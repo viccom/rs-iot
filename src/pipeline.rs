@@ -43,7 +43,7 @@ pub async fn run(
                     None => continue,
                 };
                 if let Err(e) = db::rtdata::write(
-                    &ctx.lux, &processed.hwid, &processed.devid,
+                    &ctx.lux, processed.hwid.as_ref(), &processed.devid,
                     &processed.values, processed.timestamp,
                 ).await {
                     tracing::warn!("[pipeline] rtdata write failed: {e}");

@@ -64,7 +64,7 @@ pub struct HostContext {
     /// 进程内 lux 客户端（零拷贝，Clone 共享 store/WAL）。
     pub lux: EmbeddedClient,
     /// 边缘端硬件 ID。
-    pub hwid: String,
+    pub hwid: crate::types::Hwid,
     /// 全局关闭信号。
     pub shutdown: CancellationToken,
     /// 命令路由表。

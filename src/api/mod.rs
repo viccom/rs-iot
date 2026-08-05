@@ -25,7 +25,7 @@ pub mod routes_user;
 pub struct AppState {
     pub lux: EmbeddedClient,
     pub mgr: Arc<InstanceManager>,
-    pub hwid: String,
+    pub hwid: crate::types::Hwid,
     pub jwt_secret: String,
     pub version: &'static str,
 }

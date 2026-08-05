@@ -60,7 +60,7 @@ impl Sink for MqttPub {
         mut cmd_rx: mpsc::Receiver<CtlMessage>,
         token: CancellationToken,
     ) {
-        let b = BrokerCfg::parse(&ctx.hwid, &inst.app_config);
+        let b = BrokerCfg::parse(ctx.hwid.as_ref(), &inst.app_config);
         let mut opts = MqttOptions::new(&b.client_id, &b.host, b.port);
         opts.set_keep_alive(Duration::from_secs(30));
         opts.set_clean_session(true);
@@ -114,7 +114,7 @@ impl Sink for MqttPub {
                         Ok(Event::Incoming(Packet::Publish(p))) => {
                             if let Ok(cmd) = serde_json::from_slice::<CtlMessage>(&p.payload) {
                                 let inst = cmd.instance.clone();
-                                ctx.ctl_registry.send(&inst, cmd);
+                                ctx.ctl_registry.send(inst.as_ref(), cmd);
                             }
                         }
                         Ok(_) => {}

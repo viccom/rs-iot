@@ -37,13 +37,13 @@ pub async fn inststatus(State(st): State<AppState>) -> Json<serde_json::Value> {
 
 #[derive(Deserialize)]
 pub struct IdReq {
-    pub inst_id: String,
+    pub inst_id: crate::types::InstId,
 }
 
 pub async fn startinst(State(st): State<AppState>, Json(req): Json<IdReq>) -> Response {
     let raw = match st
         .lux
-        .execute_value("HGET", &["instances", &req.inst_id])
+        .execute_value("HGET", &["instances", req.inst_id.as_ref()])
         .await
     {
         Ok(v) if !matches!(v, EmbeddedValue::Nil) => str_from_value(&v),
@@ -66,7 +66,7 @@ pub async fn startinst(State(st): State<AppState>, Json(req): Json<IdReq>) -> Re
 }
 
 pub async fn stopinst(State(st): State<AppState>, Json(req): Json<IdReq>) -> Response {
-    let _ = st.mgr.stop(&req.inst_id).await;
+    let _ = st.mgr.stop(req.inst_id.as_ref()).await;
     Json(serde_json::json!({"status": "ok"})).into_response()
 }
 

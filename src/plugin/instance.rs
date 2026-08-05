@@ -73,29 +73,29 @@ impl InstanceManager {
 
     /// 启动南向 Source 实例。产出汇入共享 hub（非返回 rx）。
     pub async fn start_source(&self, inst: InstConfig) -> Result<(), RsIotError> {
-        let create = registry::find_source(&inst.app_code).ok_or_else(|| {
+        let create = registry::find_source(inst.app_code.as_ref()).ok_or_else(|| {
             RsIotError::Config(format!("source plugin not found: {}", inst.app_code))
         })?;
         let source = create();
-        let inst_id = inst.inst_id.clone();
+        let id_key = inst.inst_id.to_string();
 
         let (cmd_tx, cmd_rx) = mpsc::channel::<CtlMessage>(64);
         let token = self.ctx.shutdown.child_token();
 
-        self.states.insert(inst_id.clone(), InstState::Starting);
-        self.ctx.ctl_registry.register(&inst_id, cmd_tx);
+        self.states.insert(id_key.clone(), InstState::Starting);
+        self.ctx.ctl_registry.register(&id_key, cmd_tx);
 
         let ctx = self.ctx.clone();
         let tx = self.hub_tx.clone();
         let token_run = token.clone();
-        let id_for_log = inst_id.clone();
+        let id_for_log = id_key.clone();
         let join = tokio::spawn(async move {
             source.run(ctx, inst, tx, cmd_rx, token_run).await;
             tracing::info!("[instance] source {id_for_log} exited");
         });
 
-        self.states.insert(inst_id.clone(), InstState::Running);
-        self.handles.insert(inst_id, InstanceHandle { token, join });
+        self.states.insert(id_key.clone(), InstState::Running);
+        self.handles.insert(id_key, InstanceHandle { token, join });
         Ok(())
     }
 
@@ -105,28 +105,28 @@ impl InstanceManager {
         inst: InstConfig,
         sample_rx: mpsc::Receiver<Sample>,
     ) -> Result<(), RsIotError> {
-        let create = registry::find_sink(&inst.app_code).ok_or_else(|| {
+        let create = registry::find_sink(inst.app_code.as_ref()).ok_or_else(|| {
             RsIotError::Config(format!("sink plugin not found: {}", inst.app_code))
         })?;
         let sink = create();
-        let inst_id = inst.inst_id.clone();
+        let id_key = inst.inst_id.to_string();
 
         let (cmd_tx, cmd_rx) = mpsc::channel::<CtlMessage>(64);
         let token = self.ctx.shutdown.child_token();
 
-        self.states.insert(inst_id.clone(), InstState::Starting);
-        self.ctx.ctl_registry.register(&inst_id, cmd_tx);
+        self.states.insert(id_key.clone(), InstState::Starting);
+        self.ctx.ctl_registry.register(&id_key, cmd_tx);
 
         let ctx = self.ctx.clone();
         let token_run = token.clone();
-        let id_for_log = inst_id.clone();
+        let id_for_log = id_key.clone();
         let join = tokio::spawn(async move {
             sink.run(ctx, inst, sample_rx, cmd_rx, token_run).await;
             tracing::info!("[instance] sink {id_for_log} exited");
         });
 
-        self.states.insert(inst_id.clone(), InstState::Running);
-        self.handles.insert(inst_id, InstanceHandle { token, join });
+        self.states.insert(id_key.clone(), InstState::Running);
+        self.handles.insert(id_key, InstanceHandle { token, join });
         Ok(())
     }
 

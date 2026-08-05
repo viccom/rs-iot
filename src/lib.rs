@@ -57,7 +57,7 @@ pub async fn run_app_with_shutdown(
     cfg: config::AppConfig,
     shutdown: CancellationToken,
 ) -> Result<(), RsIotError> {
-    let hwid = hwid::hardware_id();
+    let hwid = types::Hwid::from(hwid::hardware_id());
     tracing::info!(%hwid, "rs-iot starting");
 
     std::fs::create_dir_all(&cfg.lux.data_dir)?;
