@@ -1,0 +1,13 @@
+# rs-iot 配置（开发验证用）。生产部署按需调整。
+api_port = 8790                       # 8780 被本机其他服务占用，临时改 8790
+jwt_secret = "qwerty1234567890asdfgh1234567890"
+
+[lux]
+port = 6390
+bind_host = "127.0.0.1"
+data_dir = "./data/lux"
+save_interval_secs = 300
+
+[mqtt]
+host = "localhost"
+port = 1883

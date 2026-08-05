@@ -1,0 +1,60 @@
+mod run;
+mod service;
+
+use clap::{Parser, Subcommand};
+use std::path::PathBuf;
+
+#[derive(Parser)]
+#[command(
+    name = "rs-iot",
+    version,
+    about = "Lightweight cross-platform industrial IoT edge framework"
+)]
+struct Cli {
+    #[command(subcommand)]
+    command: Option<Command>,
+
+    /// 配置文件路径（toml）。未指定则用默认值。
+    #[arg(long, global = true)]
+    config: Option<PathBuf>,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// 前台运行
+    Run,
+    /// 安装为系统服务（Windows: sc create / Linux: systemd unit）
+    Install,
+    /// 卸载系统服务
+    Uninstall,
+    /// 被 SCM 调用的服务入口（Windows only，由 install 注册的 binPath 触发）
+    #[cfg(windows)]
+    Service,
+}
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .init();
+
+    let cli = Cli::parse();
+
+    match cli.command.unwrap_or(Command::Run) {
+        Command::Run => {
+            let cfg = rs_iot::config::AppConfig::load_or_default(cli.config.as_deref())?;
+            run::run(cfg).await?;
+        }
+        Command::Install => service::install()?,
+        Command::Uninstall => service::uninstall()?,
+        #[cfg(windows)]
+        Command::Service => {
+            // SCM 调用此入口；dispatch 内部接管 SCM 协议与生命周期
+            service::windows::dispatch()?;
+        }
+    }
+    Ok(())
+}

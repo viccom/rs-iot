@@ -1,0 +1,76 @@
+[package]
+name = "rs-iot"
+version = "0.1.0"
+edition = "2021"
+description = "Lightweight cross-platform industrial IoT edge framework (Rust), with embedded lux as an in-process Redis-compatible database."
+license = "MIT"
+repository = "https://github.com/viccom/rs-iot"
+
+[dependencies]
+# 嵌入式内存数据库：对外 RESP + Tiered 持久化
+lux = { path = "../lux" }
+
+# 异步运行时
+tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+
+# 日志
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# 错误
+anyhow = "1"
+thiserror = "2"
+
+# 序列化 / 配置
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+
+# 系统 / 硬件 ID
+sysinfo = "0.32"
+sha2 = "0.10"
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# 身份认证（与 lux 对齐版本，减少重复编译）
+bcrypt = "0.17"
+
+# trait async
+async-trait = "0.1"
+
+# M2: 插件系统 + MQTT 北向 + 数据转换
+rumqttc = { version = "0.25", features = ["url"] }
+inventory = "0.3"
+dashmap = "6"
+rhai = { version = "1.25", optional = true }
+chrono = "0.4"
+
+# M3: REST 管理 API + JWT + 静态前端嵌入
+axum = { version = "0.8", features = ["macros"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["trace", "cors"] }
+jsonwebtoken = { version = "10", features = ["rust_crypto"] }
+rust-embed = { version = "8", features = ["mime-guess"] }
+mime_guess = "2"
+
+[features]
+default = ["transform"]
+# L2 数据转换（rhai 脚本，默认开启）
+transform = ["dep:rhai"]
+# 预留（后续里程碑）：
+# local-broker = ["dep:rumqttd"]
+# analytics = ["dep:datafusion"]
+# windows-svc = ["dep:windows-service"]
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true
+# 不设 panic = "abort"，保留 unwind 以支持优雅关闭
+
+# Windows Service（仅 windows target）
+[target.'cfg(windows)'.dependencies]
+windows-service = "0.7"
