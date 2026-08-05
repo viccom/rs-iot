@@ -1,4 +1,4 @@
-use anyhow::Result;
+use crate::error::RsIotError;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -79,13 +79,14 @@ impl Default for MqttConfig {
 
 impl AppConfig {
     /// 加载配置文件；路径为 None 或文件不存在时返回默认配置。
-    pub fn load_or_default(path: Option<&Path>) -> Result<Self> {
+    pub fn load_or_default(path: Option<&Path>) -> Result<Self, RsIotError> {
         match path {
             Some(p) if p.exists() => {
                 let s = std::fs::read_to_string(p)
-                    .map_err(|e| anyhow::anyhow!("read config {}: {e}", p.display()))?;
-                let cfg: AppConfig = toml::from_str(&s)
-                    .map_err(|e| anyhow::anyhow!("parse config {}: {e}", p.display()))?;
+                    .map_err(|e| RsIotError::Config(format!("read config {}: {e}", p.display())))?;
+                let cfg: AppConfig = toml::from_str(&s).map_err(|e| {
+                    RsIotError::Config(format!("parse config {}: {e}", p.display()))
+                })?;
                 Ok(cfg)
             }
             _ => Ok(Self::default()),

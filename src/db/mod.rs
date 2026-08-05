@@ -39,7 +39,7 @@ pub fn build_lux_config(cfg: &AppConfig) -> ServerConfig {
 /// 关键陷阱：lux 的 `shutdown_and_wait()` 默认**不落盘**——
 /// Memory 模式会丢自上次快照以来的写入，Tiered 模式 WAL 不截断。
 /// 因此关闭前必须显式 `SAVE`。
-pub async fn shutdown_lux(handle: lux::ServerHandle) -> anyhow::Result<()> {
+pub async fn shutdown_lux(handle: lux::ServerHandle) -> Result<(), crate::error::RsIotError> {
     let client = handle.client();
     match client.execute("SAVE", &[]).await {
         Ok(_) => tracing::info!("lux SAVE ok (snapshot flushed)"),

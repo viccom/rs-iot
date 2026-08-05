@@ -29,7 +29,7 @@ pub mod plugin;
 pub mod transform;
 pub mod types;
 
-use anyhow::Result;
+use error::RsIotError;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
@@ -37,7 +37,7 @@ use tokio_util::sync::CancellationToken;
 pub const VERSION: &str = "20250123";
 
 /// CLI `run` 入口：内部建 shutdown + ctrl_c 监听，委托给 `run_app_with_shutdown`。
-pub async fn run_app(cfg: config::AppConfig) -> Result<()> {
+pub async fn run_app(cfg: config::AppConfig) -> Result<(), RsIotError> {
     let shutdown = CancellationToken::new();
     let s = shutdown.clone();
     tokio::spawn(async move {
@@ -56,7 +56,7 @@ pub async fn run_app(cfg: config::AppConfig) -> Result<()> {
 pub async fn run_app_with_shutdown(
     cfg: config::AppConfig,
     shutdown: CancellationToken,
-) -> Result<()> {
+) -> Result<(), RsIotError> {
     let hwid = hwid::hardware_id();
     tracing::info!(%hwid, "rs-iot starting");
 

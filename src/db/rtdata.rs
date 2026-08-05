@@ -4,8 +4,8 @@
 //! 区别：rs-iot 不再维护内存 map + sync 队列双套，直接落 lux Hash——
 //! 持久化（Tiered WAL）、REST `/rtdatas` 直接 HGETALL、并发交给 lux。
 
+use crate::error::RsIotError;
 use crate::types::SampleValue;
-use anyhow::Result;
 use lux::EmbeddedClient;
 
 /// 写入一条 Sample 的所有变量到 `rtdata:<devid>`。
@@ -16,7 +16,7 @@ pub async fn write(
     devid: &str,
     values: &std::collections::BTreeMap<String, SampleValue>,
     timestamp: i64,
-) -> Result<()> {
+) -> Result<(), RsIotError> {
     let key = format!("rtdata:{devid}");
     let local_time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
     for (tag, val) in values {

@@ -1,14 +1,17 @@
 //! rs-iot 库错误类型。
 //!
 //! 库的公开 API 统一返回 `Result<_, RsIotError>`；binary 层（main/run/service）
-//! 仍可用 `anyhow` 做带上下文的错误聚合。
+//! 仍可用 `anyhow` 做带上下文的错误聚合（`RsIotError` 实现 `std::error::Error`，
+//! 可被 `anyhow::Error` 自动收纳）。
 
 use thiserror::Error;
 
 /// rs-iot 库错误。
 ///
-/// 覆盖 lux / io / bcrypt / json / 配置 / 身份等来源；STEP 2 将补 `Toml`、`Mqtt` 变体并加 `#[non_exhaustive]`。
+/// 覆盖 lux / io / bcrypt / json / toml / mqtt / 配置 / 身份等来源。
+/// `#[non_exhaustive]` 允许未来新增变体而不破坏下游的 `match`。
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum RsIotError {
     /// lux 嵌入数据库错误。
     #[error("lux error: {0}")]
@@ -26,7 +29,15 @@ pub enum RsIotError {
     #[error("json error: {0}")]
     Json(#[from] serde_json::Error),
 
-    /// 配置错误（语义级）。
+    /// TOML 反序列化错误。
+    #[error("toml error: {0}")]
+    Toml(#[from] toml::de::Error),
+
+    /// MQTT 客户端错误（rumqttc）。
+    #[error("mqtt error: {0}")]
+    Mqtt(#[from] rumqttc::ClientError),
+
+    /// 配置错误（语义级，含路径等上下文）。
     #[error("config error: {0}")]
     Config(String),
 

@@ -6,6 +6,7 @@
 //! pipeline 单消费者从 `hub_rx` 拉取。这样 REST 动态启停某个 Source 不会断
 //! 管道（其他 Source 与 pipeline、Sink 继续工作）。
 
+use crate::error::RsIotError;
 use crate::host::HostContext;
 use crate::plugin::registry;
 use crate::types::{CtlMessage, InstConfig, Sample};
@@ -71,9 +72,10 @@ impl InstanceManager {
     }
 
     /// 启动南向 Source 实例。产出汇入共享 hub（非返回 rx）。
-    pub async fn start_source(&self, inst: InstConfig) -> anyhow::Result<()> {
-        let create = registry::find_source(&inst.app_code)
-            .ok_or_else(|| anyhow::anyhow!("source plugin not found: {}", inst.app_code))?;
+    pub async fn start_source(&self, inst: InstConfig) -> Result<(), RsIotError> {
+        let create = registry::find_source(&inst.app_code).ok_or_else(|| {
+            RsIotError::Config(format!("source plugin not found: {}", inst.app_code))
+        })?;
         let source = create();
         let inst_id = inst.inst_id.clone();
 
@@ -102,9 +104,10 @@ impl InstanceManager {
         &self,
         inst: InstConfig,
         sample_rx: mpsc::Receiver<Sample>,
-    ) -> anyhow::Result<()> {
-        let create = registry::find_sink(&inst.app_code)
-            .ok_or_else(|| anyhow::anyhow!("sink plugin not found: {}", inst.app_code))?;
+    ) -> Result<(), RsIotError> {
+        let create = registry::find_sink(&inst.app_code).ok_or_else(|| {
+            RsIotError::Config(format!("sink plugin not found: {}", inst.app_code))
+        })?;
         let sink = create();
         let inst_id = inst.inst_id.clone();
 
@@ -128,7 +131,7 @@ impl InstanceManager {
     }
 
     /// 停止指定实例：cancel 其 token 并等 join（3s 超时）。
-    pub async fn stop(&self, inst_id: &str) -> anyhow::Result<()> {
+    pub async fn stop(&self, inst_id: &str) -> Result<(), RsIotError> {
         self.states.insert(inst_id.to_string(), InstState::Stopping);
         self.ctx.ctl_registry.unregister(inst_id);
         if let Some((_, h)) = self.handles.remove(inst_id) {

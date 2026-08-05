@@ -10,13 +10,13 @@
 //! - `accesskey` : string，全局访问密钥（M3）
 //! - `rtdata:<devId>` : Hash，field=tag, value=[ts, localTime, value]（M2 实时数据缓存）
 
-use anyhow::Result;
+use crate::error::RsIotError;
 use lux::{EmbeddedClient, EmbeddedValue};
 
 /// 首次启动初始化：建 admin/admin + AdminG + UserG（幂等）。
 ///
 /// 对标 Lite_IOT `bredka.InitDB`。重复执行不会覆盖已存在的记录。
-pub async fn bootstrap(c: &EmbeddedClient) -> Result<()> {
+pub async fn bootstrap(c: &EmbeddedClient) -> Result<(), RsIotError> {
     // 管理员用户 admin/admin
     if !hash_exists(c, "users", "admin").await? {
         let profile = r#"{"userid":"admin","username":"管理员","group":"AdminG"}"#;
@@ -39,7 +39,7 @@ pub async fn bootstrap(c: &EmbeddedClient) -> Result<()> {
 }
 
 /// `HEXISTS key field` → bool
-pub async fn hash_exists(c: &EmbeddedClient, key: &str, field: &str) -> Result<bool> {
+pub async fn hash_exists(c: &EmbeddedClient, key: &str, field: &str) -> Result<bool, RsIotError> {
     let v = c.execute_value("HEXISTS", &[key, field]).await?;
     Ok(matches!(v, EmbeddedValue::Int(1)))
 }
