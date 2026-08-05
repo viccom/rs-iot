@@ -64,8 +64,8 @@ pub async fn run_app(cfg: config::AppConfig) -> Result<(), RsIotError> {
 /// 服务态入口（M4 Windows Service / systemd）：shutdown 由外部（SCM/sigterm）触发。
 ///
 /// 数据流（hub 模式，STEP 5 pull 化）：N 个 Source ──hub(mpsc)──► pipeline
-/// ──Processor──► lux HSET rtdata:`<devid>`；北向 `MqttPublisher` 独立常驻，
-/// 周期从 lux 抽取 rtdata → `PUBLISH `<hwid>`/`<devid>`/datas`。
+/// ──Processor──► lux HSET rtdata:{devid}；北向 `MqttPublisher` 独立常驻，
+/// 周期从 lux 抽取 rtdata → PUBLISH `{hwid}/{devid}/datas`。
 #[tracing::instrument(skip(cfg, shutdown))]
 pub async fn run_app_with_shutdown(
     cfg: config::AppConfig,
