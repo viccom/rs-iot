@@ -117,5 +117,6 @@ pub fn build_router(state: AppState) -> axum::Router {
         state.clone(),
         auth::auth_middleware,
     ))
+    .layer(tower_http::trace::TraceLayer::new_for_http())
     .with_state(state)
 }

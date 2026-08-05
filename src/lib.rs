@@ -36,7 +36,20 @@ use tokio_util::sync::CancellationToken;
 /// 构建版本标识（供 `/api/v1/sysinfo` 与日志使用）。
 pub const VERSION: &str = "20250123";
 
+/// 初始化全局 tracing subscriber（EnvFilter + fmt）。
+///
+/// `main` 与 Windows Service 入口共用：优先读 `RUST_LOG` 环境变量，缺省 `info` 级别。
+pub fn init_tracing() {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .init();
+}
+
 /// CLI `run` 入口：内部建 shutdown + ctrl_c 监听，委托给 `run_app_with_shutdown`。
+#[tracing::instrument(skip(cfg))]
 pub async fn run_app(cfg: config::AppConfig) -> Result<(), RsIotError> {
     let shutdown = CancellationToken::new();
     let s = shutdown.clone();
@@ -53,6 +66,7 @@ pub async fn run_app(cfg: config::AppConfig) -> Result<(), RsIotError> {
 /// 数据流（hub 模式）：N 个 Source ──hub(mpsc)──► pipeline ──Processor──►
 ///     ├─ lux HSET rtdata:`<devid>`
 ///     └─ Sink(mqttPub) PUBLISH `<hwid>`/`<devid>`/datas
+#[tracing::instrument(skip(cfg, shutdown))]
 pub async fn run_app_with_shutdown(
     cfg: config::AppConfig,
     shutdown: CancellationToken,

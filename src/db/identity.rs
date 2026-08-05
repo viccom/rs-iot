@@ -16,6 +16,7 @@ use lux::{EmbeddedClient, EmbeddedValue};
 /// 首次启动初始化：建 admin/admin + AdminG + UserG（幂等）。
 ///
 /// 对标 Lite_IOT `bredka.InitDB`。重复执行不会覆盖已存在的记录。
+#[tracing::instrument(skip(c))]
 pub async fn bootstrap(c: &EmbeddedClient) -> Result<(), RsIotError> {
     // 管理员用户 admin/admin
     if !hash_exists(c, "users", "admin").await? {

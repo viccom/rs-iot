@@ -72,6 +72,7 @@ impl InstanceManager {
     }
 
     /// 启动南向 Source 实例。产出汇入共享 hub（非返回 rx）。
+    #[tracing::instrument(skip(self, inst), fields(hwid = %self.ctx.hwid, inst_id = %inst.inst_id))]
     pub async fn start_source(&self, inst: InstConfig) -> Result<(), RsIotError> {
         let create = registry::find_source(inst.app_code.as_ref()).ok_or_else(|| {
             RsIotError::Config(format!("source plugin not found: {}", inst.app_code))
@@ -100,6 +101,7 @@ impl InstanceManager {
     }
 
     /// 启动北向 Sink 实例（sample_rx 由调用方/pipeline 提供）。
+    #[tracing::instrument(skip(self, inst), fields(hwid = %self.ctx.hwid, inst_id = %inst.inst_id))]
     pub async fn start_sink(
         &self,
         inst: InstConfig,
@@ -131,6 +133,7 @@ impl InstanceManager {
     }
 
     /// 停止指定实例：cancel 其 token 并等 join（3s 超时）。
+    #[tracing::instrument(skip(self), fields(hwid = %self.ctx.hwid, inst_id = %inst_id))]
     pub async fn stop(&self, inst_id: &str) -> Result<(), RsIotError> {
         self.states.insert(inst_id.to_string(), InstState::Stopping);
         self.ctx.ctl_registry.unregister(inst_id);

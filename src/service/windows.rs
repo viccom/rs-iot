@@ -40,7 +40,7 @@ fn service_main(_arguments: Vec<std::ffi::OsString>) {
     let status_handle = match service_control_handler::register(SERVICE_NAME, event_handler) {
         Ok(h) => h,
         Err(e) => {
-            eprintln!("[service] register control handler failed: {e:?}");
+            tracing::error!("register control handler failed: {e:?}");
             return;
         }
     };
@@ -57,7 +57,7 @@ fn service_main(_arguments: Vec<std::ffi::OsString>) {
     let cfg = match rs_iot::config::AppConfig::load_or_default(None) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("[service] config load failed: {e}");
+            tracing::error!("config load failed: {e}");
             report(
                 &status_handle,
                 ServiceState::Stopped,
@@ -80,7 +80,7 @@ fn service_main(_arguments: Vec<std::ffi::OsString>) {
         {
             Ok(rt) => rt,
             Err(e) => {
-                eprintln!("[service] tokio runtime: {e}");
+                tracing::error!("tokio runtime: {e}");
                 let _ = done_tx.send(false);
                 return;
             }
