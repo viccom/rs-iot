@@ -62,6 +62,9 @@ async-opcua = { version = "0.19", default-features = false, features = ["client"
 # 文件日志（tokio-rs 官方 appender，RollingFileAppender daily 轮转 + non_blocking）
 tracing-appender = "0.2"
 
+# Modbus TCP 南向插件（tokio-modbus：纯 async，client-only；RTU 需 serial feature，v2）
+tokio-modbus = { version = "0.17", default-features = false, features = ["tcp"] }
+
 [features]
 default = ["transform"]
 # L2 数据转换（rhai 脚本，默认开启）

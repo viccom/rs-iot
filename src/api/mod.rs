@@ -14,6 +14,7 @@ use std::sync::Arc;
 
 pub mod auth;
 pub mod frontend;
+pub mod routes_command;
 pub mod routes_device;
 pub mod routes_group;
 pub mod routes_inst;
@@ -110,6 +111,8 @@ pub fn build_router(state: AppState) -> axum::Router {
         .route("/api/v1/usergroup/add", post(routes_group::add))
         .route("/api/v1/usergroup/remove", post(routes_group::remove))
         .route("/api/v1/accesskey/set", post(routes_group::set_accesskey))
+        // 命令下发（写命令经 CtlRegistry 路由到实例 cmd_rx；默认 JWT 保护）
+        .route("/api/v1/command/send", post(routes_command::send))
         // 实时数据查询
         .route("/api/v1/rtdatas", get(routes_rtdata::rtdatas))
         // 静态前端

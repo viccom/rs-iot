@@ -35,12 +35,16 @@ impl CtlRegistry {
         self.map.remove(inst);
     }
 
-    /// 投递命令到指定实例。channel 满则丢弃（对标 Go 版 `default` 非阻塞语义）。
-    pub fn send(&self, inst: &str, msg: CtlMessage) {
+    /// 投递命令到指定实例。返回是否找到实例并尝试投递（channel 满仍 `try_send` 丢弃，
+    /// 对标 Go 版 `default` 非阻塞语义；返回 `false` 表示实例未注册，供写入口给调用方 404 反馈）。
+    pub fn send(&self, inst: &str, msg: CtlMessage) -> bool {
         // try_send 为同步操作、不跨 await，可在 DashMap 读锁内直接完成；
-        // 实例不存在或 channel 满则静默丢弃。
+        // 实例不存在返回 false；channel 满静默丢弃但返回 true（已找到实例）。
         if let Some(ref_tx) = self.map.get(inst) {
             let _ = ref_tx.value().try_send(msg);
+            true
+        } else {
+            false
         }
     }
 

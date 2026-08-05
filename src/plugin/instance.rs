@@ -157,4 +157,12 @@ impl InstanceManager {
             let _ = self.stop(&id).await;
         }
     }
+
+    /// 投递控制命令到运行中的实例（经 `CtlRegistry` 路由到实例 `cmd_rx`）。
+    ///
+    /// 供 REST/MQTT/未来北向服务器等写入口统一调用。返回 `false` = 实例未注册（未启动）；
+    /// channel 满仍 `try_send` 丢弃（对标 Go 版 `default` 非阻塞），此时返回 `true`。
+    pub fn send_ctl(&self, inst: &str, msg: CtlMessage) -> bool {
+        self.ctx.ctl_registry.send(inst, msg)
+    }
 }
