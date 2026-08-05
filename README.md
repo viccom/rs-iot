@@ -8,13 +8,15 @@
 
 - **lux 嵌入**：单实例同时对外 RESP（`:6390`）+ 进程内零拷贝 `EmbeddedClient`，共享 store/WAL；Tiered 模式每写刷盘，启动自动 snapshot+WAL 恢复。
 - **插件分层**：
-  - L1 核心协议插件：`inventory` 静态注册，编进单一二进制（零开销）
+  - L1 核心协议插件：`inventory` 静态注册，编进单一二进制（零开销）。已实现：`dataSim`（模拟）/ `opcuaClient`（OPC UA client）/ `modbusClient`（Modbus TCP）
   - L2 数据转换：内嵌 `rhai` 脚本（feature `transform`，默认开启）
   - L3 WASM 扩展 / L4 进程插件：v2 路线
-- **数据流（hub 模式，pull 化）**：N 个 Source → 共享 mpsc hub → pipeline（Processor）→ lux `rtdata:<devid>` 写入；北向 `MqttPublisher` 独立常驻，周期从 lux 抽取 rtdata 发布到外部 MQTT broker（pull 模式，STEP 5 起不再走 pipeline fan-out）。单 Source 启停不影响管道。
-- **REST 管理 API**（仓库 `config.toml` 为 `:8790`，代码默认 `:8780`）：JWT 中间件 + 白名单 + `X-Access-Key`；对标 Lite_IOT 路由（sysinfo/plugins/inst/user/group/accesskey/inst 启停 + `/rtdatas` 实时数据查询）；`apiTest` 静态前端（rust-embed 嵌入）。
+- **数据流（hub + 双总线）**：数据上行 `N × Source → hub(mpsc) → pipeline(Processor) → lux rtdata`；控制下行 `写入口 → CtlRegistry → 实例 cmd_rx`。南向采集与北向发布完全解耦（lux rtdata 单一交汇点）；单 Source 启停不影响管道。
+- **北向发布 + 写入口多源**：`MqttPublisher` 独立常驻周期从 lux 抽取发布（pull 模式）；写命令入口：MQTT `<hwid>/command` 订阅 + REST `POST /api/v1/command/send`（经 CtlRegistry 路由到实例，opcua/modbus 即时下行）。
+- **REST 管理 API**（仓库 `config.toml` 为 `:8790`，代码默认 `:8780`）：JWT 中间件 + 白名单 + `X-Access-Key`；对标 Lite_IOT 路由（sysinfo/plugins/inst/user/group/accesskey/inst 启停 + `/rtdatas` 实时数据查询 + `/command/send` 写命令）；`apiTest` 静态前端（rust-embed 嵌入）。
 - **实例动态启停**：REST `startinst`/`stopinst` 从 lux `instances` 读配置动态启停 Source。
 - **服务化**：Windows Service（`windows-service` crate dispatch）/ Linux systemd unit 生成；SCM stop 触发 `CancellationToken` → 优雅关闭（lux SAVE → shutdown）。
+- **文件日志**：`tracing-appender`（tokio-rs 官方）daily 轮转；`[log].dir` 非空时终端 + 文件双输出。
 - **L1→L2 生产基线**：`missing_docs`/clippy/rustfmt 基线、统一 `RsIotError`（thiserror + `#[non_exhaustive]`）错误规范、newtype ID（`Hwid`/`InstId`/`UserId`/`PluginName`）、`tracing` 日志（`#[instrument]` + TraceLayer）、GitHub Actions CI。规范依据见 `rust-architecture-by-code-size.md`。
 
 ## 构建
@@ -49,6 +51,10 @@ curl -X POST localhost:8790/api/v1/user/login \
   -H 'Content-Type: application/json' -d '{"user_id":"admin","pass":"admin"}'   # 拿 token
 curl -H "Authorization: <token>" localhost:8790/api/v1/sysinfo
 curl -H "Authorization: <token>" localhost:8790/api/v1/rtdatas   # 实时数据查询（全部/单设备）
+# REST 写命令（opcua/modbus 写命令均可走 REST，不必依赖 MQTT broker；经 CtlRegistry 路由到实例）
+curl -X POST localhost:8790/api/v1/command/send \
+  -H "Authorization: <token>" -H 'Content-Type: application/json' \
+  -d '{"instance":"mb1","devid":"devA","cmd":"write","data":"{\"address\":\"holding:0:f32:ABCD\",\"value\":12.5}"}'
 # 浏览器：http://localhost:8790/apitest
 ```
 
@@ -84,19 +90,29 @@ publish_interval_secs = 5     # 北向 pull 发布周期（秒）
 
 ## 架构
 
+两条总线：数据上行（采集→入库）+ 控制下行（写命令→设备）。南向 N 种协议 × 北向 M 种对接，经双总线降维成 N+M（每个协议只对接总线，不互相适配）。
+
 ```
-┌─────────────────── rs-iot 进程 ───────────────────┐
-│  lux 实例 ──┬─ 对外 RESP :6390（redis-cli / 外部） │
-│            └─ 进程内 EmbeddedClient（零拷贝）      │
-│  Source(dataSim) ─┐                              │
-│  Source(OPC UA)* ─┼─► hub(mpsc) ─► pipeline ─► Processor(rhai) │
-│                  │                      └─► lux HSET rtdata:<dev> │
-│  MqttPublisher（常驻独立 task）── 周期 KEYS rtdata:*              │
-│      ─► HGETALL ─► PUBLISH <hwid>/<dev>/datas                    │
-│  REST :8790 (axum + JWT + apiTest 前端 + /rtdatas)               │
-│  InstanceManager（动态启停 Source）              │
-└────────────────────────────────────────────────────┘
-（* 真实工业协议为 v2 路线）
+┌─────────────────────── rs-iot 进程 ───────────────────────┐
+│  lux 实例 ──┬─ 对外 RESP :6390（redis-cli / 外部）        │
+│            └─ 进程内 EmbeddedClient（零拷贝）             │
+│                                                          │
+│  ── 数据上行总线 ──────────────────────────────────────── │
+│  Source(dataSim)    ─┐                                   │
+│  Source(opcuaClient) └─► hub(mpsc 256) ─► pipeline ─► Processor(rhai) │
+│  Source(modbusClient)┘                                 └─► lux HSET rtdata:<dev> │
+│                                                          │
+│  ── 北向读出口（都从 lux rtdata 取最新值）─────────────── │
+│  MqttPublisher（常驻）── 周期 KEYS rtdata:* → HGETALL → PUBLISH <hwid>/<dev>/datas │
+│  GET /api/v1/rtdatas                                      │
+│                                                          │
+│  ── 控制下行总线（CtlRegistry，多源写入口 → 实例 cmd_rx）─ │
+│  MQTT <hwid>/command 订阅 ─┐                             │
+│  POST /api/v1/command/send ─┴─► CtlRegistry ─► handle_write（opcua/modbus…）│
+│  （未来：北向 UA Server·Modbus slave·104 写回调）         │
+│                                                          │
+│  管理面：REST :8790 (axum + JWT + apiTest) ─► InstanceManager（动态启停）│
+└──────────────────────────────────────────────────────────┘
 ```
 
 ## CI
@@ -118,10 +134,13 @@ GitHub Actions（`.github/workflows/ci.yml`，push/PR 触发）：
 - [x] **M3** REST :8790 + JWT 中间件 + apiTest 前端 + 实例动态启停（hub 模式）
 - [x] **M4** 服务化（Windows Service dispatch + systemd unit）+ 优雅关闭（lux SAVE）
 - [x] **L1→L2 治理（STEP 1-10）**：lint/文档基线 + 统一错误规范（thiserror/`#[non_exhaustive]`）+ newtype ID + 日志规范（`#[instrument]`/TraceLayer）+ mqtt pull 化（MqttPublisher 周期从 lux 抽取）+ `/rtdatas` 路由 + 公共 broker 配置 + CI + 端到端验证（公共 broker 实测通过）
+- [x] **M5** opcuaClient 南向插件（async-opcua，none/Basic256Sha256，读写 UA Server）+ 文件日志（tracing-appender daily 轮转）
+- [x] **M6** modbusClient 南向插件（tokio-modbus，批量读 + 位解析 + 4 种字节序 + 混合类型偏移）+ REST 写命令端点 `/api/v1/command/send`（CtlRegistry 多源写总线，opcua/modbus 即时下行）
 
 ## v2 路线
 
-- 真实工业协议：南向 `async-opcua`(client)、`tokio-modbus`；北向 OPC UA server 暴露 lux 数据
+- 更多南向协议：Modbus RTU / OPC DA client / IEC 60870-5-104 master / DNP3 / BACnet …
+- 北向服务器插件（既读出口又写入口）：OPC UA Server / OPC DA Server / Modbus slave / IEC 60870-5-104 Server —— 都经 CtlRegistry 写总线 + lux rtdata 读
 - L3 WASM 插件（wasmtime/extism）、L4 进程插件（execd，复用 lux RESP）
 - DataFusion 分析视图（SQL/UDF，REST `/api/v1/query`）
 - 时序 downsample（lux Stream + 周期聚合）

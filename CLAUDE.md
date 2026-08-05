@@ -6,16 +6,23 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 轻量跨平台工业 IoT 边缘框架（Rust），Go 项目 [Lite_IOT](D:\Go_Codes\Lite_IOT) 的 Rust 重写与增强。内嵌 [lux](E:\github.com\lux) 作为进程内 Redis 兼容数据库（RESP :6390 + Tiered WAL 持久化）。
 
-**数据流（hub 模式，pull 化）**——这是理解全项目的关键：
+**数据流（hub 模式 + 双总线）**——这是理解全项目的关键。**两条总线**：数据上行（采集→入库）+ 控制下行（写命令→设备）：
 
 ```
-N × Source(dataSim...) ──► hub (mpsc 256) ──► pipeline (Processor) ──► lux HSET rtdata:<devid>
-MqttPublisher（常驻独立 task）── 每 publish_interval_secs 周期 KEYS rtdata:* → HGETALL → PUBLISH <hwid>/<devid>/datas
-REST :8790 (axum + JWT) ──► InstanceManager（动态启停 Source）
+── 数据上行总线 ─────────────────────────────────────────────────────────
+N × Source(dataSim / opcuaClient / modbusClient) ──► hub (mpsc 256) ──► pipeline (Processor) ──► lux HSET rtdata:<devid>
+   └─ 读出口（都从 lux rtdata 取最新值）：GET /api/v1/rtdatas / MqttPublisher pull / 未来北向 UA Server·Modbus slave·104
+── 控制下行总线（CtlRegistry，多源写入口 → 实例 cmd_rx）──────────────────
+MQTT <hwid>/command 订阅 ─┐
+POST /api/v1/command/send ─┼─► CtlRegistry.try_send(64) ──► 实例 Source::run 的 cmd_rx ──► handle_write（opcua/modbus...）
+未来北向 UA Server·DA·Modbus slave·104 写回调 ─┘
+管理面：REST :8790 (axum + JWT) ──► InstanceManager（动态启停 Source）/ send_ctl（投递写命令）
 ```
 
-- 南向采集与北向发布**完全解耦**：pipeline 只写 lux rtdata，`MqttPublisher`（`src/plugin/builtin/mqtt_pub.rs`）独立周期从 lux 抽取发布（pull 模式，STEP 5 起不再走 pipeline fan-out）。Sink trait 已保留但无内置实现，v2 才启用 push 式北向。
-- 单 Source 启停不影响管道（共享 hub，pipeline 单消费者）。
+- **南向采集与北向发布完全解耦**：pipeline 只写 lux rtdata，`MqttPublisher`（`src/plugin/builtin/mqtt_pub.rs`）独立周期从 lux 抽取发布（pull 模式）。lux rtdata 是唯一数据交汇点（single source of truth）。
+- **写命令多源统一**：MQTT / REST / 未来北向服务器都是写入口，都经 `CtlRegistry`（`src/host.rs`，`try_send` 非阻塞，channel 满丢弃——对标 Go 版 default）路由到实例 `cmd_rx`。REST 入口 `InstanceManager::send_ctl`（`src/plugin/instance.rs`）封装，实例未注册返回 404。
+- **单 Source 启停不影响管道**（共享 hub，pipeline 单消费者；各 Source 独立 `CancellationToken`）。
+- 架构原则（分层 + 双总线 + 横向扩展边界）见下文「架构原则」节。
 
 **模块职责**（`src/`，按数据流顺序）：
 
@@ -27,7 +34,7 @@ REST :8790 (axum + JWT) ──► InstanceManager（动态启停 Source）
 | `error.rs` | `RsIotError`（thiserror + `#[non_exhaustive]`）+ `TResult<T>` 别名 |
 | `types.rs` | 数据模型 + newtype ID（见编码约定） |
 | `host.rs` | `HostContext`（lux client + hwid + shutdown + `CtlRegistry` 命令路由表），注入每个插件 task |
-| `plugin/` | `traits.rs`（Source/Sink/Processor 契约）、`registry.rs`（inventory 静态注册）、`instance.rs`（生命周期管理）、`builtin/`（datasim 模拟采集 / mqtt_pub 北向发布 / opcua_client OPC UA 采集） |
+| `plugin/` | `traits.rs`（Source/Sink/Processor 契约）、`registry.rs`（inventory 静态注册）、`instance.rs`（生命周期管理 + `send_ctl` 写命令投递）、`builtin/`（datasim 模拟采集 / opcua_client OPC UA 采集 / modbus_client Modbus TCP 采集 / mqtt_pub 北向发布） |
 | `pipeline.rs` | hub 消费者：Processor 转换 → `db::rtdata::write` |
 | `transform/` | `passthrough`（默认）/ `rhai`（feature `transform`，默认开启） |
 | `db/` | `build_lux_config`、`shutdown_lux`（先 SAVE）、`identity::bootstrap`（幂等建 admin）、`rtdata::write` |
@@ -42,7 +49,23 @@ REST :8790 (axum + JWT) ──► InstanceManager（动态启停 Source）
 - `lux = { path = "../lux" }` — 需 lux 源码在**同级** `E:\github.com\lux`；修改 lux 会直接影响本项目的编译与行为（EmbeddedClient 无 Debug、`ServerConfig` 无 Builder 等特性已被本项目代码 `expect` 依赖）。
 - `D:\Go_Codes\Lite_IOT` — 对标参考实现，新功能常按"Lite_IOT 的 X 模块"定位。
 - 端口：lux RESP 6390（避开本机 redis 6379）、REST 8780（config.toml 中 8780 被占用临时改 8790）、MQTT 公共 broker broker.emqx.io:1883（开发验证用）。
-- 日志：`tracing` + `tracing-subscriber` + `tracing-appender`（tokio-rs 官方）。终端输出始终开启；`config.toml` 的 `[log].dir` 非空时额外写文件（`<dir>/rs-iot.log.<date>` daily 轮转，non_blocking 专用线程）。级别优先 `RUST_LOG`，缺省 `[log].level`（默认 info）。opcua 采集/连接/读写均有 `[opcuaClient]` 前缀日志。
+- 日志：`tracing` + `tracing-subscriber` + `tracing-appender`（tokio-rs 官方）。终端输出始终开启；`config.toml` 的 `[log].dir` 非空时额外写文件（`<dir>/rs-iot.log.<date>` daily 轮转，non_blocking 专用线程）。级别优先 `RUST_LOG`，缺省 `[log].level`（默认 info）。opcua/modbus 采集/连接/读写均有 `[opcuaClient]`/`[modbusClient]` 前缀日志。
+
+## 架构原则
+
+rs-iot 是**工业协议网关**：南向 N 种设备协议 × 北向 M 种对接协议。分层 + 双总线把 N×M 网状耦合**降维成 N+M**（每个协议只对接总线，不互相适配）。这是生存约束——N、M 都会持续增长，网状结构不可维护。
+
+**横向扩展点**（加一个协议只动边界，不碰核心）：
+
+| 加一个… | 要做的事 | 不碰 |
+|---|---|---|
+| 南向协议 | `builtin/xxx.rs` 实现 Source + `inventory::submit!` + `mod.rs` 加一行 | hub/pipeline/lux/北向/其他南向 |
+| 北向发布 | pull/push 插件从 lux 取数据 | 南向/pipeline |
+| 写入口 | 新代码调 `CtlRegistry::send` / `InstanceManager::send_ctl`（MQTT/REST/服务器回调） | 南向 `cmd_rx` 逻辑、其他写入口 |
+| Processor | `transform/xxx.rs` 实现 Processor trait | 南向/北向 |
+| REST 端点 | `routes_xxx.rs` + `build_router` 注册一行 | 数据面/控制面 |
+
+**低耦合五机制**：① trait 契约（Source/Sink/Processor，框架依赖抽象）② channel 解耦（hub 256 / cmd 64，异步边界 + 背压）③ lux 作进程内数据总线（RESP 契约，上下游无直接引用）④ `inventory` 静态注册（编译期发现，无注册顺序依赖）⑤ `CancellationToken` + `try_send`（独立启停 + 控制面不阻塞数据面）。
 
 ## 常用命令
 
@@ -92,6 +115,8 @@ rs-iot install / uninstall        # 服务化（Windows: sc create / Linux: syst
 - 改 `src/` 任意代码：`cargo fmt --all --check` + `cargo clippy --all-targets -- -D warnings` + `cargo test --all-targets --all-features` 三项全绿才算完成（与 CI 门槛一致）。
 - 改插件/管道/类型：跑对应单测（datasim/hwid/rhai/mqtt_pub/opcua_client 已有），新增逻辑补 `#[cfg(test)]` 模块内单测。
 - **opcua_client 端到端**（依赖本机 UA Server 在线 `opc.tcp://127.0.0.1:49320`，CI 不跑）：REST 建实例 `app_code="opcuaClient"` + `app_config{endpoint, security_policy, period, verify_server}` + `devices[].children[].value=NodeId`（如 `ns=2;s=v1`）→ `startinst` → `redis-cli HGETALL rtdata:<devid>` 验证采集；写命令经 `<hwid>/<devid>/command` JSON `{"cmd":"write","data":"{\"node_id\":\"...\",\"value\":123,\"opc_type\":\"Int32\"}"}`。**`opc_type` 在 write 时强烈建议带**：OPC UA server 严格类型匹配（Int32 节点写 Int64 会 BadTypeMismatch），支持 Boolean/SByte/Byte/Int16/UInt16/Int32/UInt32/Int64/UInt64/Float/Double/String（缺省 Float→Double、Int→Int64）。**`verify_server` 默认 false**：跳过 server 证书 hostname/application-uri/有效期校验（仅检查证书被信任+密钥长度），便于用 IP/loopback 连接（server 证书常不含这些 alt name）；生产环境 endpoint 与证书匹配时设 true。`security_policy` 支持 `none` / `Basic256Sha256`（签名并加密；客户端自签证书在 `pki/own/cert.der`，需导入 UA Server 信任列表）。注意 server 端节点须对当前用户开放写权限，否则 BadUserAccessDenied（与 rs-iot 无关）。
+- **modbus_client 端到端**（依赖 Modbus TCP 从站在线，CI 不跑）：REST 建实例 `app_code="modbusClient"` + `app_config{kind:"tcp", endpoint:"ip:port", slave_id, period, gap_threshold?, max_regs?, reconnect_secs?}` + `devices[].children[].value=地址串` → `startinst` → `redis-cli HGETALL rtdata:<devid>` 验采集。**地址串** `<func>:<addr>:<type>[:<order>][:<bit>]`：func=`holding`(FC03)/`input`(FC04，只读)；addr=0-based 寄存器号（**不做 40001 自动转换**，PLC tag 换算 holding=tag-40001/input=tag-30001）；type=`bit`/`i16`/`u16`/`i32`/`u32`/`f32`/`f64`；order（i32/u32/f32/f64 可选，默认 ABCD）=`ABCD`/`CDAB`/`BADC`/`DCBA`；bit（bit 类型必填）=0-15。**字节序** 4 种均为对合置换（`perm4[perm4[i]]==i`），单测 round-trip 锁定（f32 12.5=0x41480000 的 ABCD 表示 `[0x4148,0x0000]`）。**批量合并** `gap_threshold` 约束相邻两点**最大单空洞**（非未用总数；需求"读 80 用 50"按最大单空洞调），`max_regs` 约束单区间最大寄存器数（默认 100，协议上限 125，遇 IllegalDataAddress 往下调）。**写命令** 经 `POST /api/v1/command/send`（REST，推荐）或 MQTT `<hwid>/command`，data JSON `{"address":"holding:0:f32:ABCD","value":12.34}`：u16/i16/bit→FC06，i32/u32/f32/f64→FC16，bit 走 RMW（读-改-写，单 task 内原子但非事务，部分失败仅 warn），`input` 只读拒绝。**v1 边界**：仅 TCP（`kind:"rtu"` 报错指引）；实例级 slave_id（多 RTU 从站网关需每 slave 建一实例，共享 endpoint）。tokio-modbus 0.17 read/write 返回**双层 Result**（外层 transport `Error` / 内层 `ExceptionCode`），exception 不重连、transport 失败拆 session 重连。满足现场三类需求：① 布尔打包进 FC03/FC04 寄存器按位解析（`bit` 类型）② 混合类型批量读+偏移转换（`merge_regions`）③ 大块读取部分使用（`gap_threshold`/`max_regs`）。
+- **REST 写命令端点**（`POST /api/v1/command/send`，`routes_command.rs`，默认 JWT 保护）：body `{instance, devid, cmd, data}` → `InstanceManager::send_ctl` → CtlRegistry → 实例 cmd_rx。与 MQTT `<hwid>/command` 同通道，opcua/modbus 写命令均可走 REST（不必依赖 broker）。实例未运行返回 404。
 - **集成测试在 `tests/`**：`dataflow.rs`（datasim→hub→pipeline→rtdata 端到端）、`api_flow.rs`（axum oneshot + JWT 鉴权）、`config_load.rs`（配置容错）。改数据流/REST 鉴权/配置语义后跑 `cargo test --test <name>` 对应文件。新增集成测试用 `tests/common::start_lux`（**端口 0 由 OS 分配 + 独立临时 data_dir**），勿固定端口、勿写仓库 `./data/`；测试代码同样受 CI `RUSTFLAGS=-D warnings` 约束，保持零警告。
 - 改 lux Hash 读写：`cargo test` 保证编译，但 Hash 结构变更需**端到端验证**（见下）。
 - **端到端验证**（改数据流/API 后必做，README 有完整示例）：
@@ -109,6 +134,7 @@ rs-iot install / uninstall        # 服务化（Windows: sc create / Linux: syst
 - **新增 API 路由**：在 `src/api/` 加 `routes_*.rs` handler → `api/mod.rs` `build_router` 注册路由 → 需要免鉴权则在 `auth.rs` `PUBLIC_PATHS` 加白名单（默认全部要 JWT 或 `X-Access-Key`）→ DTO 与 state 从 `AppState`（lux client + mgr + hwid + jwt_secret）取。
 - **新增 lux Hash 表/字段**：先更新 `db/identity.rs:3-11` 的清单注释 → 读写逻辑放对应模块（用户→routes_user、实例→routes_inst、rtdata→`db/rtdata.rs`）→ 初始数据在 `identity::bootstrap` 幂等写入（用 `HEXISTS` 判断，不覆盖已有记录）。
 - **新增南向/北向插件**：`plugin/builtin/` 新文件实现 trait + `inventory::submit!` 注册 → `types::InstConfig` 的 `app_code` 字符串匹配注册表名 → 默认数据流靠 `lib.rs` 的 demo config（`try_start_from_lux` 读到 `instances` 表 autoStart 实例则优先拉起）。
+- **新增写命令入口**：调 `InstanceManager::send_ctl(inst, CtlMessage)`（经 `CtlRegistry` 路由到实例 `cmd_rx`，未注册返回 `false`）。现有入口：MQTT `<hwid>/command`（`mqtt_pub.rs` 订阅 + `serde_json::from_slice::<CtlMessage>`）、REST `POST /api/v1/command/send`（`routes_command.rs`）。写命令 `data` 字段格式由各南向插件 `handle_write` 自定（opcua `{node_id,value,opc_type}`、modbus `{address,value}`）。
 - **新增 config 字段**：`config.rs` 对应 struct 加 `#[serde(default)]` 字段 + `Default` 实现（缺失字段容错是既有约定）。
 - **新增二进制行为**：`main.rs` 子命令分发 → 逻辑在 `lib.rs`（前台）或 `service/`（服务态）——前台与服务态共用 `run_app_with_shutdown`，shutdown 来源不同（ctrl_c vs SCM/sigterm）。
 
