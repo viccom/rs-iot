@@ -57,8 +57,9 @@ impl CtlRegistry {
 
 /// 注入给每个插件 task 的宿主能力。
 ///
-/// `lux::EmbeddedClient` 未实现 `Debug`，故本类型暂以 `allow` 放行 `missing_debug_implementations`。
-#[allow(missing_debug_implementations)]
+/// `lux::EmbeddedClient` 未实现 `Debug`，故以 `expect` 放行 `missing_debug_implementations`
+///（若未来 EmbeddedClient 补 Debug，编译器会提示移除该 expect）。
+#[expect(missing_debug_implementations)]
 #[derive(Clone)]
 pub struct HostContext {
     /// 进程内 lux 客户端（零拷贝，Clone 共享 store/WAL）。

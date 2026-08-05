@@ -4,9 +4,9 @@
 //! 路由对标 Lite_IOT（见各 routes_*.rs）。
 
 // REST 管理层为 rs-iot 内部实现（非库公开 API）。
-// DTO/handler 的 missing_docs / missing_debug_implementations 暂放行，
-// 待 STEP 3（newtype）顺带做 pub(crate) 收紧与 Debug 治理时统一处理。
-#![allow(missing_docs, missing_debug_implementations)]
+// DTO/handler 的 missing_docs / missing_debug_implementations 以 expect 放行
+//（若未来补全 doc/Debug，编译器会提示移除），pub(crate) 收紧留后续治理。
+#![expect(missing_docs, missing_debug_implementations)]
 
 use crate::plugin::instance::InstanceManager;
 use lux::EmbeddedClient;

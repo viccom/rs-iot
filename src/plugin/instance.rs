@@ -42,8 +42,9 @@ struct InstanceHandle {
 
 /// 实例管理器：运行态表 + task handle 表 + 数据汇聚 hub。
 ///
-/// 含 `HostContext`（其 `EmbeddedClient` 无 `Debug`），故暂以 `allow` 放行 `missing_debug_implementations`。
-#[allow(missing_debug_implementations)]
+/// 含 `HostContext`（其 `EmbeddedClient` 无 `Debug`），故以 `expect` 放行 `missing_debug_implementations`
+///（若未来 EmbeddedClient 补 Debug，编译器会提示移除该 expect）。
+#[expect(missing_debug_implementations)]
 pub struct InstanceManager {
     ctx: HostContext,
     states: Arc<DashMap<String, InstState>>,

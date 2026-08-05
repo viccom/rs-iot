@@ -13,8 +13,9 @@ use std::time::Duration;
 /// - `save_interval` 保留周期快照（截断 WAL，避免无限增长）
 /// - `auth.enabled = false`：JWT 由 rs-iot 自管，不用 lux 的 /auth/v1/*
 ///
-/// `ServerConfig` 字段众多且常增减，按字段逐一赋值比维护完整字面量更稳，故允许 field_reassign。
-#[allow(clippy::field_reassign_with_default)]
+/// `ServerConfig` 字段众多且常增减，按字段逐一赋值比维护完整字面量更稳，
+/// 故以 `expect` 放行 field_reassign（若 lux 提供 Builder，可移除）。
+#[expect(clippy::field_reassign_with_default)]
 pub fn build_lux_config(cfg: &AppConfig) -> ServerConfig {
     let mut sc = ServerConfig::default();
     sc.bind_host = cfg.lux.bind_host.clone();

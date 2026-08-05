@@ -25,7 +25,7 @@ windows_service::define_windows_service!(ffi_service_main, service_main);
 
 fn service_main(_arguments: Vec<std::ffi::OsString>) {
     let (stop_tx, stop_rx) = mpsc::channel::<()>();
-    let stop_tx_clone = stop_tx.clone();
+    let stop_tx_clone = stop_tx;
     let event_handler = move |control_event: ServiceControl| -> ServiceControlHandlerResult {
         match control_event {
             ServiceControl::Stop => {
