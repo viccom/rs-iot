@@ -63,9 +63,9 @@ pub async fn run_app(cfg: config::AppConfig) -> Result<(), RsIotError> {
 
 /// 服务态入口（M4 Windows Service / systemd）：shutdown 由外部（SCM/sigterm）触发。
 ///
-/// 数据流（hub 模式）：N 个 Source ──hub(mpsc)──► pipeline ──Processor──►
-///     ├─ lux HSET rtdata:`<devid>`
-///     └─ Sink(mqttPub) PUBLISH `<hwid>`/`<devid>`/datas
+/// 数据流（hub 模式，STEP 5 pull 化）：N 个 Source ──hub(mpsc)──► pipeline
+/// ──Processor──► lux HSET rtdata:`<devid>`；北向 `MqttPublisher` 独立常驻，
+/// 周期从 lux 抽取 rtdata → `PUBLISH `<hwid>`/`<devid>`/datas`。
 #[tracing::instrument(skip(cfg, shutdown))]
 pub async fn run_app_with_shutdown(
     cfg: config::AppConfig,
@@ -98,32 +98,20 @@ pub async fn run_app_with_shutdown(
     let (hub_tx, hub_rx) = tokio::sync::mpsc::channel::<types::Sample>(256);
     let mgr = Arc::new(plugin::instance::InstanceManager::new(ctx.clone(), hub_tx));
 
-    // 北向 Sink（固定）：mqttPub
-    let mqtt_inst = types::InstConfig {
-        inst_id: "mqtt1".into(),
-        inst_name: "mqtt publisher".into(),
-        app_code: "mqttPub".into(),
-        app_type: types::AppType::North,
-        auto_start: true,
-        app_config: serde_json::json!({
-            "host": cfg.mqtt.host,
-            "port": cfg.mqtt.port,
-            "username": cfg.mqtt.username,
-            "password": cfg.mqtt.password,
-        }),
-        devices: vec![],
-    };
-    let (mqtt_tx, mqtt_rx) = tokio::sync::mpsc::channel::<types::Sample>(256);
-    mgr.start_sink(mqtt_inst, mqtt_rx).await?;
+    // 北向 MQTT 发布器（pull 模式，STEP 5）：常驻独立 task，周期从 lux 抽取 rtdata 发布。
+    let mqtt_token = shutdown.child_token();
+    let mqtt_handle = tokio::spawn(
+        plugin::builtin::mqtt_pub::MqttPublisher::new(cfg.mqtt.clone())
+            .run(ctx.clone(), mqtt_token),
+    );
 
-    // pipeline
+    // pipeline：hub → processor → lux rtdata（不再 fan-out 到 sink）
     let processor: Arc<dyn plugin::traits::Processor> =
         Arc::new(transform::passthrough::Passthrough);
     let pipeline_token = shutdown.child_token();
     let pipeline_handle = tokio::spawn(pipeline::run(
         ctx.clone(),
         hub_rx,
-        vec![mqtt_tx],
         processor,
         pipeline_token,
     ));
@@ -164,6 +152,7 @@ pub async fn run_app_with_shutdown(
     shutdown.cancelled().await;
 
     pipeline_handle.abort();
+    mqtt_handle.abort();
     axum_handle.abort();
     mgr.stop_all().await;
     db::shutdown_lux(handle).await?;

@@ -42,6 +42,8 @@ pub struct MqttConfig {
     pub username: Option<String>,
     /// 密码。
     pub password: Option<String>,
+    /// 北向发布周期（秒）：`MqttPublisher` 每隔该时长从 lux 抽取 rtdata 发布。
+    pub publish_interval_secs: u64,
 }
 
 impl Default for AppConfig {
@@ -73,6 +75,7 @@ impl Default for MqttConfig {
             port: 1883,
             username: None,
             password: None,
+            publish_interval_secs: 5,
         }
     }
 }

@@ -1,137 +1,157 @@
-//! `mqttPub`：北向 MQTT 发布 Sink。
+//! `mqttPub`：北向 MQTT 发布器（pull 模式，STEP 5 起）。
 //!
-//! 对标 Lite_IOT `bMqtt`（paho 客户端 + broker）。rs-iot 用原生 Rust 的 `rumqttc`
-//! 连接**外部公网/本地 broker**：
-//! - 发布：每条 Sample → `PUBLISH <hwid>/<devid>/datas <json>`
-//! - 订阅：`<hwid>/command` → 解析 `CtlMessage` → 经 `CtlRegistry` 路由到实例
+//! 常驻独立 task：连接外部 broker，订阅 `<hwid>/command` 接收下行命令，
+//! 周期（`publish_interval_secs`）从 lux 读取所有 `rtdata:<devid>` 并组装
+//! `{hwid, devid, values, timestamp}` 后 `PUBLISH <hwid>/<devid>/datas`。
+//!
+//! 与 pipeline 解耦：pipeline 只写 lux rtdata，北向发布完全由本发布器周期抽取。
 
+use crate::config::MqttConfig;
 use crate::host::HostContext;
-use crate::plugin::traits::Sink;
-use crate::types::{CtlMessage, InstConfig, Sample};
-use async_trait::async_trait;
+use crate::types::CtlMessage;
 use rumqttc::{AsyncClient, Event, MqttOptions, Packet, QoS};
 use std::time::Duration;
-use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-/// 北向 MQTT 发布 Sink（`mqttPub`）；STEP 5 将重写为 pull 模式的常驻 `MqttPublisher`。
-#[derive(Debug, Default)]
-pub struct MqttPub;
-
-struct BrokerCfg {
-    host: String,
-    port: u16,
-    client_id: String,
-    username: Option<String>,
-    password: Option<String>,
+/// 北向 MQTT 发布器：周期从 lux 抽取 rtdata 发布（pull 模式，不再 impl Sink）。
+#[derive(Debug)]
+pub struct MqttPublisher {
+    /// broker 配置（host/port/credentials/publish_interval_secs）。
+    cfg: MqttConfig,
 }
 
-impl BrokerCfg {
-    fn parse(hwid: &str, v: &serde_json::Value) -> Self {
-        Self {
-            host: v
-                .get("host")
-                .and_then(|x| x.as_str())
-                .unwrap_or("localhost")
-                .to_string(),
-            port: v.get("port").and_then(|x| x.as_u64()).unwrap_or(1883) as u16,
-            client_id: v
-                .get("clientId")
-                .and_then(|x| x.as_str())
-                .unwrap_or(hwid)
-                .to_string(),
-            username: v.get("username").and_then(|x| x.as_str()).map(String::from),
-            password: v.get("password").and_then(|x| x.as_str()).map(String::from),
-        }
-    }
-}
-
-#[async_trait]
-impl Sink for MqttPub {
-    fn name(&self) -> &'static str {
-        "mqttPub"
+impl MqttPublisher {
+    /// 构造。
+    pub fn new(cfg: MqttConfig) -> Self {
+        Self { cfg }
     }
 
-    async fn run(
-        &self,
-        ctx: HostContext,
-        inst: InstConfig,
-        mut rx: mpsc::Receiver<Sample>,
-        mut cmd_rx: mpsc::Receiver<CtlMessage>,
-        token: CancellationToken,
-    ) {
-        let b = BrokerCfg::parse(ctx.hwid.as_ref(), &inst.app_config);
-        let mut opts = MqttOptions::new(&b.client_id, &b.host, b.port);
+    /// 常驻运行：连 broker、订阅命令、周期 publish rtdata，直到 `token` 取消。
+    pub async fn run(self, ctx: HostContext, token: CancellationToken) {
+        let hwid = ctx.hwid.clone();
+        let mut opts = MqttOptions::new(hwid.to_string(), &self.cfg.host, self.cfg.port);
         opts.set_keep_alive(Duration::from_secs(30));
         opts.set_clean_session(true);
-        if let (Some(u), Some(p)) = (b.username, b.password) {
+        if let (Some(u), Some(p)) = (&self.cfg.username, &self.cfg.password) {
             opts.set_credentials(u, p);
         }
         let (client, mut connection) = AsyncClient::new(opts, 10);
 
-        // 订阅命令下行：<hwid>/command
-        let cmd_topic = format!("{}/command", ctx.hwid);
+        let cmd_topic = format!("{hwid}/command");
         if let Err(e) = client.subscribe(&cmd_topic, QoS::AtMostOnce).await {
-            tracing::warn!("[mqttPub] subscribe {} failed: {e}", cmd_topic);
+            tracing::warn!("[mqtt] subscribe {cmd_topic} failed: {e}");
         } else {
-            tracing::info!("[mqttPub] subscribed {}", cmd_topic);
+            tracing::info!("[mqtt] subscribed {cmd_topic}");
         }
-
         tracing::info!(
-            "[mqttPub] inst {} -> broker {}:{} (clientId={})",
-            inst.inst_id,
-            b.host,
-            b.port,
-            b.client_id
+            "[mqtt] publisher -> {}:{} (pull every {}s)",
+            self.cfg.host,
+            self.cfg.port,
+            self.cfg.publish_interval_secs
         );
 
+        let mut ticker = tokio::time::interval(Duration::from_secs(self.cfg.publish_interval_secs));
+        // 跳过首个立即 tick（启动瞬间无需发布）
+        ticker.tick().await;
         loop {
             tokio::select! {
                 _ = token.cancelled() => {
-                    tracing::info!("[mqttPub] inst {} stopping", inst.inst_id);
+                    tracing::info!("[mqtt] publisher stopping");
                     break;
-                }
-                s = rx.recv() => {
-                    if let Some(sample) = s {
-                        let topic = format!("{}/{}/datas", sample.hwid, sample.devid);
-                        match serde_json::to_vec(&sample) {
-                            Ok(payload) => {
-                                if let Err(e) = client.publish(topic.clone(), QoS::AtMostOnce, false, payload).await {
-                                    tracing::warn!("[mqttPub] publish {} failed: {e}", topic);
-                                }
-                            }
-                            Err(e) => tracing::warn!("[mqttPub] encode sample failed: {e}"),
-                        }
-                    }
-                }
-                m = cmd_rx.recv() => {
-                    if let Some(m) = m {
-                        tracing::info!("[mqttPub] inst {} got cmd: {}", inst.inst_id, m.cmd);
-                    }
                 }
                 ev = connection.poll() => {
                     match ev {
                         Ok(Event::Incoming(Packet::Publish(p))) => {
                             if let Ok(cmd) = serde_json::from_slice::<CtlMessage>(&p.payload) {
-                                let inst = cmd.instance.clone();
-                                ctx.ctl_registry.send(inst.as_ref(), cmd);
+                                let inst = cmd.instance.to_string();
+                                ctx.ctl_registry.send(&inst, cmd);
                             }
                         }
                         Ok(_) => {}
                         Err(e) => {
-                            tracing::warn!("[mqttPub] connection error: {e}");
+                            tracing::warn!("[mqtt] connection error: {e}");
                             tokio::time::sleep(Duration::from_secs(2)).await;
                         }
                     }
+                }
+                _ = ticker.tick() => {
+                    publish_rtdata(&ctx, &hwid, &client).await;
                 }
             }
         }
     }
 }
 
-inventory::submit! {
-    crate::plugin::registry::SinkEntry {
-        name: "mqttPub",
-        create: || Box::new(MqttPub),
+/// 从 lux 读取所有 `rtdata:<devid>`，组装并 `PUBLISH`。
+///
+/// lux rtdata 结构：key=`rtdata:<devid>`，hash field=`<devid>.<tag>`（或 `<tag>`），
+/// value=`[ts, localTime, value]` JSON。组装为 `{hwid, devid, values:{field: value}, timestamp}`。
+async fn publish_rtdata(ctx: &HostContext, hwid: &crate::types::Hwid, client: &AsyncClient) {
+    let keys = match ctx.lux.execute_value("KEYS", &["rtdata:*"]).await {
+        Ok(lux::EmbeddedValue::Array(a)) => a,
+        _ => return,
+    };
+    for k in keys {
+        let key = match &k {
+            lux::EmbeddedValue::Bulk(b) => String::from_utf8_lossy(b).to_string(),
+            lux::EmbeddedValue::Simple(s) => s.clone(),
+            _ => continue,
+        };
+        let devid = key.strip_prefix("rtdata:").unwrap_or(&key);
+        let arr = match ctx.lux.execute_value("HGETALL", &[&key]).await {
+            Ok(lux::EmbeddedValue::Array(a)) => a,
+            _ => continue,
+        };
+        let mut values = serde_json::Map::new();
+        let mut latest_ts: i64 = 0;
+        let mut i = 0;
+        while i + 1 < arr.len() {
+            let field = match &arr[i] {
+                lux::EmbeddedValue::Bulk(b) => String::from_utf8_lossy(b).to_string(),
+                lux::EmbeddedValue::Simple(s) => s.clone(),
+                _ => {
+                    i += 2;
+                    continue;
+                }
+            };
+            let cell_raw = match &arr[i + 1] {
+                lux::EmbeddedValue::Bulk(b) => String::from_utf8_lossy(b).to_string(),
+                lux::EmbeddedValue::Simple(s) => s.clone(),
+                _ => {
+                    i += 2;
+                    continue;
+                }
+            };
+            // cell = [ts, localTime, value]
+            if let Ok(cell) = serde_json::from_str::<Vec<serde_json::Value>>(&cell_raw) {
+                if cell.len() >= 3 {
+                    if let Some(ts) = cell[0].as_i64() {
+                        latest_ts = latest_ts.max(ts);
+                    }
+                    values.insert(field, cell[2].clone());
+                }
+            } else {
+                values.insert(field, serde_json::Value::String(cell_raw));
+            }
+            i += 2;
+        }
+        let payload = serde_json::json!({
+            "hwid": hwid,
+            "devid": devid,
+            "values": serde_json::Value::Object(values),
+            "timestamp": latest_ts,
+        });
+        let topic = format!("{hwid}/{devid}/datas");
+        match serde_json::to_vec(&payload) {
+            Ok(bytes) => {
+                if let Err(e) = client
+                    .publish(topic.clone(), QoS::AtMostOnce, false, bytes)
+                    .await
+                {
+                    tracing::warn!("[mqtt] publish {topic} failed: {e}");
+                }
+            }
+            Err(e) => tracing::warn!("[mqtt] encode payload failed: {e}"),
+        }
     }
 }
