@@ -50,7 +50,7 @@ jobs:
           repository: viccom/lux
           path: ../lux
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo test --all-targets
+      - run: cargo test --all-targets --all-features
 
   doc:
     runs-on: ubuntu-latest

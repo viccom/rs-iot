@@ -7,6 +7,7 @@ use sha2::{Digest, Sha256};
 /// `sha256(brand + ARCH)` 取前 8 位，前缀 `eiot`。
 ///
 /// 语义：每机稳定唯一。与 Go 版不完全一致，但 rs-iot 为全新部署，无历史兼容问题。
+#[must_use]
 pub fn hardware_id() -> String {
     // sysinfo 0.32: 取首个 CPU 的 brand（含 vendor 信息）。new_all() 保证 cpu 列表已填充。
     // 仅在启动时调用一次，开销可接受。

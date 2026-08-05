@@ -1,7 +1,7 @@
 //! 用户 CRUD + 登录/JWT/改密/验 token（lux Hash `users`/`passwords`）。
 
 use crate::api::auth;
-use crate::api::{hget, hgetall, str_from_value, AppState};
+use crate::api::{hget, hgetall, AppState};
 use axum::extract::{Query, State};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
@@ -171,6 +171,5 @@ pub async fn logout() -> Response {
     if let Ok(v) = expired.parse() {
         resp.headers_mut().insert(axum::http::header::SET_COOKIE, v);
     }
-    let _ = str_from_value; // 占位避免未用警告
     resp
 }

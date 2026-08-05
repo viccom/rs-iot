@@ -12,7 +12,7 @@
   - L2 数据转换：内嵌 `rhai` 脚本（feature `transform`，默认开启）
   - L3 WASM 扩展 / L4 进程插件：v2 路线
 - **数据流（hub 模式，pull 化）**：N 个 Source → 共享 mpsc hub → pipeline（Processor）→ lux `rtdata:<devid>` 写入；北向 `MqttPublisher` 独立常驻，周期从 lux 抽取 rtdata 发布到外部 MQTT broker（pull 模式，STEP 5 起不再走 pipeline fan-out）。单 Source 启停不影响管道。
-- **REST 管理 API**（`:8790`）：JWT 中间件 + 白名单 + `X-Access-Key`；对标 Lite_IOT 路由（sysinfo/plugins/inst/user/group/accesskey/inst 启停 + `/rtdatas` 实时数据查询）；`apiTest` 静态前端（rust-embed 嵌入）。
+- **REST 管理 API**（仓库 `config.toml` 为 `:8790`，代码默认 `:8780`）：JWT 中间件 + 白名单 + `X-Access-Key`；对标 Lite_IOT 路由（sysinfo/plugins/inst/user/group/accesskey/inst 启停 + `/rtdatas` 实时数据查询）；`apiTest` 静态前端（rust-embed 嵌入）。
 - **实例动态启停**：REST `startinst`/`stopinst` 从 lux `instances` 读配置动态启停 Source。
 - **服务化**：Windows Service（`windows-service` crate dispatch）/ Linux systemd unit 生成；SCM stop 触发 `CancellationToken` → 优雅关闭（lux SAVE → shutdown）。
 - **L1→L2 生产基线**：`missing_docs`/clippy/rustfmt 基线、统一 `RsIotError`（thiserror + `#[non_exhaustive]`）错误规范、newtype ID（`Hwid`/`InstId`/`UserId`/`PluginName`）、`tracing` 日志（`#[instrument]` + TraceLayer）、GitHub Actions CI。规范依据见 `rust-architecture-by-code-size.md`。
@@ -29,10 +29,9 @@ cargo build --release   # release（lto + strip）
 ## 运行
 
 ```bash
-# 前台（默认配置：lux :6390、REST :8790、mqtt broker.emqx.io:1883）
+# 前台。不带 --config 时用代码默认（lux :6390、REST :8780、mqtt localhost）；
+# 带仓库 config.toml 时：lux :6390、REST :8790、mqtt broker.emqx.io:1883
 ./target/debug/rs-iot
-
-# 指定配置
 ./target/debug/rs-iot --config config.toml
 ```
 

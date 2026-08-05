@@ -102,39 +102,7 @@ async fn publish_rtdata(ctx: &HostContext, hwid: &crate::types::Hwid, client: &A
             Ok(lux::EmbeddedValue::Array(a)) => a,
             _ => continue,
         };
-        let mut values = serde_json::Map::new();
-        let mut latest_ts: i64 = 0;
-        let mut i = 0;
-        while i + 1 < arr.len() {
-            let field = match &arr[i] {
-                lux::EmbeddedValue::Bulk(b) => String::from_utf8_lossy(b).to_string(),
-                lux::EmbeddedValue::Simple(s) => s.clone(),
-                _ => {
-                    i += 2;
-                    continue;
-                }
-            };
-            let cell_raw = match &arr[i + 1] {
-                lux::EmbeddedValue::Bulk(b) => String::from_utf8_lossy(b).to_string(),
-                lux::EmbeddedValue::Simple(s) => s.clone(),
-                _ => {
-                    i += 2;
-                    continue;
-                }
-            };
-            // cell = [ts, localTime, value]
-            if let Ok(cell) = serde_json::from_str::<Vec<serde_json::Value>>(&cell_raw) {
-                if cell.len() >= 3 {
-                    if let Some(ts) = cell[0].as_i64() {
-                        latest_ts = latest_ts.max(ts);
-                    }
-                    values.insert(field, cell[2].clone());
-                }
-            } else {
-                values.insert(field, serde_json::Value::String(cell_raw));
-            }
-            i += 2;
-        }
+        let (values, latest_ts) = parse_rtdata_hash(&arr);
         let payload = serde_json::json!({
             "hwid": hwid,
             "devid": devid,
@@ -153,5 +121,93 @@ async fn publish_rtdata(ctx: &HostContext, hwid: &crate::types::Hwid, client: &A
             }
             Err(e) => tracing::warn!("[mqtt] encode payload failed: {e}"),
         }
+    }
+}
+
+/// 解析 `HGETALL rtdata:<devid>` 返回值（field → `[ts, localTime, value]` JSON）
+/// 为 `values` map（field → value）+ 最新 ts。
+///
+/// 非 `[ts, localTime, value]` 格式的 cell 原样保留为字符串（兼容旧数据）。
+fn parse_rtdata_hash(
+    arr: &[lux::EmbeddedValue],
+) -> (serde_json::Map<String, serde_json::Value>, i64) {
+    let mut values = serde_json::Map::new();
+    let mut latest_ts: i64 = 0;
+    let mut i = 0;
+    while i + 1 < arr.len() {
+        let field = match &arr[i] {
+            lux::EmbeddedValue::Bulk(b) => String::from_utf8_lossy(b).to_string(),
+            lux::EmbeddedValue::Simple(s) => s.clone(),
+            _ => {
+                i += 2;
+                continue;
+            }
+        };
+        let cell_raw = match &arr[i + 1] {
+            lux::EmbeddedValue::Bulk(b) => String::from_utf8_lossy(b).to_string(),
+            lux::EmbeddedValue::Simple(s) => s.clone(),
+            _ => {
+                i += 2;
+                continue;
+            }
+        };
+        // cell = [ts, localTime, value]
+        if let Ok(cell) = serde_json::from_str::<Vec<serde_json::Value>>(&cell_raw) {
+            if cell.len() >= 3 {
+                if let Some(ts) = cell[0].as_i64() {
+                    latest_ts = latest_ts.max(ts);
+                }
+                values.insert(field, cell[2].clone());
+            }
+        } else {
+            values.insert(field, serde_json::Value::String(cell_raw));
+        }
+        i += 2;
+    }
+    (values, latest_ts)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn bulk(s: &str) -> lux::EmbeddedValue {
+        lux::EmbeddedValue::Bulk(s.as_bytes().to_vec().into())
+    }
+
+    #[test]
+    fn parse_rtdata_hash_extracts_values_and_max_ts() {
+        let arr = vec![
+            bulk("devA.temp"),
+            bulk(r#"[1700000000, "2023-11-14 20:13:20", "89.9"]"#),
+            bulk("devA.humidity"),
+            bulk(r#"[1700000100, "2023-11-14 20:15:00", "45.2"]"#),
+        ];
+        let (values, ts) = parse_rtdata_hash(&arr);
+        assert_eq!(ts, 1700000100, "latest ts should win");
+        assert_eq!(values.get("devA.temp").unwrap(), "89.9");
+        assert_eq!(values.get("devA.humidity").unwrap(), "45.2");
+    }
+
+    #[test]
+    fn parse_rtdata_hash_keeps_unparseable_cell_as_string() {
+        let arr = vec![bulk("raw"), bulk("not-json")];
+        let (values, ts) = parse_rtdata_hash(&arr);
+        assert_eq!(ts, 0);
+        assert_eq!(values.get("raw").unwrap(), "not-json");
+    }
+
+    #[test]
+    fn parse_rtdata_hash_skips_short_cells() {
+        let arr = vec![
+            bulk("a"),
+            bulk("[1]"),
+            bulk("b"),
+            bulk(r#"[300, "t", "2"]"#),
+        ];
+        let (values, ts) = parse_rtdata_hash(&arr);
+        assert_eq!(ts, 300);
+        assert!(!values.contains_key("a"), "len<3 cell must be skipped");
+        assert_eq!(values.get("b").unwrap(), "2");
     }
 }

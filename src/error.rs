@@ -37,6 +37,10 @@ pub enum RsIotError {
     #[error("mqtt error: {0}")]
     Mqtt(#[from] rumqttc::ClientError),
 
+    /// JWT 签发/验证错误（jsonwebtoken）。
+    #[error("jwt error: {0}")]
+    Jsonwebtoken(#[from] jsonwebtoken::errors::Error),
+
     /// 配置错误（语义级，含路径等上下文）。
     #[error("config error: {0}")]
     Config(String),

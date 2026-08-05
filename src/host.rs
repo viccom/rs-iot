@@ -37,13 +37,8 @@ impl CtlRegistry {
 
     /// 投递命令到指定实例。channel 满则丢弃（对标 Go 版 `default` 非阻塞语义）。
     pub fn send(&self, inst: &str, msg: CtlMessage) {
-        // clone Sender 后立即释放 DashMap 读锁，避免跨 await 持锁。
-        let tx = match self.map.get(inst) {
-            Some(ref_tx) => ref_tx.value().clone(),
-            None => return,
-        };
-        drop(tx);
-        // 重新取引用并 try_send（不持锁跨 await）
+        // try_send 为同步操作、不跨 await，可在 DashMap 读锁内直接完成；
+        // 实例不存在或 channel 满则静默丢弃。
         if let Some(ref_tx) = self.map.get(inst) {
             let _ = ref_tx.value().try_send(msg);
         }

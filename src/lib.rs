@@ -4,8 +4,6 @@
 //! lux rtdata；北向 Sink（mqtt，STEP 5 起为 pull 模式）发布到外部 broker；
 //! axum REST 管理 API（默认 :8780）。
 //!
-//! 开发期：MVP 各模块逐步落地，暂允许 dead_code。
-#![allow(dead_code)]
 #![warn(
     missing_docs,
     rust_2018_idioms,

@@ -25,6 +25,7 @@ pub struct SinkEntry {
 collect!(SinkEntry);
 
 /// 按 `app_code` 查找 Source 工厂。
+#[must_use]
 pub fn find_source(name: &str) -> Option<fn() -> Box<dyn Source>> {
     iter::<SourceEntry>()
         .find(|e| e.name == name)
@@ -32,6 +33,7 @@ pub fn find_source(name: &str) -> Option<fn() -> Box<dyn Source>> {
 }
 
 /// 按 `app_code` 查找 Sink 工厂。
+#[must_use]
 pub fn find_sink(name: &str) -> Option<fn() -> Box<dyn Sink>> {
     iter::<SinkEntry>()
         .find(|e| e.name == name)
@@ -39,11 +41,13 @@ pub fn find_sink(name: &str) -> Option<fn() -> Box<dyn Sink>> {
 }
 
 /// 所有已注册 Source 名（供 `/api/v1/plugins` 展示）。
+#[must_use]
 pub fn source_names() -> Vec<&'static str> {
     iter::<SourceEntry>().map(|e| e.name).collect()
 }
 
 /// 所有已注册 Sink 名。
+#[must_use]
 pub fn sink_names() -> Vec<&'static str> {
     iter::<SinkEntry>().map(|e| e.name).collect()
 }

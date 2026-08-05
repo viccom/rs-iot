@@ -12,6 +12,7 @@ use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation}
 use serde::{Deserialize, Serialize};
 
 use crate::api::{is_public, AppState};
+use crate::error::TResult;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Claims {
@@ -21,7 +22,7 @@ pub struct Claims {
     pub exp: usize,
 }
 
-pub fn encode_token(user_id: &str, secret: &str) -> anyhow::Result<String> {
+pub fn encode_token(user_id: &str, secret: &str) -> TResult<String> {
     let exp = chrono::Local::now().timestamp() as usize + 24 * 3600;
     let claims = Claims {
         sub: user_id.to_string(),

@@ -33,13 +33,12 @@ fn var_name(tag: &str) -> String {
     // rhai 标识符：字母/下划线开头，字母数字下划线。取末段并替换非法字符。
     let last = tag.rsplit(['.', '/', ':', '-']).next().unwrap_or(tag);
     let mut s = String::with_capacity(last.len());
-    for (i, c) in last.chars().enumerate() {
+    for c in last.chars() {
         if c.is_ascii_alphanumeric() || c == '_' {
             s.push(c);
         } else {
             s.push('_');
         }
-        let _ = i;
     }
     if s.is_empty() || s.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(true) {
         s.insert(0, 'v');
