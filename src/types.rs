@@ -181,7 +181,8 @@ pub struct ChildSpec {
 pub struct InstConfig {
     /// 实例 ID（唯一，作为状态/命令路由 key）。
     pub inst_id: InstId,
-    /// 实例显示名。
+    /// 实例显示名（缺省留空，配置容错）。
+    #[serde(default)]
     pub inst_name: String,
     /// 插件名（如 "dataSim"、"mqttPub"），用于在注册表查找。
     pub app_code: PluginName,
