@@ -17,6 +17,7 @@ pub mod frontend;
 pub mod routes_device;
 pub mod routes_group;
 pub mod routes_inst;
+pub mod routes_rtdata;
 pub mod routes_sys;
 pub mod routes_user;
 
@@ -109,6 +110,8 @@ pub fn build_router(state: AppState) -> axum::Router {
         .route("/api/v1/usergroup/add", post(routes_group::add))
         .route("/api/v1/usergroup/remove", post(routes_group::remove))
         .route("/api/v1/accesskey/set", post(routes_group::set_accesskey))
+        // 实时数据查询
+        .route("/api/v1/rtdatas", get(routes_rtdata::rtdatas))
         // 静态前端
         .route("/apitest", get(frontend::index_redirect))
         .route("/", get(frontend::root_redirect));
