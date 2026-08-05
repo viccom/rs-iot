@@ -1,0 +1,77 @@
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+
+env:
+  RUSTFLAGS: -D warnings
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fmt:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # lux 为 path 依赖（../lux）；CI 一并 checkout（仓库名按实际 GitHub org 调整）
+      - uses: actions/checkout@v4
+        with:
+          repository: viccom/lux
+          path: ../lux
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all --check
+
+  clippy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: viccom/lux
+          path: ../lux
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - run: cargo clippy --all-targets -- -D warnings
+
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: viccom/lux
+          path: ../lux
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test --all-targets
+
+  doc:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: viccom/lux
+          path: ../lux
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo doc --no-deps
+
+  audit:
+    runs-on: ubuntu-latest
+    # 信息性：传递依赖（rustls TLS 链，经 rumqttc/lux 引入）当前有已知 advisory
+    # （rustls-webpki 0.102.8 / rustls-pemfile 2.2.0 等）；rs-iot 用明文 MQTT
+    # （broker:1883，TLS 路径未启用）实际风险低。升级 lux/rumqttc 依赖链后
+    # 移除 continue-on-error 改为严格。
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo install cargo-audit --locked
+      - run: cargo audit
