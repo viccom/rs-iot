@@ -34,16 +34,46 @@ use tokio_util::sync::CancellationToken;
 /// 构建版本标识（供 `/api/v1/sysinfo` 与日志使用）。
 pub const VERSION: &str = "20250123";
 
-/// 初始化全局 tracing subscriber（EnvFilter + fmt）。
+/// 初始化全局 tracing subscriber。
 ///
-/// `main` 与 Windows Service 入口共用：优先读 `RUST_LOG` 环境变量，缺省 `info` 级别。
-pub fn init_tracing() {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .init();
+/// 终端输出始终开启；当 `cfg.dir` 非空时额外写日志文件（`tracing-appender` daily 轮转 +
+/// non_blocking 专用日志线程）。级别优先读 `RUST_LOG`，缺省用 `cfg.level`。
+///
+/// `cfg = None` 表示仅终端、级别 info（供 install/uninstall 等管理命令使用）。
+/// 用 `try_init` 容忍重复调用（进程级 subscriber 单例，重复设置静默忽略）。
+///
+/// 非 blocking writer 的 `WorkerGuard` 被刻意 `forget`：服务常驻进程需日志线程全程存活，
+/// 进程退出时线程随之结束；v1 不做退出前 flush（可能丢最后几条），如需精确 flush 改为
+/// 在 shutdown 流程显式持有并 drop guard。
+pub fn init_tracing(cfg: Option<&config::LogConfig>) {
+    use tracing_subscriber::{fmt, layer::Layer, prelude::*, EnvFilter};
+
+    let default_level = cfg.map(|c| c.level.as_str()).unwrap_or("info");
+    let filter = EnvFilter::try_from_default_env()
+        .or_else(|_| EnvFilter::try_new(default_level))
+        .unwrap_or_else(|_| EnvFilter::new("info"));
+
+    let mut layers: Vec<Box<dyn Layer<tracing_subscriber::Registry> + Send + Sync>> =
+        vec![fmt::layer()
+            .with_target(true)
+            .with_filter(filter.clone())
+            .boxed()];
+
+    if let Some(c) = cfg {
+        let dir = c.dir.trim();
+        if !dir.is_empty() {
+            if let Err(e) = std::fs::create_dir_all(dir) {
+                eprintln!("init_tracing: create log dir '{dir}' failed: {e}");
+            } else {
+                let appender = tracing_appender::rolling::daily(dir, "rs-iot.log");
+                let (writer, guard) = tracing_appender::non_blocking(appender);
+                std::mem::forget(guard);
+                layers.push(fmt::layer().with_writer(writer).with_filter(filter).boxed());
+            }
+        }
+    }
+
+    let _ = tracing_subscriber::registry().with(layers).try_init();
 }
 
 /// CLI `run` 入口：内部建 shutdown + ctrl_c 监听，委托给 `run_app_with_shutdown`。

@@ -2,3 +2,4 @@
 
 pub mod datasim;
 pub mod mqtt_pub;
+pub mod opcua_client;

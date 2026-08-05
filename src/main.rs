@@ -43,20 +43,26 @@ enum Command {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    rs_iot::init_tracing();
-
     let cli = Cli::parse();
 
     match cli.command.unwrap_or(Command::Run) {
         Command::Run => {
             let cfg = rs_iot::config::AppConfig::load_or_default(cli.config.as_deref())?;
+            rs_iot::init_tracing(Some(&cfg.log));
             run::run(cfg).await?;
         }
-        Command::Install => service::install()?,
-        Command::Uninstall => service::uninstall()?,
+        Command::Install => {
+            rs_iot::init_tracing(None);
+            service::install()?
+        }
+        Command::Uninstall => {
+            rs_iot::init_tracing(None);
+            service::uninstall()?
+        }
         #[cfg(windows)]
         Command::Service => {
-            // SCM 调用此入口；dispatch 内部接管 SCM 协议与生命周期
+            // SCM 调用此入口；dispatch 内部接管 SCM 协议与生命周期。
+            // 不在此 init_tracing：service_main 加载 config 后再初始化（含文件日志）。
             service::windows::dispatch()?;
         }
     }

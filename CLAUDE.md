@@ -27,7 +27,7 @@ REST :8790 (axum + JWT) ──► InstanceManager（动态启停 Source）
 | `error.rs` | `RsIotError`（thiserror + `#[non_exhaustive]`）+ `TResult<T>` 别名 |
 | `types.rs` | 数据模型 + newtype ID（见编码约定） |
 | `host.rs` | `HostContext`（lux client + hwid + shutdown + `CtlRegistry` 命令路由表），注入每个插件 task |
-| `plugin/` | `traits.rs`（Source/Sink/Processor 契约）、`registry.rs`（inventory 静态注册）、`instance.rs`（生命周期管理）、`builtin/`（datasim / mqtt_pub） |
+| `plugin/` | `traits.rs`（Source/Sink/Processor 契约）、`registry.rs`（inventory 静态注册）、`instance.rs`（生命周期管理）、`builtin/`（datasim 模拟采集 / mqtt_pub 北向发布 / opcua_client OPC UA 采集） |
 | `pipeline.rs` | hub 消费者：Processor 转换 → `db::rtdata::write` |
 | `transform/` | `passthrough`（默认）/ `rhai`（feature `transform`，默认开启） |
 | `db/` | `build_lux_config`、`shutdown_lux`（先 SAVE）、`identity::bootstrap`（幂等建 admin）、`rtdata::write` |
@@ -42,6 +42,7 @@ REST :8790 (axum + JWT) ──► InstanceManager（动态启停 Source）
 - `lux = { path = "../lux" }` — 需 lux 源码在**同级** `E:\github.com\lux`；修改 lux 会直接影响本项目的编译与行为（EmbeddedClient 无 Debug、`ServerConfig` 无 Builder 等特性已被本项目代码 `expect` 依赖）。
 - `D:\Go_Codes\Lite_IOT` — 对标参考实现，新功能常按"Lite_IOT 的 X 模块"定位。
 - 端口：lux RESP 6390（避开本机 redis 6379）、REST 8780（config.toml 中 8780 被占用临时改 8790）、MQTT 公共 broker broker.emqx.io:1883（开发验证用）。
+- 日志：`tracing` + `tracing-subscriber` + `tracing-appender`（tokio-rs 官方）。终端输出始终开启；`config.toml` 的 `[log].dir` 非空时额外写文件（`<dir>/rs-iot.log.<date>` daily 轮转，non_blocking 专用线程）。级别优先 `RUST_LOG`，缺省 `[log].level`（默认 info）。opcua 采集/连接/读写均有 `[opcuaClient]` 前缀日志。
 
 ## 常用命令
 
@@ -89,7 +90,8 @@ rs-iot install / uninstall        # 服务化（Windows: sc create / Linux: syst
 ## 验证规则
 
 - 改 `src/` 任意代码：`cargo fmt --all --check` + `cargo clippy --all-targets -- -D warnings` + `cargo test --all-targets --all-features` 三项全绿才算完成（与 CI 门槛一致）。
-- 改插件/管道/类型：跑对应单测（datasim/hwid/rhai/mqtt_pub 已有），新增逻辑补 `#[cfg(test)]` 模块内单测。
+- 改插件/管道/类型：跑对应单测（datasim/hwid/rhai/mqtt_pub/opcua_client 已有），新增逻辑补 `#[cfg(test)]` 模块内单测。
+- **opcua_client 端到端**（依赖本机 UA Server 在线 `opc.tcp://127.0.0.1:49320`，CI 不跑）：REST 建实例 `app_code="opcuaClient"` + `app_config{endpoint, security_policy, period, verify_server}` + `devices[].children[].value=NodeId`（如 `ns=2;s=v1`）→ `startinst` → `redis-cli HGETALL rtdata:<devid>` 验证采集；写命令经 `<hwid>/<devid>/command` JSON `{"cmd":"write","data":"{\"node_id\":\"...\",\"value\":123,\"opc_type\":\"Int32\"}"}`。**`opc_type` 在 write 时强烈建议带**：OPC UA server 严格类型匹配（Int32 节点写 Int64 会 BadTypeMismatch），支持 Boolean/SByte/Byte/Int16/UInt16/Int32/UInt32/Int64/UInt64/Float/Double/String（缺省 Float→Double、Int→Int64）。**`verify_server` 默认 false**：跳过 server 证书 hostname/application-uri/有效期校验（仅检查证书被信任+密钥长度），便于用 IP/loopback 连接（server 证书常不含这些 alt name）；生产环境 endpoint 与证书匹配时设 true。`security_policy` 支持 `none` / `Basic256Sha256`（签名并加密；客户端自签证书在 `pki/own/cert.der`，需导入 UA Server 信任列表）。注意 server 端节点须对当前用户开放写权限，否则 BadUserAccessDenied（与 rs-iot 无关）。
 - **集成测试在 `tests/`**：`dataflow.rs`（datasim→hub→pipeline→rtdata 端到端）、`api_flow.rs`（axum oneshot + JWT 鉴权）、`config_load.rs`（配置容错）。改数据流/REST 鉴权/配置语义后跑 `cargo test --test <name>` 对应文件。新增集成测试用 `tests/common::start_lux`（**端口 0 由 OS 分配 + 独立临时 data_dir**），勿固定端口、勿写仓库 `./data/`；测试代码同样受 CI `RUSTFLAGS=-D warnings` 约束，保持零警告。
 - 改 lux Hash 读写：`cargo test` 保证编译，但 Hash 结构变更需**端到端验证**（见下）。
 - **端到端验证**（改数据流/API 后必做，README 有完整示例）：

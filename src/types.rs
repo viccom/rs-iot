@@ -108,7 +108,7 @@ pub struct Sample {
 }
 
 /// 采样值。`untagged` 让 JSON 直接是数字/布尔/字符串。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
 #[non_exhaustive]
 pub enum SampleValue {

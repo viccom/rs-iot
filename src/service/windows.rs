@@ -70,6 +70,10 @@ fn service_main(_arguments: Vec<std::ffi::OsString>) {
         }
     };
 
+    // config 加载成功后初始化日志（含文件输出）。service_main 早期错误（register/config load）
+    // 在此之前无 subscriber，由 SCM 事件日志兜底。
+    rs_iot::init_tracing(Some(&cfg.log));
+
     let shutdown = CancellationToken::new();
     let shutdown_clone = shutdown.clone();
     let (done_tx, done_rx) = mpsc::channel::<bool>();

@@ -14,6 +14,8 @@ pub struct AppConfig {
     pub jwt_secret: String,
     /// 北向 MQTT broker（mqttPub 默认实例连接目标）
     pub mqtt: MqttConfig,
+    /// 日志配置（终端 + 可选文件轮转）。
+    pub log: LogConfig,
 }
 
 /// lux ServerConfig 的子集映射（仅暴露我们关心的字段）。
@@ -53,6 +55,7 @@ impl Default for AppConfig {
             api_port: 8780,
             jwt_secret: "qwerty1234567890asdfgh1234567890".into(),
             mqtt: MqttConfig::default(),
+            log: LogConfig::default(),
         }
     }
 }
@@ -76,6 +79,25 @@ impl Default for MqttConfig {
             username: None,
             password: None,
             publish_interval_secs: 5,
+        }
+    }
+}
+
+/// 日志配置。终端输出始终开启；`dir` 非空时额外写文件（daily 轮转）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LogConfig {
+    /// 日志文件目录。空 = 仅终端；非空（如 `./data/logs`）= 额外写文件。
+    pub dir: String,
+    /// 日志级别（仅当未设 `RUST_LOG` 时作为缺省；`RUST_LOG` 优先）。
+    pub level: String,
+}
+
+impl Default for LogConfig {
+    fn default() -> Self {
+        Self {
+            dir: String::new(),
+            level: "info".into(),
         }
     }
 }

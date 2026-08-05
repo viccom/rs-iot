@@ -56,6 +56,12 @@ jsonwebtoken = { version = "10", features = ["rust_crypto"] }
 rust-embed = { version = "8", features = ["mime-guess"] }
 mime_guess = "2"
 
+# OPC UA 南向插件（async-opcua：freeopcua 社区接棒 locka99 的现代纯 async 实现）
+async-opcua = { version = "0.19", default-features = false, features = ["client"] }
+
+# 文件日志（tokio-rs 官方 appender，RollingFileAppender daily 轮转 + non_blocking）
+tracing-appender = "0.2"
+
 [features]
 default = ["transform"]
 # L2 数据转换（rhai 脚本，默认开启）
