@@ -17,22 +17,32 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
+/// 插件实例运行状态。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum InstState {
+    /// 正在启动。
     Starting,
+    /// 运行中。
     Running,
+    /// 正在停止。
     Stopping,
+    /// 已停止。
     Stopped,
+    /// 失败。
     Failed,
 }
 
+#[derive(Debug)]
 struct InstanceHandle {
     token: CancellationToken,
     join: JoinHandle<()>,
 }
 
 /// 实例管理器：运行态表 + task handle 表 + 数据汇聚 hub。
+///
+/// 含 `HostContext`（其 `EmbeddedClient` 无 `Debug`），故暂以 `allow` 放行 `missing_debug_implementations`。
+#[allow(missing_debug_implementations)]
 pub struct InstanceManager {
     ctx: HostContext,
     states: Arc<DashMap<String, InstState>>,
@@ -42,6 +52,7 @@ pub struct InstanceManager {
 }
 
 impl InstanceManager {
+    /// 构造管理器，绑定到共享 hub 发送端。
     pub fn new(ctx: HostContext, hub_tx: mpsc::Sender<Sample>) -> Self {
         Self {
             ctx,
@@ -51,8 +62,12 @@ impl InstanceManager {
         }
     }
 
+    /// 快照所有实例当前状态（供 `/api/v1/inststatus`）。
     pub fn status(&self) -> HashMap<String, InstState> {
-        self.states.iter().map(|r| (r.key().clone(), *r.value())).collect()
+        self.states
+            .iter()
+            .map(|r| (r.key().clone(), *r.value()))
+            .collect()
     }
 
     /// 启动南向 Source 实例。产出汇入共享 hub（非返回 rx）。
@@ -112,6 +127,7 @@ impl InstanceManager {
         Ok(())
     }
 
+    /// 停止指定实例：cancel 其 token 并等 join（3s 超时）。
     pub async fn stop(&self, inst_id: &str) -> anyhow::Result<()> {
         self.states.insert(inst_id.to_string(), InstState::Stopping);
         self.ctx.ctl_registry.unregister(inst_id);
@@ -127,6 +143,7 @@ impl InstanceManager {
         Ok(())
     }
 
+    /// 停止所有实例（关闭流程用）。
     pub async fn stop_all(&self) {
         let ids: Vec<String> = self.handles.iter().map(|r| r.key().clone()).collect();
         for id in ids {

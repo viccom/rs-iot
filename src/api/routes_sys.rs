@@ -40,11 +40,12 @@ pub struct IdReq {
     pub inst_id: String,
 }
 
-pub async fn startinst(
-    State(st): State<AppState>,
-    Json(req): Json<IdReq>,
-) -> Response {
-    let raw = match st.lux.execute_value("HGET", &["instances", &req.inst_id]).await {
+pub async fn startinst(State(st): State<AppState>, Json(req): Json<IdReq>) -> Response {
+    let raw = match st
+        .lux
+        .execute_value("HGET", &["instances", &req.inst_id])
+        .await
+    {
         Ok(v) if !matches!(v, EmbeddedValue::Nil) => str_from_value(&v),
         _ => return err(StatusCode::NOT_FOUND, "instance not found"),
     };

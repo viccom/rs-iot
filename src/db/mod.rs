@@ -6,11 +6,15 @@ use lux::{ServerConfig, StorageConfig, StorageMode};
 use std::time::Duration;
 
 /// 构造 lux `ServerConfig`：
+///
 /// - RESP 监听 `bind_host:port`（默认 127.0.0.1:6390），仅 loopback
 /// - 禁用 lux 自带 HTTP（`http_port = 0`），管理面用我们自己的 axum :8780
 /// - `storage.mode = Tiered`：每写刷 WAL，真正持久化
 /// - `save_interval` 保留周期快照（截断 WAL，避免无限增长）
 /// - `auth.enabled = false`：JWT 由 rs-iot 自管，不用 lux 的 /auth/v1/*
+///
+/// `ServerConfig` 字段众多且常增减，按字段逐一赋值比维护完整字面量更稳，故允许 field_reassign。
+#[allow(clippy::field_reassign_with_default)]
 pub fn build_lux_config(cfg: &AppConfig) -> ServerConfig {
     let mut sc = ServerConfig::default();
     sc.bind_host = cfg.lux.bind_host.clone();

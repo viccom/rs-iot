@@ -10,7 +10,13 @@ use lux::EmbeddedClient;
 
 /// 写入一条 Sample 的所有变量到 `rtdata:<devid>`。
 /// field = `<devid>.<tag>`（若 tag 已含 devid 则不重复），value = JSON `[ts, localTime, value]`。
-pub async fn write(c: &EmbeddedClient, hwid: &str, devid: &str, values: &std::collections::BTreeMap<String, SampleValue>, timestamp: i64) -> Result<()> {
+pub async fn write(
+    c: &EmbeddedClient,
+    hwid: &str,
+    devid: &str,
+    values: &std::collections::BTreeMap<String, SampleValue>,
+    timestamp: i64,
+) -> Result<()> {
     let key = format!("rtdata:{devid}");
     let local_time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
     for (tag, val) in values {

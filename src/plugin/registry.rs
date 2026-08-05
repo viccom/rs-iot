@@ -5,15 +5,21 @@ use super::traits::{Sink, Source};
 use inventory::{collect, iter};
 
 /// 一个南向插件（Source）的注册项。
+#[derive(Debug)]
 pub struct SourceEntry {
+    /// 插件名（`app_code`）。
     pub name: &'static str,
+    /// 工厂函数：构造插件实例。
     pub create: fn() -> Box<dyn Source>,
 }
 collect!(SourceEntry);
 
 /// 一个北向插件（Sink）的注册项。
+#[derive(Debug)]
 pub struct SinkEntry {
+    /// 插件名（`app_code`）。
     pub name: &'static str,
+    /// 工厂函数：构造插件实例。
     pub create: fn() -> Box<dyn Sink>,
 }
 collect!(SinkEntry);

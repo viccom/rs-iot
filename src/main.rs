@@ -1,3 +1,12 @@
+#![warn(
+    missing_docs,
+    rust_2018_idioms,
+    missing_debug_implementations,
+    unreachable_pub
+)]
+
+//! rs-iot 二进制入口：解析 CLI、初始化 tracing、按子命令分发到 run/service。
+
 mod run;
 mod service;
 

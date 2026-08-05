@@ -4,12 +4,12 @@
 //! - `windows::dispatch`：被 SCM 调用的服务入口（Windows only）
 
 #[cfg(unix)]
-pub mod systemd;
+pub(crate) mod systemd;
 #[cfg(windows)]
-pub mod windows;
+pub(crate) mod windows;
 
 /// 安装为系统服务。
-pub fn install() -> anyhow::Result<()> {
+pub(crate) fn install() -> anyhow::Result<()> {
     let exe = std::env::current_exe()?;
     println!("binary: {}", exe.display());
     #[cfg(unix)]
@@ -24,7 +24,7 @@ pub fn install() -> anyhow::Result<()> {
 }
 
 /// 卸载系统服务。
-pub fn uninstall() -> anyhow::Result<()> {
+pub(crate) fn uninstall() -> anyhow::Result<()> {
     #[cfg(unix)]
     {
         systemd::uninstall()?;
@@ -61,8 +61,12 @@ fn install_windows(exe: &std::path::Path) -> anyhow::Result<()> {
 
 #[cfg(windows)]
 fn uninstall_windows() -> anyhow::Result<()> {
-    let _ = std::process::Command::new("sc").args(["stop", "rs-iot"]).status();
-    let status = std::process::Command::new("sc").args(["delete", "rs-iot"]).status()?;
+    let _ = std::process::Command::new("sc")
+        .args(["stop", "rs-iot"])
+        .status();
+    let status = std::process::Command::new("sc")
+        .args(["delete", "rs-iot"])
+        .status()?;
     if !status.success() {
         anyhow::bail!("sc delete 失败");
     }

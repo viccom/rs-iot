@@ -28,7 +28,8 @@ pub async fn bootstrap(c: &EmbeddedClient) -> Result<()> {
 
     // 用户组
     if !hash_exists(c, "groups", "AdminG").await? {
-        c.execute("HSET", &["groups", "AdminG", r#"["admin"]"#]).await?;
+        c.execute("HSET", &["groups", "AdminG", r#"["admin"]"#])
+            .await?;
     }
     if !hash_exists(c, "groups", "UserG").await? {
         c.execute("HSET", &["groups", "UserG", r#"[""]"#]).await?;

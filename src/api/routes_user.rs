@@ -43,7 +43,10 @@ pub struct DelReq {
     pub user_id: String,
 }
 
-pub async fn delete(State(st): State<AppState>, Json(req): Json<DelReq>) -> Json<serde_json::Value> {
+pub async fn delete(
+    State(st): State<AppState>,
+    Json(req): Json<DelReq>,
+) -> Json<serde_json::Value> {
     let _ = st.lux.execute("HDEL", &["users", &req.user_id]).await;
     let _ = st.lux.execute("HDEL", &["passwords", &req.user_id]).await;
     Json(serde_json::json!({"status": "deleted"}))
@@ -64,7 +67,10 @@ async fn check_password(lux: &lux::EmbeddedClient, user_id: &str, pass: &str) ->
     bcrypt::verify(pass, &hash).unwrap_or(false)
 }
 
-pub async fn verify(State(st): State<AppState>, Json(req): Json<VerifyReq>) -> Json<serde_json::Value> {
+pub async fn verify(
+    State(st): State<AppState>,
+    Json(req): Json<VerifyReq>,
+) -> Json<serde_json::Value> {
     let ok = check_password(&st.lux, &req.user_id, &req.pass).await;
     Json(serde_json::json!({"userId": req.user_id, "status": ok}))
 }
@@ -76,10 +82,7 @@ pub struct ChangePassReq {
     pub new_pass: String,
 }
 
-pub async fn changepass(
-    State(st): State<AppState>,
-    Json(req): Json<ChangePassReq>,
-) -> Response {
+pub async fn changepass(State(st): State<AppState>, Json(req): Json<ChangePassReq>) -> Response {
     if !check_password(&st.lux, &req.user_id, &req.pass).await {
         return (
             axum::http::StatusCode::UNAUTHORIZED,
@@ -89,7 +92,10 @@ pub async fn changepass(
     }
     match bcrypt::hash(&req.new_pass, bcrypt::DEFAULT_COST) {
         Ok(h) => {
-            let _ = st.lux.execute("HSET", &["passwords", &req.user_id, &h]).await;
+            let _ = st
+                .lux
+                .execute("HSET", &["passwords", &req.user_id, &h])
+                .await;
             Json(serde_json::json!({"status": "ok"})).into_response()
         }
         Err(e) => (

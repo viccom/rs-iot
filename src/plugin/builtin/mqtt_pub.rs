@@ -14,6 +14,8 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+/// 北向 MQTT 发布 Sink（`mqttPub`）；STEP 5 将重写为 pull 模式的常驻 `MqttPublisher`。
+#[derive(Debug, Default)]
 pub struct MqttPub;
 
 struct BrokerCfg {
@@ -77,7 +79,10 @@ impl Sink for MqttPub {
 
         tracing::info!(
             "[mqttPub] inst {} -> broker {}:{} (clientId={})",
-            inst.inst_id, b.host, b.port, b.client_id
+            inst.inst_id,
+            b.host,
+            b.port,
+            b.client_id
         );
 
         loop {

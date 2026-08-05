@@ -30,7 +30,10 @@ where
     serde_json::json!({"status": "ok"})
 }
 
-pub async fn add(State(st): State<AppState>, Json(req): Json<MemberReq>) -> Json<serde_json::Value> {
+pub async fn add(
+    State(st): State<AppState>,
+    Json(req): Json<MemberReq>,
+) -> Json<serde_json::Value> {
     Json(
         mutate_group(&st, &req.group_id, &req.user_id, |members, uid| {
             if !members.iter().any(|m| m == uid) {
@@ -41,7 +44,10 @@ pub async fn add(State(st): State<AppState>, Json(req): Json<MemberReq>) -> Json
     )
 }
 
-pub async fn remove(State(st): State<AppState>, Json(req): Json<MemberReq>) -> Json<serde_json::Value> {
+pub async fn remove(
+    State(st): State<AppState>,
+    Json(req): Json<MemberReq>,
+) -> Json<serde_json::Value> {
     Json(
         mutate_group(&st, &req.group_id, &req.user_id, |members, uid| {
             members.retain(|m| m != uid);
@@ -55,7 +61,10 @@ pub struct AccessKeyReq {
     pub key: String,
 }
 
-pub async fn set_accesskey(State(st): State<AppState>, Json(req): Json<AccessKeyReq>) -> Json<serde_json::Value> {
+pub async fn set_accesskey(
+    State(st): State<AppState>,
+    Json(req): Json<AccessKeyReq>,
+) -> Json<serde_json::Value> {
     let _ = st.lux.execute("SET", &["accesskey", &req.key]).await;
     Json(serde_json::json!({"status": "ok"}))
 }

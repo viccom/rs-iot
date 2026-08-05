@@ -17,6 +17,7 @@ pub trait Source: Send + Sync {
     /// 插件名（注册表 key，对应 `InstConfig::app_code`）。
     fn name(&self) -> &'static str;
 
+    /// 运行采集循环：产出经 `tx` 推入 hub，命令从 `cmd_rx` 消费，`token` 取消时退出。
     async fn run(
         &self,
         ctx: HostContext,
@@ -30,8 +31,10 @@ pub trait Source: Send + Sync {
 /// 北向：消费数据。`mqttPub` 等发布插件实现此 trait。
 #[async_trait]
 pub trait Sink: Send + Sync {
+    /// 插件名（注册表 key）。
     fn name(&self) -> &'static str;
 
+    /// 运行发布循环：从 `rx` 消费样本发布，命令从 `cmd_rx` 消费，`token` 取消时退出。
     async fn run(
         &self,
         ctx: HostContext,

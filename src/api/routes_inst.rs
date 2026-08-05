@@ -36,7 +36,10 @@ pub async fn set(State(st): State<AppState>, Json(req): Json<SetReq>) -> Json<se
         m.insert("inst_id".into(), req.inst_id.clone().into());
     }
     let s = serde_json::to_string(&obj).unwrap_or_default();
-    let _ = st.lux.execute("HSET", &["instances", &req.inst_id, &s]).await;
+    let _ = st
+        .lux
+        .execute("HSET", &["instances", &req.inst_id, &s])
+        .await;
     Json(serde_json::json!({"status": "ok"}))
 }
 
@@ -45,7 +48,10 @@ pub struct DelReq {
     pub inst_id: String,
 }
 
-pub async fn delete(State(st): State<AppState>, Json(req): Json<DelReq>) -> Json<serde_json::Value> {
+pub async fn delete(
+    State(st): State<AppState>,
+    Json(req): Json<DelReq>,
+) -> Json<serde_json::Value> {
     let _ = st.lux.execute("HDEL", &["instances", &req.inst_id]).await;
     Json(serde_json::json!({"status": "deleted"}))
 }

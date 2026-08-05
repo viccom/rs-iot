@@ -12,6 +12,10 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+/// 消费 hub 汇聚的样本：经 `Processor` 转换后写 lux rtdata，并 fan-out 到各 Sink。
+///
+/// 单消费者模型：所有 Source 输出汇入 `hub_rx`，本函数独占消费。`sink_txs` 参数
+/// 在 STEP 5（mqtt pull 化）后将移除——北向发布改为常驻 `MqttPublisher` 周期从 lux 抽取。
 pub async fn run(
     ctx: HostContext,
     mut hub_rx: mpsc::Receiver<Sample>,

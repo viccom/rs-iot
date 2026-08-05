@@ -14,11 +14,14 @@ use crate::types::{Sample, SampleValue};
 use async_trait::async_trait;
 use rhai::{Dynamic, Engine, Scope};
 
+/// rhai 脚本 Processor：用用户脚本转换 `sample.values`。
+#[derive(Debug)]
 pub struct RhaiProcessor {
     script: String,
 }
 
 impl RhaiProcessor {
+    /// 用脚本字符串构造 Processor。
     pub fn new(script: impl Into<String>) -> Self {
         Self {
             script: script.into(),

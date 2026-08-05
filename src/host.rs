@@ -12,12 +12,13 @@ use tokio_util::sync::CancellationToken;
 /// 对标 Lite_IOT `pluginM.handlers map[string]chan CtlMessage` +
 /// `SendMessage(target, msg)`。北向（MQTT command）或 REST 把命令投到这里，
 /// 再路由到对应实例 task 的 `cmd_rx`。
-#[derive(Clone, Default)]
+#[derive(Clone, Default, Debug)]
 pub struct CtlRegistry {
     map: Arc<DashMap<String, mpsc::Sender<CtlMessage>>>,
 }
 
 impl CtlRegistry {
+    /// 构造空注册表。
     pub fn new() -> Self {
         Self {
             map: Arc::new(DashMap::new()),
@@ -55,6 +56,9 @@ impl CtlRegistry {
 }
 
 /// 注入给每个插件 task 的宿主能力。
+///
+/// `lux::EmbeddedClient` 未实现 `Debug`，故本类型暂以 `allow` 放行 `missing_debug_implementations`。
+#[allow(missing_debug_implementations)]
 #[derive(Clone)]
 pub struct HostContext {
     /// 进程内 lux 客户端（零拷贝，Clone 共享 store/WAL）。

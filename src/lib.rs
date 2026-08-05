@@ -1,13 +1,30 @@
-// 开发期：MVP 各模块逐步落地，暂允许 dead_code。
+//! rs-iot：轻量跨平台工业 IoT 边缘框架（Rust）。
+//!
+//! 内嵌 lux 作为进程内 Redis 兼容数据库；南向 Source 采集 → hub → pipeline →
+//! lux rtdata；北向 Sink（mqtt，STEP 5 起为 pull 模式）发布到外部 broker；
+//! axum REST 管理 API（默认 :8780）。
+//!
+//! 开发期：MVP 各模块逐步落地，暂允许 dead_code。
 #![allow(dead_code)]
+#![warn(
+    missing_docs,
+    rust_2018_idioms,
+    missing_debug_implementations,
+    unreachable_pub
+)]
 
 pub mod api;
+/// 应用配置（toml 加载，`AppConfig`）。
 pub mod config;
+/// lux 嵌入数据库辅助（建配置、身份引导、rtdata 读写、优雅关闭）。
 pub mod db;
+/// 库错误类型（`RsIotError`、`TResult`）。
 pub mod error;
 pub mod host;
+/// 硬件 ID 生成。
 pub mod hwid;
 pub mod pipeline;
+/// 插件系统（trait 契约、注册表、实例管理、内置实现）。
 pub mod plugin;
 pub mod transform;
 pub mod types;
@@ -16,6 +33,7 @@ use anyhow::Result;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
+/// 构建版本标识（供 `/api/v1/sysinfo` 与日志使用）。
 pub const VERSION: &str = "20250123";
 
 /// CLI `run` 入口：内部建 shutdown + ctrl_c 监听，委托给 `run_app_with_shutdown`。
@@ -33,9 +51,12 @@ pub async fn run_app(cfg: config::AppConfig) -> Result<()> {
 /// 服务态入口（M4 Windows Service / systemd）：shutdown 由外部（SCM/sigterm）触发。
 ///
 /// 数据流（hub 模式）：N 个 Source ──hub(mpsc)──► pipeline ──Processor──►
-///     ├─ lux HSET rtdata:<devid>
-///     └─ Sink(mqttPub) PUBLISH <hwid>/<devid>/datas
-pub async fn run_app_with_shutdown(cfg: config::AppConfig, shutdown: CancellationToken) -> Result<()> {
+///     ├─ lux HSET rtdata:`<devid>`
+///     └─ Sink(mqttPub) PUBLISH `<hwid>`/`<devid>`/datas
+pub async fn run_app_with_shutdown(
+    cfg: config::AppConfig,
+    shutdown: CancellationToken,
+) -> Result<()> {
     let hwid = hwid::hardware_id();
     tracing::info!(%hwid, "rs-iot starting");
 
@@ -156,10 +177,11 @@ async fn try_start_from_lux(
             }
         };
         if let Ok(inst) = serde_json::from_str::<types::InstConfig>(&s) {
-            if inst.auto_start && inst.app_type == types::AppType::South {
-                if mgr.start_source(inst).await.is_ok() {
-                    count += 1;
-                }
+            if inst.auto_start
+                && inst.app_type == types::AppType::South
+                && mgr.start_source(inst).await.is_ok()
+            {
+                count += 1;
             }
         }
         i += 2;

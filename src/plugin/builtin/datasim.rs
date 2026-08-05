@@ -12,6 +12,8 @@ use std::collections::BTreeMap;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+/// 模拟数据 Source（`dataSim`）：按设备规格周期产出正弦变化的样本。
+#[derive(Debug, Default)]
 pub struct DataSim;
 
 #[async_trait]
@@ -46,7 +48,9 @@ impl Source for DataSim {
 
         tracing::info!(
             "[dataSim] inst {} starting ({} devices, every {}s)",
-            inst.inst_id, devices.len(), period_secs
+            inst.inst_id,
+            devices.len(),
+            period_secs
         );
 
         loop {
@@ -120,6 +124,10 @@ mod tests {
         let b = simulate("temp", "float", 1000);
         assert_eq!(format!("{a:?}"), format!("{b:?}"));
         let c = simulate("temp", "float", 1010);
-        assert_ne!(format!("{a:?}"), format!("{c:?}"), "value should change over time");
+        assert_ne!(
+            format!("{a:?}"),
+            format!("{c:?}"),
+            "value should change over time"
+        );
     }
 }

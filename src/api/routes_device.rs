@@ -45,7 +45,10 @@ pub struct DelReq {
     pub dev_id: String,
 }
 
-pub async fn delete(State(st): State<AppState>, Json(req): Json<DelReq>) -> Json<serde_json::Value> {
+pub async fn delete(
+    State(st): State<AppState>,
+    Json(req): Json<DelReq>,
+) -> Json<serde_json::Value> {
     let _ = st.lux.execute("HDEL", &["devices", &req.dev_id]).await;
     Json(serde_json::json!({"status": "deleted"}))
 }

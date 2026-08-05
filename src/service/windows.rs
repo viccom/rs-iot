@@ -14,10 +14,12 @@ use tokio_util::sync::CancellationToken;
 use windows_service::service::{
     ServiceControl, ServiceControlAccept, ServiceExitCode, ServiceState, ServiceStatus, ServiceType,
 };
-use windows_service::service_control_handler::{self, ServiceControlHandlerResult, ServiceStatusHandle};
+use windows_service::service_control_handler::{
+    self, ServiceControlHandlerResult, ServiceStatusHandle,
+};
 use windows_service::service_dispatcher;
 
-pub const SERVICE_NAME: &str = "rs-iot";
+pub(crate) const SERVICE_NAME: &str = "rs-iot";
 
 windows_service::define_windows_service!(ffi_service_main, service_main);
 
@@ -72,7 +74,10 @@ fn service_main(_arguments: Vec<std::ffi::OsString>) {
     let shutdown_clone = shutdown.clone();
     let (done_tx, done_rx) = mpsc::channel::<bool>();
     let _app_thread = std::thread::spawn(move || {
-        let rt = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
+        let rt = match tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+        {
             Ok(rt) => rt,
             Err(e) => {
                 eprintln!("[service] tokio runtime: {e}");
@@ -142,7 +147,7 @@ fn report(
     });
 }
 
-pub fn dispatch() -> anyhow::Result<()> {
+pub(crate) fn dispatch() -> anyhow::Result<()> {
     service_dispatcher::start(SERVICE_NAME, ffi_service_main)
         .map_err(|e| anyhow::anyhow!("service dispatch failed: {e:?}"))
 }

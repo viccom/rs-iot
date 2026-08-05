@@ -3,6 +3,11 @@
 //! 端口默认 :8780。JWT 中间件 + 白名单（login/register/静态资源）+ X-Access-Key 直通。
 //! 路由对标 Lite_IOT（见各 routes_*.rs）。
 
+// REST 管理层为 rs-iot 内部实现（非库公开 API）。
+// DTO/handler 的 missing_docs / missing_debug_implementations 暂放行，
+// 待 STEP 3（newtype）顺带做 pub(crate) 收紧与 Debug 治理时统一处理。
+#![allow(missing_docs, missing_debug_implementations)]
+
 use crate::plugin::instance::InstanceManager;
 use lux::EmbeddedClient;
 use std::sync::Arc;
@@ -26,13 +31,10 @@ pub struct AppState {
 }
 
 /// 白名单路径（无需 JWT）。
-pub const PUBLIC_PATHS: &[&str] = &[
-    "/api/v1/user/login",
-    "/api/v1/user/register",
-];
+pub const PUBLIC_PATHS: &[&str] = &["/api/v1/user/login", "/api/v1/user/register"];
 
 pub fn is_public(path: &str) -> bool {
-    PUBLIC_PATHS.iter().any(|p| path == *p) || path.starts_with("/apitest")
+    PUBLIC_PATHS.contains(&path) || path.starts_with("/apitest")
 }
 
 // ---------- lux Hash 读写 helper（供各 routes 复用） ----------

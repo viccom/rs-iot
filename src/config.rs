@@ -36,8 +36,11 @@ pub struct LuxConfig {
 pub struct MqttConfig {
     /// broker 主机（公网或本地 mosquitto 等）。
     pub host: String,
+    /// broker 端口（默认 1883）。
     pub port: u16,
+    /// 用户名（匿名 broker 留 None）。
     pub username: Option<String>,
+    /// 密码。
     pub password: Option<String>,
 }
 

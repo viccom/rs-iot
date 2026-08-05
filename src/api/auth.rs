@@ -57,7 +57,9 @@ pub async fn auth_middleware(State(st): State<AppState>, req: Request, next: Nex
         .get("x-access-key")
         .and_then(|v| v.to_str().ok())
     {
-        if let Ok(lux::EmbeddedValue::Simple(stored)) = st.lux.execute_value("GET", &["accesskey"]).await {
+        if let Ok(lux::EmbeddedValue::Simple(stored)) =
+            st.lux.execute_value("GET", &["accesskey"]).await
+        {
             if !stored.is_empty() && stored == ak {
                 return next.run(req).await;
             }
