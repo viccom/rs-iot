@@ -9,5 +9,7 @@ data_dir = "./data/lux"
 save_interval_secs = 300
 
 [mqtt]
-host = "localhost"
+# 公共 MQTT broker（匿名，开发/验证用；生产部署换私有 broker + credentials）
+host = "broker.emqx.io"
 port = 1883
+publish_interval_secs = 5
