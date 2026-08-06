@@ -16,6 +16,8 @@ pub struct AppConfig {
     pub mqtt: MqttConfig,
     /// 日志配置（终端 + 可选文件轮转）。
     pub log: LogConfig,
+    /// 外部插件 bridge 配置（进程外南向插件经 TCP 接入）。
+    pub bridge: BridgeConfig,
 }
 
 /// lux ServerConfig 的子集映射（仅暴露我们关心的字段）。
@@ -56,6 +58,7 @@ impl Default for AppConfig {
             jwt_secret: "qwerty1234567890asdfgh1234567890".into(),
             mqtt: MqttConfig::default(),
             log: LogConfig::default(),
+            bridge: BridgeConfig::default(),
         }
     }
 }
@@ -79,6 +82,40 @@ impl Default for MqttConfig {
             username: None,
             password: None,
             publish_interval_secs: 5,
+        }
+    }
+}
+
+/// 外部插件 bridge 配置（sidecarClient：进程外南向插件经 TCP 接入）。
+///
+/// `enable=false` 默认，现有部署零影响（不占端口、不起 acceptor）。
+/// 跨机部署需显式改 `bind_host="0.0.0.0"`；同机用 loopback 最安全。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BridgeConfig {
+    /// 是否启用 bridge（监听端口接受外部插件连接）。
+    pub enable: bool,
+    /// 绑定地址。默认 `127.0.0.1`（同机，零局域网暴露）；跨机改 `0.0.0.0`。
+    pub bind_host: String,
+    /// 监听端口。默认 8781。
+    pub port: u16,
+    /// 心跳超时（秒）：外部插件超过该时长未发心跳则判失联。
+    pub heartbeat_timeout_secs: u64,
+    /// 接入握手超时（秒）：TCP 连接建立后多久内必须收到 Hello 帧。
+    pub accept_hello_timeout_secs: u64,
+    /// 最大并发外部连接数（防连接风暴/DoS；acceptor 用 Semaphore 限并发握手）。
+    pub max_connections: usize,
+}
+
+impl Default for BridgeConfig {
+    fn default() -> Self {
+        Self {
+            enable: false,
+            bind_host: "127.0.0.1".into(),
+            port: 8781,
+            heartbeat_timeout_secs: 15,
+            accept_hello_timeout_secs: 10,
+            max_connections: 512,
         }
     }
 }

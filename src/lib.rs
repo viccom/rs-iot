@@ -116,11 +116,13 @@ pub async fn run_app_with_shutdown(
     tracing::info!("identity bootstrap done");
 
     let ctl_registry = host::CtlRegistry::new();
+    let bridge_registry = host::BridgeRegistry::new();
     let ctx = host::HostContext {
         lux: client.clone(),
         hwid: hwid.clone(),
         shutdown: shutdown.clone(),
         ctl_registry,
+        bridge_registry: bridge_registry.clone(),
     };
 
     let (hub_tx, hub_rx) = tokio::sync::mpsc::channel::<types::Sample>(256);
@@ -175,6 +177,34 @@ pub async fn run_app_with_shutdown(
         }
     });
 
+    // 外部插件 bridge（sidecarClient acceptor）：仅在 cfg.bridge.enable 时启动。
+    // 先 bind listener（拿实际端口用于日志/测试），再 spawn acceptor（acceptor 只做 accept 循环）。
+    let bridge_handle = if cfg.bridge.enable {
+        let bt = shutdown.child_token();
+        match tokio::net::TcpListener::bind((cfg.bridge.bind_host.as_str(), cfg.bridge.port)).await
+        {
+            Ok(listener) => Some(tokio::spawn(plugin::builtin::sidecar_client::acceptor(
+                listener,
+                std::time::Duration::from_secs(cfg.bridge.accept_hello_timeout_secs),
+                cfg.bridge.max_connections,
+                client.clone(),
+                std::sync::Arc::<str>::from(cfg.jwt_secret.as_str()),
+                bridge_registry.clone(),
+                bt,
+            ))),
+            Err(e) => {
+                tracing::error!(
+                    "bridge bind {}:{} failed: {e}",
+                    cfg.bridge.bind_host,
+                    cfg.bridge.port
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     tracing::info!("rs-iot ready. shutdown signal will stop all components.");
 
     shutdown.cancelled().await;
@@ -182,6 +212,9 @@ pub async fn run_app_with_shutdown(
     pipeline_handle.abort();
     mqtt_handle.abort();
     axum_handle.abort();
+    if let Some(h) = bridge_handle {
+        h.abort();
+    }
     mgr.stop_all().await;
     db::shutdown_lux(handle).await?;
     tracing::info!("rs-iot stopped");
@@ -244,5 +277,6 @@ fn demo_datasim_config() -> types::InstConfig {
                 },
             ],
         }],
+        host_kind: types::HostKind::Builtin,
     }
 }

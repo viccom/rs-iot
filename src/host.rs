@@ -4,6 +4,7 @@ use crate::types::CtlMessage;
 use dashmap::DashMap;
 use lux::EmbeddedClient;
 use std::sync::Arc;
+use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -54,6 +55,66 @@ impl CtlRegistry {
     }
 }
 
+/// bridge 连接分发失败原因。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DispatchErr {
+    /// 实例未启动（无 slot）。
+    NoSlot,
+    /// 实例 task 还没取走上一次连接（slot 满）。
+    Full,
+}
+
+/// bridge 连接分发注册表：`inst_id` → 连接 slot。
+///
+/// acceptor 校验外部进程 Hello 后，按 `inst_id` 把裸 `TcpStream` 经此表分发给对应
+/// sidecarClient task（每外部实例一个 task、一个 slot）。slot 用 mpsc 支持外部多次重连。
+/// task 收到 stream 后自行 `tokio::io::split` + `FramedRead`/`FramedWrite`（codec 在 sidecar_client）。
+#[derive(Clone, Default, Debug)]
+pub struct BridgeRegistry {
+    map: Arc<DashMap<String, mpsc::Sender<TcpStream>>>,
+}
+
+impl BridgeRegistry {
+    /// 构造空注册表。
+    pub fn new() -> Self {
+        Self {
+            map: Arc::new(DashMap::new()),
+        }
+    }
+
+    /// 注册实例的连接 slot（sidecarClient task 启动时）。
+    pub fn register(&self, inst: &str, tx: mpsc::Sender<TcpStream>) {
+        self.map.insert(inst.to_string(), tx);
+    }
+
+    /// 注销（实例停止时）。
+    pub fn unregister(&self, inst: &str) {
+        self.map.remove(inst);
+    }
+
+    /// 是否有实例在等连接。
+    pub fn contains(&self, inst: &str) -> bool {
+        self.map.contains_key(inst)
+    }
+
+    /// 分发连接到实例 task。成功返回 `Ok(())`；失败归还连接 + 原因（acceptor 回 HelloAck 后 close）。
+    pub fn try_dispatch(
+        &self,
+        inst: &str,
+        conn: TcpStream,
+    ) -> Result<(), (TcpStream, DispatchErr)> {
+        if let Some(slot) = self.map.get(inst) {
+            match slot.value().try_send(conn) {
+                Ok(()) => Ok(()),
+                Err(mpsc::error::TrySendError::Full(c)) => Err((c, DispatchErr::Full)),
+                Err(mpsc::error::TrySendError::Closed(c)) => Err((c, DispatchErr::NoSlot)),
+            }
+        } else {
+            Err((conn, DispatchErr::NoSlot))
+        }
+    }
+}
+
 /// 注入给每个插件 task 的宿主能力。
 ///
 /// `lux::EmbeddedClient` 未实现 `Debug`，故以 `expect` 放行 `missing_debug_implementations`
@@ -69,4 +130,6 @@ pub struct HostContext {
     pub shutdown: CancellationToken,
     /// 命令路由表。
     pub ctl_registry: CtlRegistry,
+    /// bridge 连接分发表（外部插件 sidecarClient）。
+    pub bridge_registry: BridgeRegistry,
 }

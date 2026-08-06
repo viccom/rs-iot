@@ -27,6 +27,7 @@ async fn test_app() -> (axum::Router, lux::ServerHandle) {
         hwid: Hwid::new("it-hwid"),
         shutdown,
         ctl_registry: CtlRegistry::new(),
+        bridge_registry: rs_iot::host::BridgeRegistry::new(),
     };
     let (hub_tx, _hub_rx) = tokio::sync::mpsc::channel(64);
     let mgr = Arc::new(InstanceManager::new(ctx, hub_tx));

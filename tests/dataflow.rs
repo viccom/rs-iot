@@ -10,7 +10,9 @@ use rs_iot::host::{CtlRegistry, HostContext};
 use rs_iot::plugin::instance::InstanceManager;
 use rs_iot::plugin::traits::Processor;
 use rs_iot::transform::passthrough::Passthrough;
-use rs_iot::types::{AppType, ChildSpec, DeviceSpec, Hwid, InstConfig, PluginName, Sample};
+use rs_iot::types::{
+    AppType, ChildSpec, DeviceSpec, HostKind, Hwid, InstConfig, PluginName, Sample,
+};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
@@ -40,6 +42,7 @@ fn datasim_inst() -> InstConfig {
                 },
             ],
         }],
+        host_kind: HostKind::Builtin,
     }
 }
 
@@ -72,6 +75,7 @@ async fn datasim_to_rtdata_end_to_end() {
         hwid: Hwid::new("it-hwid"),
         shutdown: shutdown.clone(),
         ctl_registry: CtlRegistry::new(),
+        bridge_registry: rs_iot::host::BridgeRegistry::new(),
     };
     let (hub_tx, hub_rx) = tokio::sync::mpsc::channel::<Sample>(64);
     let mgr = InstanceManager::new(ctx.clone(), hub_tx);

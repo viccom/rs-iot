@@ -148,6 +148,20 @@ pub enum AppType {
     North,
 }
 
+/// 插件实现形态（进程内内置 / 进程外外部经 bridge 接入）。
+///
+/// 标记 + bridge 准入约束：`External` 实例才签发/校验外部 token、才接受外部进程报到。
+/// `InstanceManager` 的 spawn/stop/路由不感知此字段（对所有 Source 一视同仁）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum HostKind {
+    /// 进程内 Rust trait（inventory 静态注册）。
+    #[default]
+    Builtin,
+    /// 进程外外部插件，经 bridge（sidecarClient）接入，任意语言。
+    External,
+}
+
 /// 设备规格（对标 Lite_IOT devices：label/value/children）。
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct DeviceSpec {
@@ -197,4 +211,7 @@ pub struct InstConfig {
     /// 设备规格列表（南向采集用）。
     #[serde(default)]
     pub devices: Vec<DeviceSpec>,
+    /// 插件形态（内置/外部）。缺省 `Builtin`，向后兼容老配置。
+    #[serde(default)]
+    pub host_kind: HostKind,
 }

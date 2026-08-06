@@ -13,3 +13,11 @@ save_interval_secs = 300
 host = "broker.emqx.io"
 port = 1883
 publish_interval_secs = 5
+
+[bridge]
+# 外部插件 bridge（sidecarClient）。默认关（现有部署零影响）；本机端到端验证时改 true。
+enable = false
+bind_host = "127.0.0.1"
+port = 8781
+heartbeat_timeout_secs = 30
+accept_hello_timeout_secs = 10

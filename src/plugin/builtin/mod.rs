@@ -4,3 +4,4 @@ pub mod datasim;
 pub mod modbus_client;
 pub mod mqtt_pub;
 pub mod opcua_client;
+pub mod sidecar_client;

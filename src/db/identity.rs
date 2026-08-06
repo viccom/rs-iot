@@ -8,6 +8,7 @@
 //! - `devices`   : field=devId, value=JSON 设备配置（M3）
 //! - `children`  : field=devId, value=JSON 变量列表（M3）
 //! - `accesskey` : string，全局访问密钥（M3）
+//! - `ext_tokens`: Hash，field=instId, value=JSON{token_hash,created_at,enabled}（M7 外部插件 bridge）
 //! - `rtdata:<devId>` : Hash，field=tag, value=[ts, localTime, value]（M2 实时数据缓存）
 
 use crate::error::RsIotError;
