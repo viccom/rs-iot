@@ -1,6 +1,7 @@
-//! `modbusClient`：Modbus TCP 南向采集插件（tokio-modbus 0.17）。
+//! `modbusClient`：Modbus 南向采集插件（tokio-modbus 0.17），支持 **TCP / RTU（serial /
+//! over-tcp / over-udp）** 四种传输，统一产出 `Context`，采集/写逻辑同构。
 //!
-//! 周期连接外部 Modbus TCP 从站，按 `devices` 配置批量读，组装 `Sample` 推入 hub。
+//! 周期连接外部 Modbus 从站，按 `devices` 配置批量读，组装 `Sample` 推入 hub。
 //! 同时消费下行命令（`cmd="write"`）写回从站。满足现场三类需求：
 //!
 //! 1. **布尔**：独立 coil/discrete（FC01/FC02，`coil:0:bool`）或 holding/input 寄存器位
@@ -8,18 +9,32 @@
 //! 2. **混合类型批量读 + 偏移转换**（一次 FC03/FC04 读连续区间，各点按 offset 解码）。
 //! 3. **大块读取部分使用**（`gap_threshold`/`max_regs` 控制区间合并）。
 //!
-//! 配置（`InstConfig::app_config` JSON）：
+//! 配置（`InstConfig::app_config` JSON，扁平 `kind` 决定传输；`kind` 缺省即 tcp，向后兼容）：
+//!
+//! **TCP**（默认）：
 //! ```json
-//! {
-//!   "kind": "tcp",
-//!   "endpoint": "192.168.1.5:502",
-//!   "slave_id": 1,
-//!   "period": 3,
-//!   "gap_threshold": 16,
-//!   "max_regs": 100,
-//!   "reconnect_secs": 2
-//! }
+//! { "kind":"tcp", "endpoint":"192.168.1.5:502", "slave_id":1, "period":3,
+//!   "gap_threshold":16, "max_regs":100, "reconnect_secs":2 }
 //! ```
+//! **RTU over serial**（串口直连 RS-485/RS-232；`serial_port` 必填，串口参数缺省 9600/8N1/NONE）：
+//! ```json
+//! { "kind":"rtu_serial", "serial_port":"COM3", "baud_rate":9600,
+//!   "data_bits":8, "parity":"none", "stop_bits":1, "flow_control":"none",
+//!   "slave_id":1, "period":3 }
+//! ```
+//! **RTU over TCP**（串口服务器/网关透传，RTU 帧+CRC 走 TCP，无 MBAP 头）：
+//! ```json
+//! { "kind":"rtu_tcp", "endpoint":"192.168.1.5:502", "slave_id":1, "period":3 }
+//! ```
+//! **RTU over UDP**（部分 DTU 用 UDP datagram 透传 RTU 帧；内部 connected socket，
+//! datagram 边界天然保帧，无流式粘包）：
+//! ```json
+//! { "kind":"rtu_udp", "endpoint":"10.0.0.7:502", "slave_id":1, "period":3 }
+//! ```
+//!
+//! 串口参数（仅 rtu_serial）：`baud_rate`(默认 9600) / `data_bits`(5/6/7/8，默认 8) /
+//! `parity`(none/even/odd，默认 none) / `stop_bits`(1/2，默认 1) /
+//! `flow_control`(none/software/hardware，默认 none)。
 //!
 //! 变量映射（复用 `devices`，与 opcua/datasim 对齐）：
 //! - `DeviceSpec.value` = 设备 ID（`rtdata:<devid>` 的 key）
@@ -53,31 +68,84 @@
 //!   原子但非事务，部分失败仅 warn）
 //! - discrete/input 只读，写拒绝
 //!
-//! **v1 边界**：仅 TCP（`kind="rtu"` 报错指引）；实例级 slave_id（多 RTU 从站网关需每
-//! slave 建一实例，共享 endpoint）。
+//! **传输边界**：TCP / RTU(serial / over-tcp / over-udp) 四种均产出统一 `Context`，
+//! 采集/写逻辑同构；ASCII 暂不支持（tokio-modbus 无，未来可借 `rmodbus` codec 后置）。
+//! 实例级 slave_id（多 RTU 从站网关需每 slave 建一实例，共享 endpoint）。RTU over UDP 用
+//! connected socket（`connect(peer)` 后 `send`/`recv` 无需 addr），datagram 边界天然消除
+//! 流式粘包/分帧歧义。
 
 use crate::host::HostContext;
 use crate::plugin::traits::Source;
 use crate::types::{CtlMessage, InstConfig, Sample, SampleValue};
 use async_trait::async_trait;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::net::SocketAddr;
+use std::pin::Pin;
+use std::task::{Context as TaskContext, Poll};
 use std::time::Duration;
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tokio::net::{TcpStream, UdpSocket};
 use tokio::sync::mpsc;
-use tokio_modbus::client::tcp;
-use tokio_modbus::client::{Context, Reader, Writer};
+use tokio_modbus::client::{rtu, tcp, Context, Reader, Writer};
 use tokio_modbus::prelude::SlaveContext;
 use tokio_modbus::Slave;
+use tokio_serial::{DataBits, FlowControl, Parity, SerialPortBuilderExt, StopBits};
 use tokio_util::sync::CancellationToken;
 
-/// Modbus TCP 采集插件（无状态工厂标记，每个实例 task 内持有自己的 `Context`）。
+/// Modbus 采集插件（无状态工厂标记，每个实例 task 内持有自己的 `Context`）。
+/// 支持 TCP / RTU（serial / over-tcp / over-udp）四种传输，统一产出 `Context`，采集/写逻辑同构。
 #[derive(Debug, Default)]
 pub struct ModbusClient;
 
-/// 从 `app_config` 解析的插件配置。
+/// 传输模式（扁平 `kind` 映射）。RTU 三种均经 `rtu::attach_slave` 产 `Context`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Transport {
+    /// Modbus TCP（MBAP 头）。
+    Tcp,
+    /// RTU over serial（RS-485/RS-232 串口直连）。
+    RtuSerial,
+    /// RTU over TCP（串口服务器/网关透传，RTU 帧+CRC 走 TCP，无 MBAP 头）。
+    RtuTcp,
+    /// RTU over UDP（部分 DTU 用 UDP datagram 透传 RTU 帧）。
+    RtuUdp,
+}
+
+/// 串口校验位（映射 `serialport::Parity`，工业默认 None）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum ParityKind {
+    #[default]
+    None,
+    Even,
+    Odd,
+}
+
+/// 串口流控（映射 `serialport::FlowControl`，工业默认 None）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum FlowKind {
+    #[default]
+    None,
+    Software,
+    Hardware,
+}
+
+/// 从 `app_config` 解析的插件配置。`transport` 决定必填字段（rtu_serial 需 serial_port，余需 endpoint）。
 #[derive(Debug)]
 struct ModbusCfg {
+    transport: Transport,
+    /// tcp/rtu_tcp/rtu_udp 的 `ip:port`（rtu_serial 时为空）。
     endpoint: String,
+    /// rtu_serial 串口名（COM3 / /dev/ttyUSB0）。
+    serial_port: Option<String>,
+    /// rtu_serial 波特率（默认 9600）。
+    baud_rate: u32,
+    /// rtu_serial 数据位（5/6/7/8，默认 8）。
+    data_bits: u8,
+    /// rtu_serial 校验位（默认 None）。
+    parity: ParityKind,
+    /// rtu_serial 停止位（1/2，默认 1）。
+    stop_bits: u8,
+    /// rtu_serial 流控（默认 None）。
+    flow_control: FlowKind,
     slave_id: u8,
     period: u64,
     /// 相邻两点最大单空洞（超过则分裂成两次读）。
@@ -87,19 +155,68 @@ struct ModbusCfg {
     reconnect_secs: u64,
 }
 
-/// 解析 `app_config`。`kind` 非 tcp 报错（v1 仅 TCP）。数值字段给缺省 + 钳制。
+/// 解析 `app_config`。`kind` 扁平：tcp（默认，向后兼容）/ rtu_serial / rtu_tcp / rtu_udp。
+/// rtu_serial 必须有 `serial_port`，其余必须有 `endpoint`。串口参数缺省 9600/8N1/NONE。
 fn parse_cfg(app: &serde_json::Value) -> Result<ModbusCfg, String> {
     let kind = app.get("kind").and_then(|v| v.as_str()).unwrap_or("tcp");
-    if kind != "tcp" {
-        return Err(format!(
-            "unsupported kind '{kind}': v1 仅支持 tcp（rtu 需 serial feature，见文档）"
-        ));
+    let transport = match kind {
+        "tcp" => Transport::Tcp,
+        "rtu_serial" => Transport::RtuSerial,
+        "rtu_tcp" => Transport::RtuTcp,
+        "rtu_udp" => Transport::RtuUdp,
+        other => {
+            return Err(format!(
+                "unsupported kind '{other}': 仅支持 tcp / rtu_serial / rtu_tcp / rtu_udp（ASCII 见文档后置）"
+            ));
+        }
+    };
+    // rtu_serial 必须有 serial_port；其余必须有 endpoint。
+    let (endpoint, serial_port) = match transport {
+        Transport::RtuSerial => {
+            let sp = app
+                .get("serial_port")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| "rtu_serial 需要 serial_port（如 COM3 / /dev/ttyUSB0）".to_string())?
+                .to_string();
+            (String::new(), Some(sp))
+        }
+        _ => {
+            let ep = app
+                .get("endpoint")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| "app_config.endpoint missing".to_string())?
+                .to_string();
+            (ep, None)
+        }
+    };
+    let baud_rate = app
+        .get("baud_rate")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(9600) as u32;
+    let data_bits = app.get("data_bits").and_then(|v| v.as_u64()).unwrap_or(8) as u8;
+    if !matches!(data_bits, 5..=8) {
+        return Err(format!("unsupported data_bits {data_bits}（5/6/7/8）"));
     }
-    let endpoint = app
-        .get("endpoint")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| "app_config.endpoint missing".to_string())?
-        .to_string();
+    let parity = match app.get("parity").and_then(|v| v.as_str()) {
+        Some("even") => ParityKind::Even,
+        Some("odd") => ParityKind::Odd,
+        Some("none") | None => ParityKind::None,
+        Some(other) => return Err(format!("unsupported parity '{other}'（none/even/odd）")),
+    };
+    let stop_bits = app.get("stop_bits").and_then(|v| v.as_u64()).unwrap_or(1) as u8;
+    if !matches!(stop_bits, 1 | 2) {
+        return Err(format!("unsupported stop_bits {stop_bits}（1/2）"));
+    }
+    let flow_control = match app.get("flow_control").and_then(|v| v.as_str()) {
+        Some("software") => FlowKind::Software,
+        Some("hardware") => FlowKind::Hardware,
+        Some("none") | None => FlowKind::None,
+        Some(other) => {
+            return Err(format!(
+                "unsupported flow_control '{other}'（none/software/hardware）"
+            ))
+        }
+    };
     let slave_id = app.get("slave_id").and_then(|v| v.as_u64()).unwrap_or(1) as u8;
     let period = app
         .get("period")
@@ -121,7 +238,14 @@ fn parse_cfg(app: &serde_json::Value) -> Result<ModbusCfg, String> {
         .unwrap_or(2)
         .max(1);
     Ok(ModbusCfg {
+        transport,
         endpoint,
+        serial_port,
+        baud_rate,
+        data_bits,
+        parity,
+        stop_bits,
+        flow_control,
         slave_id,
         period,
         gap_threshold,
@@ -564,18 +688,197 @@ fn json_to_sample_value(v: &serde_json::Value) -> SampleValue {
 
 // ========== 连接 ==========
 
-/// 建立到 Modbus TCP 从站的连接（预 parse SocketAddr 避免 DNS 边界，再 set_slave）。
+/// 建立到 Modbus 从站的连接（按 transport 选 TCP / RTU(serial/over-tcp/over-udp)）。
+/// 四种传输统一返回 `Context`，下游采集/写逻辑同构。每次新建 Context 都 `set_slave`（drop 后丢失）。
 async fn connect(cfg: &ModbusCfg) -> Result<Context, String> {
-    let addr: SocketAddr = cfg
-        .endpoint
-        .parse()
-        .map_err(|e| format!("invalid endpoint '{}': {e}", cfg.endpoint))?;
-    let mut ctx = tcp::connect(addr)
-        .await
-        .map_err(|e| format!("connect {}: {e}", cfg.endpoint))?;
-    // 每次新建 Context 都要重设 slave（drop 后丢失）。
+    let mut ctx = match cfg.transport {
+        Transport::Tcp => {
+            let addr = parse_addr(&cfg.endpoint)?;
+            tcp::connect(addr)
+                .await
+                .map_err(|e| format!("connect tcp {}: {e}", cfg.endpoint))?
+        }
+        Transport::RtuTcp => {
+            let addr = parse_addr(&cfg.endpoint)?;
+            let stream = TcpStream::connect(addr)
+                .await
+                .map_err(|e| format!("connect rtu-tcp {}: {e}", cfg.endpoint))?;
+            rtu::attach_slave(stream, Slave(cfg.slave_id))
+        }
+        Transport::RtuUdp => {
+            let addr = parse_addr(&cfg.endpoint)?;
+            let sock = UdpSocket::bind("0.0.0.0:0")
+                .await
+                .map_err(|e| format!("bind rtu-udp: {e}"))?;
+            sock.connect(addr)
+                .await
+                .map_err(|e| format!("connect rtu-udp {}: {e}", cfg.endpoint))?;
+            rtu::attach_slave(UdpIo::new(sock), Slave(cfg.slave_id))
+        }
+        Transport::RtuSerial => {
+            let port = cfg
+                .serial_port
+                .as_ref()
+                .ok_or_else(|| "rtu_serial 缺 serial_port".to_string())?;
+            let builder = tokio_serial::new(port, cfg.baud_rate)
+                .data_bits(map_data_bits(cfg.data_bits))
+                .parity(map_parity(cfg.parity))
+                .stop_bits(map_stop_bits(cfg.stop_bits))
+                .flow_control(map_flow(cfg.flow_control));
+            let stream = builder
+                .open_native_async()
+                .map_err(|e| format!("open serial {port}: {e}"))?;
+            rtu::attach_slave(stream, Slave(cfg.slave_id))
+        }
+    };
+    // 统一 set_slave：RTU 在 attach_slave 已带 slave，再设无害；TCP 必须设。
     ctx.set_slave(Slave(cfg.slave_id));
     Ok(ctx)
+}
+
+/// 解析 `ip:port` → `SocketAddr`（预解析避免 DNS 边界，与原 TCP 实现一致）。
+fn parse_addr(endpoint: &str) -> Result<SocketAddr, String> {
+    endpoint
+        .parse()
+        .map_err(|e| format!("invalid endpoint '{endpoint}': {e}"))
+}
+
+/// `data_bits`(u8) → serialport `DataBits`（parse_cfg 已校验 5/6/7/8）。
+fn map_data_bits(b: u8) -> DataBits {
+    match b {
+        5 => DataBits::Five,
+        6 => DataBits::Six,
+        7 => DataBits::Seven,
+        _ => DataBits::Eight,
+    }
+}
+
+/// `ParityKind` → serialport `Parity`。
+fn map_parity(p: ParityKind) -> Parity {
+    match p {
+        ParityKind::None => Parity::None,
+        ParityKind::Even => Parity::Even,
+        ParityKind::Odd => Parity::Odd,
+    }
+}
+
+/// `stop_bits`(u8) → serialport `StopBits`（parse_cfg 已校验 1/2）。
+fn map_stop_bits(b: u8) -> StopBits {
+    match b {
+        2 => StopBits::Two,
+        _ => StopBits::One,
+    }
+}
+
+/// `FlowKind` → serialport `FlowControl`。
+fn map_flow(f: FlowKind) -> FlowControl {
+    match f {
+        FlowKind::None => FlowControl::None,
+        FlowKind::Software => FlowControl::Software,
+        FlowKind::Hardware => FlowControl::Hardware,
+    }
+}
+
+/// UDP RTU 传输适配器：把 connected `UdpSocket` 包成 `AsyncRead + AsyncWrite`，供 `rtu::attach_slave`。
+///
+/// RTU client "写一帧→读一帧" 的交互正好对应 UDP "攒帧→发一个 datagram→收一个 datagram"，
+/// 1:1 请求-响应，datagram 边界天然保帧，无流式粘包/分帧歧义。
+///
+/// - `poll_write`：攒字节到 `write_buf`（不实际发，等 flush）——对应 RTU client 编码一帧的多次 write；
+/// - `poll_flush`：`write_buf` 整体作为一个 datagram `poll_send`——一个 RTU 帧 = 一个 UDP 包；
+/// - `poll_read`：先消费 `read_buf` 剩余（上次 recv 未读完），否则 `poll_recv` 收一个整 datagram 入队再按容量吐出。
+///
+/// 内部用 `UdpSocket::poll_send`/`poll_recv`（cancel-safe），`UdpIo` 字段均为非自引用故 `Unpin`。
+struct UdpIo {
+    /// 已 connect(peer) 的 UDP socket。
+    sock: UdpSocket,
+    /// 待 flush 发送的积压字节（攒一帧）。
+    write_buf: Vec<u8>,
+    /// 上次 recv 到但未消费完的字节（UDP 一次 recv = 整 datagram，poll_read 分批吐出）。
+    read_buf: VecDeque<u8>,
+}
+
+impl UdpIo {
+    /// 包一个已 `connect(peer)` 的 `UdpSocket`。
+    fn new(sock: UdpSocket) -> Self {
+        Self {
+            sock,
+            write_buf: Vec::new(),
+            read_buf: VecDeque::new(),
+        }
+    }
+}
+
+impl AsyncRead for UdpIo {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        let this = self.get_mut();
+        // 先消费 read_buf 剩余（上次 recv 的 datagram 未读完部分）。
+        if !this.read_buf.is_empty() {
+            drain_into(this, buf);
+            return Poll::Ready(Ok(()));
+        }
+        // read_buf 空：recv 一个新 datagram（以太网 MTU 1500 足够单 RTU 帧 ≤256B）。
+        const MAX_DGRAM: usize = 1500;
+        let mut tmp = [0u8; MAX_DGRAM];
+        let mut rb = ReadBuf::new(&mut tmp);
+        match this.sock.poll_recv(cx, &mut rb) {
+            Poll::Ready(Ok(())) => {
+                this.read_buf.extend(rb.filled().iter().copied());
+                drain_into(this, buf);
+                Poll::Ready(Ok(()))
+            }
+            Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
+impl AsyncWrite for UdpIo {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        _cx: &mut TaskContext<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        let this = self.get_mut();
+        this.write_buf.extend_from_slice(buf);
+        Poll::Ready(Ok(buf.len()))
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<std::io::Result<()>> {
+        let this = self.get_mut();
+        while !this.write_buf.is_empty() {
+            // poll_send 理论整包发（UDP），但 API 返回字节数，循环 drain 保险。
+            match this.sock.poll_send(cx, this.write_buf.as_slice()) {
+                Poll::Ready(Ok(0)) => {
+                    return Poll::Ready(Err(std::io::Error::other("udp poll_send wrote 0 bytes")));
+                }
+                Poll::Ready(Ok(n)) => {
+                    this.write_buf.drain(..n);
+                }
+                Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                Poll::Pending => return Poll::Pending,
+            }
+        }
+        Poll::Ready(Ok(()))
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut TaskContext<'_>) -> Poll<std::io::Result<()>> {
+        // UDP 无连接态可关；清空 write_buf（丢弃未发数据，失联重连语义）。
+        self.get_mut().write_buf.clear();
+        Poll::Ready(Ok(()))
+    }
+}
+
+/// 从 `read_buf` 队首按 `buf` 剩余容量吐字节（UdpIo::poll_read 复用）。
+fn drain_into(this: &mut UdpIo, buf: &mut ReadBuf<'_>) {
+    let n = buf.remaining().min(this.read_buf.len());
+    // VecDeque 非连续，drain 收集成切片喂 `put_slice`（ReadBuf 无逐字节 put_u8）。
+    let chunk: Vec<u8> = this.read_buf.drain(..n).collect();
+    buf.put_slice(&chunk);
 }
 
 /// `select!` 事件。把事件类型与 `Context` 的 `&mut` 借用解耦：modbus 的 read/write 取
@@ -966,8 +1269,11 @@ mod tests {
     }
 
     #[test]
-    fn parse_cfg_defaults_and_clamps() {
+    fn parse_cfg_tcp_defaults_and_clamps() {
         let cfg = parse_cfg(&serde_json::json!({"endpoint":"127.0.0.1:502"})).unwrap();
+        assert_eq!(cfg.transport, Transport::Tcp);
+        assert_eq!(cfg.endpoint, "127.0.0.1:502");
+        assert_eq!(cfg.serial_port, None);
         assert_eq!(cfg.slave_id, 1);
         assert_eq!(cfg.period, 3);
         assert_eq!(cfg.gap_threshold, 16);
@@ -978,12 +1284,152 @@ mod tests {
             parse_cfg(&serde_json::json!({"endpoint":"x","period":0,"max_regs":9999})).unwrap();
         assert_eq!(cfg2.period, 1, "period 0 clamp 1");
         assert_eq!(cfg2.max_regs, 125, "max_regs clamp 125");
+    }
 
-        assert!(parse_cfg(&serde_json::json!({})).is_err(), "缺 endpoint");
+    #[test]
+    fn parse_cfg_rtu_serial_defaults_and_params() {
+        let cfg =
+            parse_cfg(&serde_json::json!({"kind":"rtu_serial","serial_port":"COM3"})).unwrap();
+        assert_eq!(cfg.transport, Transport::RtuSerial);
+        assert_eq!(cfg.serial_port.as_deref(), Some("COM3"));
+        assert_eq!(cfg.endpoint, "", "rtu_serial 无 endpoint");
+        // 工业默认 9600/8N1/NONE。
+        assert_eq!(cfg.baud_rate, 9600);
+        assert_eq!(cfg.data_bits, 8);
+        assert_eq!(cfg.parity, ParityKind::None);
+        assert_eq!(cfg.stop_bits, 1);
+        assert_eq!(cfg.flow_control, FlowKind::None);
+
+        let cfg3 = parse_cfg(&serde_json::json!({
+            "kind":"rtu_serial","serial_port":"/dev/ttyUSB0","baud_rate":115200,
+            "data_bits":7,"parity":"even","stop_bits":2,"flow_control":"hardware"
+        }))
+        .unwrap();
+        assert_eq!(cfg3.baud_rate, 115200);
+        assert_eq!(cfg3.data_bits, 7);
+        assert_eq!(cfg3.parity, ParityKind::Even);
+        assert_eq!(cfg3.stop_bits, 2);
+        assert_eq!(cfg3.flow_control, FlowKind::Hardware);
+    }
+
+    #[test]
+    fn parse_cfg_rtu_tcp_and_rtu_udp() {
+        let cfg =
+            parse_cfg(&serde_json::json!({"kind":"rtu_tcp","endpoint":"192.168.1.5:502"})).unwrap();
+        assert_eq!(cfg.transport, Transport::RtuTcp);
+        assert_eq!(cfg.endpoint, "192.168.1.5:502");
+
+        let cfg = parse_cfg(
+            &serde_json::json!({"kind":"rtu_udp","endpoint":"10.0.0.7:502","slave_id":2}),
+        )
+        .unwrap();
+        assert_eq!(cfg.transport, Transport::RtuUdp);
+        assert_eq!(cfg.slave_id, 2);
+    }
+
+    #[test]
+    fn parse_cfg_rejects_invalid_kind_and_params() {
         assert!(
-            parse_cfg(&serde_json::json!({"endpoint":"x","kind":"rtu"})).is_err(),
-            "rtu 报错"
+            parse_cfg(&serde_json::json!({})).is_err(),
+            "tcp 缺 endpoint"
         );
+        assert!(
+            parse_cfg(&serde_json::json!({"kind":"rtu_tcp"})).is_err(),
+            "rtu_tcp 缺 endpoint"
+        );
+        assert!(
+            parse_cfg(&serde_json::json!({"kind":"rtu_serial"})).is_err(),
+            "rtu_serial 缺 serial_port"
+        );
+        assert!(
+            parse_cfg(&serde_json::json!({"kind":"ascii","endpoint":"x"})).is_err(),
+            "非法 kind（ASCII 后置）"
+        );
+        assert!(
+            parse_cfg(&serde_json::json!({"kind":"rtu_serial","serial_port":"COM3","data_bits":9}))
+                .is_err(),
+            "非法 data_bits"
+        );
+        assert!(
+            parse_cfg(&serde_json::json!({"kind":"rtu_serial","serial_port":"COM3","stop_bits":3}))
+                .is_err(),
+            "非法 stop_bits"
+        );
+        assert!(
+            parse_cfg(
+                &serde_json::json!({"kind":"rtu_serial","serial_port":"COM3","parity":"mark"})
+            )
+            .is_err(),
+            "非法 parity"
+        );
+        assert!(
+            parse_cfg(
+                &serde_json::json!({"kind":"rtu_serial","serial_port":"COM3","flow_control":"auto"})
+            )
+            .is_err(),
+            "非法 flow_control"
+        );
+    }
+
+    #[tokio::test]
+    async fn udpio_keeps_datagram_boundary() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        // 一对 loopback UDP：UdpIo(client, connected) → server。
+        let server = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let server_addr = server.local_addr().unwrap();
+        let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        client.connect(server_addr).await.unwrap();
+        let mut io = UdpIo::new(client);
+
+        // 两帧分别写 + flush：每帧应是独立 datagram，不粘包。
+        let frame1: &[u8] = b"\x01\x03\x00\x00\x00\x01";
+        let frame2: &[u8] = b"\x01\x03\x02\x12\x34";
+        io.write_all(frame1).await.unwrap();
+        io.flush().await.unwrap();
+        io.write_all(frame2).await.unwrap();
+        io.flush().await.unwrap();
+
+        let mut buf1 = [0u8; 64];
+        let (n1, client_addr) = server.recv_from(&mut buf1).await.unwrap();
+        assert_eq!(&buf1[..n1], frame1, "第一帧独立 datagram");
+        let mut buf2 = [0u8; 64];
+        let (n2, _) = server.recv_from(&mut buf2).await.unwrap();
+        assert_eq!(&buf2[..n2], frame2, "第二帧独立 datagram，未与第一帧粘包");
+
+        // server 回一个 datagram，UdpIo 应读回完整字节。
+        let resp: &[u8] = b"\x01\x03\x02\xAB\xCD";
+        server.send_to(resp, client_addr).await.unwrap();
+        let mut rbuf = [0u8; 64];
+        let rn = io.read(&mut rbuf).await.unwrap();
+        assert_eq!(&rbuf[..rn], resp, "回包完整读取");
+    }
+
+    #[tokio::test]
+    async fn udpio_read_chunked_from_one_datagram() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        // 验证 read_buf：一个 datagram 被多次小容量 read 分块消费，顺序保持。
+        let server = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let server_addr = server.local_addr().unwrap();
+        let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        client.connect(server_addr).await.unwrap();
+        let mut io = UdpIo::new(client);
+
+        // 先握手让 server 拿到 client_addr。
+        io.write_all(b"hi").await.unwrap();
+        io.flush().await.unwrap();
+        let mut tmp = [0u8; 16];
+        let (_, client_addr) = server.recv_from(&mut tmp).await.unwrap();
+
+        // server 发 8 字节 datagram；UdpIo poll_read 整包入 read_buf，再分批吐出。
+        server.send_to(b"01234567", client_addr).await.unwrap();
+        let mut a = [0u8; 2];
+        assert_eq!(io.read(&mut a).await.unwrap(), 2);
+        assert_eq!(&a, b"01");
+        assert_eq!(io.read(&mut a).await.unwrap(), 2);
+        assert_eq!(&a, b"23");
+        let mut b4 = [0u8; 4];
+        assert_eq!(io.read(&mut b4).await.unwrap(), 4);
+        assert_eq!(&b4, b"4567");
     }
 
     #[test]

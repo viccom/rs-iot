@@ -62,8 +62,10 @@ async-opcua = { version = "0.19", default-features = false, features = ["client"
 # 文件日志（tokio-rs 官方 appender，RollingFileAppender daily 轮转 + non_blocking）
 tracing-appender = "0.2"
 
-# Modbus TCP 南向插件（tokio-modbus：纯 async，client-only；RTU 需 serial feature，v2）
-tokio-modbus = { version = "0.17", default-features = false, features = ["tcp"] }
+# Modbus 南向插件（tokio-modbus：纯 async，client-only；tcp + rtu 协议编解码）。
+# RTU over serial 单独依赖 tokio-serial（SerialStream 实现 tokio AsyncRead+AsyncWrite）。
+tokio-modbus = { version = "0.17", default-features = false, features = ["tcp", "rtu"] }
+tokio-serial = "5.5"
 
 # 外部插件 bridge（sidecarClient）：token hmac 校验 + 高熵 token 生成 + 长度前缀帧
 hmac = "0.12"

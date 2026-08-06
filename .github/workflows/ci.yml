@@ -35,6 +35,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
+      # serialport/tokio-serial（RTU over serial）在 Linux 链接 libudev，需头文件。
+      - name: Install libudev-dev (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev
       - run: cargo clippy --all-targets -- -D warnings
 
   test:
@@ -50,6 +54,9 @@ jobs:
           repository: viccom/lux
           path: ../lux
       - uses: dtolnay/rust-toolchain@stable
+      - name: Install libudev-dev (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev
       - run: cargo test --all-targets --all-features
 
   doc:
@@ -61,6 +68,9 @@ jobs:
           repository: viccom/lux
           path: ../lux
       - uses: dtolnay/rust-toolchain@stable
+      - name: Install libudev-dev (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev
       - run: cargo doc --no-deps
 
   audit:
