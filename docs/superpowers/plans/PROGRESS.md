@@ -5,14 +5,14 @@
 ## 当前状态
 
 - ✅ Plan 1 / M1-M3 MVP — 合并 master @ `4423da6`（99 测试绿）
-- 🔵 Plan 2 / M4 — 分支 `feature/lua-m4`，**Task 1+2+3 ✅**（L4 kv + L3 send_command 完成），执行中 Task 4-5
+- 🔵 Plan 2 / M4 — 分支 `feature/lua-m4`，**Task 1+2+3+4 ✅**（L4 kv + L3 send_command + I2 重连完成），剩 Task 5（集成测）+ 合并
 
 ## Plan 路线图（spec §附 milestone）
 
 | Plan | Milestone | 状态 | plan 文件 |
 |---|---|---|---|
 | 1 | M1-M3 MVP | ✅ done @ master | `2026-08-06-lua-client-mvp.md` |
-| 2 | M4（L3 send_command + L4 kv + I2 TCP 重连） | 🔵 `feature/lua-m4`，Task 1+2+3 ✅ | `2026-08-06-lua-client-m4.md` |
+| 2 | M4（L3 send_command + L4 kv + I2 TCP 重连） | 🔵 `feature/lua-m4`，Task 1+2+3+4 ✅，剩 Task 5 | `2026-08-06-lua-client-m4.md` |
 | 3 | M5 HTTP（L5 http_get/post + 审计） | ⏭ 待写 plan | — |
 | 4 | M6 热加载 + on_data 被动帧 | ⏭ 待写 plan | — |
 | 5 | M7 状态监测 + REST | ⏭ 待写 plan | — |
@@ -22,17 +22,19 @@
 
 - [x] Task 1：`luakv.rs` + identity 清单 + 实例删除清理 ✅（`0ca0255`；spec+代码双 review 过）
 - [x] Task 2：`ctx:kv_set/kv_get`（L4 API）✅（`a042781`；implementer agent API 503 收尾失败但已完整提交，控制器自验 CI 全绿 + 自审）
-- [x] Task 3：`ctx:send_command`（L3 联动）✅（`9b33e34`；控制器接手 API 不稳，CI 三项全绿 + 自审）
-- [ ] Task 4：`TcpIo` 断连重连（I2，`Option<TcpStream>` 懒连接）← 🔵 下一个
-- [ ] Task 5：M4 集成测（kv 跨 VM 持久 + send_command 双实例 + delete 清 kv）
+- [x] Task 3：`ctx:send_command`（L3 联动）✅（`9b33e34`；控制器接手，CI 三项全绿 + 自审）
+- [x] Task 4：`TcpIo` 断连重连（I2）✅（`a1bd236`；控制器接手，CI 三项全绿 + 自审；**修 plan 两处缺陷**：tcp_roundtrip 测试改 `TcpIo::new`（plan 漏改）、request `buf 非空+peer_closed` 应返回 buf 作帧完成（plan 误判对端关闭））
+- [ ] Task 5：M4 集成测（kv 跨 VM 持久 + send_command 双实例 + delete 清 kv）← 🔵 下一个
 
 ## 下一步（每轮 cron 触发执行）
 
-执行 **Plan 2 Task 4**（`TcpIo` 断连重连，改 `io_engine.rs` + `mod.rs`）：spec §5.4 line 157 + §8 line 282/288，对标 modbus `Option<Session>` 但下沉 IO task。控制器接手（API 不稳；cargo 路径已证稳）或 subagent（若 API 恢复）。Task 4+5 完成 → `finishing-a-development-branch` 合并 `feature/lua-m4` → master → 写 Plan 3（M5 HTTP）plan。
+执行 **Plan 2 Task 5**（集成测 `tests/lua_m4_e2e.rs`）：3 测（kv 跨 VM 持久 / send_command 双实例联动 / delete 清 kv）。**注意**：plan Task 5 的 `send_command_links_two_instances` 用 `rs_iot::plugin::builtin::lua_client::source()`——此函数可能不存在，需改 `find_source("luaClient")` 方式（仿 `tests/lua_modbus_e2e.rs`），实现前先读 lua_modbus_e2e.rs 的实例化模式 + 确认 rs_iot 公开 API。
+
+Task 5 完成 → `finishing-a-development-branch` 合并 `feature/lua-m4` → master → 写 Plan 3（M5 HTTP）plan。
 
 ## 接手模式说明（API 503 期间）
 
-API 503 间歇故障（combo models / zai-b cooldown）致 subagent dispatch 不稳。Task 2 起控制器接手机械 task（plan 含完整代码 + 控制器已读相关文件 + cargo 不依赖 LLM API）：实现→自跑 CI 三项→自审（spec 合规 + 代码质量）→提交。独立 reviewer 因 API 不稳暂跳过，自审结论标注于各 task 行。API 恢复后恢复 subagent-driven 双 review。
+API 503 间歇故障（combo models / zai-b cooldown）致 subagent dispatch 不稳。Task 2 起控制器接手机械 task（plan 含完整代码 + 控制器已读相关文件 + cargo 不依赖 LLM API）：实现→自跑 CI 三项→自审（spec 合规 + 代码质量）→提交。独立 reviewer 因 API 不稳暂跳过，自审结论标注于各 task 行。API 恢复后恢复 subagent-driven 双 review。Task 4 还发现并修复 plan 两处实现缺陷（见上）。
 
 ## 后续清理项（跨模块，非阻断）
 
