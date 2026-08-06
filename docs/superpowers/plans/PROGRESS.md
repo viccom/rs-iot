@@ -4,8 +4,8 @@
 
 ## 当前状态
 
-- ✅ Plan 1-4（M1-M5 + on_data）— 合并 master @ `797545d`（110 测试绿）
-- 🔵 Plan 5（M6 热加载）— 分支 `feature/lua-m6`，**Task 1+2+3 ✅**，执行中 Task 4
+- ✅ Plan 1-5（M1-M6：MVP / M4 联动持久 / M5 HTTP / on_data / M6 热加载）— 合并 master @ `cf92eee`（**111 测试全绿**）
+- 🔵 下一步：写 Plan 6（M7 状态监测 + REST）plan
 
 ## Plan 路线图（spec milestone + 欠账补全）
 
@@ -15,28 +15,34 @@
 | 2 | M4（L3 send_command + L4 kv + I2 重连） | ✅ done @ master（`136e9a9`） | `2026-08-06-lua-client-m4.md` |
 | 3 | M5 HTTP（L5 http_get/post + 审计） | ✅ done @ master（`6ff4ff0`） | `2026-08-07-lua-client-m5.md` |
 | 4 | on_data 被动帧（M2 欠账） | ✅ done @ master（`797545d`） | `2026-08-07-lua-client-on-data.md` |
-| 5 | M6 热加载（notify + VM 重建 + dry-run + 失败回退） | 🔵 `feature/lua-m6`，Task 1+2+3 ✅ 执行中 | `2026-08-07-lua-client-m6.md` |
-| 6 | M7 状态监测（`stat:<inst>`）+ REST（`routes_lua`） | ⏭ 待写 plan | — |
-| 7 | M8 serial/udp + L2 数据 API + 文档 + 沙箱测补全 | ⏭ 待写 plan | — |
+| 5 | M6 热加载（notify + VM 重建 + dry-run + 失败回退） | ✅ done @ master（`cf92eee`，2026-08-07 合并） | `2026-08-07-lua-client-m6.md` |
+| 6 | M7 状态监测（`stat:<inst>`）+ REST（`routes_lua` stats/reload） | 🔵 待写 plan | — |
+| 7 | M8 serial/udp 传输 + L2 数据 API（set_value/get_value/...）+ 文档 + 沙箱测补全 | ⏭ 待写 plan | — |
 
-## Plan 5（M6 热加载）执行进度（分支 `feature/lua-m6`）
+## Plan 5（M6 热加载）完成总结 ✅（合并 master @ `cf92eee`）
 
-- [x] Task 1：Cargo.toml lua feature 加 notify 8 + notify-debouncer-mini 0.7 ✅（`c079aca`）
-- [x] Task 2：mod.rs Evt 枚举 + 主循环 Evt 重构 + `reload_vm` ✅（`25efc3b`）
-- [x] Task 3：`hotload.rs` notify watcher（监听 scripts/<name>/ 去抖 200ms → reload_tx）✅（`4d2fb62`；**修复**：std::thread 替 spawn_blocking，避免 watcher 长驻 task 阻止 tokio runtime shutdown 致测试卡 >10min）
-- [ ] Task 4：热加载集成测（改脚本 → reload → 新 collect 值）← 🔵 下一个
+- [x] Task 1：Cargo notify 8 + notify-debouncer-mini 0.7（`c079aca`）
+- [x] Task 2：Evt 枚举 + 主循环 Evt 重构 + `reload_vm`（new_vm+load+register+dry-run on_init）+ Evt::Reload 替换 lua（`25efc3b`）
+- [x] Task 3：`hotload.rs` notify watcher（去抖 200ms → reload_tx）（`4d2fb62`；**修复** std::thread 替 spawn_blocking 避免 runtime shutdown 卡）
+- [x] Task 4：热加载集成测（改脚本 v1→v2 → reload → 新 collect 值）（`cf92eee`）
+
+111 测试全绿（lib 92 + 集成测 19）。spec §5.3 热加载覆盖（notify + VM 重建 + dry-run + 失败回退「永不半生效」）。
 
 ## 下一步（每轮 cron 触发执行）
 
-执行 **Plan 5 Task 4**（热加载集成测 `tests/lua_hotload_e2e.rs`）：起实例（脚本 v=1）→ 改 main.lua（v=2）→ notify 去抖 → reload_vm → 新 collect 值 2。**风险**：notify Windows 事件丢失（spec §18）可能致测试 flaky → 实现时若 Windows flaky，延长 sleep 或 retry 改脚本；CI Linux 应稳定。Task 4 完成 → `finishing-a-development-branch` 合并 → 写 Plan 6（M7 状态 REST）。
+**写 Plan 6（M7 状态监测 + REST）plan**：superpowers:writing-plans，spec §13（状态监测）+ §4（routes_lua）。
+- 状态指标写 lux `stat:<inst_id>`（JSON）：status(running/degraded/stopped) / collect_count / collect_fail_count / last_collect_ts / last_collect_duration_ms / vm_restart_count（热加载/崩溃恢复）。
+- REST `routes_lua`：`GET /api/v1/lua/<inst>/stats`（读 stat hash）+ `POST /api/v1/lua/<inst>/reload`（手动触发热加载，Windows notify 兜底）+ 可能 `GET /api/v1/lua/list`。
+- luaClient run() 内采点（collect 成功/失败计数 + 热加载 vm_restart_count）。
 
-## 已知简化 / 风险（Plan 5，注明）
+文件名 `2026-08-07-lua-client-m7.md`。
 
-- dry-run = on_init only（collect dry-run 真发 request 有副作用，跳过，hook 兜底）
-- notify Windows 事件丢失（spec §18）→ 去抖 + M7 REST 兜底
-- VM 重建不重启 IO 连接（新 VM 复用 io_engine）
-- watcher 用 std::thread（非 spawn_blocking）避免阻止 runtime shutdown
-- mod.rs reload channel 注释 _reload_tx 过时（代码已 reload_tx），待清
+## 已知简化 / 风险（累计，注明）
+
+- Plan 5 dry-run = on_init only；notify Windows 事件丢失（去抖 + M7 REST reload 兜底）；VM 重建不重启 IO；watcher std::thread
+- Plan 4 on_data 混合协议竞争丢帧（纯被动不受影响）
+- Plan 3 http：reqwest Client per-call / bytes() 后 check 上限 / http_timeout_secs config 未接
+- mod.rs reload channel 注释 _reload_tx 过时待清（Plan 5 Task 3 遗留）
 
 ## 接手模式说明（API 503 期间）
 
@@ -47,9 +53,9 @@ API 503 间歇故障致 subagent dispatch 不稳。Plan 2 起控制器接手机�
 - `luakv::get` 空 JSON 值误判 missing（与 `ext_token::get` 同根）
 - `RsIotError::Config` 用于运行时校验语义勉强（待 `Validation` 变体）
 - in-crate 单测 data_dir 按 pid 共享
-- M5 http 简化：reqwest Client per-call / bytes() 后 check 上限 / `http_timeout_secs` config 未接
-- on_data 混合协议竞争丢帧（纯被动不受影响）
-- mod.rs reload channel 注释 _reload_tx 过时待清（Task 3 遗留）
+- M5 http 简化（per-call Client / 流式 limit / config 字段）
+- on_data 混合协议竞争丢帧
+- mod.rs reload channel 注释 _reload_tx 过时待清
 
 ## CI 命令（Windows，规避 link.exe 并行 OOM）
 
