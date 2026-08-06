@@ -3,6 +3,7 @@
 //! 实例加载 `scripts/<name>/main.lua`，脚本定义 `collect(ctx)`/`on_write(ctx,cmd)`。
 //! 详见 `docs/superpowers/specs/2026-08-06-lua-script-collector-design.md`。
 
+mod api;
 mod config;
 mod engine;
 mod io_engine;
