@@ -4,8 +4,8 @@
 
 ## 当前状态
 
-- ✅ Plan 1（M1-M3 MVP）+ Plan 2（M4 联动与持久 + I2 重连）— 合并 master @ `136e9a9`（107 测试全绿）
-- 🔵 Plan 3（M5 HTTP）— **plan 就绪**（`2026-08-07-lua-client-m5.md`，2 task），待建分支执行
+- ✅ Plan 1（M1-M3）+ Plan 2（M4）— 合并 master @ `136e9a9`（107 测试绿）
+- 🔵 Plan 3（M5 HTTP）— 分支 `feature/lua-m5`，**Task 1 ✅**（`79ad01b` lua-http feature + reqwest），执行中 Task 2
 
 ## Plan 路线图（spec §附 milestone）
 
@@ -13,25 +13,23 @@
 |---|---|---|---|
 | 1 | M1-M3 MVP | ✅ done @ master | `2026-08-06-lua-client-mvp.md` |
 | 2 | M4（L3 send_command + L4 kv + I2 TCP 重连） | ✅ done @ master（`136e9a9`） | `2026-08-06-lua-client-m4.md` |
-| 3 | M5 HTTP（L5 http_get/post + 全审计，feature `lua-http`） | 🔵 plan 就绪，待执行 | `2026-08-07-lua-client-m5.md` |
+| 3 | M5 HTTP（L5 http_get/post + 全审计，feature `lua-http`） | 🔵 `feature/lua-m5`，Task 1 ✅ 执行中 | `2026-08-07-lua-client-m5.md` |
 | 4 | M6 热加载 + `on_data` 被动帧 | ⏭ 待写 plan | — |
 | 5 | M7 状态监测（`stat:<inst>`）+ REST（`routes_lua`） | ⏭ 待写 plan | — |
 | 6 | M8 serial/udp 传输 + 文档 + 沙箱测补全 | ⏭ 待写 plan | — |
 
-## Plan 3（M5 HTTP）执行进度（待建分支 `feature/lua-m5`）
+## Plan 3（M5 HTTP）执行进度（分支 `feature/lua-m5`）
 
-- [ ] Task 1：Cargo.toml `lua-http` feature + reqwest 依赖（默认开，独立可关）← 🔵 下一个
-- [ ] Task 2：`ctx:http_get/http_post` + 全审计 + 5s 默认超时 + 1MB 上限（api.rs，`#[cfg(feature="lua-http")]`）
+- [x] Task 1：Cargo.toml `lua-http` feature + reqwest 依赖 ✅（`79ad01b`；默认编译 41s / 关 lua-http 2m46s 双向验证过，feature 门控正确，reqwest 复用 lux 缓存未重编 rustls）
+- [ ] Task 2：`ctx:http_get/http_post` + 全审计 + 5s 默认超时 + 1MB 上限（api.rs `#[cfg(feature="lua-http")]`）+ mock HTTP server 测试 ← 🔵 下一个
 
 ## 下一步（每轮 cron 触发执行）
 
-1. 建 `feature/lua-m5` 分支（从 master `136e9a9`）
-2. 执行 **Task 1**（Cargo.toml）：subagent-driven（若 API 恢复）或控制器接手。**注意**：Task 1 引入 reqwest + rustls，首次编译 ~3-5min（预期）。验证 `cargo build`（默认）+ `cargo build --no-default-features --features lua`（关 lua-http 不编 http）。
-3. Task 1+2 完成 → `finishing-a-development-branch` 合并 → 写 Plan 4（M6 热加载 + on_data）plan。
+执行 **Plan 3 Task 2**（api.rs http 实现）：控制器接手（plan 含完整代码）或 subagent（若 API 恢复）。3 处 Edit（register 内 http 段 cfg 门控 / headers_to_vec+http_request helper / mock server 测试）。mock HTTP server（裸 TcpListener 回 200+JSON）验 http_get {status,body}。Task 2 绿 → `finishing-a-development-branch` 合并 `feature/lua-m5` → master → 写 Plan 4（M6 热加载 + on_data）plan。
 
-## Plan 2 完成总结 ✅（合并 master @ `136e9a9`，2026-08-07）
+## Plan 2 完成总结 ✅（合并 master @ `136e9a9`）
 
-5 task 全完成（luakv 数据层 / ctx:kv_set/kv_get L4 / ctx:send_command L3 / TcpIo 断连重连 I2 / M4 集成测），107 测试全绿。接手模式（API 503）+ 修 plan 两缺陷（tcp_roundtrip、request 帧完成逻辑）。
+5 task 全完成，107 测试全绿。接手模式（API 503）+ 修 plan 两缺陷。
 
 ## 接手模式说明（API 503 期间）
 
