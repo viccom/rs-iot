@@ -13,11 +13,21 @@ pub(super) struct IoRequest {
     pub(super) reply_to: oneshot::Sender<mlua::Result<Vec<u8>>>,
 }
 
-/// IO 后端 trait：IO task 持有一个，处理 request。Plan 1 有 MockIoTask；Task 7 加 TcpIo。
+/// IO 后端 trait：IO task 持有一个，处理 request + 被动帧（on_data）。
 #[async_trait::async_trait]
 pub(super) trait IoBackend: Send + 'static {
     /// 处理一次 request：发 frame、收响应、返回字节（或 Err）。
     async fn request(&mut self, frame: &[u8]) -> mlua::Result<Vec<u8>>;
+
+    /// 无在飞 request 时主动收一帧（广播/推送场景）。默认 `None`（不支持被动帧）；
+    /// `TcpIo` 覆盖为 idle 成帧 read。`Some(frame)` 推 `on_data`；`None` = idle 超时/未连接。
+    ///
+    /// 默认实现 `sleep 50ms` 后返回 None——避免 IO task `select!` 在无 req 时忙循环
+    /// （若立即返回 None，select! 不断 poll recv_idle → 100% CPU）。
+    async fn recv_idle(&mut self) -> Option<Vec<u8>> {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        None
+    }
 }
 
 /// IO 引擎句柄：Lua 侧通过它发 request（经 channel 送 IO task）。
@@ -47,13 +57,31 @@ impl IoEngine {
     }
 }
 
-/// 启动 IO task（独占 backend）。返回 IoEngine 句柄。
-pub(super) fn spawn_io_task(mut backend: Box<dyn IoBackend>) -> IoEngine {
+/// 启动 IO task（独占 backend）。`on_data_tx` 接被动帧（无在飞 request 时 recv_idle 收到）。
+/// 返回 IoEngine 句柄（Lua 侧 request 用）。
+pub(super) fn spawn_io_task(
+    mut backend: Box<dyn IoBackend>,
+    on_data_tx: mpsc::Sender<Vec<u8>>,
+) -> IoEngine {
     let (tx, mut rx) = mpsc::channel::<IoRequest>(64);
     tokio::spawn(async move {
-        while let Some(req) = rx.recv().await {
-            let r = backend.request(&req.frame).await;
-            let _ = req.reply_to.send(r); // 回执失败说明 Lua 侧已超时放弃 → 忽略
+        loop {
+            tokio::select! {
+                biased; // request 优先：有 request 时立即处理，不被 recv_idle 阻塞
+                req = rx.recv() => match req {
+                    Some(req) => {
+                        let r = backend.request(&req.frame).await;
+                        let _ = req.reply_to.send(r);
+                    }
+                    None => break, // 所有 IoEngine 句柄 drop → 退出
+                },
+                res = backend.recv_idle() => {
+                    if let Some(frame) = res {
+                        let _ = on_data_tx.send(frame).await; // 主循环 drop → 忽略
+                    }
+                    // None（idle 无数据/未连接）→ 回 loop 重 select!（recv_idle 重启）
+                }
+            }
         }
     });
     IoEngine { tx }
@@ -177,6 +205,36 @@ impl IoBackend for TcpIo {
         }
         Ok(buf)
     }
+
+    /// 无在飞 request 时主动收一帧（idle 成帧）：ensure_connected + read 累积，
+    /// idle 静默返回 `Some(buf)`；idle 超时无数据 / 未连接 / 对端关闭返回 `None`。
+    /// 对端关闭或 read err → 置 `stream = None`（下次 request/recv_idle 重连）。
+    async fn recv_idle(&mut self) -> Option<Vec<u8>> {
+        use tokio::io::AsyncReadExt;
+        self.ensure_connected().await.ok()?;
+        let mut buf = Vec::new();
+        let mut tmp = [0u8; 256];
+        loop {
+            let stream = self.stream.as_mut()?;
+            match tokio::time::timeout(self.idle, stream.read(&mut tmp)).await {
+                Ok(Ok(0)) => {
+                    self.stream = None; // 对端关闭 → 重连
+                    break;
+                }
+                Ok(Ok(n)) => buf.extend_from_slice(&tmp[..n]),
+                Ok(Err(_)) => {
+                    self.stream = None;
+                    break;
+                }
+                Err(_) => break, // idle 静默 → 帧完成（buf 非空）或无数据
+            }
+        }
+        if buf.is_empty() {
+            None
+        } else {
+            Some(buf)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -184,6 +242,12 @@ mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
+
+    /// 测试用：spawn_io_task 配一个丢弃被动帧的 on_data channel（单测不测 on_data）。
+    fn spawn_no_on_data(backend: Box<dyn IoBackend>) -> IoEngine {
+        let (tx, _rx) = mpsc::channel::<Vec<u8>>(8);
+        spawn_io_task(backend, tx)
+    }
 
     #[tokio::test]
     async fn mock_roundtrip() {
@@ -194,7 +258,7 @@ mod tests {
                 Ok(r)
             }),
         };
-        let engine = spawn_io_task(Box::new(mock));
+        let engine = spawn_no_on_data(Box::new(mock));
         let resp = engine.request(b"\x01\x02", 200).await.unwrap();
         assert_eq!(resp, vec![0x01, 0x02, 0xAA]);
     }
@@ -270,5 +334,31 @@ mod tests {
         let r2 = io.request(b"\x01").await;
         assert!(r2.is_ok(), "第二次（重连）应成功，got {r2:?}");
         assert_eq!(r2.unwrap(), vec![0x01, 0xAA]);
+    }
+
+    /// on_data：mock server 无请求时主动推一帧 → IO task recv_idle 收到 → on_data channel。
+    #[tokio::test]
+    async fn on_data_frame_from_idle_server() {
+        use std::time::Duration;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        // server：accept 后 sleep 100ms（让 client 连上 + IO task 进 recv_idle）→ 主动推一帧。
+        tokio::spawn(async move {
+            let (mut s, _) = listener.accept().await.unwrap();
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let _ = s.write_all(b"\x02ping").await;
+            tokio::time::sleep(Duration::from_millis(200)).await; // 保连接不断
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let backend = Box::new(TcpIo::new(format!("127.0.0.1:{port}"), 50));
+        let (on_data_tx, mut on_data_rx) = mpsc::channel::<Vec<u8>>(8);
+        let _engine = spawn_io_task(backend, on_data_tx);
+
+        let frame = tokio::time::timeout(Duration::from_secs(2), on_data_rx.recv())
+            .await
+            .expect("超时")
+            .expect("应收到被动帧");
+        assert_eq!(frame, b"\x02ping");
     }
 }

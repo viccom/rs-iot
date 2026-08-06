@@ -88,7 +88,10 @@ impl Source for LuaClient {
                 })
             }
         };
-        let io_engine = spawn_io_task(backend);
+        // IO 引擎 + on_data 被动帧 channel（IO task 无在飞 request 时收到的帧 → 主循环）。
+        // data_rx 主循环消费（Task 2 接 select!）；_data_rx 前缀避免未用 warning（Task 2 改用）。
+        let (data_tx, _data_rx) = mpsc::channel::<Vec<u8>>(64);
+        let io_engine = spawn_io_task(backend, data_tx);
 
         // 4. 注册 ctx API。
         if let Err(e) = api::register(&lua, ctx.clone(), &inst, io_engine) {

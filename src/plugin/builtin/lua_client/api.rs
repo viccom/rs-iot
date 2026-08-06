@@ -298,17 +298,26 @@ async fn http_request(
 mod tests {
     use super::*;
     use crate::host::{BridgeRegistry, CtlRegistry, HostContext};
-    use crate::plugin::builtin::lua_client::io_engine::{spawn_io_task, MockIoTask};
+    use crate::plugin::builtin::lua_client::io_engine::{spawn_io_task, IoEngine, MockIoTask};
     use crate::types::{AppType, DeviceSpec, HostKind, InstConfig, PluginName};
     use tokio_util::sync::CancellationToken;
+
+    /// 测试用：spawn_io_task 配丢弃被动帧的 on_data channel（api 单测不测 on_data）。
+    fn spawn_mock_io() -> IoEngine {
+        let (tx, _rx) = tokio::sync::mpsc::channel::<Vec<u8>>(8);
+        spawn_io_task(
+            Box::new(MockIoTask {
+                responder: Box::new(|_| Ok(vec![])),
+            }),
+            tx,
+        )
+    }
 
     /// 冒烟测：register 成功 + ctx 暴露 request/log_info/now/time（且都是 function）。
     #[tokio::test]
     async fn register_exposes_ctx_api() {
         let lua = Lua::new();
-        let io = spawn_io_task(Box::new(MockIoTask {
-            responder: Box::new(|_| Ok(vec![])),
-        }));
+        let io = spawn_mock_io();
         // 起一个测试 lux 拿 EmbeddedClient（HostContext 需要；端口 0 由 OS 分配，独立
         // 临时 data_dir 防并行冲突——同 tests/common 模式）。
         let data_dir = std::env::temp_dir()
@@ -381,9 +390,7 @@ mod tests {
     #[tokio::test]
     async fn kv_set_get_roundtrip() {
         let lua = mlua::Lua::new();
-        let io = spawn_io_task(Box::new(MockIoTask {
-            responder: Box::new(|_| Ok(vec![])),
-        }));
+        let io = spawn_mock_io();
         let data_dir = std::env::temp_dir()
             .join(format!("lua-kv-{}", std::process::id()))
             .to_str()
@@ -463,9 +470,7 @@ mod tests {
         ctl.register("target", tx);
 
         let lua = mlua::Lua::new();
-        let io = spawn_io_task(Box::new(MockIoTask {
-            responder: Box::new(|_| Ok(vec![])),
-        }));
+        let io = spawn_mock_io();
         let data_dir = std::env::temp_dir()
             .join(format!("lua-send-{}", std::process::id()))
             .to_str()
@@ -557,9 +562,7 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
         let lua = mlua::Lua::new();
-        let io = spawn_io_task(Box::new(MockIoTask {
-            responder: Box::new(|_| Ok(vec![])),
-        }));
+        let io = spawn_mock_io();
         let data_dir = std::env::temp_dir()
             .join(format!("lua-http-{}", std::process::id()))
             .to_str()
