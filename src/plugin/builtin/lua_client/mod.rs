@@ -5,6 +5,8 @@
 
 mod config;
 mod engine;
+mod loader;
+mod script;
 
 use crate::host::HostContext;
 use crate::plugin::traits::Source;
