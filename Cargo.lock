@@ -2566,6 +2566,7 @@ dependencies = [
  "mime_guess",
  "mlua",
  "rand 0.8.7",
+ "reqwest",
  "rhai",
  "rumqttc",
  "rust-embed",
