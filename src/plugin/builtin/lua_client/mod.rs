@@ -108,9 +108,9 @@ impl Source for LuaClient {
             return;
         }
 
-        // 5. on_init（若脚本定义）。
+        // 5. on_init（若脚本定义）。on_init 用全局 ctx（与 collect/on_write 一致，无参）。
         if lua.globals().get::<mlua::Function>("on_init").is_ok() {
-            let r: mlua::Result<()> = lua.load("on_init(ctx)").eval_async().await;
+            let r: mlua::Result<()> = lua.load("on_init()").eval_async().await;
             if let Err(e) = r {
                 tracing::warn!("[luaClient] on_init 失败：{e}");
             }

@@ -1,14 +1,11 @@
 //! Lua 插件配置：传输 / 周期 / 沙箱参数 / `parse_cfg`（解析 `app_config`）。
 //!
-//! 脚手架：`parse_cfg`/`LuaCfg`/`Transport`/`RecvMode` 仅供本文件 `#[cfg(test)]`
-//! 与 Task 6（P1-T6 LuaClient 主循环）的 `run` 消费，lib build 全模块无引用。
-//! 用 `#[allow(dead_code)]` 而非 CLAUDE.md 首选的 `#[expect]`：test build 中 LuaCfg
-//! 仅部分字段被测试读取（endpoint/recv_mode 等未读），仅非 test build 应用 expect
-//! 会暴露字段级 dead_code；无条件 expect 又会在项被 test 使用时触发 unfulfilled。
-//! allow 是 dual-build + 部分字段未读下的务实选择，Task 6 接入后移除。
+//! `LuaCfg` struct 级 `#[allow(dead_code)]`：`serial_port`（serial 后端 Plan 6）、
+//! `timeout_ms`（Lua 侧 `ctx:request` 显式传）、`recv_mode`（MVP 总 `Timeout`）三字段
+//! lib build 仍未读，struct 级 allow 抑制字段级 dead_code；其余项（`parse_cfg`/
+//! `Transport`/`RecvMode`）已被 `run` 消费，不再 dead。
 
 /// 传输模式（Plan 1 仅实现 tcp；serial/udp 框架预留，Task 7 接入）。
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Transport {
     /// TCP 连接（`ip:port`）。
@@ -20,7 +17,6 @@ pub(super) enum Transport {
 }
 
 /// 接收成帧模式（spec §8）。Plan 1 MVP 仅用 `Timeout`。
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum RecvMode {
     /// 读到静默 idle_ms 返回累积字节。
@@ -51,7 +47,6 @@ pub(super) struct LuaCfg {
 }
 
 /// 解析 `app_config`。tcp 默认；period=0 表示纯被动（仅 on_data，Plan 1 不用，保留）。
-#[allow(dead_code)]
 pub(super) fn parse_cfg(app: &serde_json::Value) -> Result<LuaCfg, String> {
     let script = app
         .get("script")

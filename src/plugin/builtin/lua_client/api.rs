@@ -1,10 +1,5 @@
 //! ctx 对象 + host API 注册（spec §7）。Plan 1：L1 request（async）+ L6 log/now/time；
 //! L2 get_value/set_value/get_device/list_devices/config/dump_comm/crc 后续 plan 扩。
-//!
-//! 脚手架：`register`/`register_log` 在 lib build 无调用方（Task 6 `LuaClient::run`
-//! 调用），用 `#[allow(dead_code)]` 而非 CLAUDE.md 首选的 `#[expect]`：与
-//! config/engine/io_engine 同属 dual-build 脚手架（test build 调用、lib build 不调），
-//! 无条件 expect 会在 test build 命中时触发 unfulfilled。Task 6 接入后移除。
 
 use crate::host::HostContext;
 use crate::plugin::builtin::lua_client::io_engine::IoEngine;
@@ -21,7 +16,6 @@ use mlua::{Lua, LuaString, Value};
 ///
 /// `_ctx_host` Plan 1 未用（L2 get_value 等后续 plan 经 lux 读取设备最新值/实例配置
 /// 时使用），保留参数以稳定 Task 6 调用签名。
-#[allow(dead_code)] // 脚手架：Task 6 run 调用；同 config.rs dual-build 处理
 pub(super) fn register(
     lua: &Lua,
     _ctx_host: HostContext, // Plan 1 未用（L2 get_value 等后续 plan 用），保留参数
@@ -58,7 +52,9 @@ pub(super) fn register(
     // --- L6 now() / time() ---
     ctx.set(
         "now",
-        lua.create_function(|_lua, _self: Value| Ok(chrono::Local::now().timestamp_millis() as f64))?,
+        lua.create_function(|_lua, _self: Value| {
+            Ok(chrono::Local::now().timestamp_millis() as f64)
+        })?,
     )?;
     ctx.set(
         "time",
@@ -168,7 +164,10 @@ mod tests {
             assert!(is_fn, "ctx.{api} 应是 function");
         }
         // 冒号语法冒烟：ctx:now() / ctx:log_info(...) 应工作（_self 首参吸收冒号隐式 self）。
-        let now: f64 = lua.load("return ctx:now()").eval().expect("ctx:now 冒号调用");
+        let now: f64 = lua
+            .load("return ctx:now()")
+            .eval()
+            .expect("ctx:now 冒号调用");
         assert!(now > 0.0);
         let _: () = lua
             .load("ctx:log_info('hello')")

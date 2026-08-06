@@ -4,10 +4,7 @@ use std::path::{Path, PathBuf};
 
 /// 脚本根目录（相对于进程工作目录）。生产可由 app_config 覆盖，Plan 1 固定。
 ///
-/// Task 6 的 `run` 将用此常量构造默认 `LoadCtx::scripts_root`；lib build 未引用，
-/// 用 `#[allow(dead_code)]` 而非 `#[expect]`：与 config.rs/engine.rs 同属 dual-build
-/// 脚手架（部分项仅在 test build 或 Task 6 后被读），Task 6 接入后移除。
-#[allow(dead_code)]
+/// `run` 用此常量构造默认 `LoadCtx::scripts_root`（可被 `app_config.scripts_root` 覆盖）。
 pub(super) const SCRIPTS_ROOT: &str = "scripts";
 
 /// 解析脚本入口路径：scripts/<name>/main.lua。

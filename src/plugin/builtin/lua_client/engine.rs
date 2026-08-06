@@ -9,7 +9,6 @@ use mlua::{Error, HookTriggers, Lua, LuaOptions, StdLib};
 /// - 指令 hook：每 `hook_instr_limit` 条指令触发，回调返回 Err 中断死循环。
 /// - 内存限额：超 `mem_limit_mb` 触发 MemoryError。
 /// - catch_rust_panics(true)：Rust callback panic 转 RuntimeError。
-#[allow(dead_code)] // 脚手架：Task 6 run 调用；同 config.rs 的 dual-build 处理
 pub(super) fn new_vm(cfg: &LuaCfg) -> mlua::Result<Lua> {
     let lua = Lua::new_with(
         StdLib::TABLE | StdLib::STRING | StdLib::MATH | StdLib::COROUTINE,

@@ -2,27 +2,18 @@
 //!
 //! Lua 的 ctx:request 经 create_async_function → mpsc 送 IoRequest → IO task 独占连接
 //! 处理 → oneshot 回执；timeout 包 oneshot，超时丢弃迟到回包。
-//!
-//! 脚手架：本模块全部项（IoRequest/IoBackend/IoEngine/spawn_io_task/MockIoTask）在
-//! lib build 无调用方（Task 6 LuaClient 主循环 + Task 8 ctx API 接入），仅 test build
-//! 与后续 task 使用。用 `#[allow(dead_code)]` 而非 CLAUDE.md 首选的 `#[expect]`：与
-//! config/engine/loader 同属 dual-build 脚手架（trait 方法 request 在 lib build 未被调、
-//! test build 调用），部分项仅在 test build 命中，无条件 expect 会暴露 unfulfilled。
-//! Task 6/8 接入后移除。
 
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::timeout;
 
 /// 一次 request：帧字节 + 回执通道。
-#[allow(dead_code)]
 pub(super) struct IoRequest {
     pub(super) frame: Vec<u8>,
     pub(super) reply_to: oneshot::Sender<mlua::Result<Vec<u8>>>,
 }
 
 /// IO 后端 trait：IO task 持有一个，处理 request。Plan 1 有 MockIoTask；Task 7 加 TcpIo。
-#[allow(dead_code)] // trait 方法 request 在 lib build 未被调；test build 经 MockIoTask 调用
 #[async_trait::async_trait]
 pub(super) trait IoBackend: Send + 'static {
     /// 处理一次 request：发 frame、收响应、返回字节（或 Err）。
@@ -30,7 +21,6 @@ pub(super) trait IoBackend: Send + 'static {
 }
 
 /// IO 引擎句柄：Lua 侧通过它发 request（经 channel 送 IO task）。
-#[allow(dead_code)]
 #[derive(Clone)]
 pub(super) struct IoEngine {
     tx: mpsc::Sender<IoRequest>,
@@ -38,7 +28,6 @@ pub(super) struct IoEngine {
 
 impl IoEngine {
     /// 发一次 request，等回执（带超时）。供 ctx:request 的 async fn 调用。
-    #[allow(dead_code)] // 脚手架：Task 8 ctx:request 调用
     pub(super) async fn request(&self, frame: &[u8], timeout_ms: u64) -> mlua::Result<Vec<u8>> {
         let (otx, orx) = oneshot::channel();
         self.tx
@@ -59,7 +48,6 @@ impl IoEngine {
 }
 
 /// 启动 IO task（独占 backend）。返回 IoEngine 句柄。
-#[allow(dead_code)] // 脚手架：Task 6 run 调用
 pub(super) fn spawn_io_task(mut backend: Box<dyn IoBackend>) -> IoEngine {
     let (tx, mut rx) = mpsc::channel::<IoRequest>(64);
     tokio::spawn(async move {
@@ -77,7 +65,6 @@ pub(super) fn spawn_io_task(mut backend: Box<dyn IoBackend>) -> IoEngine {
 pub(super) type MockResponder = Box<dyn Fn(&[u8]) -> mlua::Result<Vec<u8>> + Send + Sync>;
 
 /// mock IO backend：按闭包响应。用于无真实设备的单测/集成测。
-#[allow(dead_code)] // 仅 test build 使用；lib build 不构造
 pub(super) struct MockIoTask {
     /// 响应闭包：输入 frame 字节，返回响应字节（或 Err）。
     pub(super) responder: MockResponder,

@@ -9,7 +9,6 @@ use std::path::Path;
 use std::sync::Arc;
 
 /// 加载上下文：脚本根 + 脚本名（供 require 闭包解析模块路径）。
-#[allow(dead_code)] // 脚手架：Task 6 run 使用；同 config.rs dual-build 处理
 #[derive(Clone)]
 pub(super) struct LoadCtx {
     /// 脚本根目录（`scripts`）。
@@ -19,7 +18,6 @@ pub(super) struct LoadCtx {
 }
 
 /// 在 `lua` 上注入受控 require（限定 `scripts/<name>/lib/`）并加载 main.lua 入口。
-#[allow(dead_code)] // 脚手架：Task 6 run 调用
 pub(super) fn load_main(lua: &Lua, lctx: &LoadCtx) -> mlua::Result<()> {
     let lctx2 = lctx.clone();
     let require_fn = lua.create_function(move |lua, req: String| -> mlua::Result<()> {
