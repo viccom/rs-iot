@@ -3,7 +3,7 @@
 
 use crate::host::HostContext;
 use crate::plugin::builtin::lua_client::io_engine::IoEngine;
-use crate::types::InstConfig;
+use crate::types::{CtlMessage, InstConfig, InstId};
 use mlua::{Lua, LuaSerdeExt, LuaString, Value};
 
 /// 在 `lua` 上注册 ctx 全局对象 + host 函数（Task 6 的 run 调用）。
@@ -106,6 +106,31 @@ pub(super) fn register(
         }
     })?;
     ctx.set("kv_get", kv_get_fn)?;
+
+    // --- L3 ctx:send_command(inst_id, devid, cmd, data) -> bool ---
+    // 经 CtlRegistry::send 投到目标实例 cmd_rx（与 MQTT/REST 写入口同总线）。
+    // send 是同步 try_send → create_function（非 async）；_self 吸收冒号隐式 self。
+    let ctl = ctx_host.ctl_registry.clone();
+    let send_fn = lua.create_function(
+        move |_lua,
+              (_self, inst_id, devid, cmd, data): (
+            Value,
+            LuaString,
+            LuaString,
+            LuaString,
+            LuaString,
+        )| {
+            let msg = CtlMessage {
+                instance: InstId::from(inst_id.to_string_lossy().to_string()),
+                devid: devid.to_string_lossy().to_string(),
+                cmd: cmd.to_string_lossy().to_string(),
+                data: data.to_string_lossy().to_string(),
+            };
+            let inst_str = msg.instance.to_string();
+            Ok(ctl.send(&inst_str, msg))
+        },
+    )?;
+    ctx.set("send_command", send_fn)?;
 
     lua.globals().set("ctx", ctx)?;
     Ok(())
@@ -298,6 +323,84 @@ mod tests {
             .await
             .expect("kv_get nil");
         assert_eq!(nil, mlua::Value::Nil, "缺省 key 返回 nil");
+
+        let _ = crate::db::shutdown_lux(handle).await;
+        let _ = std::fs::remove_dir_all(&data_dir);
+    }
+
+    /// send_command 经 CtlRegistry 投到目标实例；未注册实例返回 false。
+    #[tokio::test]
+    async fn send_command_routes_to_target() {
+        let ctl = CtlRegistry::new();
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<crate::types::CtlMessage>(8);
+        ctl.register("target", tx);
+
+        let lua = mlua::Lua::new();
+        let io = spawn_io_task(Box::new(MockIoTask {
+            responder: Box::new(|_| Ok(vec![])),
+        }));
+        let data_dir = std::env::temp_dir()
+            .join(format!("lua-send-{}", std::process::id()))
+            .to_str()
+            .unwrap()
+            .to_string();
+        let cfg = crate::config::AppConfig {
+            lux: crate::config::LuxConfig {
+                port: 0,
+                data_dir: data_dir.clone(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let handle = lux::run_with_config(crate::db::build_lux_config(&cfg))
+            .await
+            .expect("lux");
+        let ctx_host = HostContext {
+            lux: handle.client(),
+            hwid: crate::types::Hwid::new("it"),
+            shutdown: CancellationToken::new(),
+            ctl_registry: ctl.clone(), // 共享：lua send_command → target cmd_rx
+            bridge_registry: BridgeRegistry::new(),
+        };
+        let inst = InstConfig {
+            inst_id: "src".into(),
+            inst_name: "src".into(),
+            app_code: PluginName::new("luaClient"),
+            app_type: AppType::South,
+            auto_start: false,
+            app_config: serde_json::json!({"script":"a","endpoint":"x"}),
+            devices: vec![DeviceSpec {
+                label: "d".into(),
+                value: "d".into(),
+                children: vec![],
+            }],
+            host_kind: HostKind::Builtin,
+        };
+        register(&lua, ctx_host, &inst, io).expect("register");
+
+        // 命中目标实例。
+        let ok: bool = lua
+            .load("return ctx:send_command('target', 'dev1', 'write', '{\"v\":1}')")
+            .eval_async()
+            .await
+            .expect("send_command eval");
+        assert!(ok, "目标实例已注册应返回 true");
+        let m = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+            .await
+            .expect("超时")
+            .expect("应收到 CtlMessage");
+        assert_eq!(m.instance.as_str(), "target");
+        assert_eq!(m.devid, "dev1");
+        assert_eq!(m.cmd, "write");
+        assert_eq!(m.data, "{\"v\":1}");
+
+        // 未注册实例 → false。
+        let miss: bool = lua
+            .load("return ctx:send_command('nope', 'd', 'write', '{}')")
+            .eval_async()
+            .await
+            .expect("eval");
+        assert!(!miss, "未注册实例应返回 false");
 
         let _ = crate::db::shutdown_lux(handle).await;
         let _ = std::fs::remove_dir_all(&data_dir);
