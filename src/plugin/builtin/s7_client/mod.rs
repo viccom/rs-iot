@@ -14,7 +14,8 @@
 //!   "auto_reconnect": true
 //! }
 //! ```
-//! - `endpoint`：PLC IP（端口固定 102，S7 标准 ISO-on-TCP）
+//! - `endpoint`：PLC IP（端口默认 102，S7 标准 ISO-on-TCP；可用 `port` 覆盖——
+//!   非标端口 PLC 真实存在，亦便于测试连进程内 mock server）
 //! - `plc_type`：`s200`/`s200smart`/`s300`/`s400`/`s1200`/`s1500`/`sinumerik828d`
 //!   （缺省 `s1200`，大小写不敏感）
 //! - `rack`/`slot`：可选；缺省按 `plc_type`（`with_plc_type` 自动填默认）
@@ -77,6 +78,8 @@ pub struct S7Client;
 struct S7Cfg {
     /// PLC IP 地址。
     endpoint: String,
+    /// PLC 端口（缺省 102；可由 `app_config.port` 覆盖，便于非标端口 PLC + 测试）。
+    port: u16,
     /// PLC 型号（决定 rack/slot 默认 + PDU）。
     plc_type: PlcType,
     /// 用户显式指定的 rack/slot（缺省 None → 走 plc_type 默认）。
@@ -99,6 +102,11 @@ fn parse_cfg(app: &serde_json::Value) -> Result<S7Cfg, String> {
         .and_then(|v| v.as_str())
         .ok_or_else(|| "app_config.endpoint missing".to_string())?
         .to_string();
+    let port = app
+        .get("port")
+        .and_then(|v| v.as_u64())
+        .map(|p| p as u16)
+        .unwrap_or(S7_PORT);
     let plc_type = parse_plc_type(
         app.get("plc_type")
             .and_then(|v| v.as_str())
@@ -127,6 +135,7 @@ fn parse_cfg(app: &serde_json::Value) -> Result<S7Cfg, String> {
         .unwrap_or(true);
     Ok(S7Cfg {
         endpoint,
+        port,
         plc_type,
         rack_slot,
         period,
@@ -260,7 +269,7 @@ fn decode_item(kind: Kind, item: &DataItem) -> Option<SampleValue> {
 async fn connect(cfg: &S7Cfg) -> Result<S7Conn, String> {
     let mut s7 = S7Config::new(&cfg.endpoint)
         .with_plc_type(cfg.plc_type)
-        .with_port(S7_PORT)
+        .with_port(cfg.port)
         .with_timeout(cfg.timeout_ms)
         .with_auto_reconnect(cfg.auto_reconnect);
     if let Some((rack, slot)) = cfg.rack_slot {
@@ -587,6 +596,7 @@ mod tests {
     fn parse_cfg_defaults_and_validation() {
         let cfg = parse_cfg(&serde_json::json!({"endpoint":"192.168.0.1"})).unwrap();
         assert_eq!(cfg.endpoint, "192.168.0.1");
+        assert_eq!(cfg.port, 102, "port defaults to 102 (S7 standard)");
         assert_eq!(cfg.plc_type, PlcType::S1200);
         assert!(cfg.rack_slot.is_none(), "rack/slot default to plc_type");
         assert_eq!(cfg.period, 2);
@@ -594,10 +604,11 @@ mod tests {
         assert!(cfg.auto_reconnect);
 
         let cfg2 = parse_cfg(
-            &serde_json::json!({"endpoint":"x","plc_type":"s300","rack":0,"slot":2,"period":0,"timeout_ms":1000,"auto_reconnect":false}),
+            &serde_json::json!({"endpoint":"x","port":1025,"plc_type":"s300","rack":0,"slot":2,"period":0,"timeout_ms":1000,"auto_reconnect":false}),
         )
         .unwrap();
         assert_eq!(cfg2.plc_type, PlcType::S300);
+        assert_eq!(cfg2.port, 1025, "port overridable (非标端口 PLC / 测试)");
         assert_eq!(cfg2.rack_slot, Some((0, 2)));
         assert_eq!(cfg2.period, 1, "period 0 clamped to 1");
         assert_eq!(cfg2.timeout_ms, 1000);
