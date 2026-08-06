@@ -4,6 +4,7 @@
 //! 详见 `docs/superpowers/specs/2026-08-06-lua-script-collector-design.md`。
 
 mod config;
+mod engine;
 
 use crate::host::HostContext;
 use crate::plugin::traits::Source;
