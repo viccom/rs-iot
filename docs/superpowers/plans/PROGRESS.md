@@ -4,8 +4,8 @@
 
 ## 当前状态
 
-- ✅ Plan 1（M1-M3）+ Plan 2（M4）+ Plan 3（M5 HTTP）— 合并 master @ `6ff4ff0`（108 测试绿）
-- 🔵 Plan 4（on_data 被动帧，M2 欠账补全）— 分支 `feature/lua-on-data`，**Task 1 ✅**（`c021271`），执行中 Task 2-3
+- ✅ Plan 1（M1-M3）+ Plan 2（M4）+ Plan 3（M5 HTTP）+ Plan 4（on_data M2 欠账）— 合并 master @ `797545d`（**110 测试全绿**）
+- 🔵 下一步：写 Plan 5（M6 热加载）plan
 
 ## Plan 路线图（spec milestone + 欠账补全）
 
@@ -14,25 +14,32 @@
 | 1 | M1-M3 MVP | ✅ done @ master | `2026-08-06-lua-client-mvp.md` |
 | 2 | M4（L3 send_command + L4 kv + I2 重连） | ✅ done @ master（`136e9a9`） | `2026-08-06-lua-client-m4.md` |
 | 3 | M5 HTTP（L5 http_get/post + 审计） | ✅ done @ master（`6ff4ff0`） | `2026-08-07-lua-client-m5.md` |
-| 4 | on_data 被动帧（M2 欠账） | 🔵 `feature/lua-on-data`，Task 1 ✅ 执行中 | `2026-08-07-lua-client-on-data.md` |
-| 5 | M6 热加载（notify + VM 重建 + dry-run + 失败回退） | ⏭ 待写 plan | — |
+| 4 | on_data 被动帧（M2 欠账） | ✅ done @ master（`797545d`，2026-08-07 合并） | `2026-08-07-lua-client-on-data.md` |
+| 5 | M6 热加载（notify + VM 重建 + dry-run + 失败回退） | 🔵 待写 plan | — |
 | 6 | M7 状态监测（`stat:<inst>`）+ REST（`routes_lua`） | ⏭ 待写 plan | — |
-| 7 | M8 serial/udp + L2 数据 API + 文档 + 沙箱测补全 | ⏭ 待写 plan | — |
+| 7 | M8 serial/udp + L2 数据 API（set_value/get_value/...）+ 文档 + 沙箱测补全 | ⏭ 待写 plan | — |
 
-## Plan 4（on_data）执行进度（分支 `feature/lua-on-data`）
+## Plan 4（on_data）完成总结 ✅（合并 master @ `797545d`）
 
-- [x] Task 1：io_engine on_data 改造 ✅（`c021271`；IoBackend `recv_idle`（默认 sleep 50ms 避忙循环，TcpIo 覆盖主动 read）+ spawn_io_task 加 on_data_tx + IO task select!{ biased; req / recv_idle } + on_data 单测；mod.rs 建 data channel；api.rs 4 处测试改 spawn_mock_io helper。**修复设计缺陷**：默认 recv_idle 立即 None 致 select! 忙循环 CPU 100% → sleep 50ms。lua_client 24 测试绿）
-- [ ] Task 2：mod.rs 主循环 data_rx 分支 + `call_on_data`（`_data_rx` → `mut data_rx`）← 🔵 下一个
-- [ ] Task 3：on_data 集成测（mock server 推帧 → on_data kv_set 端到端）
+- [x] Task 1：io_engine on_data 改造（`c021271`；IoBackend `recv_idle` + spawn_io_task select! + on_data_tx；**修复忙循环**：默认 recv_idle 立即 None 致 CPU 100%，改 sleep 50ms）
+- [x] Task 2：mod.rs 主循环 data_rx 分支 + call_on_data（`876de55`）
+- [x] Task 3：on_data 集成测（`797545d`；mock server 推帧 → on_data kv_set 端到端，绕过未实现的 set_value）
+
+110 测试全绿（lib 92 + 集成测 18）。spec §8/§6 on_data 覆盖（IO recv_idle + 主循环 Evt::Data + 脚本回调）。
 
 ## 下一步（每轮 cron 触发执行）
 
-执行 **Plan 4 Task 2**（mod.rs 主循环）：3 Edit（`_data_rx`→`mut data_rx` / 主循环 select! 加 `Some(frame)=data_rx.recv()` 分支 / 加 `call_on_data` helper）。控制器接手（plan 含完整代码）。Task 2 绿 → Task 3 集成测 → 合并 → 写 Plan 5（M6 热加载）plan。
+**写 Plan 5（M6 热加载）plan**：superpowers:writing-plans，spec §5.3。
+- `notify::RecommendedWatcher` + `notify-debouncer-mini` 去抖 200ms → 收 `<name>/` 改动 → Source task 内编译新 VM（沙箱+hook）→ dry-run（on_init + 一次 collect 严格 hook）→ 成功切换（旧 VM CancellationToken 退出）/ 失败 warn 回退（旧 VM 继续跑，永不半生效）。
+- Cargo.toml lua feature 加 `dep:notify,dep:notify-debouncer-mini`（spec §16）。
+- spec §18 风险：notify Windows 偶有事件丢失 → 去抖 + REST 手动 reload（M7）兜底。
 
-## 已知简化（Plan 4，注明）
+文件名 `2026-08-07-lua-client-m6.md`。
 
-- 混合协议（collect + on_data）下 request cancel recv_idle 可能丢部分广播片段 —— 纯被动 period=0 不受影响；v1 接受。
-- `set_value`（L2）未实现，Task 3 用 `kv_set` 绕过测 on_data 链路。
+## 已知简化（Plan 4，注明，后续）
+
+- 混合协议（collect + on_data）下 request cancel recv_idle 可能丢部分广播片段 —— 纯被动 period=0 不受影响。
+- `set_value`（L2）未实现，Plan 4 集成测用 `kv_set` 绕过（L2 整组 set_value/get_value/get_device/list_devices 留 Plan 7）。
 
 ## 接手模式说明（API 503 期间）
 
