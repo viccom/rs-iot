@@ -4,8 +4,8 @@
 
 ## 当前状态
 
-- ✅ Plan 1（M1-M3）+ Plan 2（M4）+ Plan 3（M5 HTTP）+ Plan 4（on_data M2 欠账）— 合并 master @ `797545d`（110 测试绿）
-- 🔵 Plan 5（M6 热加载）— **plan 就绪**（`2026-08-07-lua-client-m6.md`，4 task），待建分支执行
+- ✅ Plan 1-4（M1-M5 + on_data）— 合并 master @ `797545d`（110 测试绿）
+- 🔵 Plan 5（M6 热加载）— 分支 `feature/lua-m6`，**Task 1 ✅**（`c079aca`），执行中 Task 2-4
 
 ## Plan 路线图（spec milestone + 欠账补全）
 
@@ -15,29 +15,27 @@
 | 2 | M4（L3 send_command + L4 kv + I2 重连） | ✅ done @ master（`136e9a9`） | `2026-08-06-lua-client-m4.md` |
 | 3 | M5 HTTP（L5 http_get/post + 审计） | ✅ done @ master（`6ff4ff0`） | `2026-08-07-lua-client-m5.md` |
 | 4 | on_data 被动帧（M2 欠账） | ✅ done @ master（`797545d`） | `2026-08-07-lua-client-on-data.md` |
-| 5 | M6 热加载（notify + VM 重建 + dry-run + 失败回退） | 🔵 plan 就绪，待执行 | `2026-08-07-lua-client-m6.md` |
+| 5 | M6 热加载（notify + VM 重建 + dry-run + 失败回退） | 🔵 `feature/lua-m6`，Task 1 ✅ 执行中 | `2026-08-07-lua-client-m6.md` |
 | 6 | M7 状态监测（`stat:<inst>`）+ REST（`routes_lua`） | ⏭ 待写 plan | — |
 | 7 | M8 serial/udp + L2 数据 API + 文档 + 沙箱测补全 | ⏭ 待写 plan | — |
 
-## Plan 5（M6 热加载）执行进度（待建分支 `feature/lua-m6`）
+## Plan 5（M6 热加载）执行进度（分支 `feature/lua-m6`）
 
-- [ ] Task 1：Cargo.toml lua feature 加 notify + notify-debouncer-mini ← 🔵 下一个
-- [ ] Task 2：mod.rs Evt 枚举 + 主循环 Evt 重构 + `reload_vm`（new_vm+load+register+dry-run on_init）+ Evt::Reload 替换 lua（核心 VM 重建）
+- [x] Task 1：Cargo.toml lua feature 加 notify 8 + notify-debouncer-mini 0.7 ✅（`c079aca`；cargo build 49.94s，notify 8.2 + debouncer 0.7 编译过）
+- [ ] Task 2：mod.rs Evt 枚举 + 主循环 Evt 重构 + `reload_vm`（new_vm+load+register+dry-run on_init）+ Evt::Reload 替换 lua（核心 VM 重建）← 🔵 下一个
 - [ ] Task 3：`hotload.rs` notify watcher（监听 scripts/<name>/ 去抖 200ms → reload_tx）
 - [ ] Task 4：热加载集成测（改脚本 → reload → 新 collect 值）
 
 ## 下一步（每轮 cron 触发执行）
 
-1. 建 `feature/lua-m6` 分支（从 master `7416127`）
-2. 执行 **Task 1**（Cargo notify + notify-debouncer-mini）：控制器接手（plan 含完整代码）或 subagent（API 恢复）。
-3. Task 1-4 完成 → 合并 → 写 Plan 6（M7 状态 REST）plan。
+执行 **Plan 5 Task 2**（mod.rs Evt 重构，核心 VM 重建）：控制器接手（plan 含完整代码）。4 处 Edit（Evt 枚举顶部 / reload channel + mut lua / 主循环整体替换 Evt 模式 / reload_vm helper）。**关键**：Evt 模式解耦 `&lua`/`&mut lua` 借用（Evt::Reload 的 `lua=new_lua` 与其他分支 `call_*(&lua)` 共存）。手动 reload_tx 测（Task 3 接 notify watcher）。Task 2 绿（lua_client 24 测试 + lua_modbus_e2e 不破坏）→ Task 3。
 
 ## 已知简化 / 风险（Plan 5，注明）
 
-- **dry-run = on_init only**（spec 说 on_init + collect；collect dry-run 真发 request 有副作用，v1 跳过，hook 兜底死循环）
-- **notify Windows 事件丢失**（spec §18）→ 去抖 + M7 REST 手动 reload 兜底
-- **VM 重建不重启 IO 连接**（新 VM 复用 io_engine；需重连则手动 stop/start 实例）
-- notify-debouncer-mini 0.7 API 实现时按实际调整（plan 给常见用法设计）
+- dry-run = on_init only（collect dry-run 真发 request 有副作用，跳过，hook 兜底）
+- notify Windows 事件丢失（spec §18）→ 去抖 + M7 REST 兜底
+- VM 重建不重启 IO 连接（新 VM 复用 io_engine）
+- notify-debouncer-mini 0.7 API 实现时按实际调整
 
 ## 接手模式说明（API 503 期间）
 
