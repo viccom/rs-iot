@@ -89,8 +89,7 @@ impl Source for LuaClient {
             }
         };
         // IO 引擎 + on_data 被动帧 channel（IO task 无在飞 request 时收到的帧 → 主循环）。
-        // data_rx 主循环消费（Task 2 接 select!）；_data_rx 前缀避免未用 warning（Task 2 改用）。
-        let (data_tx, _data_rx) = mpsc::channel::<Vec<u8>>(64);
+        let (data_tx, mut data_rx) = mpsc::channel::<Vec<u8>>(64);
         let io_engine = spawn_io_task(backend, data_tx);
 
         // 4. 注册 ctx API。
@@ -130,6 +129,12 @@ impl Source for LuaClient {
                                 tracing::warn!("[luaClient] on_write 失败：{e}");
                             }
                         }
+                    }
+                }
+                // on_data 被动帧（IO task 无在飞 request 时收到 → 脚本 on_data(frame)）。
+                Some(frame) = data_rx.recv() => {
+                    if let Err(e) = call_on_data(&lua, &frame).await {
+                        tracing::warn!("[luaClient] on_data 失败：{e}");
                     }
                 }
                 _ = ticker.tick() => {
@@ -197,6 +202,17 @@ async fn call_on_write(lua: &mlua::Lua, cmd_data: &str) -> mlua::Result<()> {
         lua.to_value(&v)?
     };
     let _: mlua::Value = f.call_async(cmd).await?;
+    Ok(())
+}
+
+/// 调脚本 on_data(frame)。frame 是 IO task 被动收到的字节串。脚本未定义 on_data 则忽略。
+async fn call_on_data(lua: &mlua::Lua, frame: &[u8]) -> mlua::Result<()> {
+    let f: mlua::Function = match lua.globals().get("on_data") {
+        Ok(f) => f,
+        Err(_) => return Ok(()),
+    };
+    let frame_str = lua.create_string(frame)?;
+    let _: mlua::Value = f.call_async(frame_str).await?;
     Ok(())
 }
 
