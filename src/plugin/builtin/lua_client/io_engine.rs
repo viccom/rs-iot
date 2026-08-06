@@ -90,9 +90,62 @@ impl IoBackend for MockIoTask {
     }
 }
 
+// ===== TcpIo（Plan 1 唯一真实 backend：独占 TcpStream，Timeout 成帧）=====
+
+/// TCP IO backend：独占一条 TcpStream，request = write_all(frame) + 读响应（Timeout 成帧：
+/// 读到静默 recv_idle_ms 返回累积字节）。
+pub(super) struct TcpIo {
+    /// 已连接的 TCP 流（独占，单 IO task 持有）。
+    stream: tokio::net::TcpStream,
+    /// 静默成帧阈值：本次 read 后 idle 内无新数据即视为一帧结束。
+    idle: std::time::Duration,
+}
+
+impl TcpIo {
+    /// 连接 endpoint（`ip:port`），返回 backend。失败由调用方按 reconnect_secs 重试（Plan 1
+    /// 以实例重启兜底，spec §5.4 懒连接 + 断链重连在后续 plan 完善）。
+    pub(super) async fn connect(endpoint: &str, recv_idle_ms: u64) -> mlua::Result<Self> {
+        let stream = tokio::net::TcpStream::connect(endpoint)
+            .await
+            .map_err(|e| mlua::Error::RuntimeError(format!("tcp connect {endpoint}: {e}")))?;
+        Ok(Self {
+            stream,
+            idle: std::time::Duration::from_millis(recv_idle_ms),
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl IoBackend for TcpIo {
+    async fn request(&mut self, frame: &[u8]) -> mlua::Result<Vec<u8>> {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        self.stream
+            .write_all(frame)
+            .await
+            .map_err(|e| mlua::Error::RuntimeError(format!("tcp write: {e}")))?;
+        // Timeout 成帧：循环读，每次 idle 内无新数据即返回。
+        let mut buf = Vec::new();
+        let mut tmp = [0u8; 256];
+        loop {
+            match tokio::time::timeout(self.idle, self.stream.read(&mut tmp)).await {
+                Ok(Ok(0)) => break, // 对端关闭
+                Ok(Ok(n)) => buf.extend_from_slice(&tmp[..n]),
+                Ok(Err(e)) => return Err(mlua::Error::RuntimeError(format!("tcp read: {e}"))),
+                Err(_) => break, // idle 静默 → 帧完成
+            }
+        }
+        if buf.is_empty() {
+            return Err(mlua::Error::RuntimeError("tcp: 无响应".into()));
+        }
+        Ok(buf)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
 
     #[tokio::test]
     async fn mock_roundtrip() {
@@ -117,5 +170,33 @@ mod tests {
         // _rx 还活着（未 drop），send 成功但无 backend 处理 → 超时。
         // 注意：若 drop(_rx) 则 send 失败 → "IO task closed" 错。这里保留 _rx 触发超时。
         assert!(r.is_err(), "无 backend 处理应超时或报错，got: {r:?}");
+    }
+
+    #[tokio::test]
+    async fn tcp_roundtrip() {
+        // mock server：收什么回什么 + 尾巴 0xAA。
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let (mut s, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 64];
+            loop {
+                match s.read(&mut buf).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        let mut r = buf[..n].to_vec();
+                        r.push(0xAA);
+                        let _ = s.write_all(&r).await;
+                    }
+                }
+            }
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let mut io = TcpIo::connect(&format!("127.0.0.1:{port}"), 50)
+            .await
+            .unwrap();
+        let resp = io.request(b"\x01\x02").await.unwrap();
+        assert_eq!(resp, vec![0x01, 0x02, 0xAA]);
     }
 }
