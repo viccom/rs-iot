@@ -74,21 +74,9 @@ impl Source for LuaClient {
             return;
         }
 
-        // 3. IO 引擎（按 transport 选 backend；Plan 1 仅 tcp，serial/udp 后续 plan）。
+        // 3. IO 引擎（按 transport 选 backend；TCP 懒连接 + 断连重连，serial/udp 后续 plan）。
         let backend: Box<dyn IoBackend> = match cfg.transport {
-            config::Transport::Tcp => match TcpIo::connect(&cfg.endpoint, cfg.recv_idle_ms).await {
-                Ok(io) => Box::new(io),
-                Err(e) => {
-                    tracing::warn!(
-                        "[luaClient] inst {} tcp 连接失败：{e}（{}s 后重连由实例重启兜底）",
-                        inst.inst_id,
-                        cfg.reconnect_secs
-                    );
-                    Box::new(MockIoTask {
-                        responder: Box::new(|_| Ok(vec![])),
-                    })
-                }
-            },
+            config::Transport::Tcp => Box::new(TcpIo::new(cfg.endpoint.clone(), cfg.recv_idle_ms)),
             _ => {
                 tracing::warn!(
                     "[luaClient] inst {} transport {:?} 暂未实现（Plan 1 仅 tcp），用 mock 占位",
