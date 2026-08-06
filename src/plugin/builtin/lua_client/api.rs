@@ -4,21 +4,24 @@
 use crate::host::HostContext;
 use crate::plugin::builtin::lua_client::io_engine::IoEngine;
 use crate::types::InstConfig;
-use mlua::{Lua, LuaString, Value};
+use mlua::{Lua, LuaSerdeExt, LuaString, Value};
 
 /// 在 `lua` 上注册 ctx 全局对象 + host 函数（Task 6 的 run 调用）。
 ///
 /// - L1 `ctx:request(frame:str, timeout_ms:num) -> resp:str | nil,err`：async，经
 ///   `create_async_function` 桥接，脚本 `ctx:request(...)` 调用时 mlua 自动驱动协程，
 ///   内部 `io.request` → IO task 独占处理 → oneshot 回执（spec §8 模式 Z）。
+/// - L4 `ctx:kv_set(key, v)` / `ctx:kv_get(key) -> v|nil`：async，落 lux Hash
+///   `luakv:<inst>`（`db::luakv`），脚本本地持久状态——跨重启保留、实例间隔离。
+///   value 经 `serde_json::Value` 中转（Lua value <-> JSON 文本）。
 /// - L6 `log_info/warn/err/debug(msg)`：tracing，前缀 `[lua:<inst>]`。
 /// - L6 `now()`/`time()`：当前本地毫秒/秒时间戳（f64）。
 ///
-/// `_ctx_host` Plan 1 未用（L2 get_value 等后续 plan 经 lux 读取设备最新值/实例配置
-/// 时使用），保留参数以稳定 Task 6 调用签名。
+/// `ctx_host` 自本 task（L4 kv）起用于 lux 读写；L2 get_value 等后续 plan 亦经此
+/// 读设备最新值/实例配置。
 pub(super) fn register(
     lua: &Lua,
-    _ctx_host: HostContext, // Plan 1 未用（L2 get_value 等后续 plan 用），保留参数
+    ctx_host: HostContext,
     inst: &InstConfig,
     io: IoEngine,
 ) -> mlua::Result<()> {
@@ -60,6 +63,49 @@ pub(super) fn register(
         "time",
         lua.create_function(|_lua, _self: Value| Ok(chrono::Local::now().timestamp() as f64))?,
     )?;
+
+    // --- L4 ctx:kv_set(key, v) / ctx:kv_get(key) -> v|nil ---
+    // value 经 serde_json::Value 中转（Lua value <-> JSON 文本），落 lux luakv:<inst>。
+    // async（lux 操作 await）→ create_async_function；_self 吸收冒号隐式 self。
+    let lux_set = ctx_host.lux.clone();
+    let inst_set = inst.inst_id.as_str().to_string();
+    let kv_set_fn =
+        lua.create_async_function(move |lua, (_self, key, v): (Value, LuaString, Value)| {
+            let lux = lux_set.clone();
+            let inst = inst_set.clone();
+            async move {
+                let key = key.to_string_lossy().to_string();
+                let json: serde_json::Value = lua.from_value(v)?;
+                let s = serde_json::to_string(&json)
+                    .map_err(|e| mlua::Error::RuntimeError(format!("kv_set 序列化: {e}")))?;
+                crate::db::luakv::set(&lux, &inst, &key, &s)
+                    .await
+                    .map_err(|e| mlua::Error::RuntimeError(format!("kv_set: {e}")))?;
+                Ok(())
+            }
+        })?;
+    ctx.set("kv_set", kv_set_fn)?;
+
+    let lux_get = ctx_host.lux.clone();
+    let inst_get = inst.inst_id.as_str().to_string();
+    let kv_get_fn = lua.create_async_function(move |lua, (_self, key): (Value, LuaString)| {
+        let lux = lux_get.clone();
+        let inst = inst_get.clone();
+        async move {
+            let key = key.to_string_lossy().to_string();
+            match crate::db::luakv::get(&lux, &inst, &key).await {
+                Ok(Some(s)) => {
+                    let json: serde_json::Value = serde_json::from_str(&s)
+                        .map_err(|e| mlua::Error::RuntimeError(format!("kv_get 反序列化: {e}")))?;
+                    let v: Value = lua.to_value(&json)?;
+                    Ok(v)
+                }
+                Ok(None) => Ok(Value::Nil),
+                Err(e) => Err(mlua::Error::RuntimeError(format!("kv_get: {e}"))),
+            }
+        }
+    })?;
+    ctx.set("kv_get", kv_get_fn)?;
 
     lua.globals().set("ctx", ctx)?;
     Ok(())
@@ -175,6 +221,84 @@ mod tests {
             .expect("ctx:log_info 冒号调用");
 
         // 优雅关闭 lux（先 SAVE 再 shutdown），并清理临时 data_dir。
+        let _ = crate::db::shutdown_lux(handle).await;
+        let _ = std::fs::remove_dir_all(&data_dir);
+    }
+
+    /// kv_set 后 kv_get 命中；类型 round-trip（number/string/bool）；缺省返回 nil。
+    #[tokio::test]
+    async fn kv_set_get_roundtrip() {
+        let lua = mlua::Lua::new();
+        let io = spawn_io_task(Box::new(MockIoTask {
+            responder: Box::new(|_| Ok(vec![])),
+        }));
+        let data_dir = std::env::temp_dir()
+            .join(format!("lua-kv-{}", std::process::id()))
+            .to_str()
+            .unwrap()
+            .to_string();
+        let cfg = crate::config::AppConfig {
+            lux: crate::config::LuxConfig {
+                port: 0,
+                data_dir: data_dir.clone(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let handle = lux::run_with_config(crate::db::build_lux_config(&cfg))
+            .await
+            .expect("lux");
+        let ctx_host = HostContext {
+            lux: handle.client(),
+            hwid: crate::types::Hwid::new("it"),
+            shutdown: CancellationToken::new(),
+            ctl_registry: CtlRegistry::new(),
+            bridge_registry: BridgeRegistry::new(),
+        };
+        let inst = InstConfig {
+            inst_id: "it".into(),
+            inst_name: "it".into(),
+            app_code: PluginName::new("luaClient"),
+            app_type: AppType::South,
+            auto_start: false,
+            app_config: serde_json::json!({"script":"a","endpoint":"x"}),
+            devices: vec![DeviceSpec {
+                label: "d".into(),
+                value: "d".into(),
+                children: vec![],
+            }],
+            host_kind: HostKind::Builtin,
+        };
+        register(&lua, ctx_host, &inst, io).expect("register");
+
+        // kv_set/kv_get 是 async function（底层落 lux），用 exec_async/eval_async 驱动。
+        lua.load("ctx:kv_set('counter', 42)")
+            .exec_async()
+            .await
+            .expect("kv_set");
+        lua.load("ctx:kv_set('name', 'alpha')")
+            .exec_async()
+            .await
+            .expect("kv_set str");
+        let n: i64 = lua
+            .load("return ctx:kv_get('counter')")
+            .eval_async()
+            .await
+            .expect("kv_get num");
+        assert_eq!(n, 42);
+        let s: String = lua
+            .load("return ctx:kv_get('name')")
+            .eval_async()
+            .await
+            .expect("kv_get str");
+        assert_eq!(s, "alpha");
+        let nil: mlua::Value = lua
+            .load("return ctx:kv_get('missing')")
+            .eval_async()
+            .await
+            .expect("kv_get nil");
+        assert_eq!(nil, mlua::Value::Nil, "缺省 key 返回 nil");
+
         let _ = crate::db::shutdown_lux(handle).await;
         let _ = std::fs::remove_dir_all(&data_dir);
     }
