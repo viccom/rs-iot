@@ -139,11 +139,11 @@ loop {
     match evt {
         Evt::Cmd(Some(m)) => if m.cmd == "write" { call_on_write(&vm, &m.data).await; }
         Evt::Cmd(None) => break,
-        Evt::Data(Some(frame)) => { let _ = call_on_data(&vm, &frame).await; }  // 脚本 on_data(ctx, frame)
+        Evt::Data(Some(frame)) => { let _ = call_on_data(&vm, &frame).await; }  // 脚本 on_data(frame)
         Evt::Data(None) => break,
         Evt::Tick => {
             // ensure io task connected（懒连接 + 断链重连，参考 modbus Option<Session>）
-            match call_collect(&vm).await {   // 调脚本 collect(ctx)，底层 ctx:request 经 IO task
+            match call_collect(&vm).await {   // 调脚本 collect()，底层 ctx:request 经 IO task
                 Ok(Some(sample)) => { let _ = tx.send(sample).await; }  // → hub
                 Ok(None) => {}                 // 脚本返回 nil，本次无数据
                 Err(e) => warn!(%e, "collect failed"),  // 脚本 error，VM 不死，下 tick 重试
@@ -154,7 +154,7 @@ loop {
 ```
 **关键不变式**（守 modbus_client 经验）：
 - `Evt` 枚举解耦 `select!` 与 `&mut` 借用；
-- `Option<IoHandle>` 懒连接，transport 错时置 None 下 tick 重连；
+- `Option<IoHandle>` 懒连接 + 断链重连（**Plan 2 实现**；MVP 启动连一次 `TcpIo::connect`，失败回退 `MockIoTask`，运行中断连不自动重连——对标 modbus `Option<Session>` 模式待补）；
 - 脚本 error 仅 warn，不杀 VM；
 - `ticker.set_missed_tick_behavior(Skip)` 防积压雪崩。
 
@@ -164,10 +164,12 @@ loop {
 
 | 函数 | 调用时机 | 返回 | 用途 |
 |---|---|---|---|
-| `on_init(ctx)` | 启动时一次 | 忽略 | 初始化（建表、读 kv、日志） |
-| `collect(ctx)` | 每个 `period` 周期（period=0 时不调） | `table\|nil`（key→value） | 主动一问一答采集；返回 table 转 Sample 推 hub |
-| `on_data(ctx, frame)` | IO task 收到帧时（被动） | 忽略 | 广播/推送协议；脚本内 `ctx:set_value` 上报 |
-| `on_write(ctx, cmd)` | 收到写命令时（cmd_rx） | `bool\|nil` | 处理写命令；cmd 为 JSON 解析后的 table |
+| `on_init()` | 启动时一次 | 忽略 | 初始化（建表、读 kv、日志）；用全局 `ctx` |
+| `collect()` | 每个 `period` 周期（period=0 时不调） | `table\|nil`（key→value） | 主动一问一答采集；返回 table 转 Sample 推 hub；用全局 `ctx` |
+| `on_data(frame)` | IO task 收到帧时（被动） | 忽略 | 广播/推送协议；脚本内 `ctx:set_value` 上报；`frame` 为被动帧字节串 |
+| `on_write(cmd)` | 收到写命令时（cmd_rx） | `bool\|nil` | 处理写命令；`cmd` 为 JSON 解析后的 table；用全局 `ctx` |
+
+**`ctx` 是全局**（宿主 `api::register` 注册 `lua.globals().set("ctx", ...)`），脚本直接用全局 `ctx`，回调函数**不取 ctx 参数**。Lua 冒号语法 `ctx:request(...)`/`ctx:log_info(...)`/`ctx:now()` 的隐式 self 由宿主函数 `_self: Value` 首参吸收（mlua 0.12，见实现 api.rs）。
 
 - `collect` 与 `on_data` **可共存**：一问一答走 collect，被动报文走 on_data。
 - 纯被动协议设 `period=0`，仅靠 on_data。
@@ -187,12 +189,12 @@ local function crc16(buf)
     return s
 end
 
-function on_init(ctx)
+function on_init()
     ctx.counter = ctx:kv_get("counter") or 0   -- 读持久状态
     ctx:log_info("devA started")
 end
 
-function collect(ctx)                          -- 周期一问一答
+function collect()  -- 周期一问一答；用全局 ctx（无参）
     local req = "\x01\x03\x00\x00\x00\x02"
     local resp = ctx:request(req .. string.pack("<H", crc16(req)), 100)
     if not resp or #resp < 7 then return nil end
@@ -202,11 +204,11 @@ function collect(ctx)                          -- 周期一问一答
     return { temp = temp, counter = ctx.counter }
 end
 
-function on_data(ctx, frame)                   -- 被动广播帧
+function on_data(frame)                   -- 被动广播帧（frame 为字节串；用全局 ctx）
     ctx:set_value("heartbeat", ctx:time())
 end
 
-function on_write(ctx, cmd)                    -- 写命令（cmd = JSON 解析后 table）
+function on_write(cmd)                    -- 写命令（cmd = JSON 解析后 table；用全局 ctx）
     local f = "\x01\x06" .. string.pack(">H>i2", cmd.addr, cmd.value)
     return ctx:request(f .. string.pack("<H", crc16(f)), 100) ~= nil
 end
@@ -220,7 +222,7 @@ end
 | API | 说明 |
 |---|---|
 | `ctx:request(frame, timeout_ms)` → `string\|nil, err?` | 主动一问一答（serial/tcp/udp 统一）；底层 coroutine.yield + IO task async |
-| `on_data(ctx, frame)`（脚本定义） | 被动收报；IO task 收到帧触发 |
+| `on_data(frame)`（脚本定义） | 被动收报；IO task 收到帧触发；用全局 ctx |
 | `ctx:sleep(ms)` | 主动延迟（底层 tokio sleep，不阻塞 reactor） |
 
 ### L2 数据读写
@@ -403,7 +405,7 @@ MQTT <hwid>/command 或 POST /api/v1/command/send
 - **mock server**：`ServerState{regs:HashMap<u16,u16>, writes:Vec}`；解析 FC03 请求的 `start/qty` 回寄存器值（大端 u16）；解析 FC06 落 `writes` + echo。
 - **Lua 脚本**（`scripts/it_modbus/main.lua`）：
   ```lua
-  function collect(ctx)
+  function collect()
     -- MBAP(tid,pid,len=6,uid) + FC03(fc=3,addr=0,qty=2)，全大端
     local req = string.pack(">I2I2I2BBI2I2", 1, 0, 6, 1, 3, 0, 2)
     local resp = ctx:request(req, 200)
@@ -411,7 +413,7 @@ MQTT <hwid>/command 或 POST /api/v1/command/send
     local r0, r1 = string.unpack(">I2I2", resp:sub(10))   -- 跳 MBAP(7)+fc(1)+bc(1)
     return { temp = r0/10, speed = r1 }
   end
-  function on_write(ctx, c)
+  function on_write(c)
     local req = string.pack(">I2I2I2BBI2I2", 2, 0, 6, 1, 6, c.addr, c.value)
     return ctx:request(req, 200) ~= nil
   end
@@ -424,7 +426,7 @@ MQTT <hwid>/command 或 POST /api/v1/command/send
 - **Lua 脚本**（`scripts/it_modbus_like/main.lua`）：
   ```lua
   local function ck(b) local s=0 for i=1,#b do s=(s+b:byte(i))&0xFF end return s end
-  function collect(ctx)
+  function collect()
     local body = string.pack("BBBB", 1, 3, 0, 2)                -- unit,fc,addr_le,qty
     local resp = ctx:request("\xAA"..body..string.char(ck(body)), 200)
     if not resp or resp:byte(1)~=0xAA then return nil end
@@ -440,11 +442,11 @@ MQTT <hwid>/command 或 POST /api/v1/command/send
 - **mock server**：spawn 定时推心跳 task（`02 10 02 <seq> 03`）+ 响应查询帧（`02 01 01 <level> 03`）。
 - **Lua 脚本**（`scripts/it_custom/main.lua`）：
   ```lua
-  function collect(ctx)
+  function collect()
     local r = ctx:request("\x02\x01\x00\x03", 200)             -- 主动查询
     if r and #r >= 6 then return { level = r:byte(4) } end
   end
-  function on_data(ctx, frame)                                 -- 被动广播
+  function on_data(frame)                                 -- 被动广播
     if frame:byte(1)==0x02 and frame:byte(2)==0x10 then
       ctx:set_value("heartbeat", ctx:time())
     end
