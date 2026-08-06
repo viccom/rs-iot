@@ -6,6 +6,7 @@
 mod api;
 mod config;
 mod engine;
+mod hotload;
 mod io_engine;
 mod loader;
 mod script;
@@ -121,7 +122,10 @@ impl Source for LuaClient {
 
         // 6. reload channel（notify watcher → Evt::Reload；Task 3 接 watcher）+ 主循环 Evt。
         // _reload_tx 暂不用（Task 3 spawn watcher 改 reload_tx.clone()）；前缀 _ 避 unused。
-        let (_reload_tx, mut reload_rx) = mpsc::channel::<()>(8);
+        let (reload_tx, mut reload_rx) = mpsc::channel::<()>(8);
+        // notify watcher 监听 scripts/<name>/ 改动 → reload_tx（热加载，spec §5.3）。
+        let script_dir = scripts_root.join(cfg.script.as_str());
+        hotload::spawn_watcher(script_dir, reload_tx);
         let mut ticker = tokio::time::interval(std::time::Duration::from_secs(cfg.period.max(1)));
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         tracing::info!(
