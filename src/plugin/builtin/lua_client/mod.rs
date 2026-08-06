@@ -24,6 +24,19 @@ use io_engine::{spawn_io_task, IoBackend, MockIoTask, TcpIo};
 use loader::SCRIPTS_ROOT;
 use script::{load_main, LoadCtx};
 
+/// 主循环事件（spec §5.4）：解耦 select! 与 `&lua` / `&mut lua` 借用，
+/// 使 `Evt::Reload` 的 `lua = new_lua`（&mut）与其他分支 `call_*(&lua)`（&）共存。
+enum Evt {
+    /// 写命令（cmd_rx）。
+    Cmd(Option<CtlMessage>),
+    /// on_data 被动帧（data_rx）。
+    Data(Vec<u8>),
+    /// 采集周期（ticker）。
+    Tick,
+    /// 热加载信号（reload_rx，notify watcher 触发）。
+    Reload,
+}
+
 /// Lua 脚本采集 Source（`luaClient`）。
 #[derive(Debug, Default)]
 pub struct LuaClient;
@@ -93,7 +106,7 @@ impl Source for LuaClient {
         let io_engine = spawn_io_task(backend, data_tx);
 
         // 4. 注册 ctx API。
-        if let Err(e) = api::register(&lua, ctx.clone(), &inst, io_engine) {
+        if let Err(e) = api::register(&lua, ctx.clone(), &inst, io_engine.clone()) {
             tracing::warn!("[luaClient] inst {} ctx API 注册失败：{e}", inst.inst_id);
             return;
         }
@@ -106,7 +119,9 @@ impl Source for LuaClient {
             }
         }
 
-        // 6. 主循环（照抄 data_sim/mod.rs:56-93 的 select! 骨架）。
+        // 6. reload channel（notify watcher → Evt::Reload；Task 3 接 watcher）+ 主循环 Evt。
+        // _reload_tx 暂不用（Task 3 spawn watcher 改 reload_tx.clone()）；前缀 _ 避 unused。
+        let (_reload_tx, mut reload_rx) = mpsc::channel::<()>(8);
         let mut ticker = tokio::time::interval(std::time::Duration::from_secs(cfg.period.max(1)));
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         tracing::info!(
@@ -116,28 +131,30 @@ impl Source for LuaClient {
             cfg.period
         );
 
+        let mut lua = lua; // 可变（Evt::Reload 替换为新 VM）
         loop {
-            tokio::select! {
-                _ = token.cancelled() => {
-                    tracing::info!("[luaClient] inst {} stopping", inst.inst_id);
-                    break;
-                }
-                msg = cmd_rx.recv() => {
-                    if let Some(m) = msg {
-                        if m.cmd == "write" {
-                            if let Err(e) = call_on_write(&lua, &m.data).await {
-                                tracing::warn!("[luaClient] on_write 失败：{e}");
-                            }
+            let evt = tokio::select! {
+                _ = token.cancelled() => break,
+                msg = cmd_rx.recv() => Evt::Cmd(msg),
+                Some(frame) = data_rx.recv() => Evt::Data(frame),
+                _ = reload_rx.recv() => Evt::Reload,
+                _ = ticker.tick() => Evt::Tick,
+            };
+            match evt {
+                Evt::Cmd(Some(m)) => {
+                    if m.cmd == "write" {
+                        if let Err(e) = call_on_write(&lua, &m.data).await {
+                            tracing::warn!("[luaClient] on_write 失败：{e}");
                         }
                     }
                 }
-                // on_data 被动帧（IO task 无在飞 request 时收到 → 脚本 on_data(frame)）。
-                Some(frame) = data_rx.recv() => {
+                Evt::Cmd(None) => break,
+                Evt::Data(frame) => {
                     if let Err(e) = call_on_data(&lua, &frame).await {
                         tracing::warn!("[luaClient] on_data 失败：{e}");
                     }
                 }
-                _ = ticker.tick() => {
+                Evt::Tick => {
                     if cfg.period == 0 {
                         continue;
                     }
@@ -158,6 +175,18 @@ impl Source for LuaClient {
                             Ok(_) => {}
                             Err(e) => tracing::warn!("[luaClient] collect 失败：{e}"),
                         }
+                    }
+                }
+                Evt::Reload => {
+                    match reload_vm(&cfg, &lctx, ctx.clone(), &inst, io_engine.clone()).await {
+                        Ok(new_lua) => {
+                            lua = new_lua;
+                            tracing::info!("[luaClient] inst {} 热加载成功", inst.inst_id);
+                        }
+                        Err(e) => tracing::warn!(
+                            "[luaClient] inst {} 热加载失败，旧 VM 继续：{e}",
+                            inst.inst_id
+                        ),
                     }
                 }
             }
@@ -214,6 +243,28 @@ async fn call_on_data(lua: &mlua::Lua, frame: &[u8]) -> mlua::Result<()> {
     let frame_str = lua.create_string(frame)?;
     let _: mlua::Value = f.call_async(frame_str).await?;
     Ok(())
+}
+
+/// 重建 VM：new_vm + load_main + register ctx + dry-run on_init（spec §5.3 热加载）。
+///
+/// IO engine / ctx_host 复用（不随 VM 替换）。dry-run 跑 on_init（hook 验证不死循环）；
+/// collect dry-run 跳过（真 collect 在下 tick，失败 warn）。失败返回 Err（主循环回退旧 VM）。
+async fn reload_vm(
+    cfg: &config::LuaCfg,
+    lctx: &LoadCtx,
+    ctx_host: HostContext,
+    inst: &InstConfig,
+    io: io_engine::IoEngine,
+) -> mlua::Result<mlua::Lua> {
+    let lua = engine::new_vm(cfg)?;
+    load_main(&lua, lctx)?;
+    api::register(&lua, ctx_host, inst, io)?;
+    // dry-run on_init（hook 兜底死循环；失败 → Err → 主循环回退旧 VM）。
+    if lua.globals().get::<mlua::Function>("on_init").is_ok() {
+        let r: mlua::Result<()> = lua.load("on_init()").eval_async().await;
+        r?;
+    }
+    Ok(lua)
 }
 
 /// mlua::Value → SampleValue（对标 transform/rhai.rs 的类型映射）。
