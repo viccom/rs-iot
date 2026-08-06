@@ -32,9 +32,11 @@ pub(super) fn register(
 
     // --- L1 ctx:request(frame:str, timeout_ms:num) -> resp:str | nil,err ---
     // create_async_function：ctx:request 内部 coroutine.yield 桥接 IO task（spec §8）。
+    // 首参 `_self` 接收 Lua 方法调用语法 `ctx:request(...)` 隐式传入的 self（ctx 表本身），
+    // 不使用——若漏掉会导致 mlua 把 ctx 表当 frame 解析（bad argument #1: Lua table to string）。
     let io_req = io.clone();
-    let request_fn =
-        lua.create_async_function(move |lua, (frame, timeout_ms): (LuaString, u64)| {
+    let request_fn = lua.create_async_function(
+        move |lua, (_self, frame, timeout_ms): (Value, LuaString, u64)| {
             let io = io_req.clone();
             async move {
                 let bytes = frame.as_bytes().to_vec();
@@ -45,7 +47,8 @@ pub(super) fn register(
                     Err(e) => Ok((Value::Nil, Value::String(lua.create_string(e.to_string())?))),
                 }
             }
-        })?;
+        },
+    )?;
     ctx.set("request", request_fn)?;
 
     // --- L6 log_info / log_warn / log_err / log_debug ---
@@ -55,11 +58,11 @@ pub(super) fn register(
     // --- L6 now() / time() ---
     ctx.set(
         "now",
-        lua.create_function(|_lua, ()| Ok(chrono::Local::now().timestamp_millis() as f64))?,
+        lua.create_function(|_lua, _self: Value| Ok(chrono::Local::now().timestamp_millis() as f64))?,
     )?;
     ctx.set(
         "time",
-        lua.create_function(|_lua, ()| Ok(chrono::Local::now().timestamp() as f64))?,
+        lua.create_function(|_lua, _self: Value| Ok(chrono::Local::now().timestamp() as f64))?,
     )?;
 
     lua.globals().set("ctx", ctx)?;
@@ -79,7 +82,7 @@ fn register_log(lua: &Lua, ctx: &mlua::Table, name: &str) -> mlua::Result<()> {
         ("log_debug", tracing::Level::DEBUG),
     ] {
         let n = name.to_string();
-        let f = lua.create_function(move |_lua, msg: LuaString| {
+        let f = lua.create_function(move |_lua, (_self, msg): (Value, LuaString)| {
             let msg = msg.to_string_lossy().to_string();
             if level == tracing::Level::INFO {
                 tracing::info!("[lua:{n}] {msg}");
@@ -164,6 +167,14 @@ mod tests {
             let is_fn: bool = lua.load(&src).eval().expect(api);
             assert!(is_fn, "ctx.{api} 应是 function");
         }
+        // 冒号语法冒烟：ctx:now() / ctx:log_info(...) 应工作（_self 首参吸收冒号隐式 self）。
+        let now: f64 = lua.load("return ctx:now()").eval().expect("ctx:now 冒号调用");
+        assert!(now > 0.0);
+        let _: () = lua
+            .load("ctx:log_info('hello')")
+            .exec()
+            .expect("ctx:log_info 冒号调用");
+
         // 优雅关闭 lux（先 SAVE 再 shutdown），并清理临时 data_dir。
         let _ = crate::db::shutdown_lux(handle).await;
         let _ = std::fs::remove_dir_all(&data_dir);
