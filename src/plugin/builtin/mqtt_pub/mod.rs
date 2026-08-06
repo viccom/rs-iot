@@ -15,12 +15,12 @@ use tokio_util::sync::CancellationToken;
 
 /// 北向 MQTT 发布器：周期从 lux 抽取 rtdata 发布（pull 模式，不再 impl Sink）。
 #[derive(Debug)]
-pub struct MqttPublisher {
+pub struct MqttPub {
     /// broker 配置（host/port/credentials/publish_interval_secs）。
     cfg: MqttConfig,
 }
 
-impl MqttPublisher {
+impl MqttPub {
     /// 构造。
     pub fn new(cfg: MqttConfig) -> Self {
         Self { cfg }

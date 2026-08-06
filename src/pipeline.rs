@@ -1,7 +1,7 @@
 //! 数据管道：消费 hub 汇聚的所有 Source 样本 → Processor 转换 → 写 lux rtdata。
 //!
 //! hub 模式：所有 Source 输出汇入共享 mpsc，pipeline 单消费者。
-//! 单 Source 启停不影响 pipeline。北向发布由常驻 `MqttPublisher` 独立周期从 lux
+//! 单 Source 启停不影响 pipeline。北向发布由常驻 `MqttPub` 独立周期从 lux
 //! 抽取（STEP 5 起），不再走 pipeline fan-out。
 
 use crate::db;
@@ -15,7 +15,7 @@ use tokio_util::sync::CancellationToken;
 /// 消费 hub 汇聚的样本：经 `Processor` 转换后写 lux rtdata。
 ///
 /// 单消费者模型：所有 Source 输出汇入 `hub_rx`，本函数独占消费。
-/// 北向 MQTT 发布由独立的 `MqttPublisher` 周期从 lux 抽取，不再走 pipeline fan-out。
+/// 北向 MQTT 发布由独立的 `MqttPub` 周期从 lux 抽取，不再走 pipeline fan-out。
 pub async fn run(
     ctx: HostContext,
     mut hub_rx: mpsc::Receiver<Sample>,
