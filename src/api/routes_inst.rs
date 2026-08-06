@@ -77,5 +77,9 @@ pub async fn delete(
     if let Err(e) = crate::db::ext_token::remove(&st.lux, &req.inst_id).await {
         tracing::warn!("[routes_inst] remove token for {} failed: {e}", req.inst_id);
     }
+    // 清理该实例的全部 Lua kv（实例没了，脚本持久状态随之失效——与 ext_token 同位）。
+    if let Err(e) = crate::db::luakv::remove(&st.lux, &req.inst_id).await {
+        tracing::warn!("[routes_inst] remove luakv for {} failed: {e}", req.inst_id);
+    }
     Json(serde_json::json!({"status": "deleted"}))
 }

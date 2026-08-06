@@ -1,5 +1,6 @@
 pub mod ext_token;
 pub mod identity;
+pub mod luakv;
 pub mod rtdata;
 
 use crate::config::AppConfig;

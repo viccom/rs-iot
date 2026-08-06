@@ -9,6 +9,7 @@
 //! - `children`  : field=devId, value=JSON 变量列表（M3）
 //! - `accesskey` : string，全局访问密钥（M3）
 //! - `ext_tokens`: Hash，field=instId, value=JSON{token_hash,created_at,enabled}（M7 外部插件 bridge）
+//! - `luakv:<instId>` : Hash，field=key，value=JSON（M4 脚本本地持久化状态）
 //! - `rtdata:<devId>` : Hash，field=tag, value=[ts, localTime, value]（M2 实时数据缓存）
 
 use crate::error::RsIotError;
