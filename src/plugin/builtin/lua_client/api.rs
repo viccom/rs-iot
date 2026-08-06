@@ -132,6 +132,63 @@ pub(super) fn register(
     )?;
     ctx.set("send_command", send_fn)?;
 
+    // --- L5 ctx:http_get/http_post（feature lua-http，全审计 + 5s 默认超时 + 1MB 上限）---
+    // reqwest async（同 ctx:request 模式）；_self 吸收冒号隐式 self；timeout 秒（默认 5）。
+    #[cfg(feature = "lua-http")]
+    {
+        let inst_get = inst.inst_id.as_str().to_string();
+        let http_get_fn = lua.create_async_function(
+            move |lua,
+                  (_self, url, headers, timeout): (
+                Value,
+                LuaString,
+                Option<mlua::Table>,
+                Option<u64>,
+            )| {
+                let inst = inst_get.clone();
+                async move {
+                    let url = url.to_string_lossy().to_string();
+                    let timeout_secs = timeout.unwrap_or(5).max(1);
+                    let hdrs = headers_to_vec(headers)?;
+                    let (status, body) =
+                        http_request(&inst, "GET", &url, None, hdrs, timeout_secs).await?;
+                    let t = lua.create_table()?;
+                    t.set("status", status)?;
+                    t.set("body", body)?;
+                    Ok(t)
+                }
+            },
+        )?;
+        ctx.set("http_get", http_get_fn)?;
+
+        let inst_post = inst.inst_id.as_str().to_string();
+        let http_post_fn = lua.create_async_function(
+            move |lua,
+                  (_self, url, body, headers, timeout): (
+                Value,
+                LuaString,
+                LuaString,
+                Option<mlua::Table>,
+                Option<u64>,
+            )| {
+                let inst = inst_post.clone();
+                async move {
+                    let url = url.to_string_lossy().to_string();
+                    let body = body.to_string_lossy().to_string();
+                    let timeout_secs = timeout.unwrap_or(5).max(1);
+                    let hdrs = headers_to_vec(headers)?;
+                    let (status, resp_body) =
+                        http_request(&inst, "POST", &url, Some(body), hdrs, timeout_secs).await?;
+                    let t = lua.create_table()?;
+                    t.set("status", status)?;
+                    t.set("body", resp_body)?;
+                    Ok(t)
+                }
+            },
+        )?;
+        ctx.set("http_post", http_post_fn)?;
+    }
+
     lua.globals().set("ctx", ctx)?;
     Ok(())
 }
@@ -165,6 +222,76 @@ fn register_log(lua: &Lua, ctx: &mlua::Table, name: &str) -> mlua::Result<()> {
         ctx.set(key, f)?;
     }
     Ok(())
+}
+
+/// Lua headers table → `Vec<(name,value)>`（`Send`，跨 await 安全）。
+///
+/// mlua `Table` 跨 await 持有不一定 `Send`，故在闭包内（await 前）同步转 `Vec`。
+#[cfg(feature = "lua-http")]
+fn headers_to_vec(headers: Option<mlua::Table>) -> mlua::Result<Vec<(String, String)>> {
+    let mut v = Vec::new();
+    if let Some(h) = headers {
+        for pair in h.pairs::<String, LuaString>() {
+            let (k, val) = pair?;
+            v.push((k, val.to_string_lossy().to_string()));
+        }
+    }
+    Ok(v)
+}
+
+/// 发一次 HTTP 请求，返回 `(status, body)`。全审计（INFO 成功 / warn 失败或超限），
+/// 响应体上限 1MB（防 OOM；流式 limit 为后续优化）。超时由 `timeout_secs` 控制。
+#[cfg(feature = "lua-http")]
+async fn http_request(
+    inst: &str,
+    method: &str,
+    url: &str,
+    body: Option<String>,
+    headers: Vec<(String, String)>,
+    timeout_secs: u64,
+) -> mlua::Result<(u16, String)> {
+    let start = std::time::Instant::now();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(timeout_secs))
+        .build()
+        .map_err(|e| mlua::Error::RuntimeError(format!("http client: {e}")))?;
+    let mut req = match method {
+        "GET" => client.get(url),
+        "POST" => client.post(url).body(body.unwrap_or_default()),
+        other => {
+            return Err(mlua::Error::RuntimeError(format!(
+                "http: 不支持的方法 {other}"
+            )))
+        }
+    };
+    for (k, v) in &headers {
+        req = req.header(k, v.as_str());
+    }
+    match req.send().await {
+        Ok(resp) => {
+            let status = resp.status().as_u16();
+            let bytes = resp
+                .bytes()
+                .await
+                .map_err(|e| mlua::Error::RuntimeError(format!("http body: {e}")))?;
+            if bytes.len() > 1024 * 1024 {
+                let ms = start.elapsed().as_millis();
+                tracing::warn!(
+                    "[lua:{inst}] HTTP {method} {url} -> body 过大 ({}B > 1MB, {ms}ms)",
+                    bytes.len()
+                );
+                return Err(mlua::Error::RuntimeError("http: 响应体超 1MB".into()));
+            }
+            let ms = start.elapsed().as_millis();
+            tracing::info!("[lua:{inst}] HTTP {method} {url} -> {status} ({ms}ms)");
+            Ok((status, String::from_utf8_lossy(&bytes).into_owned()))
+        }
+        Err(e) => {
+            let ms = start.elapsed().as_millis();
+            tracing::warn!("[lua:{inst}] HTTP {method} {url} -> FAIL {e} ({ms}ms)");
+            Err(mlua::Error::RuntimeError(format!("http {method}: {e}")))
+        }
+    }
 }
 
 #[cfg(test)]
@@ -401,6 +528,84 @@ mod tests {
             .await
             .expect("eval");
         assert!(!miss, "未注册实例应返回 false");
+
+        let _ = crate::db::shutdown_lux(handle).await;
+        let _ = std::fs::remove_dir_all(&data_dir);
+    }
+
+    /// http_get 返回 {status, body}；经 mock HTTP server 验证。
+    #[cfg(feature = "lua-http")]
+    #[tokio::test]
+    async fn http_get_returns_status_and_body() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+        // mock HTTP server：读请求后回 200 + JSON body。
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let (mut s, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 1024];
+            let _ = s.read(&mut buf).await;
+            let body = r#"{"ok":true}"#;
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = s.write_all(resp.as_bytes()).await;
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let lua = mlua::Lua::new();
+        let io = spawn_io_task(Box::new(MockIoTask {
+            responder: Box::new(|_| Ok(vec![])),
+        }));
+        let data_dir = std::env::temp_dir()
+            .join(format!("lua-http-{}", std::process::id()))
+            .to_str()
+            .unwrap()
+            .to_string();
+        let cfg = crate::config::AppConfig {
+            lux: crate::config::LuxConfig {
+                port: 0,
+                data_dir: data_dir.clone(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let handle = lux::run_with_config(crate::db::build_lux_config(&cfg))
+            .await
+            .expect("lux");
+        let ctx_host = HostContext {
+            lux: handle.client(),
+            hwid: crate::types::Hwid::new("it"),
+            shutdown: CancellationToken::new(),
+            ctl_registry: CtlRegistry::new(),
+            bridge_registry: BridgeRegistry::new(),
+        };
+        let inst = InstConfig {
+            inst_id: "it".into(),
+            inst_name: "it".into(),
+            app_code: PluginName::new("luaClient"),
+            app_type: AppType::South,
+            auto_start: false,
+            app_config: serde_json::json!({"script":"a","endpoint":"x"}),
+            devices: vec![DeviceSpec {
+                label: "d".into(),
+                value: "d".into(),
+                children: vec![],
+            }],
+            host_kind: HostKind::Builtin,
+        };
+        register(&lua, ctx_host, &inst, io).expect("register");
+
+        let resp: mlua::Table = lua
+            .load(format!("return ctx:http_get('http://127.0.0.1:{port}/x')"))
+            .eval_async()
+            .await
+            .expect("http_get");
+        assert_eq!(resp.get::<i64>("status").unwrap(), 200);
+        assert_eq!(resp.get::<String>("body").unwrap(), "{\"ok\":true}");
 
         let _ = crate::db::shutdown_lux(handle).await;
         let _ = std::fs::remove_dir_all(&data_dir);
