@@ -85,12 +85,17 @@ mlua = { version = "0.12", features = ["lua54", "vendored", "async", "send", "se
 # json feature 供 http_post body 序列化（v1 直接传文本 body，json feature 备用）。
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"], optional = true }
 
+# Lua 脚本热加载（lua feature）：notify 监听 scripts/ 改动 + notify-debouncer-mini 去抖。
+# notify-debouncer-mini 0.7 依赖 notify ^8.2（0.5 要 notify 7 会冲突，已核实 crates.io）。
+notify = { version = "8", optional = true }
+notify-debouncer-mini = { version = "0.7", optional = true }
+
 [features]
 default = ["transform", "lua", "lua-http"]
 # L2 数据转换（rhai 脚本，默认开启）
 transform = ["dep:rhai"]
 # Lua 动态脚本采集（luaClient，默认开启）
-lua = ["dep:mlua"]
+lua = ["dep:mlua", "dep:notify", "dep:notify-debouncer-mini"]
 # Lua HTTP 出站（ctx:http_get/http_post，默认随 lua 开；独立可关以裁 release / 减出站风险面）
 lua-http = ["lua", "dep:reqwest"]
 # 预留（后续里程碑）：
