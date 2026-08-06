@@ -10,7 +10,8 @@
 - **插件分层**：
   - L1 核心协议插件：`inventory` 静态注册，编进单一二进制（零开销）。已实现：`dataSim`（模拟）/ `opcuaClient`（OPC UA client）/ `modbusClient`（Modbus TCP）
   - L2 数据转换：内嵌 `rhai` 脚本（feature `transform`，默认开启）
-  - L3 WASM 扩展 / L4 进程插件：v2 路线
+  - **外部南向插件（sidecarClient bridge，M7）**：任意语言（C/Go/Python/Java…）外部进程经 TCP bridge 接入，token 鉴权；外部=纯运行时（配置/数据在 rs-iot，本地仅缓存补传），lux 不对暴露。协议见 `docs/external-plugin-protocol.md`；样例：`examples/ext-plugin-python/`（Python）、`examples/ext-plugin-opcda-go/`（OPC DA，Go + opcda，连 Matrikon DA Server）
+  - L3 WASM 扩展：v2 路线
 - **数据流（hub + 双总线）**：数据上行 `N × Source → hub(mpsc) → pipeline(Processor) → lux rtdata`；控制下行 `写入口 → CtlRegistry → 实例 cmd_rx`。南向采集与北向发布完全解耦（lux rtdata 单一交汇点）；单 Source 启停不影响管道。
 - **北向发布 + 写入口多源**：`MqttPublisher` 独立常驻周期从 lux 抽取发布（pull 模式）；写命令入口：MQTT `<hwid>/command` 订阅 + REST `POST /api/v1/command/send`（经 CtlRegistry 路由到实例，opcua/modbus 即时下行）。
 - **REST 管理 API**（仓库 `config.toml` 为 `:8790`，代码默认 `:8780`）：JWT 中间件 + 白名单 + `X-Access-Key`；对标 Lite_IOT 路由（sysinfo/plugins/inst/user/group/accesskey/inst 启停 + `/rtdatas` 实时数据查询 + `/command/send` 写命令）；`apiTest` 静态前端（rust-embed 嵌入）。
@@ -86,6 +87,13 @@ save_interval_secs = 300
 host = "broker.emqx.io"       # 公共 MQTT broker（匿名；生产换私有 broker + credentials）
 port = 1883
 publish_interval_secs = 5     # 北向 pull 发布周期（秒）
+
+[bridge]
+enable = false                # 外部插件 bridge（sidecarClient）；默认关，现有部署零影响
+bind_host = "127.0.0.1"       # 同机；跨机部署改 "0.0.0.0"（token 强制校验）
+port = 8781
+heartbeat_timeout_secs = 15
+accept_hello_timeout_secs = 10
 ```
 
 ## 架构
@@ -115,6 +123,21 @@ publish_interval_secs = 5     # 北向 pull 发布周期（秒）
 └──────────────────────────────────────────────────────────┘
 ```
 
+**外部插件 bridge（sidecarClient，M7）**——任意语言外部进程作为南向 Source 接入：
+
+```
+外部进程(C/Go/Python/...) ──TCP──► bridge acceptor(:8781, token 鉴权)
+                                        │ 按 inst_id 分发到实例 task
+                                        ▼
+                              sidecarClient task（每实例一个）
+                                        │ DataUp → Sample → hub → pipeline → rtdata（与内置同构）
+                                        │ 写命令 ← CtlRegistry ← MQTT/REST → Command 帧 → 外部
+                                        ▼
+                              lux（loopback，外部永不触碰）
+```
+
+外部=纯运行时（配置/数据/状态全在 rs-iot，本地仅缓存数据待补传）；几百实例并发，每实例独立 task；双向重连容错（外部指数退避 + 缓存补传，bridge 断连感知 + 失联期间写命令丢弃）。
+
 ## CI
 
 GitHub Actions（`.github/workflows/ci.yml`，push/PR 触发）：
@@ -136,12 +159,14 @@ GitHub Actions（`.github/workflows/ci.yml`，push/PR 触发）：
 - [x] **L1→L2 治理（STEP 1-10）**：lint/文档基线 + 统一错误规范（thiserror/`#[non_exhaustive]`）+ newtype ID + 日志规范（`#[instrument]`/TraceLayer）+ mqtt pull 化（MqttPublisher 周期从 lux 抽取）+ `/rtdatas` 路由 + 公共 broker 配置 + CI + 端到端验证（公共 broker 实测通过）
 - [x] **M5** opcuaClient 南向插件（async-opcua，none/Basic256Sha256，读写 UA Server）+ 文件日志（tracing-appender daily 轮转）
 - [x] **M6** modbusClient 南向插件（tokio-modbus，批量读 + 位解析 + 4 种字节序 + 混合类型偏移）+ REST 写命令端点 `/api/v1/command/send`（CtlRegistry 多源写总线，opcua/modbus 即时下行）
+- [x] **M7** 外部插件 bridge（sidecarClient）：任意语言外部进程经 TCP 接入（token 鉴权，方案 C 不暴露 lux）；sidecarClient Source + acceptor + BridgeRegistry + 7 帧协议（Hello/ConfigPush/DataUp/Command/Ack/Heartbeat）+ 双向重连容错 + ext_tokens hmac；Python 样例 + 端到端集成测试
 
 ## v2 路线
 
 - 更多南向协议：Modbus RTU / OPC DA client / IEC 60870-5-104 master / DNP3 / BACnet …
 - 北向服务器插件（既读出口又写入口）：OPC UA Server / OPC DA Server / Modbus slave / IEC 60870-5-104 Server —— 都经 CtlRegistry 写总线 + lux rtdata 读
-- L3 WASM 插件（wasmtime/extism）、L4 进程插件（execd，复用 lux RESP）
+- L3 WASM 插件（wasmtime/extism）
+- 外部插件 bridge 增强：TLS（rustls）、配置变更自动 notify、历史时序存储、迟到数据 ts 单调过滤、北向外部插件（app_type=North + sidecarClient）、批量导入 API（几百实例运维）
 - DataFusion 分析视图（SQL/UDF，REST `/api/v1/query`）
 - 时序 downsample（lux Stream + 周期聚合）
 - v2 push sink：Sink trait 已保留，供推送式北向插件使用
