@@ -16,6 +16,7 @@ use crate::plugin::traits::Source;
 use crate::types::{CtlMessage, InstConfig, Sample, SampleValue};
 use async_trait::async_trait;
 use mlua::LuaSerdeExt;
+use sha2::Digest;
 use std::collections::BTreeMap;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -135,6 +136,22 @@ impl Source for LuaClient {
             cfg.period
         );
 
+        // 状态快照（spec §13）：启动写 running，collect/reload/退出 更新。
+        let script_ver = script_version(&scripts_root, &cfg.script);
+        let mut stat = crate::db::luastat::LuaStat {
+            status: "running".into(),
+            collect_count: 0,
+            collect_fail_count: 0,
+            last_collect_ts: 0,
+            last_collect_duration_ms: 0,
+            vm_restart_count: 0,
+            script_version: script_ver,
+            last_err: String::new(),
+        };
+        let _ = crate::db::luastat::write(&ctx.lux, inst.inst_id.as_ref(), &stat).await;
+        // 连续失败计数（内存，不落 lux；仅 stat.status 反映 degraded）。
+        let mut consecutive_fail: u32 = 0;
+
         let mut lua = lua; // 可变（Evt::Reload 替换为新 VM）
         loop {
             let evt = tokio::select! {
@@ -162,7 +179,9 @@ impl Source for LuaClient {
                     if cfg.period == 0 {
                         continue;
                     }
+                    let started = std::time::Instant::now();
                     let now = chrono::Local::now().timestamp();
+                    let mut tick_err: Option<String> = None;
                     for dev in &inst.devices {
                         match call_collect(&lua).await {
                             Ok(Some(values)) if !values.is_empty() => {
@@ -177,14 +196,40 @@ impl Source for LuaClient {
                                 }
                             }
                             Ok(_) => {}
-                            Err(e) => tracing::warn!("[luaClient] collect 失败：{e}"),
+                            Err(e) => {
+                                tracing::warn!("[luaClient] collect 失败：{e}");
+                                tick_err = Some(e.to_string());
+                            }
                         }
                     }
+                    // 状态采点（spec §13）：按周期计，任一 collect 失败记 fail 周期。
+                    stat.last_collect_ts = now;
+                    stat.last_collect_duration_ms = started.elapsed().as_millis() as u64;
+                    if let Some(e) = tick_err {
+                        stat.collect_fail_count += 1;
+                        stat.last_err = e;
+                        consecutive_fail = consecutive_fail.saturating_add(1);
+                        if consecutive_fail >= cfg.fail_threshold {
+                            stat.status = "degraded".into();
+                        }
+                    } else {
+                        stat.collect_count += 1;
+                        stat.last_err.clear();
+                        consecutive_fail = 0;
+                        stat.status = "running".into();
+                    }
+                    let _ = crate::db::luastat::write(&ctx.lux, inst.inst_id.as_ref(), &stat).await;
                 }
                 Evt::Reload => {
                     match reload_vm(&cfg, &lctx, ctx.clone(), &inst, io_engine.clone()).await {
                         Ok(new_lua) => {
                             lua = new_lua;
+                            stat.vm_restart_count += 1;
+                            consecutive_fail = 0;
+                            stat.status = "running".into();
+                            let _ =
+                                crate::db::luastat::write(&ctx.lux, inst.inst_id.as_ref(), &stat)
+                                    .await;
                             tracing::info!("[luaClient] inst {} 热加载成功", inst.inst_id);
                         }
                         Err(e) => tracing::warn!(
@@ -195,6 +240,10 @@ impl Source for LuaClient {
                 }
             }
         }
+
+        // 退出标记 stopped（spec §13 status）。
+        stat.status = "stopped".into();
+        let _ = crate::db::luastat::write(&ctx.lux, inst.inst_id.as_ref(), &stat).await;
     }
 }
 
@@ -282,6 +331,26 @@ fn lua_value_to_sample(v: &mlua::Value) -> Option<SampleValue> {
     }
 }
 
+/// 算脚本版本（main.lua 内容 sha256 前 8 hex，spec §13 `script_version`）。
+///
+/// 文件读失败返回 `"unknown"`（不阻塞启动；`load_main` 会报真正的加载错误）。
+fn script_version(scripts_root: &std::path::Path, name: &str) -> String {
+    let path = loader::main_lua_path(scripts_root, name);
+    match std::fs::read(&path) {
+        Ok(bytes) => {
+            let mut h = sha2::Sha256::new();
+            h.update(&bytes);
+            let sum = h.finalize();
+            let mut hex = String::with_capacity(8);
+            for b in sum.iter().take(4) {
+                hex.push_str(&format!("{:02x}", b));
+            }
+            hex
+        }
+        Err(_) => "unknown".into(),
+    }
+}
+
 // 静态注册到 inventory（编译期，编进单一二进制）
 inventory::submit! {
     crate::plugin::registry::SourceEntry {
@@ -305,6 +374,26 @@ mod tests {
     fn lua_client_registered() {
         assert!(find_source("luaClient").is_some(), "luaClient 应静态注册");
         assert!(find_source("nope").is_none());
+    }
+
+    #[test]
+    fn script_version_stable_and_short() {
+        let tmp = std::env::temp_dir().join(format!("lua-sv-{}", std::process::id()));
+        std::fs::create_dir_all(tmp.join("devA")).unwrap();
+        std::fs::write(
+            tmp.join("devA/main.lua"),
+            "function collect() return { v = 1 } end",
+        )
+        .unwrap();
+        let v1 = super::script_version(&tmp, "devA");
+        assert_eq!(v1.len(), 8, "sha256 前 8 hex");
+        assert_ne!(v1, "unknown");
+        // 同内容 → 同 hash。
+        let v2 = super::script_version(&tmp, "devA");
+        assert_eq!(v1, v2);
+        // 不存在 → unknown。
+        assert_eq!(super::script_version(&tmp, "missing"), "unknown");
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[tokio::test]
