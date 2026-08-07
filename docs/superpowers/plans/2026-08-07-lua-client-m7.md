@@ -264,14 +264,14 @@ Expected: config 全测试绿（含新 fail_threshold）。
 
 **Files:** Modify `src/plugin/builtin/lua_client/mod.rs`
 
-### - [ ] Step 1：顶层 use 加 sha2::Digest
+### - [x] Step 1：顶层 use 加 sha2::Digest
 
 mod.rs 顶部 `use` 段（`use mlua::LuaSerdeExt;` 后）加：
 ```rust
 use sha2::Digest;
 ```
 
-### - [ ] Step 2：script_version helper（含单测）
+### - [x] Step 2：script_version helper（含单测）
 
 mod.rs（`lua_value_to_sample` 函数后、`inventory::submit!` 前）加 helper：
 ```rust
@@ -315,7 +315,7 @@ mod.rs `#[cfg(test)] mod tests` 内加单测：
     }
 ```
 
-### - [ ] Step 3：run() 内 stat 初始化 + 启动写 running
+### - [x] Step 3：run() 内 stat 初始化 + 启动写 running
 
 mod.rs `run()` 主循环前（`let mut lua = lua;` 行前）插入 stat 初始化：
 ```rust
@@ -336,7 +336,7 @@ mod.rs `run()` 主循环前（`let mut lua = lua;` 行前）插入 stat 初始�
         let mut consecutive_fail: u32 = 0;
 ```
 
-### - [ ] Step 4：Evt::Tick 分支加 stat 采点
+### - [x] Step 4：Evt::Tick 分支加 stat 采点
 
 mod.rs 主循环 `Evt::Tick => { ... }` 分支整体替换为（加耗时计量 + stat 采点，保留原 collect→Sample→hub 逻辑）：
 ```rust
@@ -388,7 +388,7 @@ mod.rs 主循环 `Evt::Tick => { ... }` 分支整体替换为（加耗时计量 
                 }
 ```
 
-### - [ ] Step 5：Evt::Reload Ok 分支加 vm_restart_count
+### - [x] Step 5：Evt::Reload Ok 分支加 vm_restart_count
 
 mod.rs `Evt::Reload => { match reload_vm(...) { Ok(new_lua) => { ... } Err(e) => ... } }` 的 `Ok(new_lua)` 分支替换为：
 ```rust
@@ -407,7 +407,7 @@ mod.rs `Evt::Reload => { match reload_vm(...) { Ok(new_lua) => { ... } Err(e) =>
                         }
 ```
 
-### - [ ] Step 6：loop 退出后写 stopped
+### - [x] Step 6：loop 退出后写 stopped
 
 mod.rs 主循环 `loop { ... }` 之后（`run` 函数末尾，`}` 闭合 loop 后）加：
 ```rust
@@ -418,7 +418,7 @@ mod.rs 主循环 `loop { ... }` 之后（`run` 函数末尾，`}` 闭合 loop �
 
 > **注意：** 主循环 `loop { ... }` 结束（break）后，`ctx`/`stat`/`inst` 仍在作用域内（未被 move），可直接写。`inst.inst_id.as_ref()`——InstId 实现 `AsRef<str>`（`impl_string_newtype!`）。
 
-### - [ ] Step 7：run 全量 lua_client + fmt + clippy + 提交
+### - [x] Step 7：run 全量 lua_client + fmt + clippy + 提交
 
 ```bash
 CARGO_BUILD_JOBS=1 cargo test --lib plugin::builtin::lua_client
