@@ -8,12 +8,13 @@
 
 - **lux 嵌入**：单实例同时对外 RESP（`:6390`）+ 进程内零拷贝 `EmbeddedClient`，共享 store/WAL；Tiered 模式每写刷盘，启动自动 snapshot+WAL 恢复。
 - **插件分层**：
-  - L1 核心协议插件：`inventory` 静态注册，编进单一二进制（零开销）。已实现：`dataSim`（模拟）/ `opcuaClient`（OPC UA client）/ `modbusClient`（Modbus TCP / RTU serial / RTU over TCP-UDP）/ `s7Client`（西门子 S7-200/200Smart/300/400/1200/1500/Sinumerik828D）
+  - L1 核心协议插件：`inventory` 静态注册，编进单一二进制（零开销）。已实现：`dataSim`（模拟）/ `opcuaClient`（OPC UA client）/ `modbusClient`（Modbus TCP / RTU serial / RTU over TCP-UDP）/ `s7Client`（西门子 S7-200/200Smart/300/400/1200/1500/Sinumerik828D）/ `luaClient`（Lua 5.4 动态脚本，覆盖长尾/自定义协议，串口+tcp+udp，热加载）
   - L2 数据转换：内嵌 `rhai` 脚本（feature `transform`，默认开启）
   - **外部南向插件（sidecarClient bridge，M7）**：任意语言（C/Go/Python/Java…）外部进程经 TCP bridge 接入，token 鉴权；外部=纯运行时（配置/数据在 rs-iot，本地仅缓存补传），lux 不对暴露。协议见 `docs/external-plugin-protocol.md`；样例：`examples/ext-plugin-python/`（Python）、`examples/ext-plugin-opcda-go/`（OPC DA，Go + opcda，连 Matrikon DA Server）
   - L3 WASM 扩展：v2 路线
 - **数据流（hub + 双总线）**：数据上行 `N × Source → hub(mpsc) → pipeline(Processor) → lux rtdata`；控制下行 `写入口 → CtlRegistry → 实例 cmd_rx`。南向采集与北向发布完全解耦（lux rtdata 单一交汇点）；单 Source 启停不影响管道。
 - **北向发布 + 写入口多源**：`MqttPublisher` 独立常驻周期从 lux 抽取发布（pull 模式）；写命令入口：MQTT `<hwid>/command` 订阅 + REST `POST /api/v1/command/send`（经 CtlRegistry 路由到实例，opcua/modbus 即时下行）。
+- **Feature 裁剪**：`opcua`/`modbus`/`s7`/`lua` 为可选 Cargo feature（默认全开），现场可 `--no-default-features --features "lua,modbus"` 按需裁剪（减体积/省系统依赖，如不跑 Modbus RTU 的 Linux 机可不装 libudev-dev）。详见 `docs/plan-feature-gating-protocols.md`。
 - **REST 管理 API**（仓库 `config.toml` 为 `:8790`，代码默认 `:8780`）：JWT 中间件 + 白名单 + `X-Access-Key`；对标 Lite_IOT 路由（sysinfo/plugins/inst/user/group/accesskey/inst 启停 + `/rtdatas` 实时数据查询 + `/command/send` 写命令）；`apiTest` 静态前端（rust-embed 嵌入）。
 - **实例动态启停**：REST `startinst`/`stopinst` 从 lux `instances` 读配置动态启停 Source。
 - **服务化**：Windows Service（`windows-service` crate dispatch）/ Linux systemd unit 生成；SCM stop 触发 `CancellationToken` → 优雅关闭（lux SAVE → shutdown）。
@@ -162,6 +163,8 @@ GitHub Actions（`.github/workflows/ci.yml`，push/PR 触发）：
 - [x] **M7** 外部插件 bridge（sidecarClient）：任意语言外部进程经 TCP 接入（token 鉴权，方案 C 不暴露 lux）；sidecarClient Source + acceptor + BridgeRegistry + 7 帧协议（Hello/ConfigPush/DataUp/Command/Ack/Heartbeat）+ 双向重连容错 + ext_tokens hmac；Python 样例 + 端到端集成测试
 - [x] **M8** modbusClient RTU 扩展（tokio-modbus `rtu` + tokio-serial）：扁平 `kind` 支持 `rtu_serial` / `rtu_tcp` / `rtu_udp`（RTU over TCP/UDP 经 `rtu::attach_slave` 统一 `Context`，采集/写逻辑同构；UDP 自写 `UdpIo` adapter 保 datagram 边界），串口参数缺省 9600/8N1/NONE；ASCII 后置（未来可借 `rmodbus` codec）
 - [x] **M9** s7Client 西门子 S7 南向插件（tokio-s7 0.1，纯 Rust async，ISO-on-TCP :102）：批量 read + 大端自解码，覆盖 S7-200/200Smart/300/400/1200/1500/Sinumerik828D；`kind` 显式映射 typed 位宽（tokio-s7 地址前缀装饰陷阱）；写命令 typed `write_*`；string/wstring 后置
+- [x] **M10** luaClient 动态脚本南向插件（mlua 0.12，Lua 5.4 vendored）：`collect`/`on_data`/`on_write` 回调 + ctx API（L1 通讯/L2 数据/L3 联动/L4 kv/L5 http/L6 工具）+ 串口/tcp/udp 三传输 + 沙箱护栏（库裁剪+指令 hook+内存限额）+ 文件热加载（notify 去抖，失败回退）+ `stat:<inst>` 运行指标（collect 计数/耗时/degraded）。详见 `docs/lua-script-guide.md`
+- [x] **M11** Feature 裁剪：`opcua`/`modbus`/`s7` 改为可选 Cargo feature（默认全开），CI minimal job 守护裁剪组合可编译 + 优雅降级（`find_source` 未命中返 "source plugin not found"）。详见 `docs/plan-feature-gating-protocols.md`
 
 ## v2 路线
 

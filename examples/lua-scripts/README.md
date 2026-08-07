@@ -31,7 +31,7 @@ luaClient 脚本示例（配合 [`docs/lua-script-guide.md`](../../docs/lua-scri
    }
    ```
 
-3. `POST /api/v1/instances/modbus1/start` → `redis-cli -p 6390 HGETALL rtdata:dev1` 验采集。
+3. `POST /api/v1/startinst`（body `{"inst_id":"modbus1"}`）→ `redis-cli -p 6390 HGETALL rtdata:dev1` 验采集。
 
 ## 写命令
 

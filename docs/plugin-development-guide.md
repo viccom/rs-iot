@@ -397,6 +397,23 @@ inventory::submit! {
 最小参考：`src/plugin/builtin/datasim/mod.rs`（DataSim，模拟采集，~130 行）。协议采集参考：
 `opcua_client/mod.rs`（中等，批量读 + 类型映射）、`s7_client/mod.rs`（中等，批量读 + 大端解码）。
 
+### 4.12 运行指标与诊断（v1 规划，待实现）
+
+> 本节是**前瞻指引**：当前仅 `luaClient` 有完整运行指标（`stat:<inst>`），opcua/modbus/s7 的指标暴露、报文 trace、统一自愈尚在规划。缺口与优先级见 [`scenario-gap-assessment.md`](scenario-gap-assessment.md)。新增插件应**预留埋点位置**，便于后续统一接入零返工。
+
+**指标埋点（对标 `luaClient` `stat:<inst>`，见 `db/luastat.rs`）**：每个 Source task 建议维护并周期写入 lux `stat:<inst_id>`：
+- `status`：`running` / `degraded`（连续失败 ≥ 阈值）/ `stopped`
+- `collect_count` / `collect_fail_count`：采集成功/失败计数
+- `last_collect_ts` / `last_collect_duration_ms`：最后采集时间戳与耗时
+- `connected`（规划）：当前连接状态
+- `last_err`（规划）：最后错误描述
+
+**报文 trace（规划）**：收发报文经统一 hex dump 工具，受 per-instance 开关控制（REST 按需激活，到时自动关）——见场景评估 §5。
+
+**自愈策略**：§4.5 的懒连接 + 断线重连（`Option<Conn>` + `is_connection_error()`）是 v1 既有范式；统一指数退避、`Failed` 状态真实写入、实例 watchdog 见场景评估 §2。
+
+**写新插件时的实务建议**：先按 §4.5 范式实现基础重连；在 task 内提前维护采集计数/耗时（即使暂不写 lux），后续 stat 统一接入时只补"写 lux"一步。
+
 ---
 
 ## 5. 内置 Sink 开发（北向发布）
@@ -657,6 +674,7 @@ Rust 模块系统对 `foo.rs` vs `foo/mod.rs` 透明，迁移**零代码改动**
 - [ ] 写命令 `handle_write`（cmd_rx 分支 + JSON data + 未连接 warn 丢弃）
 - [ ] 错误 `tracing::warn!` 降级，绝不 panic
 - [ ] 日志 `[pluginName]` 前缀
+- [ ] 预留指标埋点（采集成功/失败计数、最后采集 ts/耗时，对标 `stat:<inst>`，见 [§4.12](#412-运行指标与诊断v1-规划待实现)）
 - [ ] `pub` 项有 `///` doc 注释（中文）
 - [ ] 单测覆盖纯函数（解析/编解码/类型映射）
 - [ ] 四项质量门全绿（fmt / clippy -D warnings / test / doc -D warnings）

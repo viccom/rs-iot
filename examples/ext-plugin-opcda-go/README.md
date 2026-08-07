@@ -29,9 +29,9 @@ port = 8781
 ```bash
 TOKEN=$(curl -s -XPOST http://localhost:8780/api/v1/user/login \
   -H 'Content-Type: application/json' \
-  -d '{"userid":"admin","password":"admin"}' | jq -r .token)
+  -d '{"user_id":"admin","pass":"admin"}' | jq -r .token)
 
-curl -s -XPOST http://localhost:8780/api/v1/instance/set \
+curl -s -XPOST http://localhost:8780/api/v1/inst/set \
   -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
   -d '{
     "inst_id": "opc1",
@@ -64,7 +64,7 @@ curl -s -XPOST http://localhost:8780/api/v1/instance/set \
     }
   }' | jq .   # → {"status":"ok","plugin_token":"<hex>"}
 
-curl -s -XPOST http://localhost:8780/api/v1/sys/startinst \
+curl -s -XPOST http://localhost:8780/api/v1/startinst \
   -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
   -d '{"inst_id":"opc1"}'
 ```

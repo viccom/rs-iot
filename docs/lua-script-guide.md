@@ -38,7 +38,7 @@ luaClient 是 rs-iot 的南向 `Source`（与 modbus/opcua/s7 同构，`inventor
    }
    ```
 
-3. `POST /api/v1/instances/<id>/start` → `redis-cli -p 6390 HGETALL rtdata:dev1` 验采集。
+3. `POST /api/v1/startinst`（body `{"inst_id":"dev1"}`）→ `redis-cli -p 6390 HGETALL rtdata:dev1` 验采集。REST 端点全表见 [`rest-api.md`](rest-api.md)。
 
 ## 回调函数
 
@@ -126,11 +126,10 @@ luaClient 是 rs-iot 的南向 `Source`（与 modbus/opcua/s7 同构，`inventor
 
 ## 示例
 
-`examples/lua-scripts/`（Plan 8 Task 4）：
+`examples/lua-scripts/`：
 
-- `tcp-modbus/`：Modbus TCP 一问一答（`collect` + `request`）。
-- `serial-rtu/`：串口 RTU 被动帧（`on_data` + `set_value`）。
-- `push-http/`：广播推送 + HTTP 转发（`on_data` + `http_post`）。
+- `modbus-like/`：Modbus TCP 协议（MBAP + FC03 读 / FC06 写），一问一答（`collect` + `on_write`）。
+- `custom-on-data/`：自定义协议 + `on_data` 被动广播上报（`set_value` + `kv_set` 持久化）。
 
 ## 沙箱限制
 
@@ -147,7 +146,7 @@ luaClient 是 rs-iot 的南向 `Source`（与 modbus/opcua/s7 同构，`inventor
 改 `scripts/<name>/main.lua` → notify watcher（去抖 200ms）→ VM 重建（新 load + register +
 dry-run `on_init` 验证）。失败回退旧 VM（永不半生效）。
 
-兜底：`POST /api/v1/lua/reload?inst=<id>`（stop + start，IO 重连）。
+兜底：`POST /api/v1/lua/reload?inst_id=<id>`（stop + start，IO 重连）。
 
 ## 状态监测
 
@@ -156,4 +155,4 @@ lux `stat:<inst>` JSON（每 collect 周期采点）：
 - `running` / `stopped` / `degraded`（连续失败 ≥ `fail_threshold`）。
 - `collect_count` / `collect_errors` / `last_collect_ms` / `reload_count` / `script_version`。
 
-REST：`GET /api/v1/lua/stats?inst=<id>`（读 stat）/ `GET /api/v1/lua/scripts`（列脚本）。
+REST：`GET /api/v1/lua/stats?inst_id=<id>`（读 stat）/ `GET /api/v1/lua/scripts`（列脚本）。
