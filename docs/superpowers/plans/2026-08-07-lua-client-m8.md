@@ -181,7 +181,7 @@ Expected: config 全测试绿（含新 3 serial 单测）。
 
 **Files:** Modify `src/plugin/builtin/lua_client/io_engine.rs`
 
-### - [ ] Step 1：SerialIo struct + ensure_connected
+### - [x] Step 1：SerialIo struct + ensure_connected
 
 `io_engine.rs`（`TcpIo` impl 块后、`#[cfg(test)]` 前）加：
 ```rust
@@ -287,7 +287,7 @@ fn map_flow(f: super::config::FlowControl) -> tokio_serial::FlowControl {
 }
 ```
 
-### - [ ] Step 2：SerialIo impl IoBackend（request + recv_idle）
+### - [x] Step 2：SerialIo impl IoBackend（request + recv_idle）
 
 紧接 Step 1 后加：
 ```rust
@@ -359,7 +359,7 @@ impl IoBackend for SerialIo {
 }
 ```
 
-### - [ ] Step 3：SerialIo 单测（`#[ignore]`，需真串口）
+### - [x] Step 3：SerialIo 单测（`#[ignore]`，需真串口）
 
 `#[cfg(test)] mod tests` 内加（serial 需真机/虚拟串口，CI 跳过）：
 ```rust
@@ -375,7 +375,7 @@ impl IoBackend for SerialIo {
     }
 ```
 
-### - [ ] Step 4：编译 + fmt + clippy + 提交
+### - [x] Step 4：编译 + fmt + clippy + 提交
 
 ```bash
 CARGO_BUILD_JOBS=1 cargo build --lib
