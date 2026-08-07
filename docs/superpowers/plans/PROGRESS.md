@@ -7,12 +7,12 @@
 - ✅ Plan 1-5（M1-M6：MVP / M4 联动持久 / M5 HTTP / on_data / M6 热加载）— 合并 master @ `cf92eee`（**111 测试全绿**）
 - ✅ Plan 6（M7 状态监测 + REST）— 合并 master @ `26897bb`（fast-forward，**125 测试全绿**）
 - ✅ Plan 7（M8a serial/udp 传输）— 合并 master @ `6621585`（fast-forward，**131 测试全绿**）
-- ✅ Plan 8（M8b L2 数据 API + 文档 + 示例）plan 就绪 @ `1a6caa2`（spec 最后 milestone）
+- ✅ Plan 8（M8b L2 数据 API + 文档 + 示例）— 合并 master @ `04e47ca`（fast-forward，**spec 全 milestone 实现 M1-M8**）
 - ✅ Plan 8 Task 1（api.rs 拆分 api/ 目录，3 文件 mod/http/tests 简化）— `feature/lua-m8b`
 - ✅ Plan 8 Task 2（L2 数据 API set_value/get_value/get_device/list_devices + register 加 tx + mod.rs/reload_vm 接）— CI 三项绿（lib 108 测）
 - ✅ Plan 8 Task 3（docs/lua-script-guide.md 159 行脚本指南）— 纯文档
 - ✅ Plan 8 Task 4（examples/lua-scripts/ modbus-like + custom-on-data + README + tests/lua_l2_e2e.rs）— CI 三项绿
-- 🎉 Plan 8 全 4 task 完成 → 🔵 下一步：finishing-a-development-branch 合并 master + CronDelete 收尾（spec 全 milestone 实现 M1-M8）
+- 🎉 Plan 8 全 4 task 完成，已 ff merge master @ `04e47ca` → **spec 全 milestone 实现（M1-M8）** → 🔵 CronDelete 收尾
 
 ## Plan 路线图（spec milestone + 欠账补全）
 
