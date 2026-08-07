@@ -8,7 +8,8 @@
 - ✅ Plan 6（M7 状态监测 + REST）— 合并 master @ `26897bb`（fast-forward，**125 测试全绿**）
 - ✅ Plan 7（M8a serial/udp 传输）— 合并 master @ `6621585`（fast-forward，**131 测试全绿**）
 - ✅ Plan 8（M8b L2 数据 API + 文档 + 示例）plan 就绪 @ `1a6caa2`（spec 最后 milestone）
-- 🔵 下一步：建 `feature/lua-m8b` 分支，执行 Plan 8 Task 1（api.rs 拆分 api/ 目录）
+- ✅ Plan 8 Task 1（api.rs 拆分 api/ 目录，3 文件 mod/http/tests 简化，184/142/322 行）— `feature/lua-m8b` 进行中（CI 三项绿，131 测不变）
+- 🔵 下一步：Plan 8 Task 2（L2 数据 API set_value/get_value/get_device/list_devices + register 加 tx + mod.rs/reload_vm 接）
 
 ## Plan 路线图（spec milestone + 欠账补全）
 
@@ -58,8 +59,8 @@
 ## 下一步（每轮 cron 触发执行）
 
 **执行 Plan 8（M8b）**：建 `feature/lua-m8b` 分支（从 master `1a6caa2`），subagent-driven 逐 task（API 503 时控制器接手）。Plan `2026-08-07-lua-client-m8b.md` @ `1a6caa2`，4 task：
-- 🔵 Task 1：api.rs 拆分 api/ 目录（mod/comm/data/http/util，守 <500，重构）。（下一步）
-- ⏳ Task 2：L2 数据 API（set_value/get_value/get_device/list_devices）+ register 加 tx + mod.rs/reload_vm 接。
+- ✅ Task 1：api.rs 拆分 api/ 目录（3 文件 mod/http/tests 简化，守 <500，CI 绿）。
+- 🔵 Task 2：L2 数据 API（set_value/get_value/get_device/list_devices）+ register 加 tx + mod.rs/reload_vm 接。（下一步）
 - ⏳ Task 3：docs/lua-script-guide.md 脚本开发指南。
 - ⏳ Task 4：examples/lua-scripts/ + L2 集成测（lua_l2_e2e）。
 
@@ -84,7 +85,7 @@ API 503 间歇故障致 subagent dispatch 不稳。Plan 2 起控制器接手机�
 - M5 http 简化（per-call Client / 流式 limit / config 字段）
 - on_data 混合协议竞争丢帧
 - mod.rs reload channel 注释 _reload_tx 过时待清
-- api.rs 616 行超 <500（Plan 1-6 累积；Plan 8 改 L2 时拆 ctx API 到 api/ 目录）
+- ~~api.rs 616 行超 <500~~ → ✅ Plan 8 Task 1 已拆 api/ 目录（mod 184/http 142/tests 322）
 
 ## CI 命令（Windows，规避 link.exe 并行 OOM）
 

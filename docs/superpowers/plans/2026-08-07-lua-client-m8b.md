@@ -36,7 +36,9 @@
 
 ---
 
-## Task 1: api.rs 拆分 api/ 目录（守 <500，重构）
+## Task 1: api.rs 拆分 api/ 目录（守 <500，重构）✅
+
+> **实现调整（2026-08-07）**：用 **3 文件简化**（`api/mod.rs` 184 行 = register L1/L3/L4/L6 + register_log；`api/http.rs` 142 行 = L5 + headers_to_vec + http_request；`api/tests.rs` 322 行 = 4 测原样）替代 plan 的 5 文件（comm/data/http/util）——行为等价、守 <500、减少散布（tests 集中不拆）。CI 三项全绿（fmt + clippy -D warnings + test 131 绿），行为不变。register 签名 Task 1 不变（4 参数），Task 2 加 tx。
 
 **Files:** 拆 `api.rs` → `api/{mod,comm,data,http,util}.rs`；`mod.rs`（lua_client）`mod api;` 不变（找 api/mod.rs）
 
