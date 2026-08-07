@@ -1,3 +1,4 @@
+#![cfg(feature = "s7")]
 //! s7Client 端到端：起 lux + **进程内最小 S7 mock server** + s7Client 实例，
 //! 闭环验证建连/读/写/return_code 行为。CI 友好（无真机、无 docker、无外部 snap7-server）。
 //!
