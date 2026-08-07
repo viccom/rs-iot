@@ -6,8 +6,8 @@
 
 - ✅ Plan 1-5（M1-M6：MVP / M4 联动持久 / M5 HTTP / on_data / M6 热加载）— 合并 master @ `cf92eee`（**111 测试全绿**）
 - ✅ Plan 6（M7 状态监测 + REST）— 合并 master @ `26897bb`（fast-forward，**125 测试全绿**）
-- ✅ Plan 7（M8a serial/udp 传输）全 5 task 完成 @ 分支 `feature/lua-m8a`（HEAD `a1e264b`，**131 测试全绿**），待合并 master
-- 🔵 下一步：`finishing-a-development-branch` 合并 `feature/lua-m8a` → master + 删分支 → 写 Plan 8（M8b L2 + 文档）plan
+- ✅ Plan 7（M8a serial/udp 传输）— 合并 master @ `6621585`（fast-forward，**131 测试全绿**）
+- 🔵 下一步：写 Plan 8（M8b L2 数据 API + 文档 + 示例）plan
 
 ## Plan 路线图（spec milestone + 欠账补全）
 
@@ -19,10 +19,10 @@
 | 4 | on_data 被动帧（M2 欠账） | ✅ done @ master（`797545d`） | `2026-08-07-lua-client-on-data.md` |
 | 5 | M6 热加载（notify + VM 重建 + dry-run + 失败回退） | ✅ done @ master（`cf92eee`，2026-08-07 合并） | `2026-08-07-lua-client-m6.md` |
 | 6 | M7 状态监测（`stat:<inst>`）+ REST（`routes_lua` stats/reload） | ✅ done @ master（`26897bb`，125 测试绿） | `2026-08-07-lua-client-m7.md` |
-| 7 | M8a serial/udp 传输（SerialIo/UdpIo + config serial 参数） | ✅ 全 task 完成 @ `feature/lua-m8a`（131 测试绿），待合并 master | `2026-08-07-lua-client-m8.md` |
+| 7 | M8a serial/udp 传输（SerialIo/UdpIo + config serial 参数） | ✅ done @ master（`6621585`，131 测试绿） | `2026-08-07-lua-client-m8.md` |
 | 8 | M8b L2 数据 API（set_value/get_value/get_device/list_devices）+ 文档 + 示例 | ⏭ 待写 plan | — |
 
-## Plan 7（M8a serial/udp 传输）完成总结 ✅（分支 `feature/lua-m8a`，待合并 master）
+## Plan 7（M8a serial/udp 传输）完成总结 ✅（合并 master @ `6621585`，2026-08-07）
 
 - [x] Task 1：`config.rs` serial 参数（baud_rate/data_bits/parity/stop_bits/flow_control + Parity/FlowControl enum）（`7026c93`，8 单测）
 - [x] Task 2：`io_engine` SerialIo（tokio-serial，IoBackend impl，单测 `#[ignore]`）（`42f3165`）
@@ -56,9 +56,7 @@
 
 ## 下一步（每轮 cron 触发执行）
 
-**1. 合并 Plan 7 → master**：`superpowers:finishing-a-development-branch`，分支 `feature/lua-m8a`（HEAD `a1e264b`，15 commit）→ merge master + 删分支。CI 已全绿（131 测试 + fmt + clippy）。
-
-**2. 写 Plan 8（M8b）plan**：`superpowers:writing-plans`，spec §7 L2 数据 API（set_value/get_value/get_device/list_devices）+ `docs/lua-script-guide.md` 脚本指南 + `examples/lua-scripts/` 示例。文件名 `2026-08-07-lua-client-m8b.md`。
+**写 Plan 8（M8b）plan**：`superpowers:writing-plans`，spec §7 L2 数据 API（set_value/get_value/get_device/list_devices）+ `docs/lua-script-guide.md` 脚本指南 + `examples/lua-scripts/` 示例。文件名 `2026-08-07-lua-client-m8b.md`。
 - M8b 范围：① api.rs L2 ctx API（set_value 推 hub 需 register 加 tx；get_value/get_device 读 lux rtdata；list_devices 列设备）② docs/lua-script-guide.md（API 参考 + 示例）③ examples/lua-scripts/（含 mock 协议）。
 - 关键：api.rs 616 行超 <500，Plan 8 改 L2 时拆 ctx API 到 api/ 目录；set_value 推 Sample 经 hub（register 加 tx 参数）。
 
