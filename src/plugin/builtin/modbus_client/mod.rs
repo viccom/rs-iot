@@ -82,12 +82,12 @@ mod transport;
 
 use crate::host::HostContext;
 use crate::plugin::traits::Source;
-use crate::types::{CtlMessage, InstConfig, Sample, SampleValue};
+use crate::types::{CtlMessage, DeviceSpec, InstConfig, Sample, SampleValue};
 use address::{addr_fc, addr_func_name, parse_point, Func, PointSpec, Type};
 use async_trait::async_trait;
 use codec::{decode_point, encode_value, Buf, WritePayload};
 use config::parse_cfg;
-use merge::merge_regions;
+use merge::{merge_regions, Region};
 use std::collections::BTreeMap;
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -97,6 +97,8 @@ use transport::connect;
 
 #[cfg(test)]
 use address::Order;
+#[cfg(test)]
+use crate::types::ChildSpec;
 #[cfg(test)]
 use codec::{decode_f32, decode_u32, decode_u64, encode_u32, encode_u64, extract_bit};
 #[cfg(test)]
@@ -123,6 +125,73 @@ fn json_to_sample_value(v: &serde_json::Value) -> SampleValue {
         serde_json::Value::String(s) => SampleValue::Str(s.clone()),
         other => SampleValue::Str(other.to_string()),
     }
+}
+
+/// 一个 slave 的采集计划：devid + unit id + 预合并的 region 列表（owned）。
+///
+/// 预解析产物（`plan_devices`），采集循环每 tick 直接遍历 `regions`，不再重复 `merge_regions`。
+/// `slave_id` 由 `DeviceSpec.slave_id` 提供，缺省回退实例级 `cfg.slave_id`（向后兼容）。
+#[cfg_attr(not(test), expect(dead_code))]
+struct SlavePlan {
+    /// 设备 ID（Sample.devid / rtdata:<devid> 的 key）。
+    devid: String,
+    /// Modbus unit id（读前 `set_slave`）。
+    slave_id: u8,
+    /// 该 slave 的合并读区间（owned；地址解析失败的点位已丢弃）。
+    regions: Vec<Region>,
+}
+
+/// 预解析 `devices` → `Vec<SlavePlan>`（纯函数，便于单测）。
+///
+/// - 每个有点子的 device → 一个 `SlavePlan`；无点位设备跳过。
+/// - 点位地址解析失败 → `warn` 丢弃该点位，保留其余。
+/// - `slave_id`：`DeviceSpec.slave_id` 优先，缺省回退 `fallback_slave_id`（= `cfg.slave_id`）。
+#[cfg_attr(not(test), expect(dead_code))]
+fn plan_devices(
+    devices: &[DeviceSpec],
+    gap_threshold: u16,
+    max_regs: u16,
+    fallback_slave_id: u8,
+) -> Vec<SlavePlan> {
+    devices
+        .iter()
+        .filter_map(|dev| {
+            let pairs: Vec<(String, PointSpec)> = dev
+                .children
+                .iter()
+                .filter_map(|c| {
+                    parse_point(&c.value)
+                        .map(|p| {
+                            let field = if c.label.is_empty() {
+                                c.value.clone()
+                            } else {
+                                c.label.clone()
+                            };
+                            (field, p)
+                        })
+                        .map_err(|e| {
+                            tracing::warn!(
+                                "[modbusClient] dev {} bad address '{}': {}",
+                                dev.value,
+                                c.value,
+                                e
+                            );
+                            e
+                        })
+                        .ok()
+                })
+                .collect();
+            if pairs.is_empty() {
+                return None;
+            }
+            let regions = merge_regions(&pairs, gap_threshold, max_regs);
+            Some(SlavePlan {
+                devid: dev.value.clone(),
+                slave_id: dev.slave_id.unwrap_or(fallback_slave_id),
+                regions,
+            })
+        })
+        .collect()
 }
 
 /// `select!` 事件。把事件类型与 `Context` 的 `&mut` 借用解耦：modbus 的 read/write 取
@@ -989,5 +1058,80 @@ mod tests {
         assert!(Func::Input.is_readonly());
         assert!(!Func::Coil.is_readonly());
         assert!(!Func::Holding.is_readonly());
+    }
+
+    #[test]
+    fn plan_devices_assigns_device_slave_id_with_fallback() {
+        let devices = vec![
+            DeviceSpec {
+                label: "".into(),
+                value: "m1".into(),
+                children: vec![ChildSpec {
+                    label: "t".into(),
+                    value: "holding:0:u16".into(),
+                    r#type: "".into(),
+                }],
+                slave_id: Some(1),
+            },
+            DeviceSpec {
+                label: "".into(),
+                value: "m2".into(),
+                children: vec![ChildSpec {
+                    label: "t".into(),
+                    value: "holding:0:u16".into(),
+                    r#type: "".into(),
+                }],
+                slave_id: None,
+            },
+        ];
+        let plans = plan_devices(&devices, 16, 100, 9);
+        assert_eq!(plans.len(), 2);
+        assert_eq!(plans[0].devid, "m1");
+        assert_eq!(plans[0].slave_id, 1, "device 级 slave_id 优先");
+        assert_eq!(plans[1].slave_id, 9, "缺省回退 fallback");
+        assert_eq!(plans[0].regions.len(), 1, "merge 预计算");
+    }
+
+    #[test]
+    fn plan_devices_skips_bad_address_but_keeps_device() {
+        let devices = vec![DeviceSpec {
+            label: "".into(),
+            value: "m1".into(),
+            children: vec![
+                ChildSpec {
+                    label: "good".into(),
+                    value: "holding:0:u16".into(),
+                    r#type: "".into(),
+                },
+                ChildSpec {
+                    label: "bad".into(),
+                    value: "holding:x:u16".into(),
+                    r#type: "".into(),
+                },
+            ],
+            slave_id: Some(1),
+        }];
+        let plans = plan_devices(&devices, 16, 100, 1);
+        assert_eq!(
+            plans[0]
+                .regions
+                .iter()
+                .map(|r| r.points.len())
+                .sum::<usize>(),
+            1,
+            "非法地址丢弃，合法保留"
+        );
+    }
+
+    #[test]
+    fn plan_devices_empty_children_skipped() {
+        let devices = vec![DeviceSpec {
+            label: "".into(),
+            value: "m1".into(),
+            children: vec![],
+            slave_id: Some(1),
+        }];
+        let plans = plan_devices(&devices, 16, 100, 1);
+        assert!(plans.is_empty(), "无点位设备不入 plan");
     }
 }
