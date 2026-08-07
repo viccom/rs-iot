@@ -5,7 +5,8 @@
 ## 当前状态
 
 - ✅ Plan 1-5（M1-M6：MVP / M4 联动持久 / M5 HTTP / on_data / M6 热加载）— 合并 master @ `cf92eee`（**111 测试全绿**）
-- 🔵 下一步：写 Plan 6（M7 状态监测 + REST）plan
+- ✅ Plan 6（M7 状态监测 + REST）plan 就绪 @ `939fe25`（2026-08-07）
+- 🔵 下一步：建 `feature/lua-m7` 分支，执行 Plan 6 Task 1（db/luastat）
 
 ## Plan 路线图（spec milestone + 欠账补全）
 
@@ -16,7 +17,7 @@
 | 3 | M5 HTTP（L5 http_get/post + 审计） | ✅ done @ master（`6ff4ff0`） | `2026-08-07-lua-client-m5.md` |
 | 4 | on_data 被动帧（M2 欠账） | ✅ done @ master（`797545d`） | `2026-08-07-lua-client-on-data.md` |
 | 5 | M6 热加载（notify + VM 重建 + dry-run + 失败回退） | ✅ done @ master（`cf92eee`，2026-08-07 合并） | `2026-08-07-lua-client-m6.md` |
-| 6 | M7 状态监测（`stat:<inst>`）+ REST（`routes_lua` stats/reload） | 🔵 待写 plan | — |
+| 6 | M7 状态监测（`stat:<inst>`）+ REST（`routes_lua` stats/reload） | 🔵 plan 就绪 @ `939fe25`，待执行 | `2026-08-07-lua-client-m7.md` |
 | 7 | M8 serial/udp 传输 + L2 数据 API（set_value/get_value/...）+ 文档 + 沙箱测补全 | ⏭ 待写 plan | — |
 
 ## Plan 5（M6 热加载）完成总结 ✅（合并 master @ `cf92eee`）
@@ -30,12 +31,15 @@
 
 ## 下一步（每轮 cron 触发执行）
 
-**写 Plan 6（M7 状态监测 + REST）plan**：superpowers:writing-plans，spec §13（状态监测）+ §4（routes_lua）。
-- 状态指标写 lux `stat:<inst_id>`（JSON）：status(running/degraded/stopped) / collect_count / collect_fail_count / last_collect_ts / last_collect_duration_ms / vm_restart_count（热加载/崩溃恢复）。
-- REST `routes_lua`：`GET /api/v1/lua/<inst>/stats`（读 stat hash）+ `POST /api/v1/lua/<inst>/reload`（手动触发热加载，Windows notify 兜底）+ 可能 `GET /api/v1/lua/list`。
-- luaClient run() 内采点（collect 成功/失败计数 + 热加载 vm_restart_count）。
+**执行 Plan 6（M7 状态监测 + REST）**：建 `feature/lua-m7` 分支（从 master `939fe25`），subagent-driven 逐 task（API 503 时控制器接手）。Plan `2026-08-07-lua-client-m7.md` @ `939fe25`，5 task：
+- Task 1：`db/luastat.rs`（LuaStat + write/read，lux `stat:<inst>` SET/GET JSON）+ `db/mod.rs` 引出 + `identity.rs` 清单注释。
+- Task 2：`lua_client/config.rs` 加 `fail_threshold: u32`（连续失败 N 次标 degraded，默认 10）。
+- Task 3：`lua_client/mod.rs` run() stat 采点（启动 running / Tick collect 计数+耗时 / Reload vm_restart+1 / 退出 stopped）+ `script_version`（main.lua sha256 前 8 hex）。
+- Task 4：`api/routes_lua.rs`（stats/reload/scripts，query 参数 `?inst_id=`，JWT 默认保护）+ `api/mod.rs` 注册三路由。
+- Task 5：集成测（`lua_stat_e2e` 采集+stopped / `lua_api_e2e` REST stats/reload/scripts/JWT）。
 
-文件名 `2026-08-07-lua-client-m7.md`。
+**关键设计（plan 已定）**：REST reload = `mgr.stop + start_source(config_from_lux)`（复用 InstanceManager，spec §5.3「VM 替换 ≈ 轻量重启 instance」；IO 重连，结果与 notify 自动热加载一致）；stat 用 lux **string key**（SET/GET，非 Hash）；REST **query 参数**（贴 `routes_inst::IdQuery` 约定，避 axum 0.8 路径参数 `{param}`/`:param` 语法歧义）。
+**v1 简化（plan 注明）**：`io_connected`/`last_io_err` 后置（io_engine 未暴露连接状态，需 io_engine 改造）；`script_version` = main.lua 单文件 sha256 前 8 hex（不含 lib/）；stat 按 collect 周期计（多 dev 任一失败记 fail 周期）。
 
 ## 已知简化 / 风险（累计，注明）
 
