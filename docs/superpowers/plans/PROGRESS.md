@@ -5,8 +5,8 @@
 ## 当前状态
 
 - ✅ Plan 1-5（M1-M6：MVP / M4 联动持久 / M5 HTTP / on_data / M6 热加载）— 合并 master @ `cf92eee`（**111 测试全绿**）
-- ✅ Plan 6（M7 状态监测 + REST）全 5 task 完成 @ 分支 `feature/lua-m7`（HEAD `adfb69a`，**125 测试全绿**），待合并 master
-- 🔵 下一步：`finishing-a-development-branch` 合并 `feature/lua-m7` → master + 删分支 → 写 Plan 7（M8）plan
+- ✅ Plan 6（M7 状态监测 + REST）— 合并 master @ `26897bb`（fast-forward，**125 测试全绿**）
+- 🔵 下一步：写 Plan 7（M8 serial/udp 传输 + L2 数据 API + 文档）plan
 
 ## Plan 路线图（spec milestone + 欠账补全）
 
@@ -17,10 +17,10 @@
 | 3 | M5 HTTP（L5 http_get/post + 审计） | ✅ done @ master（`6ff4ff0`） | `2026-08-07-lua-client-m5.md` |
 | 4 | on_data 被动帧（M2 欠账） | ✅ done @ master（`797545d`） | `2026-08-07-lua-client-on-data.md` |
 | 5 | M6 热加载（notify + VM 重建 + dry-run + 失败回退） | ✅ done @ master（`cf92eee`，2026-08-07 合并） | `2026-08-07-lua-client-m6.md` |
-| 6 | M7 状态监测（`stat:<inst>`）+ REST（`routes_lua` stats/reload） | ✅ 全 task 完成 @ `feature/lua-m7`（125 测试绿），待合并 master | `2026-08-07-lua-client-m7.md` |
+| 6 | M7 状态监测（`stat:<inst>`）+ REST（`routes_lua` stats/reload） | ✅ done @ master（`26897bb`，125 测试绿） | `2026-08-07-lua-client-m7.md` |
 | 7 | M8 serial/udp 传输 + L2 数据 API（set_value/get_value/...）+ 文档 + 沙箱测补全 | ⏭ 待写 plan | — |
 
-## Plan 6（M7 状态监测 + REST）完成总结 ✅（分支 `feature/lua-m7`，待合并 master）
+## Plan 6（M7 状态监测 + REST）完成总结 ✅（合并 master @ `26897bb`，2026-08-07）
 
 - [x] Task 1：`db/luastat.rs`（LuaStat + write/read，lux `stat:<inst>` SET/GET JSON）+ identity 清单（`f5d25bc`，3 单测）
 - [x] Task 2：`lua_client/config.rs` `fail_threshold`（连续失败标 degraded，默认 10）（`0363912`，5 单测）
@@ -42,9 +42,7 @@
 
 ## 下一步（每轮 cron 触发执行）
 
-**1. 合并 Plan 6 → master**：`superpowers:finishing-a-development-branch`，分支 `feature/lua-m7`（HEAD `adfb69a`，10 commit）→ merge master + 删分支。CI 已全绿（125 测试 + fmt + clippy --all-targets -D warnings）。
-
-**2. 写 Plan 7（M8）plan**：`superpowers:writing-plans`，spec §16 serial/udp 传输 + §7 L2 数据 API（get_value/get_device/list_devices）+ 文档 + 沙箱测补全。文件名 `2026-08-07-lua-client-m8.md`。
+**写 Plan 7（M8）plan**：`superpowers:writing-plans`，spec §16 serial/udp 传输 + §7 L2 数据 API（get_value/get_device/list_devices）+ 文档 + 沙箱测补全。文件名 `2026-08-07-lua-client-m8.md`。
 - M8 范围：① io_engine serial/udp backend（现仅 tcp，serial/udp 走 MockIoTask 占位——`mod.rs` line 92-104）② L2 ctx API（get_value/get_device/list_devices 读 lux rtdata；set_value 已在 on_data 用）③ `docs/lua-script-guide.md` 脚本指南 ④ `examples/lua-scripts/` 示例。
 - 关键：serial 用 tokio-serial（modbus_client 已引 `tokio-serial = "5.5"`，SerialStream 实现 AsyncRead+AsyncWrite）；udp connected socket（modbus rtu_udp 模式）；L2 get_value 走 lux HGET `rtdata:<devid>`。
 
