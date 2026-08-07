@@ -7,7 +7,7 @@
 - ✅ Plan 1-5（M1-M6：MVP / M4 联动持久 / M5 HTTP / on_data / M6 热加载）— 合并 master @ `cf92eee`（**111 测试全绿**）
 - ✅ Plan 6（M7 状态监测 + REST）— 合并 master @ `26897bb`（fast-forward，**125 测试全绿**）
 - ✅ Plan 7（M8a serial/udp 传输）plan 就绪 @ `c4ffbd0`（2026-08-07）
-- 🔵 Plan 7 执行中：分支 `feature/lua-m8a`，Task 1-2 ✅（config serial 参数 + SerialIo backend），下一步 Task 3（UdpIo）
+- 🔵 Plan 7 执行中：分支 `feature/lua-m8a`，Task 1-2 ✅ + io_engine 拆分为目录模块（mod/tcp/serial/mock，守 <500 行），下一步 Task 3（UdpIo）
 
 ## Plan 路线图（spec milestone + 欠账补全）
 
@@ -72,6 +72,7 @@ API 503 间歇故障致 subagent dispatch 不稳。Plan 2 起控制器接手机�
 - M5 http 简化（per-call Client / 流式 limit / config 字段）
 - on_data 混合协议竞争丢帧
 - mod.rs reload channel 注释 _reload_tx 过时待清
+- api.rs 616 行超 <500（Plan 1-6 累积；Plan 8 改 L2 时拆 ctx API 到 api/ 目录）
 
 ## CI 命令（Windows，规避 link.exe 并行 OOM）
 
