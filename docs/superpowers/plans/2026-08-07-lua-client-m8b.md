@@ -648,7 +648,7 @@ git commit -m "docs(lua): M8b lua-script-guide 脚本开发指南（API 参考 +
 
 ---
 
-## Task 4: examples/lua-scripts/ + L2 集成测
+## Task 4: examples/lua-scripts/ + L2 集成测 ✅（modbus-like + custom-on-data + README + lua_l2_e2e，CI 三项绿，L2 set_value→rtdata 端到端验证）
 
 **Files:** Create `examples/lua-scripts/<protocol>/main.lua` + `tests/lua_l2_e2e.rs`
 

@@ -10,8 +10,9 @@
 - ✅ Plan 8（M8b L2 数据 API + 文档 + 示例）plan 就绪 @ `1a6caa2`（spec 最后 milestone）
 - ✅ Plan 8 Task 1（api.rs 拆分 api/ 目录，3 文件 mod/http/tests 简化）— `feature/lua-m8b`
 - ✅ Plan 8 Task 2（L2 数据 API set_value/get_value/get_device/list_devices + register 加 tx + mod.rs/reload_vm 接）— CI 三项绿（lib 108 测）
-- ✅ Plan 8 Task 3（docs/lua-script-guide.md 159 行脚本指南）— 纯文档，无 CI
-- 🔵 下一步：Plan 8 Task 4（examples/lua-scripts/ + L2 集成测 lua_l2_e2e，spec 最后 task）
+- ✅ Plan 8 Task 3（docs/lua-script-guide.md 159 行脚本指南）— 纯文档
+- ✅ Plan 8 Task 4（examples/lua-scripts/ modbus-like + custom-on-data + README + tests/lua_l2_e2e.rs）— CI 三项绿
+- 🎉 Plan 8 全 4 task 完成 → 🔵 下一步：finishing-a-development-branch 合并 master + CronDelete 收尾（spec 全 milestone 实现 M1-M8）
 
 ## Plan 路线图（spec milestone + 欠账补全）
 
@@ -64,7 +65,8 @@
 - ✅ Task 1：api.rs 拆分 api/ 目录（3 文件 mod/http/tests 简化，守 <500，CI 绿）。
 - ✅ Task 2：L2 数据 API（set_value/get_value/get_device/list_devices）+ register 加 tx + mod.rs/reload_vm 接（CI 绿，lib 108 测 +4 L2）。
 - ✅ Task 3：docs/lua-script-guide.md 脚本开发指南（159 行，API 参考 + 配置 + 传输 + 沙箱 + 热加载 + 状态监测）。
-- 🔵 Task 4：examples/lua-scripts/ + L2 集成测（lua_l2_e2e）。（下一步，spec 最后 task）
+- ✅ Task 4：examples/lua-scripts/（modbus-like + custom-on-data + README）+ tests/lua_l2_e2e.rs（L2 set_value→rtdata 端到端，CI 三项绿）。
+- 🎉 Plan 8 全 4 task 完成 → 下一步合并 master + CronDelete 收尾。
 
 **spec 最后 milestone**：Plan 8 完成后 spec 全 milestone 实现（M1-M8）→ `CronDelete 39632fab` 收尾。
 
