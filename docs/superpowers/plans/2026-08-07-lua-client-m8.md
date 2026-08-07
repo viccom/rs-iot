@@ -34,7 +34,7 @@
 
 **Files:** Modify `src/plugin/builtin/lua_client/config.rs`
 
-### - [ ] Step 1：先加失败单测（TDD）
+### - [x] Step 1：先加失败单测（TDD）
 
 `config.rs` 的 `#[cfg(test)] mod tests` 内加：
 ```rust
@@ -70,14 +70,14 @@
     }
 ```
 
-### - [ ] Step 2：跑测确认失败
+### - [x] Step 2：跑测确认失败
 
 ```bash
 CARGO_BUILD_JOBS=1 cargo test --lib plugin::builtin::lua_client::config 2>&1 | tail -8
 ```
 Expected: 编译失败（`baud_rate`/`Parity` 等未定义）。
 
-### - [ ] Step 3：加 enum + LuaCfg 字段 + parse
+### - [x] Step 3：加 enum + LuaCfg 字段 + parse
 
 `config.rs` 顶部（`RecvMode` enum 后）加 serial 枚举：
 ```rust
@@ -165,7 +165,7 @@ pub(super) enum FlowControl {
         flow_control,
 ```
 
-### - [ ] Step 4：跑测通过 + fmt + clippy + 提交
+### - [x] Step 4：跑测通过 + fmt + clippy + 提交
 
 ```bash
 CARGO_BUILD_JOBS=1 cargo test --lib plugin::builtin::lua_client::config
