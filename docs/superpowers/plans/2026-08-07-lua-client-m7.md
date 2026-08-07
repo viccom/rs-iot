@@ -588,7 +588,7 @@ Expected: routes_lua 2 单测绿（scan 有/无 main.lua）；build 编译过（
 
 **Files:** Create `tests/lua_stat_e2e.rs`; Create `tests/lua_api_e2e.rs`
 
-### - [ ] Step 1：lua_stat_e2e.rs（stat 采集端到端）
+### - [x] Step 1：lua_stat_e2e.rs（stat 采集端到端）
 
 新建 `tests/lua_stat_e2e.rs`（仿 lua_hotload_e2e 的 InstanceManager setup）：
 ```rust
@@ -759,14 +759,14 @@ async fn stat_marked_stopped_on_exit() {
 }
 ```
 
-### - [ ] Step 2：run lua_stat_e2e
+### - [x] Step 2：run lua_stat_e2e
 
 ```bash
 CARGO_BUILD_JOBS=1 cargo test --test lua_stat_e2e
 ```
 Expected: 2 passed（stat_written_after_collect / stat_marked_stopped_on_exit）。
 
-### - [ ] Step 3：lua_api_e2e.rs（REST 端点集成测）
+### - [x] Step 3：lua_api_e2e.rs（REST 端点集成测）
 
 新建 `tests/lua_api_e2e.rs`（仿 api_flow.rs 的 router oneshot + JWT）：
 ```rust
@@ -960,7 +960,7 @@ async fn scripts_returns_list_shape() {
 }
 ```
 
-### - [ ] Step 4：run lua_api_e2e + 全量 fmt/clippy/test + 提交
+### - [x] Step 4：run lua_api_e2e + 全量 fmt/clippy/test + 提交
 
 ```bash
 CARGO_BUILD_JOBS=1 cargo test --test lua_api_e2e

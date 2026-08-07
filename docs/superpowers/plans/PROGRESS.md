@@ -5,8 +5,8 @@
 ## 当前状态
 
 - ✅ Plan 1-5（M1-M6：MVP / M4 联动持久 / M5 HTTP / on_data / M6 热加载）— 合并 master @ `cf92eee`（**111 测试全绿**）
-- ✅ Plan 6（M7 状态监测 + REST）plan 就绪 @ `939fe25`（2026-08-07）
-- 🔵 Plan 6 执行中：分支 `feature/lua-m7`，Task 1-4 ✅（db/luastat + config fail_threshold + mod.rs stat 采点 + routes_lua REST），下一步 Task 5（集成测 lua_stat_e2e + lua_api_e2e）
+- ✅ Plan 6（M7 状态监测 + REST）全 5 task 完成 @ 分支 `feature/lua-m7`（HEAD `adfb69a`，**125 测试全绿**），待合并 master
+- 🔵 下一步：`finishing-a-development-branch` 合并 `feature/lua-m7` → master + 删分支 → 写 Plan 7（M8）plan
 
 ## Plan 路线图（spec milestone + 欠账补全）
 
@@ -17,8 +17,19 @@
 | 3 | M5 HTTP（L5 http_get/post + 审计） | ✅ done @ master（`6ff4ff0`） | `2026-08-07-lua-client-m5.md` |
 | 4 | on_data 被动帧（M2 欠账） | ✅ done @ master（`797545d`） | `2026-08-07-lua-client-on-data.md` |
 | 5 | M6 热加载（notify + VM 重建 + dry-run + 失败回退） | ✅ done @ master（`cf92eee`，2026-08-07 合并） | `2026-08-07-lua-client-m6.md` |
-| 6 | M7 状态监测（`stat:<inst>`）+ REST（`routes_lua` stats/reload） | 🔵 plan 就绪 @ `939fe25`，待执行 | `2026-08-07-lua-client-m7.md` |
+| 6 | M7 状态监测（`stat:<inst>`）+ REST（`routes_lua` stats/reload） | ✅ 全 task 完成 @ `feature/lua-m7`（125 测试绿），待合并 master | `2026-08-07-lua-client-m7.md` |
 | 7 | M8 serial/udp 传输 + L2 数据 API（set_value/get_value/...）+ 文档 + 沙箱测补全 | ⏭ 待写 plan | — |
+
+## Plan 6（M7 状态监测 + REST）完成总结 ✅（分支 `feature/lua-m7`，待合并 master）
+
+- [x] Task 1：`db/luastat.rs`（LuaStat + write/read，lux `stat:<inst>` SET/GET JSON）+ identity 清单（`f5d25bc`，3 单测）
+- [x] Task 2：`lua_client/config.rs` `fail_threshold`（连续失败标 degraded，默认 10）（`0363912`，5 单测）
+- [x] Task 3：`lua_client/mod.rs` run() stat 采点（启动 running / Tick 计数+耗时 / Reload vm_restart+1 / 退出 stopped）+ `script_version`（main.lua sha256 前 8 hex）（`8ba9b4c`，lua_client 26 单测）
+- [x] Task 4：`api/routes_lua.rs` stats/reload/scripts（query 参数，JWT 保护）（`ffde6e1`，2 单测）
+- [x] Task 5：集成测 `lua_stat_e2e`（采集+stopped）+ `lua_api_e2e`（REST stats/reload/scripts + JWT，5 测）（`adfb69a`）
+
+**125 测试全绿**（lib 99 = 既有 92 + M7 +7；集成测 26 = 既有 19 + M7 +7）。spec §13 状态监测（`stat:<inst>` JSON）+ §4 routes_lua（stats/reload/scripts）覆盖。
+**v1 简化（plan 注明）**：io_connected/last_io_err 后置（io_engine 改造）；REST reload = stop+start（IO 重连）；script_version = main.lua 单文件 sha256；stat 按 collect 周期计。
 
 ## Plan 5（M6 热加载）完成总结 ✅（合并 master @ `cf92eee`）
 
@@ -31,15 +42,11 @@
 
 ## 下一步（每轮 cron 触发执行）
 
-**执行 Plan 6（M7 状态监测 + REST）**：建 `feature/lua-m7` 分支（从 master `939fe25`），subagent-driven 逐 task（API 503 时控制器接手）。Plan `2026-08-07-lua-client-m7.md` @ `939fe25`，5 task：
-- ✅ Task 1：`db/luastat.rs`（LuaStat + write/read，lux `stat:<inst>` SET/GET JSON）+ `db/mod.rs` 引出 + `identity.rs` 清单注释。— @ `f5d25bc`（3 单测绿）
-- ✅ Task 2：`lua_client/config.rs` 加 `fail_threshold: u32`（连续失败 N 次标 degraded，默认 10）。— @ `0363912`（5 单测绿）
-- ✅ Task 3：`lua_client/mod.rs` run() stat 采点（启动 running / Tick collect 计数+耗时 / Reload vm_restart+1 / 退出 stopped）+ `script_version`（main.lua sha256 前 8 hex）。— @ `8ba9b4c`（lua_client 26 单测绿）
-- ✅ Task 4：`api/routes_lua.rs`（stats/reload/scripts，query 参数 `?inst_id=`，JWT 默认保护）+ `api/mod.rs` 注册三路由。— @ `ffde6e1`（2 单测绿）
-- 🔵 Task 5：集成测（`lua_stat_e2e` 采集+stopped / `lua_api_e2e` REST stats/reload/scripts/JWT）。（下一步）
+**1. 合并 Plan 6 → master**：`superpowers:finishing-a-development-branch`，分支 `feature/lua-m7`（HEAD `adfb69a`，10 commit）→ merge master + 删分支。CI 已全绿（125 测试 + fmt + clippy --all-targets -D warnings）。
 
-**关键设计（plan 已定）**：REST reload = `mgr.stop + start_source(config_from_lux)`（复用 InstanceManager，spec §5.3「VM 替换 ≈ 轻量重启 instance」；IO 重连，结果与 notify 自动热加载一致）；stat 用 lux **string key**（SET/GET，非 Hash）；REST **query 参数**（贴 `routes_inst::IdQuery` 约定，避 axum 0.8 路径参数 `{param}`/`:param` 语法歧义）。
-**v1 简化（plan 注明）**：`io_connected`/`last_io_err` 后置（io_engine 未暴露连接状态，需 io_engine 改造）；`script_version` = main.lua 单文件 sha256 前 8 hex（不含 lib/）；stat 按 collect 周期计（多 dev 任一失败记 fail 周期）。
+**2. 写 Plan 7（M8）plan**：`superpowers:writing-plans`，spec §16 serial/udp 传输 + §7 L2 数据 API（get_value/get_device/list_devices）+ 文档 + 沙箱测补全。文件名 `2026-08-07-lua-client-m8.md`。
+- M8 范围：① io_engine serial/udp backend（现仅 tcp，serial/udp 走 MockIoTask 占位——`mod.rs` line 92-104）② L2 ctx API（get_value/get_device/list_devices 读 lux rtdata；set_value 已在 on_data 用）③ `docs/lua-script-guide.md` 脚本指南 ④ `examples/lua-scripts/` 示例。
+- 关键：serial 用 tokio-serial（modbus_client 已引 `tokio-serial = "5.5"`，SerialStream 实现 AsyncRead+AsyncWrite）；udp connected socket（modbus rtu_udp 模式）；L2 get_value 走 lux HGET `rtdata:<devid>`。
 
 ## 已知简化 / 风险（累计，注明）
 
