@@ -40,7 +40,7 @@
 
 **Files:** Create `src/db/luastat.rs`; Modify `src/db/mod.rs`; Modify `src/db/identity.rs`
 
-### - [ ] Step 1：写 luastat.rs（含单测，TDD 先行）
+### - [x] Step 1：写 luastat.rs（含单测，TDD 先行）
 
 新建 `src/db/luastat.rs`：
 ```rust
@@ -175,21 +175,21 @@ mod tests {
 }
 ```
 
-### - [ ] Step 2：db/mod.rs 引出 luastat
+### - [x] Step 2：db/mod.rs 引出 luastat
 
 `src/db/mod.rs` 顶部 `pub mod` 段（`pub mod luakv;` 后）加：
 ```rust
 pub mod luastat;
 ```
 
-### - [ ] Step 3：identity.rs hash 清单加 stat
+### - [x] Step 3：identity.rs hash 清单加 stat
 
 `src/db/identity.rs` 顶部清单注释（`luakv:<instId>` 行后、`rtdata:<devId>` 行前）加一行：
 ```rust
 //! - `stat:<instId>`  : string，JSON 实例状态快照（M7 luaClient 运行指标：status/collect 计数/脚本版本）
 ```
 
-### - [ ] Step 4：run luastat 单测 + fmt + clippy + 提交
+### - [x] Step 4：run luastat 单测 + fmt + clippy + 提交
 
 ```bash
 CARGO_BUILD_JOBS=1 cargo test --lib db::luastat
