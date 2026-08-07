@@ -86,7 +86,7 @@ use crate::types::{CtlMessage, DeviceSpec, InstConfig, Sample, SampleValue};
 use address::{addr_fc, addr_func_name, parse_point, Func, PointSpec, Type};
 use async_trait::async_trait;
 use codec::{decode_point, encode_value, Buf, WritePayload};
-use config::parse_cfg;
+use config::{parse_cfg, PollStrategy};
 use merge::{merge_regions, Region};
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -96,9 +96,9 @@ use tokio_util::sync::CancellationToken;
 use transport::connect;
 
 #[cfg(test)]
-use address::Order;
-#[cfg(test)]
 use crate::types::ChildSpec;
+#[cfg(test)]
+use address::Order;
 #[cfg(test)]
 use codec::{decode_f32, decode_u32, decode_u64, encode_u32, encode_u64, extract_bit};
 #[cfg(test)]
@@ -192,6 +192,39 @@ fn plan_devices(
             })
         })
         .collect()
+}
+
+/// 构造一个 tick 的轮询序列 `(plan_idx, region_idx)`，按 `strategy` 排列。
+///
+/// - `RoundRobin`：外层按 region 下标——先所有 slave 的第 0 region，再第 1 region…
+///   （所有 slave 齐头并进、刷新均匀；period 内轮不完时每 slave 都采到一部分）
+/// - `Sequential`：外层按 slave——slave0 所有 region、slave1 所有 region…
+///   （单 slave 多点时间一致，但 slave 间有延迟）
+///
+/// 半双工 RS485 物理串行，两种都是顺序遍历，差别仅在排列。
+#[cfg_attr(not(test), expect(dead_code))]
+fn build_poll_order(plans: &[SlavePlan], strategy: PollStrategy) -> Vec<(usize, usize)> {
+    let max_regions = plans.iter().map(|p| p.regions.len()).max().unwrap_or(0);
+    let mut order = Vec::new();
+    match strategy {
+        PollStrategy::RoundRobin => {
+            for r in 0..max_regions {
+                for (pi, plan) in plans.iter().enumerate() {
+                    if r < plan.regions.len() {
+                        order.push((pi, r));
+                    }
+                }
+            }
+        }
+        PollStrategy::Sequential => {
+            for (pi, plan) in plans.iter().enumerate() {
+                for r in 0..plan.regions.len() {
+                    order.push((pi, r));
+                }
+            }
+        }
+    }
+    order
 }
 
 /// `select!` 事件。把事件类型与 `Context` 的 `&mut` 借用解耦：modbus 的 read/write 取
@@ -1133,5 +1166,104 @@ mod tests {
         }];
         let plans = plan_devices(&devices, 16, 100, 1);
         assert!(plans.is_empty(), "无点位设备不入 plan");
+    }
+
+    #[test]
+    fn build_poll_order_round_robin_interleaves() {
+        // 2 slave 各 1 region → round_robin: [(0,0),(1,0)]（先全 slave 第 0 region）
+        let mk_region = || {
+            merge_regions(
+                &[("x".into(), parse_point("holding:0:u16").unwrap())],
+                16,
+                100,
+            )[0]
+            .clone()
+        };
+        let plans = vec![
+            SlavePlan {
+                devid: "a".into(),
+                slave_id: 1,
+                regions: vec![mk_region()],
+            },
+            SlavePlan {
+                devid: "b".into(),
+                slave_id: 2,
+                regions: vec![mk_region()],
+            },
+        ];
+        assert_eq!(
+            build_poll_order(&plans, PollStrategy::RoundRobin),
+            vec![(0, 0), (1, 0)]
+        );
+    }
+
+    #[test]
+    fn build_poll_order_round_robin_multi_region() {
+        // 2 slave × 2 region → round_robin: (0,0)(1,0)(0,1)(1,1)
+        let mk_region = |start: u16| {
+            merge_regions(
+                &[(
+                    format!("t{start}"),
+                    parse_point(&format!("holding:{start}:u16")).unwrap(),
+                )],
+                16,
+                100,
+            )[0]
+            .clone()
+        };
+        let plans = vec![
+            SlavePlan {
+                devid: "a".into(),
+                slave_id: 1,
+                regions: vec![mk_region(0), mk_region(10)],
+            },
+            SlavePlan {
+                devid: "b".into(),
+                slave_id: 2,
+                regions: vec![mk_region(0), mk_region(10)],
+            },
+        ];
+        assert_eq!(
+            build_poll_order(&plans, PollStrategy::RoundRobin),
+            vec![(0, 0), (1, 0), (0, 1), (1, 1)]
+        );
+    }
+
+    #[test]
+    fn build_poll_order_sequential_drains_each_slave() {
+        let mk_region = |start: u16| {
+            merge_regions(
+                &[(
+                    format!("t{start}"),
+                    parse_point(&format!("holding:{start}:u16")).unwrap(),
+                )],
+                16,
+                100,
+            )[0]
+            .clone()
+        };
+        let plans = vec![
+            SlavePlan {
+                devid: "a".into(),
+                slave_id: 1,
+                regions: vec![mk_region(0), mk_region(10)],
+            },
+            SlavePlan {
+                devid: "b".into(),
+                slave_id: 2,
+                regions: vec![mk_region(0)],
+            },
+        ];
+        // 逐 slave 打透：(0,0)(0,1)(1,0)
+        assert_eq!(
+            build_poll_order(&plans, PollStrategy::Sequential),
+            vec![(0, 0), (0, 1), (1, 0)]
+        );
+    }
+
+    #[test]
+    fn build_poll_order_empty_when_no_plans() {
+        let plans: Vec<SlavePlan> = vec![];
+        assert!(build_poll_order(&plans, PollStrategy::RoundRobin).is_empty());
     }
 }

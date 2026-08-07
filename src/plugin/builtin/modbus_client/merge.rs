@@ -3,7 +3,8 @@
 use super::address::{Func, PointSpec};
 
 /// 合并后的连续读取区间（owned；points 不借自输入，便于 `SlavePlan` 持有跨 tick）。
-#[derive(Debug)]
+/// `Clone`：单测用 `merge_regions(...)[0].clone()` 构造 SlavePlan（避免重新解析地址串）。
+#[derive(Debug, Clone)]
 pub(super) struct Region {
     pub(super) func: Func,
     pub(super) start: u16,
