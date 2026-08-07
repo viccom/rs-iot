@@ -434,7 +434,7 @@ Expected: lua_client 全单测绿（含新 script_version；collect/on_write/on_
 
 **Files:** Create `src/api/routes_lua.rs`; Modify `src/api/mod.rs`
 
-### - [ ] Step 1：先写 scan_scripts 单测（TDD，纯函数）
+### - [x] Step 1：先写 scan_scripts 单测（TDD，纯函数）
 
 新建 `src/api/routes_lua.rs`，先放单测骨架（验证 scan 逻辑）：
 ```rust
@@ -556,7 +556,7 @@ mod tests {
 }
 ```
 
-### - [ ] Step 2：api/mod.rs 引出 + 注册路由
+### - [x] Step 2：api/mod.rs 引出 + 注册路由
 
 `src/api/mod.rs` 顶部 `pub mod` 段（`pub mod routes_inst;` 后）加：
 ```rust
@@ -571,7 +571,7 @@ pub mod routes_lua;
         .route("/api/v1/lua/scripts", get(routes_lua::list_scripts))
 ```
 
-### - [ ] Step 3：run scan 单测 + build + fmt + clippy + 提交
+### - [x] Step 3：run scan 单测 + build + fmt + clippy + 提交
 
 ```bash
 CARGO_BUILD_JOBS=1 cargo test --lib api::routes_lua
