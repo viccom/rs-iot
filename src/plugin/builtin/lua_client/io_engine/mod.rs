@@ -6,6 +6,7 @@
 mod mock;
 mod serial;
 mod tcp;
+mod udp;
 
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
@@ -16,6 +17,9 @@ pub(super) use mock::MockIoTask;
 // SerialIo：Task 4（mod.rs 接 backend）前 lib build 未用；test build serial_roundtrip 用
 pub(super) use serial::SerialIo;
 pub(super) use tcp::TcpIo;
+#[allow(unused_imports)]
+// UdpIo：Task 4（mod.rs 接 backend）前 lib build 未用；test build udp_roundtrip 用
+pub(super) use udp::UdpIo;
 
 /// 一次 request：帧字节 + 回执通道。
 pub(super) struct IoRequest {
@@ -238,5 +242,32 @@ mod tests {
         );
         let r = io.request(b"\x01\x02").await;
         assert!(r.is_ok(), "serial request: {r:?}");
+    }
+
+    #[tokio::test]
+    async fn udp_roundtrip() {
+        use tokio::net::UdpSocket;
+        // mock udp server：bind 127.0.0.1:0，收 frame 后回 echo + 0xAA。
+        let server = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let addr = server.local_addr().unwrap();
+        tokio::spawn(async move {
+            let mut buf = [0u8; 64];
+            let (n, peer) = server.recv_from(&mut buf).await.unwrap();
+            let mut r = buf[..n].to_vec();
+            r.push(0xAA);
+            let _ = server.send_to(&r, peer).await;
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let mut io = UdpIo::new(addr.to_string(), 200);
+        let resp = io.request(b"\x01\x02").await.unwrap();
+        assert_eq!(resp, vec![0x01, 0x02, 0xAA]);
+    }
+
+    #[tokio::test]
+    async fn udp_bad_endpoint_errors() {
+        let mut io = UdpIo::new("not-an-endpoint".into(), 200);
+        let r = io.request(b"x").await;
+        assert!(r.is_err(), "非法 endpoint 应 connect 失败，got {r:?}");
     }
 }
