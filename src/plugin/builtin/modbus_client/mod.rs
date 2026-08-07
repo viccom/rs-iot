@@ -595,6 +595,42 @@ mod tests {
         );
     }
 
+    #[test]
+    fn parse_cfg_poll_strategy_defaults_round_robin() {
+        let cfg = parse_cfg(&serde_json::json!({"endpoint":"127.0.0.1:502"})).unwrap();
+        assert_eq!(cfg.poll_strategy, config::PollStrategy::RoundRobin);
+        assert_eq!(cfg.request_timeout_secs, 2, "per-request 超时默认 2s");
+    }
+
+    #[test]
+    fn parse_cfg_poll_strategy_sequential() {
+        let cfg = parse_cfg(&serde_json::json!({
+            "endpoint":"127.0.0.1:502","poll_strategy":"sequential"
+        }))
+        .unwrap();
+        assert_eq!(cfg.poll_strategy, config::PollStrategy::Sequential);
+    }
+
+    #[test]
+    fn parse_cfg_request_timeout_clamped() {
+        let cfg = parse_cfg(&serde_json::json!({
+            "endpoint":"127.0.0.1:502","request_timeout_secs":0
+        }))
+        .unwrap();
+        assert_eq!(cfg.request_timeout_secs, 1, "0 clamp 1");
+    }
+
+    #[test]
+    fn parse_cfg_rejects_bad_poll_strategy() {
+        assert!(
+            parse_cfg(&serde_json::json!({
+                "endpoint":"127.0.0.1:502","poll_strategy":"random"
+            }))
+            .is_err(),
+            "非法 poll_strategy"
+        );
+    }
+
     #[tokio::test]
     async fn udpio_keeps_datagram_boundary() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};

@@ -31,6 +31,17 @@ pub(super) enum FlowKind {
     Hardware,
 }
 
+/// 多 slave 轮询策略（半双工 RS485 物理串行，区别在 (slave,region) 遍历顺序）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(super) enum PollStrategy {
+    /// 轮转：每轮对每个 slave 各发 1 条报文（各取下一 region），多轮采完。
+    /// 所有 slave 齐头并进、刷新均匀；单 slave 故障天然隔离。**默认**。
+    #[default]
+    RoundRobin,
+    /// 逐设备：一个 slave 所有 region 采完再换下一个。单设备多点时间一致。
+    Sequential,
+}
+
 /// 从 `app_config` 解析的插件配置。`transport` 决定必填字段（rtu_serial 需 serial_port，余需 endpoint）。
 #[derive(Debug)]
 pub(super) struct ModbusCfg {
@@ -56,6 +67,15 @@ pub(super) struct ModbusCfg {
     /// 单次请求最大单元数（coil/discrete 为 bit 数，holding/input 为寄存器数；协议上限 125）。
     pub(super) max_regs: u16,
     pub(super) reconnect_secs: u64,
+    /// 多 slave 轮询策略（默认 RoundRobin）。Task 5 采集循环消费；当前仅测试读，
+    /// `cfg_attr(not(test), expect)` 在 lib build 抑制 dead_code（裸 expect 在 test build
+    /// 因字段被读而 unfulfilled），Task 5 消费后此 attr 会自动提示移除。
+    #[cfg_attr(not(test), expect(dead_code))]
+    pub(super) poll_strategy: PollStrategy,
+    /// 单次读请求超时（秒）。slave 无响应时跳过该请求（故障隔离），默认 2。
+    /// 同 `poll_strategy`：Task 5 消费前由 `cfg_attr(not(test), expect)` 抑制 lib dead_code。
+    #[cfg_attr(not(test), expect(dead_code))]
+    pub(super) request_timeout_secs: u64,
 }
 
 /// 解析 `app_config`。`kind` 扁平：tcp（默认，向后兼容）/ rtu_serial / rtu_tcp / rtu_udp。
@@ -140,6 +160,20 @@ pub(super) fn parse_cfg(app: &serde_json::Value) -> Result<ModbusCfg, String> {
         .and_then(|v| v.as_u64())
         .unwrap_or(2)
         .max(1);
+    let poll_strategy = match app.get("poll_strategy").and_then(|v| v.as_str()) {
+        Some("round_robin") | None => PollStrategy::RoundRobin,
+        Some("sequential") => PollStrategy::Sequential,
+        Some(other) => {
+            return Err(format!(
+                "unsupported poll_strategy '{other}'（round_robin / sequential）"
+            ))
+        }
+    };
+    let request_timeout_secs = app
+        .get("request_timeout_secs")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(2)
+        .max(1);
     Ok(ModbusCfg {
         transport,
         endpoint,
@@ -154,5 +188,7 @@ pub(super) fn parse_cfg(app: &serde_json::Value) -> Result<ModbusCfg, String> {
         gap_threshold,
         max_regs,
         reconnect_secs,
+        poll_strategy,
+        request_timeout_secs,
     })
 }
