@@ -79,6 +79,7 @@ async fn on_data_pushes_to_luakv() {
             label: "d".into(),
             value: "devOnd".into(),
             children: vec![],
+            slave_id: None,
         }],
         host_kind: HostKind::Builtin,
     };

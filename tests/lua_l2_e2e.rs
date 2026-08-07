@@ -71,6 +71,7 @@ async fn l2_set_value_writes_rtdata() {
             label: "d".into(),
             value: "devL2".into(),
             children: vec![],
+            slave_id: None,
         }],
         host_kind: HostKind::Builtin,
     };
@@ -151,11 +152,13 @@ async fn multi_device_collect_pushes_only_first_device() {
                 label: "A".into(),
                 value: "devFirst".into(),
                 children: vec![],
+                slave_id: None,
             },
             DeviceSpec {
                 label: "B".into(),
                 value: "devSecond".into(),
                 children: vec![],
+                slave_id: None,
             },
         ],
         host_kind: HostKind::Builtin,

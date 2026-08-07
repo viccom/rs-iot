@@ -275,6 +275,7 @@ fn demo_datasim_config() -> types::InstConfig {
                     r#type: "float".into(),
                 },
             ],
+            slave_id: None,
         }],
         host_kind: types::HostKind::Builtin,
     }

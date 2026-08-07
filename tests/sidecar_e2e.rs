@@ -127,6 +127,7 @@ async fn setup(inst_id: &str, hb_secs: u64) -> Env {
                 value: "temp".into(),
                 r#type: "float".into(),
             }],
+            slave_id: None,
         }],
         host_kind: HostKind::External,
     };

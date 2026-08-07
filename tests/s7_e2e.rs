@@ -556,6 +556,7 @@ async fn s7_read_roundtrip_to_rtdata() {
                 r#type: "bool".into(),
             },
         ],
+        slave_id: None,
     }];
     let state = ServerState::new();
     // 预播种 mock PLC 内存（大端编码）：
@@ -600,6 +601,7 @@ async fn s7_write_roundtrip() {
             value: "DB1.DBD0".into(),
             r#type: "f32".into(),
         }],
+        slave_id: None,
     }];
     let env = setup("s7write", devices, ServerState::new()).await;
 
@@ -660,6 +662,7 @@ async fn s7_return_code_partial_failure() {
                 r#type: "i16".into(),
             },
         ],
+        slave_id: None,
     }];
     let state = ServerState::new();
     {

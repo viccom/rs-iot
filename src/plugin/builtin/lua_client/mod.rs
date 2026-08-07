@@ -458,6 +458,7 @@ mod tests {
                 label: "d".into(),
                 value: "devA".into(),
                 children: vec![],
+                slave_id: None,
             }],
             host_kind: HostKind::Builtin,
         };

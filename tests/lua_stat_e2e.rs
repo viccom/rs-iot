@@ -71,6 +71,7 @@ async fn stat_written_after_collect() {
             label: "d".into(),
             value: "devST".into(),
             children: vec![],
+            slave_id: None,
         }],
         host_kind: HostKind::Builtin,
     };
@@ -163,6 +164,7 @@ async fn stat_marked_stopped_on_exit() {
             label: "d".into(),
             value: "devST2".into(),
             children: vec![],
+            slave_id: None,
         }],
         host_kind: HostKind::Builtin,
     };

@@ -45,6 +45,7 @@ async fn register_exposes_ctx_api() {
             label: "d".into(),
             value: "d".into(),
             children: vec![],
+            slave_id: None,
         }],
         host_kind: HostKind::Builtin,
     };
@@ -95,6 +96,7 @@ async fn kv_set_get_roundtrip() {
             label: "d".into(),
             value: "d".into(),
             children: vec![],
+            slave_id: None,
         }],
         host_kind: HostKind::Builtin,
     };
@@ -175,6 +177,7 @@ async fn send_command_routes_to_target() {
             label: "d".into(),
             value: "d".into(),
             children: vec![],
+            slave_id: None,
         }],
         host_kind: HostKind::Builtin,
     };
@@ -245,6 +248,7 @@ async fn http_get_returns_status_and_body() {
             label: "d".into(),
             value: "d".into(),
             children: vec![],
+            slave_id: None,
         }],
         host_kind: HostKind::Builtin,
     };
@@ -311,6 +315,7 @@ async fn set_value_pushes_sample_to_hub() {
             label: "d".into(),
             value: "devX".into(),
             children: vec![],
+            slave_id: None,
         }],
         host_kind: HostKind::Builtin,
     };
@@ -355,6 +360,7 @@ async fn get_value_reads_rtdata() {
             label: "d".into(),
             value: "devX".into(),
             children: vec![],
+            slave_id: None,
         }],
         host_kind: HostKind::Builtin,
     };
@@ -402,6 +408,7 @@ async fn get_device_returns_rtdata_values() {
             label: "d".into(),
             value: "devX".into(),
             children: vec![],
+            slave_id: None,
         }],
         host_kind: HostKind::Builtin,
     };
@@ -451,11 +458,13 @@ async fn list_devices_returns_inst_devices() {
                 label: "A".into(),
                 value: "devX".into(),
                 children: vec![],
+                slave_id: None,
             },
             DeviceSpec {
                 label: "B".into(),
                 value: "devY".into(),
                 children: vec![],
+                slave_id: None,
             },
         ],
         host_kind: HostKind::Builtin,

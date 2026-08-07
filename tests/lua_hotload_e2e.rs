@@ -75,6 +75,7 @@ async fn hotload_picks_up_script_change() {
             label: "d".into(),
             value: "devHL".into(),
             children: vec![],
+            slave_id: None,
         }],
         host_kind: HostKind::Builtin,
     };

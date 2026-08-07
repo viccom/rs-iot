@@ -41,6 +41,7 @@ fn datasim_inst() -> InstConfig {
                     r#type: "float".into(),
                 },
             ],
+            slave_id: None,
         }],
         host_kind: HostKind::Builtin,
     }

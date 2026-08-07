@@ -74,6 +74,7 @@ async fn lua_kv_set_persists_to_lux() {
             label: "d".into(),
             value: "devKV".into(),
             children: vec![],
+            slave_id: None,
         }],
         host_kind: HostKind::Builtin,
     };

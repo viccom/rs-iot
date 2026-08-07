@@ -174,6 +174,10 @@ pub struct DeviceSpec {
     /// 设备下的变量列表。
     #[serde(default)]
     pub children: Vec<ChildSpec>,
+    /// Modbus unit id（仅 `modbusClient` 用；其它插件忽略）。
+    /// 缺省 `None` → modbus 回退到 `app_config.slave_id`（向后兼容旧单 slave 配置）。
+    #[serde(default)]
+    pub slave_id: Option<u8>,
 }
 
 /// 变量规格（对标 Lite_IOT devices.children）。
@@ -214,4 +218,37 @@ pub struct InstConfig {
     /// 插件形态（内置/外部）。缺省 `Builtin`，向后兼容老配置。
     #[serde(default)]
     pub host_kind: HostKind,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn device_spec_slave_id_deserializes_when_present() {
+        let json = serde_json::json!({"value":"m1","slave_id":2});
+        let d: DeviceSpec = serde_json::from_value(json).unwrap();
+        assert_eq!(d.slave_id, Some(2));
+    }
+
+    #[test]
+    fn device_spec_slave_id_absent_is_none_for_backward_compat() {
+        // 老配置无 slave_id → None（opcua/s7 等其它插件也走这条，字段透明）
+        let json = serde_json::json!({"value":"m1"});
+        let d: DeviceSpec = serde_json::from_value(json).unwrap();
+        assert_eq!(d.slave_id, None);
+    }
+
+    #[test]
+    fn device_spec_slave_id_serializes_roundtrip() {
+        let d = DeviceSpec {
+            label: "m".into(),
+            value: "m1".into(),
+            children: vec![],
+            slave_id: Some(5),
+        };
+        let s = serde_json::to_string(&d).unwrap();
+        let back: DeviceSpec = serde_json::from_str(&s).unwrap();
+        assert_eq!(back.slave_id, Some(5));
+    }
 }

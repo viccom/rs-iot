@@ -85,6 +85,7 @@ async fn udp_collect_writes_rtdata() {
             label: "d".into(),
             value: "devU".into(),
             children: vec![],
+            slave_id: None,
         }],
         host_kind: HostKind::Builtin,
     };

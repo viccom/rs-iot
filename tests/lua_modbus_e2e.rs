@@ -82,6 +82,7 @@ async fn lua_modbus_collect_and_write_roundtrip() {
             label: "m".into(),
             value: "devM".into(),
             children: vec![],
+            slave_id: None,
         }],
         host_kind: HostKind::Builtin,
     };
