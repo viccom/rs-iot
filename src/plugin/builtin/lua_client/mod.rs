@@ -22,7 +22,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use config::parse_cfg;
-use io_engine::{spawn_io_task, IoBackend, MockIoTask, TcpIo};
+use io_engine::{spawn_io_task, IoBackend, SerialIo, TcpIo, UdpIo};
 use loader::SCRIPTS_ROOT;
 use script::{load_main, LoadCtx};
 
@@ -89,19 +89,19 @@ impl Source for LuaClient {
             return;
         }
 
-        // 3. IO 引擎（按 transport 选 backend；TCP 懒连接 + 断连重连，serial/udp 后续 plan）。
+        // 3. IO 引擎（按 transport 选 backend：tcp/serial/udp 三传输，spec §8）。
         let backend: Box<dyn IoBackend> = match cfg.transport {
             config::Transport::Tcp => Box::new(TcpIo::new(cfg.endpoint.clone(), cfg.recv_idle_ms)),
-            _ => {
-                tracing::warn!(
-                    "[luaClient] inst {} transport {:?} 暂未实现（Plan 1 仅 tcp），用 mock 占位",
-                    inst.inst_id,
-                    cfg.transport
-                );
-                Box::new(MockIoTask {
-                    responder: Box::new(|_| Ok(vec![])),
-                })
-            }
+            config::Transport::Serial => Box::new(SerialIo::new(
+                cfg.serial_port.clone().unwrap_or_default(),
+                cfg.baud_rate,
+                cfg.data_bits,
+                cfg.parity,
+                cfg.stop_bits,
+                cfg.flow_control,
+                cfg.recv_idle_ms,
+            )),
+            config::Transport::Udp => Box::new(UdpIo::new(cfg.endpoint.clone(), cfg.recv_idle_ms)),
         };
         // IO 引擎 + on_data 被动帧 channel（IO task 无在飞 request 时收到的帧 → 主循环）。
         let (data_tx, mut data_rx) = mpsc::channel::<Vec<u8>>(64);

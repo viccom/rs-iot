@@ -1,8 +1,4 @@
 //! udp IO backend（spec §8）：connected UdpSocket，datagram 边界天然保帧。
-//!
-//! `#[allow(dead_code)]`（非 expect）：Task 4（mod.rs 接 backend）前 lib build 未引用
-//! UdpIo，但 test build `udp_roundtrip` 用——dual-build（lib dead + test alive），
-//! `#[expect]` 在 test build unfulfilled，故用 allow（Task 4 接入后移除）。
 
 use super::IoBackend;
 
@@ -11,7 +7,6 @@ use super::IoBackend;
 /// UDP datagram 边界天然保帧（一 send 一 recv = 整包响应），无 tcp/serial 的 idle 累积。
 /// `request`：send frame → recv 一个 datagram（整包响应）。`recv_idle`：recv 被动 datagram。
 /// connected socket（bind 0.0.0.0:0 + connect endpoint），对标 modbus rtu_udp（spec §8）。
-#[allow(dead_code)]
 pub(in crate::plugin::builtin::lua_client) struct UdpIo {
     /// 当前 socket（None = 未 connect/err，下次 request 前 ensure_connected 重 connect）。
     sock: Option<tokio::net::UdpSocket>,
@@ -21,7 +16,6 @@ pub(in crate::plugin::builtin::lua_client) struct UdpIo {
 
 impl UdpIo {
     /// 构造（不立即 connect，首次 request 才 connect）。
-    #[allow(dead_code)]
     pub(in crate::plugin::builtin::lua_client) fn new(endpoint: String, recv_idle_ms: u64) -> Self {
         Self {
             sock: None,
@@ -31,7 +25,6 @@ impl UdpIo {
     }
 
     /// 确保已 connect；None 则 bind + connect（失败返回 Err）。
-    #[allow(dead_code)]
     async fn ensure_connected(&mut self) -> mlua::Result<()> {
         if self.sock.is_some() {
             return Ok(());

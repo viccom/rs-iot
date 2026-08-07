@@ -1,8 +1,4 @@
 //! serial IO backend（spec §8）：tokio-serial，懒 open + err 置 None 重 open。
-//!
-//! `#[allow(dead_code)]`（非 expect）：Task 4（mod.rs 接 backend）前 lib build 未引用
-//! SerialIo，但 test build `serial_roundtrip` 用——dual-build（lib dead + test alive），
-//! `#[expect]` 在 test build unfulfilled，故用 allow（Task 4 接入后移除）。
 
 use super::super::config::{FlowControl, Parity};
 use super::IoBackend;
@@ -13,7 +9,6 @@ use tokio_serial::SerialPortBuilderExt;
 /// 对标 `TcpIo`（spec §8 不变式：连接生命周期由 IO task 管）。serial 无"对端关闭"，
 /// read/write err（设备拔插/线缆）→ 置 None，下次 request 重 open（reopen 失败报错）。
 /// read 用 idle 累积成帧（同 tcp，串口流式）；recv_idle 读被动帧。
-#[allow(dead_code)]
 pub(in crate::plugin::builtin::lua_client) struct SerialIo {
     /// 当前串口流（None = 未 open/err，下次 request 前 ensure_connected 重 open）。
     stream: Option<tokio_serial::SerialStream>,
@@ -28,7 +23,6 @@ pub(in crate::plugin::builtin::lua_client) struct SerialIo {
 
 impl SerialIo {
     /// 构造（不立即 open，首次 request 才 open）。
-    #[allow(dead_code)]
     pub(in crate::plugin::builtin::lua_client) fn new(
         port: String,
         baud_rate: u32,
@@ -51,7 +45,6 @@ impl SerialIo {
     }
 
     /// 确保串口已 open；None 则 open（失败返回 Err）。
-    #[allow(dead_code)]
     async fn ensure_connected(&mut self) -> mlua::Result<()> {
         if self.stream.is_some() {
             return Ok(());
@@ -75,7 +68,6 @@ impl SerialIo {
 }
 
 /// `data_bits`(u8) → tokio_serial `DataBits`。
-#[allow(dead_code)]
 fn map_data_bits(b: u8) -> tokio_serial::DataBits {
     match b {
         5 => tokio_serial::DataBits::Five,
@@ -86,7 +78,6 @@ fn map_data_bits(b: u8) -> tokio_serial::DataBits {
 }
 
 /// `Parity` → tokio_serial `Parity`。
-#[allow(dead_code)]
 fn map_parity(p: Parity) -> tokio_serial::Parity {
     match p {
         Parity::None => tokio_serial::Parity::None,
@@ -96,7 +87,6 @@ fn map_parity(p: Parity) -> tokio_serial::Parity {
 }
 
 /// `stop_bits`(u8) → tokio_serial `StopBits`。
-#[allow(dead_code)]
 fn map_stop_bits(b: u8) -> tokio_serial::StopBits {
     match b {
         2 => tokio_serial::StopBits::Two,
@@ -105,7 +95,6 @@ fn map_stop_bits(b: u8) -> tokio_serial::StopBits {
 }
 
 /// `FlowControl` → tokio_serial `FlowControl`。
-#[allow(dead_code)]
 fn map_flow(f: FlowControl) -> tokio_serial::FlowControl {
     match f {
         FlowControl::None => tokio_serial::FlowControl::None,

@@ -12,13 +12,11 @@ use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::timeout;
 
-pub(super) use mock::MockIoTask;
 #[allow(unused_imports)]
-// SerialIo：Task 4（mod.rs 接 backend）前 lib build 未用；test build serial_roundtrip 用
+// MockIoTask：luaClient run 不再用（Task 4 去占位）；io_engine/api tests 用，dual-build
+pub(super) use mock::MockIoTask;
 pub(super) use serial::SerialIo;
 pub(super) use tcp::TcpIo;
-#[allow(unused_imports)]
-// UdpIo：Task 4（mod.rs 接 backend）前 lib build 未用；test build udp_roundtrip 用
 pub(super) use udp::UdpIo;
 
 /// 一次 request：帧字节 + 回执通道。
