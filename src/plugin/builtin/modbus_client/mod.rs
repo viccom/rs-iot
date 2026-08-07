@@ -92,6 +92,8 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_modbus::client::{Context, Reader, Writer};
+use tokio_modbus::prelude::SlaveContext;
+use tokio_modbus::{ExceptionCode, Slave};
 use tokio_util::sync::CancellationToken;
 use transport::connect;
 
@@ -131,7 +133,6 @@ fn json_to_sample_value(v: &serde_json::Value) -> SampleValue {
 ///
 /// 预解析产物（`plan_devices`），采集循环每 tick 直接遍历 `regions`，不再重复 `merge_regions`。
 /// `slave_id` 由 `DeviceSpec.slave_id` 提供，缺省回退实例级 `cfg.slave_id`（向后兼容）。
-#[cfg_attr(not(test), expect(dead_code))]
 struct SlavePlan {
     /// 设备 ID（Sample.devid / rtdata:<devid> 的 key）。
     devid: String,
@@ -146,7 +147,6 @@ struct SlavePlan {
 /// - 每个有点子的 device → 一个 `SlavePlan`；无点位设备跳过。
 /// - 点位地址解析失败 → `warn` 丢弃该点位，保留其余。
 /// - `slave_id`：`DeviceSpec.slave_id` 优先，缺省回退 `fallback_slave_id`（= `cfg.slave_id`）。
-#[cfg_attr(not(test), expect(dead_code))]
 fn plan_devices(
     devices: &[DeviceSpec],
     gap_threshold: u16,
@@ -202,7 +202,6 @@ fn plan_devices(
 ///   （单 slave 多点时间一致，但 slave 间有延迟）
 ///
 /// 半双工 RS485 物理串行，两种都是顺序遍历，差别仅在排列。
-#[cfg_attr(not(test), expect(dead_code))]
 fn build_poll_order(plans: &[SlavePlan], strategy: PollStrategy) -> Vec<(usize, usize)> {
     let max_regions = plans.iter().map(|p| p.regions.len()).max().unwrap_or(0);
     let mut order = Vec::new();
@@ -225,6 +224,48 @@ fn build_poll_order(plans: &[SlavePlan], strategy: PollStrategy) -> Vec<(usize, 
         }
     }
     order
+}
+
+/// 一次 region 读结果（区分三类失败，驱动故障隔离决策）。
+///
+/// `Timeout` 在调用方由 `tokio::time::timeout` 包装产生（`read_region` 本身不超时）。
+enum ReadOutcome {
+    /// 成功，含解码缓冲。
+    Ok(Buf),
+    /// 协议异常（连接正常，如 IllegalDataAddress）——跳过该 region，不拆 session。
+    Exception(ExceptionCode),
+    /// transport 错（连接断）——拆 session 重连，中断本轮。
+    Transport(tokio_modbus::Error),
+    /// per-request 超时（slave 无响应）——跳过该 region，不拆 session（故障隔离）。
+    Timeout,
+}
+
+/// 读一个 region（按 func 分发），返回 `ReadOutcome`。调用方负责 `set_slave` + 超时包装。
+async fn read_region(sess: &mut Context, reg: &Region) -> ReadOutcome {
+    let len = reg.len();
+    let res = match reg.func {
+        Func::Coil => sess
+            .read_coils(reg.start, len)
+            .await
+            .map(|r| r.map(Buf::Bits)),
+        Func::Discrete => sess
+            .read_discrete_inputs(reg.start, len)
+            .await
+            .map(|r| r.map(Buf::Bits)),
+        Func::Holding => sess
+            .read_holding_registers(reg.start, len)
+            .await
+            .map(|r| r.map(Buf::Regs)),
+        Func::Input => sess
+            .read_input_registers(reg.start, len)
+            .await
+            .map(|r| r.map(Buf::Regs)),
+    };
+    match res {
+        Ok(Ok(buf)) => ReadOutcome::Ok(buf),
+        Ok(Err(exc)) => ReadOutcome::Exception(exc),
+        Err(e) => ReadOutcome::Transport(e),
+    }
 }
 
 /// `select!` 事件。把事件类型与 `Context` 的 `&mut` 借用解耦：modbus 的 read/write 取
@@ -258,39 +299,14 @@ impl Source for ModbusClient {
                 return;
             }
         };
-        // 预解析所有设备的 (devid, [(field, PointSpec)])，采集循环内不再重复 parse。
-        // 解析失败的点位 warn 丢弃，不阻断其余点位。
-        let devices: Vec<(String, Vec<(String, PointSpec)>)> = inst
-            .devices
+        // 预解析 devices → SlavePlan（每 slave 独立 regions + slave_id）+ 轮询顺序。
+        let plans = plan_devices(&inst.devices, cfg.gap_threshold, cfg.max_regs, cfg.slave_id);
+        let poll_order = build_poll_order(&plans, cfg.poll_strategy);
+        let req_timeout = Duration::from_secs(cfg.request_timeout_secs);
+        // handle_write 反查 devid → slave_id（写命令按目标设备切 slave）。
+        let devid_to_slave: std::collections::HashMap<String, u8> = plans
             .iter()
-            .map(|dev| {
-                let pairs: Vec<(String, PointSpec)> = dev
-                    .children
-                    .iter()
-                    .filter_map(|c| {
-                        parse_point(&c.value)
-                            .map(|p| {
-                                let field = if c.label.is_empty() {
-                                    c.value.clone()
-                                } else {
-                                    c.label.clone()
-                                };
-                                (field, p)
-                            })
-                            .map_err(|e| {
-                                tracing::warn!(
-                                    "[modbusClient] inst {inst_id} dev {} bad address '{}': {}",
-                                    dev.value,
-                                    c.value,
-                                    e
-                                );
-                                e
-                            })
-                            .ok()
-                    })
-                    .collect();
-                (dev.value.clone(), pairs)
-            })
+            .map(|p| (p.devid.clone(), p.slave_id))
             .collect();
 
         let period = Duration::from_secs(cfg.period);
@@ -308,7 +324,7 @@ impl Source for ModbusClient {
             match evt {
                 Evt::Cmd(Some(m)) => {
                     if m.cmd == "write" {
-                        handle_write(&mut session, &m.data).await;
+                        handle_write(&mut session, &m.data, &m.devid, &devid_to_slave).await;
                     } else {
                         tracing::info!("[modbusClient] inst {inst_id} unknown cmd: {}", m.cmd);
                     }
@@ -336,72 +352,73 @@ impl Source for ModbusClient {
                         Some(s) => s,
                         None => continue,
                     };
-                    for (devid, pairs) in &devices {
-                        if pairs.is_empty() {
-                            continue;
-                        }
-                        let regions = merge_regions(pairs, cfg.gap_threshold, cfg.max_regs);
-                        let mut values = BTreeMap::new();
-                        let mut read_failed = false;
-                        for reg in &regions {
-                            let len = reg.len();
-                            // 双层 Result：外层 transport Error / 内层 ExceptionCode（协议异常）。
-                            let res = match reg.func {
-                                Func::Coil => sess
-                                    .read_coils(reg.start, len)
-                                    .await
-                                    .map(|r| r.map(Buf::Bits)),
-                                Func::Discrete => sess
-                                    .read_discrete_inputs(reg.start, len)
-                                    .await
-                                    .map(|r| r.map(Buf::Bits)),
-                                Func::Holding => sess
-                                    .read_holding_registers(reg.start, len)
-                                    .await
-                                    .map(|r| r.map(Buf::Regs)),
-                                Func::Input => sess
-                                    .read_input_registers(reg.start, len)
-                                    .await
-                                    .map(|r| r.map(Buf::Regs)),
+                    // 单 tick 内所有 devid 共用一个 timestamp（点间一致，对标 opcua/s7 批量读语义）。
+                    let now = chrono::Local::now().timestamp();
+                    // 按 devid 累积解码值（round_robin 下同 devid 的 region 散落序列各处，故聚合）。
+                    let mut acc: BTreeMap<String, BTreeMap<String, SampleValue>> = BTreeMap::new();
+                    let mut transport_failed = false;
+                    for (pi, ri) in &poll_order {
+                        let plan = &plans[*pi];
+                        let reg = &plan.regions[*ri];
+                        sess.set_slave(Slave(plan.slave_id));
+                        let outcome =
+                            match tokio::time::timeout(req_timeout, read_region(sess, reg)).await {
+                                Ok(o) => o,
+                                Err(_) => ReadOutcome::Timeout,
                             };
-                            match res {
-                                Ok(Ok(buf)) => {
-                                    for (field, p) in &reg.points {
-                                        if let Some(v) = decode_point(p, &buf, reg.start) {
-                                            values.insert((*field).to_string(), v);
-                                        }
+                        match outcome {
+                            ReadOutcome::Ok(buf) => {
+                                for (field, p) in &reg.points {
+                                    if let Some(v) = decode_point(p, &buf, reg.start) {
+                                        acc.entry(plan.devid.clone())
+                                            .or_default()
+                                            .insert((*field).to_string(), v);
                                     }
                                 }
-                                Ok(Err(exc)) => {
-                                    // 协议异常（连接正常，如 IllegalDataAddress）：本次 sample
-                                    // 不完整，跳过此设备；不拆 session。
-                                    tracing::warn!(
-                                        "[modbusClient] inst {inst_id} read {}+{} exception: {exc:?}",
-                                        reg.start,
-                                        len
-                                    );
-                                }
-                                Err(e) => {
-                                    tracing::warn!(
-                                        "[modbusClient] inst {inst_id} read {}+{} failed: {e:?}",
-                                        reg.start,
-                                        len
-                                    );
-                                    read_failed = true;
-                                    break;
-                                }
+                            }
+                            ReadOutcome::Exception(exc) => {
+                                tracing::warn!(
+                                    "[modbusClient] inst {inst_id} slave {} read {}+{} exception: {exc:?}",
+                                    plan.slave_id,
+                                    reg.start,
+                                    reg.len()
+                                );
+                            }
+                            ReadOutcome::Timeout => {
+                                tracing::warn!(
+                                    "[modbusClient] inst {inst_id} slave {} read {}+{} timeout ({}s)，跳过",
+                                    plan.slave_id,
+                                    reg.start,
+                                    reg.len(),
+                                    cfg.request_timeout_secs
+                                );
+                            }
+                            ReadOutcome::Transport(e) => {
+                                tracing::warn!(
+                                    "[modbusClient] inst {inst_id} slave {} read {}+{} failed: {e:?}",
+                                    plan.slave_id,
+                                    reg.start,
+                                    reg.len()
+                                );
+                                transport_failed = true;
+                                break;
                             }
                         }
-                        if read_failed {
-                            // 读失败可能因断连：drop Context，下 tick 重连。
-                            session = None;
-                            break;
+                    }
+                    if transport_failed {
+                        // transport 失败可能因断连：drop Context，下 tick 重连。
+                        // 超时/exception 不拆（故障隔离：单 slave 无响应不影响其他 slave）。
+                        session = None;
+                    }
+                    for (devid, values) in acc {
+                        if values.is_empty() {
+                            continue;
                         }
                         let sample = Sample {
                             hwid: ctx.hwid.clone(),
-                            devid: devid.clone(),
+                            devid,
                             values,
-                            timestamp: chrono::Local::now().timestamp(),
+                            timestamp: now,
                         };
                         if tx.send(sample).await.is_err() {
                             break;
@@ -419,7 +436,12 @@ impl Source for ModbusClient {
 ///
 /// coil → FC05/0F；holding u16/i16/bit → FC06，i32/u32/f32/f64 → FC16，bit 走 RMW；
 /// discrete/input 只读拒绝。写失败仅 warn，不拆 session（读 tick 兜底发现断连）。
-async fn handle_write(session: &mut Option<Context>, data: &str) {
+async fn handle_write(
+    session: &mut Option<Context>,
+    data: &str,
+    devid: &str,
+    devid_to_slave: &std::collections::HashMap<String, u8>,
+) {
     let req: serde_json::Value = match serde_json::from_str(data) {
         Ok(v) => v,
         Err(e) => {
@@ -463,6 +485,22 @@ async fn handle_write(session: &mut Option<Context>, data: &str) {
             return;
         }
     };
+    // 按 devid 反查 slave_id（data 可显式带 slave_id 覆盖）。
+    let slave_id = req
+        .get("slave_id")
+        .and_then(|v| v.as_u64())
+        .map(|v| v as u8)
+        .or_else(|| devid_to_slave.get(devid).copied());
+    let slave_id = match slave_id {
+        Some(s) => s,
+        None => {
+            tracing::warn!(
+                "[modbusClient] write 无法确定 slave_id（devid={devid} 未在 devices 配置，data 也无 slave_id）"
+            );
+            return;
+        }
+    };
+    sess.set_slave(Slave(slave_id));
     // 仅 holding bit 写需 RMW（coil 直接写单 coil，无需读当前值）。
     let current_reg = if p.func == Func::Holding && p.typ == Type::Bit {
         match sess.read_holding_registers(p.addr, 1).await {

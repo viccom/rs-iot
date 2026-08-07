@@ -67,14 +67,9 @@ pub(super) struct ModbusCfg {
     /// 单次请求最大单元数（coil/discrete 为 bit 数，holding/input 为寄存器数；协议上限 125）。
     pub(super) max_regs: u16,
     pub(super) reconnect_secs: u64,
-    /// 多 slave 轮询策略（默认 RoundRobin）。Task 5 采集循环消费；当前仅测试读，
-    /// `cfg_attr(not(test), expect)` 在 lib build 抑制 dead_code（裸 expect 在 test build
-    /// 因字段被读而 unfulfilled），Task 5 消费后此 attr 会自动提示移除。
-    #[cfg_attr(not(test), expect(dead_code))]
+    /// 多 slave 轮询策略（默认 RoundRobin）。采集循环消费。
     pub(super) poll_strategy: PollStrategy,
     /// 单次读请求超时（秒）。slave 无响应时跳过该请求（故障隔离），默认 2。
-    /// 同 `poll_strategy`：Task 5 消费前由 `cfg_attr(not(test), expect)` 抑制 lib dead_code。
-    #[cfg_attr(not(test), expect(dead_code))]
     pub(super) request_timeout_secs: u64,
 }
 
