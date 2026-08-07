@@ -539,7 +539,7 @@ Expected: io_engine 全测试绿（含新 udp_roundtrip / udp_bad_endpoint_error
 
 **Files:** Modify `src/plugin/builtin/lua_client/mod.rs`
 
-### - [ ] Step 1：backend 选择接 SerialIo/UdpIo
+### - [x] Step 1：backend 选择接 SerialIo/UdpIo
 
 `mod.rs` 的 backend 选择（line 92-104，IO 引擎构造段）当前：
 ```rust
@@ -585,11 +585,11 @@ use io_engine::{spawn_io_task, IoBackend, MockIoTask, SerialIo, TcpIo, UdpIo};
 
 > **MockIoTask 去除：** backend 选择不再用 MockIoTask。但 `MockIoTask` 仍被 `io_engine`/`api` 单测用（`spawn_io_task(Box::new(MockIoTask{...}))`）——保留 `MockIoTask` 在 use（避免 unused import，因 mod.rs run() 不再用，但单测/其他模块用）。**若 mod.rs run() 不再用 MockIoTask，clippy 报 unused import `MockIoTask`**——从 mod.rs use 移除 MockIoTask（io_engine/api 模块各自 use）。实现时按编译反馈：mod.rs use 只留 `spawn_io_task, IoBackend, SerialIo, TcpIo, UdpIo`（去 MockIoTask）。
 
-### - [ ] Step 2：移除 SerialIo/SerialIo 的临时 `#[expect(dead_code)]`
+### - [x] Step 2：移除 SerialIo/SerialIo 的临时 `#[expect(dead_code)]`
 
 Task 2 若在 SerialIo 加了 `#[expect(dead_code)]`（Task 2 Step 4 注），Task 4 接入后移除（mod.rs 引用 → 不再 dead）。`config::Parity/FlowControl` 同理（Task 4 后 SerialIo 用 → 活）。
 
-### - [ ] Step 3：run lua_client 全单测 + fmt + clippy + 提交
+### - [x] Step 3：run lua_client 全单测 + fmt + clippy + 提交
 
 ```bash
 CARGO_BUILD_JOBS=1 cargo test --lib plugin::builtin::lua_client
