@@ -98,6 +98,12 @@ async fn stat_written_after_collect() {
         stat.last_collect_duration_ms > 0 || stat.collect_count >= 1,
         "duration 已记或已采集"
     );
+    // 🔴 1 间接：正常实例无自我热加载（vm_restart_count 应为 0）。直接测需构造 watcher
+    // 失败（notify 平台依赖 flaky），降级间接——若 reload_rx None 误触发 reload，此处会非 0。
+    assert_eq!(
+        stat.vm_restart_count, 0,
+        "正常运行不应触发热加载（vm_restart_count 应为 0）"
+    );
 
     shutdown.cancel();
     mgr.stop_all().await;

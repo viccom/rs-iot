@@ -121,12 +121,12 @@ impl Source for LuaClient {
             }
         }
 
-        // 6. reload channel（notify watcher → Evt::Reload；Task 3 接 watcher）+ 主循环 Evt。
-        // _reload_tx 暂不用（Task 3 spawn watcher 改 reload_tx.clone()）；前缀 _ 避 unused。
+        // 6. reload channel（notify watcher → Evt::Reload）+ 主循环 Evt。
         let (reload_tx, mut reload_rx) = mpsc::channel::<()>(8);
         // notify watcher 监听 scripts/<name>/ 改动 → reload_tx（热加载，spec §5.3）。
+        // watcher 随 token 终止（实例 stop 不泄漏线程）；见 hotload::spawn_watcher。
         let script_dir = scripts_root.join(cfg.script.as_str());
-        hotload::spawn_watcher(script_dir, reload_tx);
+        hotload::spawn_watcher(script_dir, reload_tx, token.clone());
         let mut ticker = tokio::time::interval(std::time::Duration::from_secs(cfg.period.max(1)));
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         tracing::info!(
@@ -135,6 +135,21 @@ impl Source for LuaClient {
             cfg.script,
             cfg.period
         );
+        // 大声失败（CLAUDE.md 规则 10）：v1 重连由 collect period 天然限速，reconnect_secs 不生效。
+        if inst.app_config.get("reconnect_secs").is_some() {
+            tracing::warn!(
+                "[luaClient] inst {}: reconnect_secs 不生效（v1 重连由 collect period 天然限速）",
+                inst.inst_id
+            );
+        }
+        // luaClient 实例语义为单设备（collect 无参、set_value 限 devices[0]）；多设备仅采首个。
+        if inst.devices.len() > 1 {
+            tracing::warn!(
+                "[luaClient] inst {} 配置 {} 个设备，仅采集 devices[0]（多设备应拆为多实例）",
+                inst.inst_id,
+                inst.devices.len()
+            );
+        }
 
         // 状态快照（spec §13）：启动写 running，collect/reload/退出 更新。
         let script_ver = script_version(&scripts_root, &cfg.script);
@@ -158,7 +173,7 @@ impl Source for LuaClient {
                 _ = token.cancelled() => break,
                 msg = cmd_rx.recv() => Evt::Cmd(msg),
                 Some(frame) = data_rx.recv() => Evt::Data(frame),
-                _ = reload_rx.recv() => Evt::Reload,
+                Some(()) = reload_rx.recv() => Evt::Reload, // None（watcher 退出/失败）忽略，不忙循环
                 _ = ticker.tick() => Evt::Tick,
             };
             match evt {
@@ -182,9 +197,12 @@ impl Source for LuaClient {
                     let started = std::time::Instant::now();
                     let now = chrono::Local::now().timestamp();
                     let mut tick_err: Option<String> = None;
-                    for dev in &inst.devices {
-                        match call_collect(&lua).await {
-                            Ok(Some(values)) if !values.is_empty() => {
+                    // collect 无参不感知设备，只调一次（重复调会使 ctx:request/kv_set 等
+                    // 副作用翻倍）；结果推 inst.devices[0]（与 ctx:set_value 的 devices.first()
+                    // 语义一致，spec §7 L2「自己当前 devid」）。多设备应拆为多实例。
+                    match call_collect(&lua).await {
+                        Ok(Some(values)) if !values.is_empty() => {
+                            if let Some(dev) = inst.devices.first() {
                                 let sample = Sample {
                                     hwid: ctx.hwid.clone(),
                                     devid: dev.value.clone(),
@@ -192,14 +210,15 @@ impl Source for LuaClient {
                                     timestamp: now,
                                 };
                                 if tx.send(sample).await.is_err() {
-                                    break;
+                                    tracing::warn!("[luaClient] hub 关闭，collect 值未上报");
                                 }
                             }
-                            Ok(_) => {}
-                            Err(e) => {
-                                tracing::warn!("[luaClient] collect 失败：{e}");
-                                tick_err = Some(e.to_string());
-                            }
+                            // devices 为空：collect 返回值无 devid 去处，丢弃（set_value 路径仍可上报）。
+                        }
+                        Ok(_) => {}
+                        Err(e) => {
+                            tracing::warn!("[luaClient] collect 失败：{e}");
+                            tick_err = Some(e.to_string());
                         }
                     }
                     // 状态采点（spec §13）：按周期计，任一 collect 失败记 fail 周期。
@@ -234,6 +253,7 @@ impl Source for LuaClient {
                         Ok(new_lua) => {
                             lua = new_lua;
                             stat.vm_restart_count += 1;
+                            stat.script_version = script_version(&scripts_root, &cfg.script);
                             consecutive_fail = 0;
                             stat.status = "running".into();
                             let _ =
@@ -457,6 +477,33 @@ mod tests {
         assert!(format!("{:?}", s.values).contains("42.5"));
         token.cancel();
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// 🔴 3 回归：watcher（tokio task）随 `token.cancel()` 退出 → `reload_tx` drop →
+    /// `reload_rx.recv()` 返 `None`。修复（方案 A：`tokio::spawn` + `select!(token.cancelled)`）
+    /// 下快速退出；回退到 `std::thread` + `loop { sleep }` 时 task 不响应 cancel → `reload_tx`
+    /// 不 drop → recv 挂起 → 测试超时失败。不依赖 notify 真实事件（只验 token 退出路径）。
+    #[tokio::test]
+    async fn watcher_exits_on_cancel() {
+        use std::time::Duration;
+        let (reload_tx, mut reload_rx) = mpsc::channel::<()>(8);
+        let token = CancellationToken::new();
+        // 独占临时目录：非共享 temp_dir()，避免并行测试写 temp_dir 触发 notify 事件，
+        // 使 reload_rx 收到 Some(()) 而非期望的 None（task 退出 → reload_tx drop）。
+        let dir = std::env::temp_dir().join(format!("lua-watcher-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        super::hotload::spawn_watcher(dir.clone(), reload_tx, token.clone());
+        // 等 watcher task 启动（debouncer 创建 + watch 注册）。
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        token.cancel();
+        // 修复：task 退出 → debouncer drop → reload_tx drop → recv() 返 None（<500ms）。
+        // bug：task 不响应 cancel → reload_tx 不 drop → recv 挂起 → 500ms 超时。
+        let r = tokio::time::timeout(Duration::from_millis(500), reload_rx.recv()).await;
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            matches!(r, Ok(None)),
+            "watcher 应随 token.cancel 退出（reload_tx drop → recv None），实得 {r:?}"
+        );
     }
 
     async fn mock_lux() -> lux::EmbeddedClient {
