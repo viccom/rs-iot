@@ -20,35 +20,20 @@ fn spawn_mock_io() -> IoEngine {
     )
 }
 
+/// 测试用 mock hub tx（满足 register 的 tx 参数；接收端立即丢弃，不验接收）。
+///
+/// 现有 L1/L3/L4/L6 测试不触 set_value，故 tx 仅占位；L2 `set_value` 测自建真实 channel。
+fn mock_hub_tx() -> tokio::sync::mpsc::Sender<crate::types::Sample> {
+    let (tx, _rx) = tokio::sync::mpsc::channel::<crate::types::Sample>(8);
+    tx
+}
+
 /// 冒烟测：register 成功 + ctx 暴露 request/log_info/now/time（且都是 function）。
 #[tokio::test]
 async fn register_exposes_ctx_api() {
     let lua = Lua::new();
     let io = spawn_mock_io();
-    // 起一个测试 lux 拿 EmbeddedClient（HostContext 需要；端口 0 由 OS 分配，独立
-    // 临时 data_dir 防并行冲突——同 tests/common 模式）。
-    let data_dir = std::env::temp_dir()
-        .join(format!("lua-api-{}", std::process::id()))
-        .to_str()
-        .unwrap()
-        .to_string();
-    let cfg = crate::config::AppConfig {
-        lux: crate::config::LuxConfig {
-            port: 0,
-            data_dir: data_dir.clone(),
-            ..Default::default()
-        },
-        ..Default::default()
-    };
-    let lux_cfg = crate::db::build_lux_config(&cfg);
-    let handle = lux::run_with_config(lux_cfg).await.expect("lux");
-    let ctx_host = HostContext {
-        lux: handle.client(),
-        hwid: crate::types::Hwid::new("it"),
-        shutdown: CancellationToken::new(),
-        ctl_registry: CtlRegistry::new(),
-        bridge_registry: BridgeRegistry::new(),
-    };
+    let (ctx_host, handle, data_dir) = setup_ctx("api").await;
     let inst = InstConfig {
         inst_id: "it".into(),
         inst_name: "it".into(),
@@ -63,7 +48,7 @@ async fn register_exposes_ctx_api() {
         }],
         host_kind: HostKind::Builtin,
     };
-    register(&lua, ctx_host, &inst, io).expect("register");
+    register(&lua, ctx_host, &inst, io, mock_hub_tx()).expect("register");
     for api in [
         "request",
         "log_info",
@@ -98,29 +83,7 @@ async fn register_exposes_ctx_api() {
 async fn kv_set_get_roundtrip() {
     let lua = mlua::Lua::new();
     let io = spawn_mock_io();
-    let data_dir = std::env::temp_dir()
-        .join(format!("lua-kv-{}", std::process::id()))
-        .to_str()
-        .unwrap()
-        .to_string();
-    let cfg = crate::config::AppConfig {
-        lux: crate::config::LuxConfig {
-            port: 0,
-            data_dir: data_dir.clone(),
-            ..Default::default()
-        },
-        ..Default::default()
-    };
-    let handle = lux::run_with_config(crate::db::build_lux_config(&cfg))
-        .await
-        .expect("lux");
-    let ctx_host = HostContext {
-        lux: handle.client(),
-        hwid: crate::types::Hwid::new("it"),
-        shutdown: CancellationToken::new(),
-        ctl_registry: CtlRegistry::new(),
-        bridge_registry: BridgeRegistry::new(),
-    };
+    let (ctx_host, handle, data_dir) = setup_ctx("kv").await;
     let inst = InstConfig {
         inst_id: "it".into(),
         inst_name: "it".into(),
@@ -135,7 +98,7 @@ async fn kv_set_get_roundtrip() {
         }],
         host_kind: HostKind::Builtin,
     };
-    register(&lua, ctx_host, &inst, io).expect("register");
+    register(&lua, ctx_host, &inst, io, mock_hub_tx()).expect("register");
 
     // kv_set/kv_get 是 async function（底层落 lux），用 exec_async/eval_async 驱动。
     lua.load("ctx:kv_set('counter', 42)")
@@ -215,7 +178,7 @@ async fn send_command_routes_to_target() {
         }],
         host_kind: HostKind::Builtin,
     };
-    register(&lua, ctx_host, &inst, io).expect("register");
+    register(&lua, ctx_host, &inst, io, mock_hub_tx()).expect("register");
 
     // 命中目标实例。
     let ok: bool = lua
@@ -270,8 +233,41 @@ async fn http_get_returns_status_and_body() {
 
     let lua = mlua::Lua::new();
     let io = spawn_mock_io();
+    let (ctx_host, handle, data_dir) = setup_ctx("http").await;
+    let inst = InstConfig {
+        inst_id: "it".into(),
+        inst_name: "it".into(),
+        app_code: PluginName::new("luaClient"),
+        app_type: AppType::South,
+        auto_start: false,
+        app_config: serde_json::json!({"script":"a","endpoint":"x"}),
+        devices: vec![DeviceSpec {
+            label: "d".into(),
+            value: "d".into(),
+            children: vec![],
+        }],
+        host_kind: HostKind::Builtin,
+    };
+    register(&lua, ctx_host, &inst, io, mock_hub_tx()).expect("register");
+
+    let resp: mlua::Table = lua
+        .load(format!("return ctx:http_get('http://127.0.0.1:{port}/x')"))
+        .eval_async()
+        .await
+        .expect("http_get");
+    assert_eq!(resp.get::<i64>("status").unwrap(), 200);
+    assert_eq!(resp.get::<String>("body").unwrap(), "{\"ok\":true}");
+
+    let _ = crate::db::shutdown_lux(handle).await;
+    let _ = std::fs::remove_dir_all(&data_dir);
+}
+
+/// 测试用：起独立 lux（端口 0 + 临时 data_dir）+ 标准 HostContext（hwid="it"，
+/// 空 registries）。返回 (ctx_host, handle, data_dir)——handle 供 `shutdown_lux`，
+/// data_dir 供清理。L2 数据测共用；L3 send_command 测自建 ctl_registry 不走此路径。
+async fn setup_ctx(tag: &str) -> (HostContext, lux::ServerHandle, String) {
     let data_dir = std::env::temp_dir()
-        .join(format!("lua-http-{}", std::process::id()))
+        .join(format!("lua-{tag}-{}", std::process::id()))
         .to_str()
         .unwrap()
         .to_string();
@@ -293,6 +289,17 @@ async fn http_get_returns_status_and_body() {
         ctl_registry: CtlRegistry::new(),
         bridge_registry: BridgeRegistry::new(),
     };
+    (ctx_host, handle, data_dir)
+}
+
+/// L2 set_value 推 Sample 到 hub（devid=inst.devices[0].value，values 含 tag→value，
+/// hwid=ctx_host.hwid）。
+#[tokio::test]
+async fn set_value_pushes_sample_to_hub() {
+    let lua = Lua::new();
+    let io = spawn_mock_io();
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<crate::types::Sample>(8);
+    let (ctx_host, handle, data_dir) = setup_ctx("l2-set").await;
     let inst = InstConfig {
         inst_id: "it".into(),
         inst_name: "it".into(),
@@ -302,20 +309,171 @@ async fn http_get_returns_status_and_body() {
         app_config: serde_json::json!({"script":"a","endpoint":"x"}),
         devices: vec![DeviceSpec {
             label: "d".into(),
-            value: "d".into(),
+            value: "devX".into(),
             children: vec![],
         }],
         host_kind: HostKind::Builtin,
     };
-    register(&lua, ctx_host, &inst, io).expect("register");
+    register(&lua, ctx_host, &inst, io, tx).expect("register");
 
-    let resp: mlua::Table = lua
-        .load(format!("return ctx:http_get('http://127.0.0.1:{port}/x')"))
+    lua.load("ctx:set_value('temp', 42.5)")
+        .exec_async()
+        .await
+        .expect("set_value");
+
+    let s = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+        .await
+        .expect("超时")
+        .expect("应收到 Sample");
+    assert_eq!(s.devid, "devX");
+    assert_eq!(s.hwid.as_str(), "it");
+    match s.values.get("temp") {
+        Some(crate::types::SampleValue::Float(f)) => {
+            assert!((f - 42.5).abs() < 1e-9, "值应为 42.5，实得 {f}")
+        }
+        other => panic!("temp 应是 Float(42.5)，实得 {other:?}"),
+    }
+
+    let _ = crate::db::shutdown_lux(handle).await;
+    let _ = std::fs::remove_dir_all(&data_dir);
+}
+
+/// L2 get_value 读 lux rtdata 最新值（经 db::rtdata::write 写入 → get_value 读回）。
+#[tokio::test]
+async fn get_value_reads_rtdata() {
+    let lua = Lua::new();
+    let io = spawn_mock_io();
+    let (ctx_host, handle, data_dir) = setup_ctx("l2-gv").await;
+    let inst = InstConfig {
+        inst_id: "it".into(),
+        inst_name: "it".into(),
+        app_code: PluginName::new("luaClient"),
+        app_type: AppType::South,
+        auto_start: false,
+        app_config: serde_json::json!({"script":"a","endpoint":"x"}),
+        devices: vec![DeviceSpec {
+            label: "d".into(),
+            value: "devX".into(),
+            children: vec![],
+        }],
+        host_kind: HostKind::Builtin,
+    };
+    // 先写 rtdata（对标 pipeline 入库格式），再让 get_value 读回。
+    let mut values = std::collections::BTreeMap::new();
+    values.insert("temp".to_string(), crate::types::SampleValue::Float(42.5));
+    crate::db::rtdata::write(&ctx_host.lux, "it", "devX", &values, 1_700_000_000)
+        .await
+        .expect("rtdata write");
+    register(&lua, ctx_host, &inst, io, mock_hub_tx()).expect("register");
+
+    let v: String = lua
+        .load("return ctx:get_value('devX', 'temp')")
         .eval_async()
         .await
-        .expect("http_get");
-    assert_eq!(resp.get::<i64>("status").unwrap(), 200);
-    assert_eq!(resp.get::<String>("body").unwrap(), "{\"ok\":true}");
+        .expect("get_value");
+    assert_eq!(v, "42.5");
+
+    // 不存在的 tag → nil。
+    let nil: mlua::Value = lua
+        .load("return ctx:get_value('devX', 'missing')")
+        .eval_async()
+        .await
+        .expect("get_value nil");
+    assert_eq!(nil, mlua::Value::Nil, "缺省 tag 应返回 nil");
+
+    let _ = crate::db::shutdown_lux(handle).await;
+    let _ = std::fs::remove_dir_all(&data_dir);
+}
+
+/// L2 get_device 读 lux HGETALL rtdata:<devid> → {tag: value_str}（全部数据点）。
+#[tokio::test]
+async fn get_device_returns_rtdata_values() {
+    let lua = Lua::new();
+    let io = spawn_mock_io();
+    let (ctx_host, handle, data_dir) = setup_ctx("l2-gd").await;
+    let inst = InstConfig {
+        inst_id: "it".into(),
+        inst_name: "it".into(),
+        app_code: PluginName::new("luaClient"),
+        app_type: AppType::South,
+        auto_start: false,
+        app_config: serde_json::json!({"script":"a","endpoint":"x"}),
+        devices: vec![DeviceSpec {
+            label: "d".into(),
+            value: "devX".into(),
+            children: vec![],
+        }],
+        host_kind: HostKind::Builtin,
+    };
+    let mut values = std::collections::BTreeMap::new();
+    values.insert("temp".to_string(), crate::types::SampleValue::Float(42.5));
+    values.insert("hum".to_string(), crate::types::SampleValue::Int(60));
+    crate::db::rtdata::write(&ctx_host.lux, "it", "devX", &values, 1_700_000_000)
+        .await
+        .expect("rtdata write");
+    register(&lua, ctx_host, &inst, io, mock_hub_tx()).expect("register");
+
+    let t: mlua::Table = lua
+        .load("return ctx:get_device('devX')")
+        .eval_async()
+        .await
+        .expect("get_device");
+    assert_eq!(t.get::<String>("temp").unwrap(), "42.5");
+    assert_eq!(t.get::<String>("hum").unwrap(), "60");
+
+    // 不存在的设备 → nil。
+    let nil: mlua::Value = lua
+        .load("return ctx:get_device('nope')")
+        .eval_async()
+        .await
+        .expect("get_device nil");
+    assert_eq!(nil, mlua::Value::Nil, "缺省设备应返回 nil");
+
+    let _ = crate::db::shutdown_lux(handle).await;
+    let _ = std::fs::remove_dir_all(&data_dir);
+}
+
+/// L2 list_devices 返 inst.devices（{label, value} 数组；实例自身设备，非全库）。
+#[tokio::test]
+async fn list_devices_returns_inst_devices() {
+    let lua = Lua::new();
+    let io = spawn_mock_io();
+    let (ctx_host, handle, data_dir) = setup_ctx("l2-ld").await;
+    let inst = InstConfig {
+        inst_id: "it".into(),
+        inst_name: "it".into(),
+        app_code: PluginName::new("luaClient"),
+        app_type: AppType::South,
+        auto_start: false,
+        app_config: serde_json::json!({"script":"a","endpoint":"x"}),
+        devices: vec![
+            DeviceSpec {
+                label: "A".into(),
+                value: "devX".into(),
+                children: vec![],
+            },
+            DeviceSpec {
+                label: "B".into(),
+                value: "devY".into(),
+                children: vec![],
+            },
+        ],
+        host_kind: HostKind::Builtin,
+    };
+    register(&lua, ctx_host, &inst, io, mock_hub_tx()).expect("register");
+
+    // list_devices 是同步函数（create_function），用 eval（非 eval_async）。
+    let t: mlua::Table = lua
+        .load("return ctx:list_devices()")
+        .eval()
+        .expect("list_devices");
+    assert_eq!(t.len().unwrap(), 2, "应返 2 个设备");
+    let d1: mlua::Table = t.get::<mlua::Table>(1).unwrap();
+    assert_eq!(d1.get::<String>("label").unwrap(), "A");
+    assert_eq!(d1.get::<String>("value").unwrap(), "devX");
+    let d2: mlua::Table = t.get::<mlua::Table>(2).unwrap();
+    assert_eq!(d2.get::<String>("label").unwrap(), "B");
+    assert_eq!(d2.get::<String>("value").unwrap(), "devY");
 
     let _ = crate::db::shutdown_lux(handle).await;
     let _ = std::fs::remove_dir_all(&data_dir);

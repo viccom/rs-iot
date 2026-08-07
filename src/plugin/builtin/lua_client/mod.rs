@@ -108,7 +108,7 @@ impl Source for LuaClient {
         let io_engine = spawn_io_task(backend, data_tx);
 
         // 4. 注册 ctx API。
-        if let Err(e) = api::register(&lua, ctx.clone(), &inst, io_engine.clone()) {
+        if let Err(e) = api::register(&lua, ctx.clone(), &inst, io_engine.clone(), tx.clone()) {
             tracing::warn!("[luaClient] inst {} ctx API 注册失败：{e}", inst.inst_id);
             return;
         }
@@ -221,7 +221,16 @@ impl Source for LuaClient {
                     let _ = crate::db::luastat::write(&ctx.lux, inst.inst_id.as_ref(), &stat).await;
                 }
                 Evt::Reload => {
-                    match reload_vm(&cfg, &lctx, ctx.clone(), &inst, io_engine.clone()).await {
+                    match reload_vm(
+                        &cfg,
+                        &lctx,
+                        ctx.clone(),
+                        &inst,
+                        io_engine.clone(),
+                        tx.clone(),
+                    )
+                    .await
+                    {
                         Ok(new_lua) => {
                             lua = new_lua;
                             stat.vm_restart_count += 1;
@@ -308,10 +317,11 @@ async fn reload_vm(
     ctx_host: HostContext,
     inst: &InstConfig,
     io: io_engine::IoEngine,
+    tx: mpsc::Sender<Sample>,
 ) -> mlua::Result<mlua::Lua> {
     let lua = engine::new_vm(cfg)?;
     load_main(&lua, lctx)?;
-    api::register(&lua, ctx_host, inst, io)?;
+    api::register(&lua, ctx_host, inst, io, tx)?;
     // dry-run on_init（hook 兜底死循环；失败 → Err → 主循环回退旧 VM）。
     if lua.globals().get::<mlua::Function>("on_init").is_ok() {
         let r: mlua::Result<()> = lua.load("on_init()").eval_async().await;

@@ -319,7 +319,9 @@ git commit -m "refactor(lua): M8b api.rs 拆分 api/ 目录（mod/comm/data/http
 
 ---
 
-## Task 2: L2 数据 API + register 加 tx
+## Task 2: L2 数据 API + register 加 tx ✅（set_value/get_value/get_device/list_devices + register 加 tx + mod.rs/reload_vm 接，CI 三项绿，lib 108 测 +4 L2）
+
+> **实现纪要（2026-08-07）**：subagent 实现 L2 主体 + register 加 tx + mod.rs/reload_vm 接 tx + api/tests.rs 加 4 L2 测 + mock_hub_tx；控制器接手修 get_device 空 Array→Nil（缺省设备返 nil）。api/mod.rs 354 行（<500）。L2 语义：set_value 推 Sample 到 hub（数据上行总线，devid 取 inst.devices[0]）；get_value 读 lux HGET rtdata cell[2]；get_device 读 HGETALL→{tag:value}（空数组返 nil）；list_devices 返 inst.devices 数组（同步）。
 
 **Files:** Modify `api/data.rs`（加 L2）+ `api/mod.rs`（register 加 tx）+ `mod.rs`（lua_client run()/reload_vm 接 tx）
 
