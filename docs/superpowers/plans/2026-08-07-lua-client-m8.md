@@ -605,7 +605,7 @@ Expected: lua_client 全单测绿（collect/on_write/on_data/stat/script_version
 
 **Files:** Create `tests/lua_udp_e2e.rs`
 
-### - [ ] Step 1：写集成测
+### - [x] Step 1：写集成测
 
 新建 `tests/lua_udp_e2e.rs`（仿 lua_modbus_e2e / lua_stat_e2e 模式，mock udp server + collect 端到端）：
 ```rust
@@ -720,7 +720,7 @@ async fn hget_cell(client: &lux::EmbeddedClient, key: &str, field: &str) -> Stri
 }
 ```
 
-### - [ ] Step 2：run + fmt + clippy + 全量 test + 提交
+### - [x] Step 2：run + fmt + clippy + 全量 test + 提交
 
 ```bash
 CARGO_BUILD_JOBS=1 cargo test --test lua_udp_e2e

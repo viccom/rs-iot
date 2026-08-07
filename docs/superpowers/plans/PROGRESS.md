@@ -6,8 +6,8 @@
 
 - ✅ Plan 1-5（M1-M6：MVP / M4 联动持久 / M5 HTTP / on_data / M6 热加载）— 合并 master @ `cf92eee`（**111 测试全绿**）
 - ✅ Plan 6（M7 状态监测 + REST）— 合并 master @ `26897bb`（fast-forward，**125 测试全绿**）
-- ✅ Plan 7（M8a serial/udp 传输）plan 就绪 @ `c4ffbd0`（2026-08-07）
-- 🔵 Plan 7 执行中：分支 `feature/lua-m8a`，Task 1-4 ✅（三传输就绪：mod.rs 接 Serial/Udp backend），下一步 Task 5（lua_udp_e2e 集成测）
+- ✅ Plan 7（M8a serial/udp 传输）全 5 task 完成 @ 分支 `feature/lua-m8a`（HEAD `a1e264b`，**131 测试全绿**），待合并 master
+- 🔵 下一步：`finishing-a-development-branch` 合并 `feature/lua-m8a` → master + 删分支 → 写 Plan 8（M8b L2 + 文档）plan
 
 ## Plan 路线图（spec milestone + 欠账补全）
 
@@ -19,8 +19,20 @@
 | 4 | on_data 被动帧（M2 欠账） | ✅ done @ master（`797545d`） | `2026-08-07-lua-client-on-data.md` |
 | 5 | M6 热加载（notify + VM 重建 + dry-run + 失败回退） | ✅ done @ master（`cf92eee`，2026-08-07 合并） | `2026-08-07-lua-client-m6.md` |
 | 6 | M7 状态监测（`stat:<inst>`）+ REST（`routes_lua` stats/reload） | ✅ done @ master（`26897bb`，125 测试绿） | `2026-08-07-lua-client-m7.md` |
-| 7 | M8a serial/udp 传输（SerialIo/UdpIo + config serial 参数） | 🔵 plan 就绪 @ `c4ffbd0`，待执行 | `2026-08-07-lua-client-m8.md` |
+| 7 | M8a serial/udp 传输（SerialIo/UdpIo + config serial 参数） | ✅ 全 task 完成 @ `feature/lua-m8a`（131 测试绿），待合并 master | `2026-08-07-lua-client-m8.md` |
 | 8 | M8b L2 数据 API（set_value/get_value/get_device/list_devices）+ 文档 + 示例 | ⏭ 待写 plan | — |
+
+## Plan 7（M8a serial/udp 传输）完成总结 ✅（分支 `feature/lua-m8a`，待合并 master）
+
+- [x] Task 1：`config.rs` serial 参数（baud_rate/data_bits/parity/stop_bits/flow_control + Parity/FlowControl enum）（`7026c93`，8 单测）
+- [x] Task 2：`io_engine` SerialIo（tokio-serial，IoBackend impl，单测 `#[ignore]`）（`42f3165`）
+- [x] io_engine 拆分为目录模块（mod/tcp/serial/mock，守 <500 行）（`2995c59`，纯重构 29 测不变）
+- [x] Task 3：`io_engine/udp.rs` UdpIo（connected UdpSocket，datagram 边界）（`6ebcd09`，io_engine 8 测）
+- [x] Task 4：`mod.rs` backend 接 Serial/Udp（三传输就绪，去 MockIoTask 占位）（`61a352b`，lua_client 31 测）
+- [x] Task 5：集成测 `lua_udp_e2e`（mock udp server → collect → rtdata）（`a1e264b`）
+
+**131 测试全绿**（lib 104 = M7 99 + M8a +5；集成测 27 = M7 26 + lua_udp_e2e +1）。spec §8 三传输（tcp/serial/udp）覆盖。
+**v1 简化（plan 注明）**：serial 单测 `#[ignore]`（需真机）；recv_mode 仅 Timeout + udp datagram（length/delimiter/fixed 后置）；io_engine 目录模块（拆分守 <500）。
 
 ## Plan 6（M7 状态监测 + REST）完成总结 ✅（合并 master @ `26897bb`，2026-08-07）
 
@@ -44,14 +56,13 @@
 
 ## 下一步（每轮 cron 触发执行）
 
-**执行 Plan 7（M8a serial/udp 传输）**：建 `feature/lua-m8a` 分支（从 master `c4ffbd0`），subagent-driven 逐 task（API 503 时控制器接手）。Plan `2026-08-07-lua-client-m8.md` @ `c4ffbd0`，5 task：
-- ✅ Task 1：`config.rs` serial 参数（baud_rate/data_bits/parity/stop_bits/flow_control + Parity/FlowControl enum）。— @ `7026c93`（8 单测绿）
-- ✅ Task 2：`io_engine.rs` SerialIo（tokio-serial，IoBackend impl，单测 `#[ignore]` 需真串口）。— @ `42f3165`（编译绿，serial 单测 ignore）
-- ✅ Task 3：`io_engine/udp.rs` UdpIo（connected UdpSocket，datagram 边界）+ mock udp 单测。— @ `6ebcd09`（io_engine 8 测绿，含 udp 2 测）
-- ✅ Task 4：`mod.rs` backend 选择接 Serial/Udp（去 MockIoTask 占位，三传输就绪）。— @ `61a352b`（lua_client 31 测绿）
-- 🔵 Task 5：`tests/lua_udp_e2e.rs`（mock udp server → collect → rtdata）。（下一步）
+**1. 合并 Plan 7 → master**：`superpowers:finishing-a-development-branch`，分支 `feature/lua-m8a`（HEAD `a1e264b`，15 commit）→ merge master + 删分支。CI 已全绿（131 测试 + fmt + clippy）。
 
-**M8 拆分**：Plan 7（M8a serial/udp，本计划）+ Plan 8（M8b L2 数据 API + 文档 + 示例）。两者独立可测。Plan 8 完成后 spec 全 milestone 实现 → CronDelete `39632fab` 收尾。
+**2. 写 Plan 8（M8b）plan**：`superpowers:writing-plans`，spec §7 L2 数据 API（set_value/get_value/get_device/list_devices）+ `docs/lua-script-guide.md` 脚本指南 + `examples/lua-scripts/` 示例。文件名 `2026-08-07-lua-client-m8b.md`。
+- M8b 范围：① api.rs L2 ctx API（set_value 推 hub 需 register 加 tx；get_value/get_device 读 lux rtdata；list_devices 列设备）② docs/lua-script-guide.md（API 参考 + 示例）③ examples/lua-scripts/（含 mock 协议）。
+- 关键：api.rs 616 行超 <500，Plan 8 改 L2 时拆 ctx API 到 api/ 目录；set_value 推 Sample 经 hub（register 加 tx 参数）。
+
+**M8 拆分**：Plan 7（M8a serial/udp，已完成）+ Plan 8（M8b L2 + 文档）。Plan 8 完成后 spec 全 milestone 实现 → CronDelete `39632fab` 收尾。
 
 ## 已知简化 / 风险（累计，注明）
 
