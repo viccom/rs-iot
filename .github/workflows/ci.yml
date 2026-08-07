@@ -59,6 +59,26 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libudev-dev
       - run: cargo test --all-targets --all-features
 
+  minimal:
+    # 验证裁剪组合可编译：关掉三协议，覆盖最小现场部署（lua 脚本采集）。
+    # 防止 feature 化后裁剪组合悄悄编译失败却无人发现（docs/plan-feature-gating-protocols.md R4）。
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: viccom/lux
+          path: ../lux
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install libudev-dev (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev
+      # test（非 build）：让 feature_gate_e2e（#![cfg(not(feature = "modbus"))]）在
+      # 裁剪组合下执行，验证关协议时优雅降级（R1）；同时回归保护裁剪组合下其他测试。
+      - run: cargo test --no-default-features --features lua
+      # modbus 开启 → feature_gate_e2e 被 cfg 跳过；此处仅验证该组合可编译。
+      - run: cargo build --no-default-features --features "lua,modbus,opcua"
+
   doc:
     runs-on: ubuntu-latest
     steps:
