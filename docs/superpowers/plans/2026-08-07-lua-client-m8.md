@@ -393,7 +393,7 @@ Expected: 编译过（SerialIo 未在 mod.rs 用，可能 dead_code 警告——
 
 **Files:** Modify `src/plugin/builtin/lua_client/io_engine.rs`
 
-### - [ ] Step 1：UdpIo struct + ensure_connected + impl IoBackend
+### - [x] Step 1：UdpIo struct + ensure_connected + impl IoBackend
 
 `io_engine.rs`（`SerialIo` impl 块后）加：
 ```rust
@@ -491,7 +491,7 @@ impl IoBackend for UdpIo {
 
 > **注意 `use tokio::io::AsyncWriteExt`：** UdpSocket 有 `send/recv`（UdpSocket 固有方法，datagram 语义），不需 AsyncWriteExt（那是 stream 的 poll_write）。这里 `send` 是 UdpSocket::send。`use AsyncWriteExt` 误加会 unused import warning——实现时确认只用 `sock.send(...)`/`sock.recv(...)`，删掉 `use AsyncWriteExt`（UdpSocket::send/recv 是 inherent method）。**实现时移除该 use。**
 
-### - [ ] Step 2：UdpIo 单测（mock udp server）
+### - [x] Step 2：UdpIo 单测（mock udp server）
 
 `#[cfg(test)] mod tests` 内加：
 ```rust
@@ -523,7 +523,7 @@ impl IoBackend for UdpIo {
     }
 ```
 
-### - [ ] Step 3：run udp 单测 + fmt + clippy + 提交
+### - [x] Step 3：run udp 单测 + fmt + clippy + 提交
 
 ```bash
 CARGO_BUILD_JOBS=1 cargo test --lib plugin::builtin::lua_client::io_engine
