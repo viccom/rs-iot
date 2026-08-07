@@ -23,6 +23,28 @@ pub(super) enum RecvMode {
     Timeout,
 }
 
+/// 串口校验（对标 modbus_client `ParityKind`）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Parity {
+    /// 无校验。
+    None,
+    /// 偶校验。
+    Even,
+    /// 奇校验。
+    Odd,
+}
+
+/// 串口流控（对标 modbus_client `FlowKind`）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum FlowControl {
+    /// 无流控。
+    None,
+    /// 软件流控（XON/XOFF）。
+    Software,
+    /// 硬件流控（RTS/CTS）。
+    Hardware,
+}
+
 /// 从 `app_config` 解析的插件配置。
 #[allow(dead_code)]
 #[derive(Debug)]
@@ -32,6 +54,16 @@ pub(super) struct LuaCfg {
     pub(super) endpoint: String,
     /// serial 串口名。
     pub(super) serial_port: Option<String>,
+    /// serial 波特率（默认 9600）。
+    pub(super) baud_rate: u32,
+    /// serial 数据位（5/6/7/8，默认 8）。
+    pub(super) data_bits: u8,
+    /// serial 校验（默认 None）。
+    pub(super) parity: Parity,
+    /// serial 停止位（1/2，默认 1）。
+    pub(super) stop_bits: u8,
+    /// serial 流控（默认 None）。
+    pub(super) flow_control: FlowControl,
     pub(super) period: u64,
     /// ctx:request 默认超时（毫秒）。
     pub(super) timeout_ms: u64,
@@ -91,6 +123,33 @@ pub(super) fn parse_cfg(app: &serde_json::Value) -> Result<LuaCfg, String> {
         }
     };
 
+    let baud_rate = app
+        .get("baud_rate")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(9600) as u32;
+    let data_bits = app.get("data_bits").and_then(|v| v.as_u64()).unwrap_or(8) as u8;
+    let stop_bits = app.get("stop_bits").and_then(|v| v.as_u64()).unwrap_or(1) as u8;
+    let parity = match app.get("parity").and_then(|v| v.as_str()).unwrap_or("none") {
+        "none" => Parity::None,
+        "even" => Parity::Even,
+        "odd" => Parity::Odd,
+        other => return Err(format!("unsupported parity '{other}'（none/even/odd）")),
+    };
+    let flow_control = match app
+        .get("flow_control")
+        .and_then(|v| v.as_str())
+        .unwrap_or("none")
+    {
+        "none" => FlowControl::None,
+        "software" => FlowControl::Software,
+        "hardware" => FlowControl::Hardware,
+        other => {
+            return Err(format!(
+                "unsupported flow_control '{other}'（none/software/hardware）"
+            ))
+        }
+    };
+
     let period = app.get("period").and_then(|v| v.as_u64()).unwrap_or(3);
     let timeout_ms = app
         .get("timeout_ms")
@@ -123,6 +182,11 @@ pub(super) fn parse_cfg(app: &serde_json::Value) -> Result<LuaCfg, String> {
         transport,
         endpoint,
         serial_port,
+        baud_rate,
+        data_bits,
+        parity,
+        stop_bits,
+        flow_control,
         period,
         timeout_ms,
         recv_mode: RecvMode::Timeout,
@@ -178,5 +242,40 @@ mod tests {
         // 显式覆盖。
         let cfg = parse_cfg(&json!({"script":"devA","endpoint":"x","fail_threshold":3})).unwrap();
         assert_eq!(cfg.fail_threshold, 3);
+    }
+
+    #[test]
+    fn parse_serial_params() {
+        let cfg = parse_cfg(&json!({
+            "script":"a","kind":"serial","serial_port":"COM3",
+            "baud_rate":19200,"data_bits":7,"parity":"even","stop_bits":2,"flow_control":"hardware"
+        }))
+        .unwrap();
+        assert_eq!(cfg.transport, Transport::Serial);
+        assert_eq!(cfg.serial_port.as_deref(), Some("COM3"));
+        assert_eq!(cfg.baud_rate, 19200);
+        assert_eq!(cfg.data_bits, 7);
+        assert_eq!(cfg.parity, Parity::Even);
+        assert_eq!(cfg.stop_bits, 2);
+        assert_eq!(cfg.flow_control, FlowControl::Hardware);
+    }
+
+    #[test]
+    fn parse_serial_defaults() {
+        // 缺省：9600/8N1/NONE（对标 modbus_client）。
+        let cfg = parse_cfg(&json!({"script":"a","kind":"serial","serial_port":"COM3"})).unwrap();
+        assert_eq!(cfg.baud_rate, 9600);
+        assert_eq!(cfg.data_bits, 8);
+        assert_eq!(cfg.parity, Parity::None);
+        assert_eq!(cfg.stop_bits, 1);
+        assert_eq!(cfg.flow_control, FlowControl::None);
+    }
+
+    #[test]
+    fn parse_bad_parity_rejected() {
+        assert!(parse_cfg(
+            &json!({"script":"a","kind":"serial","serial_port":"COM3","parity":"x"})
+        )
+        .is_err());
     }
 }
