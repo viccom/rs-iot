@@ -205,7 +205,7 @@ Expected: luastat 3 测试绿（roundtrip / missing / isolated）。
 
 **Files:** Modify `src/plugin/builtin/lua_client/config.rs`
 
-### - [ ] Step 1：先加失败单测（TDD）
+### - [x] Step 1：先加失败单测（TDD）
 
 `config.rs` 的 `#[cfg(test)] mod tests` 内加：
 ```rust
@@ -220,14 +220,14 @@ Expected: luastat 3 测试绿（roundtrip / missing / isolated）。
     }
 ```
 
-### - [ ] Step 2：跑测确认失败
+### - [x] Step 2：跑测确认失败
 
 ```bash
 CARGO_BUILD_JOBS=1 cargo test --lib plugin::builtin::lua_client::config::tests::parse_fail_threshold_default_and_override
 ```
 Expected: 编译失败（`fail_threshold` 字段不存在）。
 
-### - [ ] Step 3：LuaCfg 加字段 + parse
+### - [x] Step 3：LuaCfg 加字段 + parse
 
 `LuaCfg` struct（`hook_instr_limit` 字段后）加：
 ```rust
@@ -248,7 +248,7 @@ Expected: 编译失败（`fail_threshold` 字段不存在）。
         fail_threshold,
 ```
 
-### - [ ] Step 4：跑测确认通过 + fmt + clippy + 提交
+### - [x] Step 4：跑测确认通过 + fmt + clippy + 提交
 
 ```bash
 CARGO_BUILD_JOBS=1 cargo test --lib plugin::builtin::lua_client::config

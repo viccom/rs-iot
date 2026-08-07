@@ -6,7 +6,7 @@
 
 - ✅ Plan 1-5（M1-M6：MVP / M4 联动持久 / M5 HTTP / on_data / M6 热加载）— 合并 master @ `cf92eee`（**111 测试全绿**）
 - ✅ Plan 6（M7 状态监测 + REST）plan 就绪 @ `939fe25`（2026-08-07）
-- 🔵 Plan 6 执行中：分支 `feature/lua-m7`，Task 1 ✅ @ `f5d25bc`（db/luastat 3 单测绿），下一步 Task 2（config fail_threshold）
+- 🔵 Plan 6 执行中：分支 `feature/lua-m7`，Task 1-2 ✅（db/luastat 3 单测 + config fail_threshold 5 单测），下一步 Task 3（mod.rs stat 采点 + script_version）
 
 ## Plan 路线图（spec milestone + 欠账补全）
 
@@ -33,8 +33,8 @@
 
 **执行 Plan 6（M7 状态监测 + REST）**：建 `feature/lua-m7` 分支（从 master `939fe25`），subagent-driven 逐 task（API 503 时控制器接手）。Plan `2026-08-07-lua-client-m7.md` @ `939fe25`，5 task：
 - ✅ Task 1：`db/luastat.rs`（LuaStat + write/read，lux `stat:<inst>` SET/GET JSON）+ `db/mod.rs` 引出 + `identity.rs` 清单注释。— @ `f5d25bc`（3 单测绿）
-- 🔵 Task 2：`lua_client/config.rs` 加 `fail_threshold: u32`（连续失败 N 次标 degraded，默认 10）。（下一步）
-- ⏳ Task 3：`lua_client/mod.rs` run() stat 采点（启动 running / Tick collect 计数+耗时 / Reload vm_restart+1 / 退出 stopped）+ `script_version`（main.lua sha256 前 8 hex）。
+- ✅ Task 2：`lua_client/config.rs` 加 `fail_threshold: u32`（连续失败 N 次标 degraded，默认 10）。— @ `0363912`（5 单测绿）
+- 🔵 Task 3：`lua_client/mod.rs` run() stat 采点（启动 running / Tick collect 计数+耗时 / Reload vm_restart+1 / 退出 stopped）+ `script_version`（main.lua sha256 前 8 hex）。（下一步）
 - ⏳ Task 4：`api/routes_lua.rs`（stats/reload/scripts，query 参数 `?inst_id=`，JWT 默认保护）+ `api/mod.rs` 注册三路由。
 - ⏳ Task 5：集成测（`lua_stat_e2e` 采集+stopped / `lua_api_e2e` REST stats/reload/scripts/JWT）。
 
