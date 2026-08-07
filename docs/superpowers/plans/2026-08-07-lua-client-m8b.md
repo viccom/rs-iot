@@ -555,7 +555,7 @@ git commit -m "feat(lua): M8b L2 数据 API（set_value/get_value/get_device/lis
 
 ---
 
-## Task 3: docs/lua-script-guide.md 脚本开发指南
+## Task 3: docs/lua-script-guide.md 脚本开发指南 ✅（159 行，API 参考 L1-L6 + 配置 17 字段 + 传输 tcp/serial/udp + 沙箱 + 热加载 + 状态监测）
 
 **Files:** Create `docs/lua-script-guide.md`
 
