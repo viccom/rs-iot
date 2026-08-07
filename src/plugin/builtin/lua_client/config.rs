@@ -42,6 +42,8 @@ pub(super) struct LuaCfg {
     pub(super) mem_limit_mb: usize,
     /// 指令 hook 阈值（spec §9.2）。
     pub(super) hook_instr_limit: u32,
+    /// 连续 collect 失败 N 次标记 degraded（spec §9.6）。
+    pub(super) fail_threshold: u32,
     /// 脚本目录名（→ scripts/<script>/main.lua）。
     pub(super) script: String,
 }
@@ -112,6 +114,10 @@ pub(super) fn parse_cfg(app: &serde_json::Value) -> Result<LuaCfg, String> {
         .get("hook_instr_limit")
         .and_then(|v| v.as_u64())
         .unwrap_or(1_000_000) as u32;
+    let fail_threshold = app
+        .get("fail_threshold")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(10) as u32;
 
     Ok(LuaCfg {
         transport,
@@ -124,6 +130,7 @@ pub(super) fn parse_cfg(app: &serde_json::Value) -> Result<LuaCfg, String> {
         reconnect_secs,
         mem_limit_mb,
         hook_instr_limit,
+        fail_threshold,
         script,
     })
 }
@@ -161,5 +168,15 @@ mod tests {
         let cfg = parse_cfg(&json!({"script":"a","kind":"serial","serial_port":"COM3"})).unwrap();
         assert_eq!(cfg.transport, Transport::Serial);
         assert_eq!(cfg.serial_port.as_deref(), Some("COM3"));
+    }
+
+    #[test]
+    fn parse_fail_threshold_default_and_override() {
+        // 缺省 = 10（spec §9.6 连续失败 N 次标 degraded）。
+        let cfg = parse_cfg(&json!({"script":"devA","endpoint":"127.0.0.1:502"})).unwrap();
+        assert_eq!(cfg.fail_threshold, 10);
+        // 显式覆盖。
+        let cfg = parse_cfg(&json!({"script":"devA","endpoint":"x","fail_threshold":3})).unwrap();
+        assert_eq!(cfg.fail_threshold, 3);
     }
 }
