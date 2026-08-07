@@ -10,6 +10,7 @@
 //! - `accesskey` : string，全局访问密钥（M3）
 //! - `ext_tokens`: Hash，field=instId, value=JSON{token_hash,created_at,enabled}（M7 外部插件 bridge）
 //! - `luakv:<instId>` : Hash，field=key，value=JSON（M4 脚本本地持久化状态）
+//! - `stat:<instId>`  : string，JSON 实例状态快照（M7 luaClient 运行指标：status/collect 计数/脚本版本）
 //! - `rtdata:<devId>` : Hash，field=tag, value=[ts, localTime, value]（M2 实时数据缓存）
 
 use crate::error::RsIotError;
