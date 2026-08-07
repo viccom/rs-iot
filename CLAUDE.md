@@ -86,6 +86,17 @@ RUST_LOG=debug ./target/debug/rs-iot         # 日志级别（缺省 info）
 rs-iot install / uninstall        # 服务化（Windows: sc create / Linux: systemd）
 ```
 
+### Feature 裁剪（内置协议可选）
+
+`opcua` / `modbus` / `s7` 三个南向协议插件是**可选 Cargo feature，默认全开**（向后兼容）。现场可按需裁剪——减二进制体积、省系统依赖（如不跑 Modbus RTU 的 Linux 机器可不装 `libudev-dev`）：
+
+```bash
+cargo build --no-default-features --features lua                     # 最小现场（仅 lua 脚本采集）
+cargo build --no-default-features --features "lua,modbus,opcua"      # 选装部分协议
+```
+
+关掉某协议后，配置该 `app_code` 建实例会返回 `"config error: source plugin not found"`（`find_source` 优雅降级，非崩溃）。`tokio-serial` 因 lua 串口 IO 依赖而**保持无条件**（不随 `modbus` gate）。CI `minimal` job 守护裁剪组合可编译 + 优雅降级测试（`tests/feature_gate_e2e.rs`）。详见 `docs/plan-feature-gating-protocols.md`。
+
 ## Skill 优先使用（Rust 开发）
 
 处理 Rust 相关问题前，先调用对应 skill 加载规范，再动手：
