@@ -18,6 +18,7 @@ pub mod routes_command;
 pub mod routes_device;
 pub mod routes_group;
 pub mod routes_inst;
+pub mod routes_lua;
 pub mod routes_rtdata;
 pub mod routes_sys;
 pub mod routes_user;
@@ -111,6 +112,10 @@ pub fn build_router(state: AppState) -> axum::Router {
         .route("/api/v1/usergroup/add", post(routes_group::add))
         .route("/api/v1/usergroup/remove", post(routes_group::remove))
         .route("/api/v1/accesskey/set", post(routes_group::set_accesskey))
+        // Lua 实例状态/重载（spec §13，默认 JWT 保护）
+        .route("/api/v1/lua/stats", get(routes_lua::stats))
+        .route("/api/v1/lua/reload", post(routes_lua::reload))
+        .route("/api/v1/lua/scripts", get(routes_lua::list_scripts))
         // 命令下发（写命令经 CtlRegistry 路由到实例 cmd_rx；默认 JWT 保护）
         .route("/api/v1/command/send", post(routes_command::send))
         // 实时数据查询
