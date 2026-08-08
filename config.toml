@@ -21,3 +21,11 @@ bind_host = "127.0.0.1"
 port = 8781
 heartbeat_timeout_secs = 30
 accept_hello_timeout_secs = 10
+
+# 日志（默认即可：落盘 ./logs，保留 7 天，daily 轮转，退出自动 flush）。
+# 不写 [log] section 也走此默认（M3）。
+[log]
+dir = "./logs"        # 默认 "./logs"；置 "" 关闭文件层（仅终端）
+level = "info"        # RUST_LOG 优先
+max_days = 7          # 按文件名日期保留最近 N 天（0 = 不按天删）
+max_size_mb = 0       # 0=不限；>0 时按目录总大小删最旧
