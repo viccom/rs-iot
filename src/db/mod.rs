@@ -1,8 +1,8 @@
 pub mod ext_token;
 pub mod identity;
 pub mod luakv;
-pub mod luastat;
 pub mod rtdata;
+pub mod stat;
 
 use crate::config::AppConfig;
 use lux::{ServerConfig, StorageConfig, StorageMode};
