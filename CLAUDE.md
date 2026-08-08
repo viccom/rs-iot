@@ -154,6 +154,7 @@ cargo build --no-default-features --features "lua,modbus,opcua"      # 选装部
 - **新增 config 字段**：`config.rs` 对应 struct 加 `#[serde(default)]` 字段 + `Default` 实现（缺失字段容错是既有约定）。
 - **新增二进制行为**：`main.rs` 子命令分发 → 逻辑在 `lib.rs`（前台）或 `service/`（服务态）——前台与服务态共用 `run_app_with_shutdown`，shutdown 来源不同（ctrl_c vs SCM/sigterm）。
 - **实例自愈可信（M3）**：`start_source`/`start_sink` spawn source/sink task 后，再 spawn 一个 supervisor task（`spawn_supervisor`）唯一 await 其 join，task 退出且 `token` 未 cancel → 标 `InstState::Failed` + `error!`（覆盖 panic/配置错误早退/异常 return）；主动 `stop` 走 Stopping→Stopped（token cancel）不误判。状态仅内存（进程重启重置）。不自重启（后置）。`GET /api/v1/inststatus` 返回 Failed 实例；运维 `startinst` 重拉（Failed→Starting→Running）。**注意**：对 Failed 实例调 `stopinst` 会把状态改写为 Stopped（stop 总以 Stopped 收尾，操作员 stop 视为确认）；Failed 的 `error!` 日志已落盘，状态查询窗口在 stop 前可见。
+- **新增/修改插件埋点**：遵循 `docs/instrumentation-conventions.md` 6 约束。内置插件用 `StatTracker`（select! 加 flush ticker + tick_ok/fail）；进程级部件用 `ProcessMetrics`（atomic，/sysstatus 直读）。实例指标统一查 `GET /api/v1/inst/stats`（`{inst_id, app_code, host_kind, state, health}`，废弃的 `/api/v1/lua/stats` 已移除）。
 
 ## 安全边界
 
