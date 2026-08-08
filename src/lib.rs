@@ -137,10 +137,12 @@ fn purge_old_logs(
 /// `cfg = None` 表示仅终端、级别 info（供 install/uninstall 等管理命令使用）。
 /// 用 `try_init` 容忍重复调用（进程级 subscriber 单例，重复设置静默忽略）。
 ///
-/// 非 blocking writer 的 `WorkerGuard` 被刻意 `forget`：服务常驻进程需日志线程全程存活，
-/// 进程退出时线程随之结束；v1 不做退出前 flush（可能丢最后几条），如需精确 flush 改为
-/// 在 shutdown 流程显式持有并 drop guard。
-pub fn init_tracing(cfg: Option<&config::LogConfig>) {
+/// 返回 `WorkerGuard`：调用方必须持有到 shutdown 末尾 drop，触发 non_blocking worker
+/// drain 完剩余日志，保证故障末尾落盘（M3，修复 `std::mem::forget` 丢末尾问题）。
+/// `None` = 文件层未启用（dir 空 或 建目录失败），无需持有。
+pub fn init_tracing(
+    cfg: Option<&config::LogConfig>,
+) -> Option<tracing_appender::non_blocking::WorkerGuard> {
     use tracing_subscriber::{fmt, layer::Layer, prelude::*, EnvFilter};
 
     let default_level = cfg.map(|c| c.level.as_str()).unwrap_or("info");
@@ -154,6 +156,7 @@ pub fn init_tracing(cfg: Option<&config::LogConfig>) {
             .with_filter(filter.clone())
             .boxed()];
 
+    let mut guard = None;
     if let Some(c) = cfg {
         let dir = c.dir.trim();
         if !dir.is_empty() {
@@ -161,14 +164,15 @@ pub fn init_tracing(cfg: Option<&config::LogConfig>) {
                 eprintln!("init_tracing: create log dir '{dir}' failed: {e}");
             } else {
                 let appender = tracing_appender::rolling::daily(dir, "rs-iot.log");
-                let (writer, guard) = tracing_appender::non_blocking(appender);
-                std::mem::forget(guard);
+                let (writer, g) = tracing_appender::non_blocking(appender);
                 layers.push(fmt::layer().with_writer(writer).with_filter(filter).boxed());
+                guard = Some(g); // 不再 forget：交调用方持有到 shutdown drop → flush
             }
         }
     }
 
     let _ = tracing_subscriber::registry().with(layers).try_init();
+    guard
 }
 
 /// CLI `run` 入口：内部建 shutdown + ctrl_c 监听，委托给 `run_app_with_shutdown`。
@@ -460,5 +464,34 @@ mod log_purge_tests {
         assert_eq!(n, 0);
         assert!(dir.join("rs-iot.log.2026-08-08").exists());
         let _ = fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod init_tracing_tests {
+    use crate::config::LogConfig;
+    use crate::init_tracing;
+
+    #[test]
+    fn returns_guard_when_dir_nonempty() {
+        let dir = std::env::temp_dir().join(format!("rsiot-init-guard-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let cfg = LogConfig {
+            dir: dir.to_str().unwrap().to_string(),
+            ..Default::default()
+        };
+        let guard = init_tracing(Some(&cfg));
+        assert!(guard.is_some(), "dir 非空应返回 Some(guard)");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn returns_none_when_dir_empty() {
+        let cfg = LogConfig {
+            dir: String::new(),
+            ..Default::default()
+        };
+        let guard = init_tracing(Some(&cfg));
+        assert!(guard.is_none(), "dir 空应返回 None");
     }
 }

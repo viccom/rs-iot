@@ -48,15 +48,16 @@ async fn main() -> anyhow::Result<()> {
     match cli.command.unwrap_or(Command::Run) {
         Command::Run => {
             let cfg = rs_iot::config::AppConfig::load_or_default(cli.config.as_deref())?;
-            rs_iot::init_tracing(Some(&cfg.log));
+            // 持有 guard 到 run 返回（main 退出时 drop → flush 故障末尾日志）
+            let _log_guard = rs_iot::init_tracing(Some(&cfg.log));
             run::run(cfg).await?;
         }
         Command::Install => {
-            rs_iot::init_tracing(None);
+            let _ = rs_iot::init_tracing(None);
             service::install()?
         }
         Command::Uninstall => {
-            rs_iot::init_tracing(None);
+            let _ = rs_iot::init_tracing(None);
             service::uninstall()?
         }
         #[cfg(windows)]
