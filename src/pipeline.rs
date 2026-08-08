@@ -37,15 +37,21 @@ pub async fn run(
                         break;
                     }
                 };
+                // hub 背压 gauge：消费一个 sample 后采样队列剩余深度（M4）。
+                ctx.metrics.hub_depth(hub_rx.len());
                 let processed = match processor.process(sample).await {
                     Some(p) => p,
                     None => continue,
                 };
-                if let Err(e) = db::rtdata::write(
+                match db::rtdata::write(
                     &ctx.lux, processed.hwid.as_ref(), &processed.devid,
                     &processed.values, processed.timestamp,
                 ).await {
-                    tracing::warn!("[pipeline] rtdata write failed: {e}");
+                    Ok(()) => ctx.metrics.pipeline_processed(),
+                    Err(e) => {
+                        ctx.metrics.pipeline_write_fail();
+                        tracing::warn!("[pipeline] rtdata write failed: {e}");
+                    }
                 }
             }
         }
