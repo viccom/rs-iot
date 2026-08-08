@@ -20,6 +20,7 @@ pub mod routes_group;
 pub mod routes_inst;
 pub mod routes_lua;
 pub mod routes_rtdata;
+pub mod routes_stat;
 pub mod routes_sys;
 pub mod routes_user;
 
@@ -92,6 +93,7 @@ pub fn build_router(state: AppState) -> axum::Router {
         .route("/api/v1/inst/get", get(routes_inst::get))
         .route("/api/v1/inst/set", post(routes_inst::set))
         .route("/api/v1/inst/delete", post(routes_inst::delete))
+        .route("/api/v1/inst/stats", get(routes_stat::stats))
         // device CRUD
         .route("/api/v1/devices", get(routes_device::list))
         .route("/api/v1/device/get", get(routes_device::get))
@@ -112,8 +114,7 @@ pub fn build_router(state: AppState) -> axum::Router {
         .route("/api/v1/usergroup/add", post(routes_group::add))
         .route("/api/v1/usergroup/remove", post(routes_group::remove))
         .route("/api/v1/accesskey/set", post(routes_group::set_accesskey))
-        // Lua 实例状态/重载（spec §13，默认 JWT 保护）
-        .route("/api/v1/lua/stats", get(routes_lua::stats))
+        // Lua 实例重载/脚本（spec §13，默认 JWT 保护；实例指标走 /api/v1/inst/stats）
         .route("/api/v1/lua/reload", post(routes_lua::reload))
         .route("/api/v1/lua/scripts", get(routes_lua::list_scripts))
         // 命令下发（写命令经 CtlRegistry 路由到实例 cmd_rx；默认 JWT 保护）

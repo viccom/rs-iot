@@ -1,9 +1,10 @@
 //! Lua 实例状态/重载 REST 端点（spec §13）。默认 JWT 保护。
 //!
-//! - `GET /api/v1/lua/stats?inst_id=<inst>` → 读 lux `stat:<inst>` JSON
 //! - `POST /api/v1/lua/reload?inst_id=<inst>` → 手动重载（stop+start，复用 InstanceManager；
 //!   与 notify 自动热加载结果一致，IO 重连——spec §5.3「VM 替换 ≈ 轻量重启 instance」）
 //! - `GET /api/v1/lua/scripts` → 列 `scripts/` 下有 `main.lua` 的目录名
+//!
+//! 实例指标已迁至统一端点 `GET /api/v1/inst/stats`（M4，见 `routes_stat`）。
 //!
 //! v1 用 query 参数（与 `routes_inst::IdQuery` 一致，避 axum 0.8 路径参数语法歧义）。
 
@@ -21,20 +22,6 @@ use std::path::Path;
 pub struct InstQuery {
     /// 实例 ID。
     pub inst_id: String,
-}
-
-/// `GET /api/v1/lua/stats?inst_id=<inst>` → 实例状态快照 JSON；无则空对象 `{}`。
-pub async fn stats(State(st): State<AppState>, Query(q): Query<InstQuery>) -> Response {
-    let key = format!("stat:{}", q.inst_id);
-    match st.lux.execute_value("GET", &[&key]).await {
-        Ok(v) if !matches!(v, EmbeddedValue::Nil) => {
-            let raw = str_from_value(&v);
-            let json: serde_json::Value =
-                serde_json::from_str(&raw).unwrap_or(serde_json::json!({}));
-            Json(json).into_response()
-        }
-        _ => Json(serde_json::json!({})).into_response(),
-    }
 }
 
 /// `POST /api/v1/lua/reload?inst_id=<inst>` → 手动重载（stop + start，spec §5.3）。
