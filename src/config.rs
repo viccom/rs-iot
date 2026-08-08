@@ -190,9 +190,12 @@ mod tests {
 
     #[test]
     fn log_config_empty_dir_disables_file_layer() {
-        // 显式 dir="" 关闭文件层（保留逃生口）
+        // 显式 dir="" 关闭文件层（保留逃生口）；同时锁 partial-default 契约：
+        // 用户只设 dir，其余字段仍走 Default
         let toml = "[log]\ndir = \"\"\n";
         let cfg: AppConfig = toml::from_str(toml).expect("parse");
         assert_eq!(cfg.log.dir, "");
+        assert_eq!(cfg.log.max_days, 7);
+        assert_eq!(cfg.log.max_size_mb, 0);
     }
 }
