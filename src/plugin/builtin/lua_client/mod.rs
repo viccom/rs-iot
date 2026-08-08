@@ -142,15 +142,6 @@ impl Source for LuaClient {
                 inst.inst_id
             );
         }
-        // luaClient 实例语义为单设备（collect 无参、set_value 限 devices[0]）；多设备仅采首个。
-        if inst.devices.len() > 1 {
-            tracing::warn!(
-                "[luaClient] inst {} 配置 {} 个设备，仅采集 devices[0]（多设备应拆为多实例）",
-                inst.inst_id,
-                inst.devices.len()
-            );
-        }
-
         // 状态快照（spec §13）：启动写 running，collect/reload/退出 更新。
         let script_ver = script_version(&scripts_root, &cfg.script);
         let mut stat = crate::db::luastat::LuaStat {
@@ -198,14 +189,20 @@ impl Source for LuaClient {
                     let now = chrono::Local::now().timestamp();
                     let mut tick_err: Option<String> = None;
                     // collect 无参不感知设备，只调一次（重复调会使 ctx:request/kv_set 等
-                    // 副作用翻倍）；结果推 inst.devices[0]（与 ctx:set_value 的 devices.first()
-                    // 语义一致，spec §7 L2「自己当前 devid」）。多设备应拆为多实例。
-                    match call_collect(&lua).await {
-                        Ok(Some(values)) if !values.is_empty() => {
-                            if let Some(dev) = inst.devices.first() {
+                    // 副作用翻倍）；返回值按 spec §3.3 自动判定嵌套多设备 / 平铺单设备。
+                    // 平铺模式归口 devices[0]（与 ctx:set_value 的 devices.first() 语义一致，
+                    // spec §7 L2「自己当前 devid」）。
+                    match call_collect(
+                        &lua,
+                        inst.devices.first().map(|d| d.value.as_str()).unwrap_or(""),
+                    )
+                    .await
+                    {
+                        Ok(samples) if !samples.is_empty() => {
+                            for (devid, values) in samples {
                                 let sample = Sample {
                                     hwid: ctx.hwid.clone(),
-                                    devid: dev.value.clone(),
+                                    devid,
                                     values,
                                     timestamp: now,
                                 };
@@ -213,7 +210,6 @@ impl Source for LuaClient {
                                     tracing::warn!("[luaClient] hub 关闭，collect 值未上报");
                                 }
                             }
-                            // devices 为空：collect 返回值无 devid 去处，丢弃（set_value 路径仍可上报）。
                         }
                         Ok(_) => {}
                         Err(e) => {
@@ -276,27 +272,75 @@ impl Source for LuaClient {
     }
 }
 
-/// 调脚本 collect(ctx)，返回 values map（key=tag）。脚本未定义 collect 返回 None。
-async fn call_collect(lua: &mlua::Lua) -> mlua::Result<Option<BTreeMap<String, SampleValue>>> {
+/// 调脚本 `collect()`，返回 `(devid, values)` 列表（多设备支持）。
+///
+/// 返回值 table 自动判定（spec §3.3，零歧义——`SampleValue` 只含标量）：
+/// - 外层 table 的 value 是 **table** → 嵌套多设备：`{[devid]={tag=v,...}}`
+///   → 每个内层 table 解析成一个 `(devid, map)`。
+/// - 外层 table 的 value 是 **标量** → 平铺单设备（老脚本兼容）：
+///   → 整个 table 解析成 `(fallback_devid, map)`。
+/// - 嵌套中混入标量（脚本 bug）→ warn 跳过该项。
+///
+/// `fallback_devid` 为平铺模式的归口 devid（调用方传 `devices[0].value`）。
+/// 脚本未定义 collect / 返 nil / 非 table → 空 Vec（不推 Sample）。
+async fn call_collect(
+    lua: &mlua::Lua,
+    fallback_devid: &str,
+) -> mlua::Result<Vec<(String, BTreeMap<String, SampleValue>)>> {
     let f: mlua::Function = match lua.globals().get("collect") {
         Ok(f) => f,
-        Err(_) => return Ok(None),
+        Err(_) => return Ok(vec![]),
     };
     let result: mlua::Value = f.call_async(mlua::Value::Nil).await?;
-    match result {
-        mlua::Value::Nil => Ok(None),
-        mlua::Value::Table(t) => {
-            let mut values = BTreeMap::new();
-            for pair in t.pairs::<String, mlua::Value>() {
-                let (k, v) = pair?;
-                if let Some(sv) = lua_value_to_sample(&v) {
-                    values.insert(k, sv);
-                }
-            }
-            Ok(Some(values))
+    let outer = match result {
+        mlua::Value::Nil => return Ok(vec![]),
+        mlua::Value::Table(t) => t,
+        _ => return Ok(vec![]),
+    };
+    // 一遍检测：外层任一 value 是 table → 嵌套模式（table.clone() 廉价，RefCounted）。
+    // 解析失败的 pair 静默跳过（仅探测模式，错误留给下面的正式遍历报）。
+    let mut nested = false;
+    for (_, v) in outer.clone().pairs::<String, mlua::Value>().flatten() {
+        if matches!(v, mlua::Value::Table(_)) {
+            nested = true;
+            break;
         }
-        _ => Ok(None),
     }
+    let mut out: Vec<(String, BTreeMap<String, SampleValue>)> = Vec::new();
+    if nested {
+        for pair in outer.pairs::<String, mlua::Value>() {
+            let (devid, v) = pair?;
+            match v {
+                mlua::Value::Table(inner) => {
+                    let map = parse_table_to_sample_map(&inner)?;
+                    if !map.is_empty() {
+                        out.push((devid, map));
+                    }
+                }
+                _ => tracing::warn!(
+                    "[luaClient] collect 嵌套返回含非 table 值（key={devid}），已跳过"
+                ),
+            }
+        }
+    } else {
+        let map = parse_table_to_sample_map(&outer)?;
+        if !map.is_empty() {
+            out.push((fallback_devid.to_string(), map));
+        }
+    }
+    Ok(out)
+}
+
+/// mlua table `{tag = value}` → `BTreeMap<String, SampleValue>`（标量 value；非标量跳过）。
+fn parse_table_to_sample_map(t: &mlua::Table) -> mlua::Result<BTreeMap<String, SampleValue>> {
+    let mut values = BTreeMap::new();
+    for pair in t.pairs::<String, mlua::Value>() {
+        let (k, v) = pair?;
+        if let Some(sv) = lua_value_to_sample(&v) {
+            values.insert(k, sv);
+        }
+    }
+    Ok(values)
 }
 
 /// 调脚本 on_write(ctx, cmd)。cmd_data 是 JSON 文本，转 table 传给脚本。
@@ -424,6 +468,56 @@ mod tests {
         // 不存在 → unknown。
         assert_eq!(super::script_version(&tmp, "missing"), "unknown");
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// call_collect 嵌套返回 {[devid]={tag=v}} → 多个 (devid, map)。
+    #[tokio::test]
+    async fn call_collect_nested_returns_multi_devices() {
+        let lua = mlua::Lua::new();
+        lua.load("function collect() return { dev1 = { a = 1, b = 2 }, dev2 = { c = 3.5 } } end")
+            .exec()
+            .unwrap();
+        let out = super::call_collect(&lua, "fallback")
+            .await
+            .expect("collect");
+        assert_eq!(out.len(), 2, "嵌套应产出 2 个 (devid,map)");
+        let by_devid: std::collections::HashMap<
+            &str,
+            &std::collections::BTreeMap<String, crate::types::SampleValue>,
+        > = out.iter().map(|(d, m)| (d.as_str(), m)).collect();
+        let m1 = by_devid.get("dev1").expect("dev1 在");
+        assert_eq!(m1.len(), 2, "dev1 应含 a,b");
+        let m2 = by_devid.get("dev2").expect("dev2 在");
+        assert_eq!(m2.len(), 1, "dev2 应含 c");
+    }
+
+    /// call_collect 平铺返回 {tag=v} → 单个 (fallback_devid, map)（老脚本兼容）。
+    #[tokio::test]
+    async fn call_collect_flat_uses_fallback_devid() {
+        let lua = mlua::Lua::new();
+        lua.load("function collect() return { temp = 42.5 } end")
+            .exec()
+            .unwrap();
+        let out = super::call_collect(&lua, "devFirst")
+            .await
+            .expect("collect");
+        assert_eq!(out.len(), 1, "平铺应产出 1 个");
+        assert_eq!(out[0].0, "devFirst", "平铺归 fallback_devid");
+        assert_eq!(out[0].1.len(), 1, "含 1 tag");
+    }
+
+    /// call_collect 返 nil / 无 collect → 空 Vec（不推 Sample）。
+    #[tokio::test]
+    async fn call_collect_nil_or_absent_returns_empty() {
+        let lua = mlua::Lua::new();
+        lua.load("function collect() return nil end")
+            .exec()
+            .unwrap();
+        let out = super::call_collect(&lua, "d").await.expect("collect nil");
+        assert!(out.is_empty(), "nil 返回应空");
+        let lua2 = mlua::Lua::new();
+        let out2 = super::call_collect(&lua2, "d").await.expect("no collect");
+        assert!(out2.is_empty(), "无 collect 应空");
     }
 
     #[tokio::test]
