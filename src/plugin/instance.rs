@@ -51,6 +51,8 @@ pub struct InstanceManager {
     ctx: HostContext,
     states: Arc<DashMap<String, InstState>>,
     handles: Arc<DashMap<String, InstanceHandle>>,
+    /// 实例配置快照（start 时记，stop 保留；/inst/stats 分类数据源）。
+    configs: Arc<DashMap<String, InstConfig>>,
     /// 所有 Source 输出汇聚点（pipeline 消费 `hub_rx`）。
     hub_tx: mpsc::Sender<Sample>,
 }
@@ -62,6 +64,7 @@ impl InstanceManager {
             ctx,
             states: Arc::new(DashMap::new()),
             handles: Arc::new(DashMap::new()),
+            configs: Arc::new(DashMap::new()),
             hub_tx,
         }
     }
@@ -87,6 +90,7 @@ impl InstanceManager {
         let token = self.ctx.shutdown.child_token();
 
         self.states.insert(id_key.clone(), InstState::Starting);
+        self.configs.insert(id_key.clone(), inst.clone());
         self.ctx.ctl_registry.register(&id_key, cmd_tx);
 
         let ctx = self.ctx.clone();
@@ -128,6 +132,7 @@ impl InstanceManager {
         let token = self.ctx.shutdown.child_token();
 
         self.states.insert(id_key.clone(), InstState::Starting);
+        self.configs.insert(id_key.clone(), inst.clone());
         self.ctx.ctl_registry.register(&id_key, cmd_tx);
 
         let ctx = self.ctx.clone();
@@ -203,5 +208,10 @@ impl InstanceManager {
     /// channel 满仍 `try_send` 丢弃（对标 Go 版 `default` 非阻塞），此时返回 `true`。
     pub fn send_ctl(&self, inst: &str, msg: CtlMessage) -> bool {
         self.ctx.ctl_registry.send(inst, msg)
+    }
+
+    /// 取实例配置快照（/inst/stats 分类用：app_code + host_kind）。
+    pub fn config_snapshot(&self, inst_id: &str) -> Option<InstConfig> {
+        self.configs.get(inst_id).map(|r| r.value().clone())
     }
 }
