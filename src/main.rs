@@ -53,10 +53,12 @@ async fn main() -> anyhow::Result<()> {
             run::run(cfg).await?;
         }
         Command::Install => {
+            // init_tracing(None) 恒返回 None（仅终端），无需持有 guard
             let _ = rs_iot::init_tracing(None);
             service::install()?
         }
         Command::Uninstall => {
+            // init_tracing(None) 恒返回 None（仅终端），无需持有 guard
             let _ = rs_iot::init_tracing(None);
             service::uninstall()?
         }
