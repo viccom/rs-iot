@@ -120,21 +120,30 @@ impl Default for BridgeConfig {
     }
 }
 
-/// 日志配置。终端输出始终开启；`dir` 非空时额外写文件（daily 轮转）。
+/// 日志配置。终端输出始终开启；`dir` 非空时额外写文件（daily 轮转 + 保留期清理）。
+///
+/// - `dir` 默认 `./logs`（开箱即落盘，修复 scenario-gap §3 🔴 P0）；显式 `dir=""` 关闭文件层。
+/// - `max_days`/`max_size_mb` 控制保留期清理（M3，见 `lib::purge_old_logs`）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LogConfig {
-    /// 日志文件目录。空 = 仅终端；非空（如 `./data/logs`）= 额外写文件。
+    /// 日志文件目录。空 = 仅终端；非空（如 `./logs`）= 额外写文件。
     pub dir: String,
     /// 日志级别（仅当未设 `RUST_LOG` 时作为缺省；`RUST_LOG` 优先）。
     pub level: String,
+    /// 按文件名日期保留最近 N 天（0 = 不按天删）。
+    pub max_days: u64,
+    /// 目录总大小上限（MB）；0 = 不限，>0 时按最旧优先删直到低于阈值。
+    pub max_size_mb: u64,
 }
 
 impl Default for LogConfig {
     fn default() -> Self {
         Self {
-            dir: String::new(),
+            dir: "./logs".into(),
             level: "info".into(),
+            max_days: 7,
+            max_size_mb: 0,
         }
     }
 }
@@ -153,5 +162,37 @@ impl AppConfig {
             }
             _ => Ok(Self::default()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn log_config_default_enables_file_logging() {
+        let c = LogConfig::default();
+        // 默认落盘 ./logs（修复 scenario-gap §3 🔴 P0「默认未启用文件日志」）
+        assert_eq!(c.dir, "./logs");
+        assert_eq!(c.level, "info");
+        assert_eq!(c.max_days, 7);
+        assert_eq!(c.max_size_mb, 0);
+    }
+
+    #[test]
+    fn log_config_toml_default_section() {
+        // 无 [log] section 的 toml → Default（dir=./logs）
+        let toml = "";
+        let cfg: AppConfig = toml::from_str(toml).expect("parse");
+        assert_eq!(cfg.log.dir, "./logs");
+        assert_eq!(cfg.log.max_days, 7);
+    }
+
+    #[test]
+    fn log_config_empty_dir_disables_file_layer() {
+        // 显式 dir="" 关闭文件层（保留逃生口）
+        let toml = "[log]\ndir = \"\"\n";
+        let cfg: AppConfig = toml::from_str(toml).expect("parse");
+        assert_eq!(cfg.log.dir, "");
     }
 }
