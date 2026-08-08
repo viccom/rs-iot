@@ -51,8 +51,11 @@ luaClient 是 rs-iot 的南向 `Source`（与 modbus/opcua/s7 同构，`inventor
 | `on_data(frame)` | IO task 收被动帧（`recv_mode`） | 忽略 | 广播/推送；`ctx:set_value` 上报 |
 | `on_write(cmd)` | 收写命令 | `bool\|nil` | 处理写命令；`cmd` 为 JSON 解析后的 table |
 
-`collect` 返 table：`{ tag = value, ... }`（key=数据点名，value=number/string/bool）。
-宿主按 `inst.devices[0]` 组 `Sample` 推 hub。
+`collect` 返 table：
+- **平铺**（单设备，老脚本兼容）：`{ tag = value, ... }` → 宿主按 `inst.devices[0]` 组 `Sample` 推 hub。
+- **嵌套**（多设备，M2）：`{ [devid] = { tag = value, ... }, ... }` → 宿主为每 `devid` 各组一个 `Sample`（同一次 collect 共用同一 timestamp，点间同时刻）。适合一条 RS485 总线多从站。
+
+自动判定：外层 table 的 value 是 table → 嵌套；是标量 → 平铺（零歧义）。
 
 ## ctx API 参考
 
@@ -63,8 +66,11 @@ luaClient 是 rs-iot 的南向 `Source`（与 modbus/opcua/s7 同构，`inventor
 
 ### L2 数据（自身实例）
 
-- `ctx:set_value(tag, v)`：async，写当前实例首设备（`inst.devices[0]`）的 `tag` 值。
-  推 `Sample` 到 hub（与 `collect` 同路径，pipeline 入库）。`on_data` 单点上报用。
+- `ctx:set_value(devid, tag, v)`：async，写指定 `devid` 的 `tag` 值（3 参，`devid` 显式传入——
+  多设备实例可对 `ctx:list_devices()` 任一 devid 上报）。推 `Sample` 到 hub（与 `collect` 同路径，
+  pipeline 入库）。`on_data` 单点上报用。
+- `ctx:set_values(devid, {tag=v, ...})`：async，批量写一个设备多点 → 一个 `Sample`（多 tag 同时刻
+  timestamp）。`on_data` 解析被动帧多点上报用（贴合 `Sample` 多变量语义）。
 - `ctx:get_value(devid, tag) -> str|nil`：async，读 lux `rtdata:<devid>` 的 `tag` 最新值字符串。
 - `ctx:get_device(devid) -> table|nil`：async，读设备全部数据点 `{tag = value_str, ...}`；
   缺省设备（无数据）返 `nil`。
@@ -130,6 +136,7 @@ luaClient 是 rs-iot 的南向 `Source`（与 modbus/opcua/s7 同构，`inventor
 
 - `modbus-like/`：Modbus TCP 协议（MBAP + FC03 读 / FC06 写），一问一答（`collect` + `on_write`）。
 - `custom-on-data/`：自定义协议 + `on_data` 被动广播上报（`set_value` + `kv_set` 持久化）。
+- `multi-device/`：单实例多设备（一条 RS485 总线多从站），`collect` 嵌套返回（M2）。
 
 ## 沙箱限制
 

@@ -254,4 +254,12 @@ collect 返回 table T:
 
 ---
 
+## 6. 实现状态
+
+- **M1 modbus 多 slave**：✅ 已实现并合并 master（2026-08-08，9 commit）。两策略（round_robin/sequential）+ per-request 超时故障隔离 + device 级 slave_id + 旧配置兼容。集成测 `tests/modbus_multi_slave_e2e.rs`（5 测，mock TCP modbus server）。
+- **M2 lua 多设备**：✅ 已实现（本里程碑）。`call_collect` 嵌套/平铺自动解析 + `set_values` 批量 + `set_value` 3 参（devid 参数化）。集成测 `tests/lua_multi_device_e2e.rs`。破坏性变更：`set_value` 2 参→3 参（spec §3.4 许可，无线上脚本）。
+- **M3 真机验证**：⏳ 待办（RS485 多从站 modbus + lua 各一场景）。
+
+---
+
 *本 spec 随实现推进更新；M1/M2 完成后补实测数据与偏差记录。*

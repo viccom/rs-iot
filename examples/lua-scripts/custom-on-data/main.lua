@@ -14,7 +14,8 @@ end
 function on_data(frame)
     -- 被动广播：STX=0x02 cmd=0x10 → 心跳，set_value 上报 + kv 持久化（跨重启）。
     if frame:byte(1) == 0x02 and frame:byte(2) == 0x10 then
-        ctx:set_value("heartbeat", ctx:time())
+        local dev = ctx:list_devices()[1].value   -- 本实例首设备 devid（M2：set_value 需显式 devid）
+        ctx:set_value(dev, "heartbeat", ctx:time())
         ctx:kv_set("last_heartbeat", ctx:time())
     end
 end
