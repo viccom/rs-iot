@@ -13,6 +13,10 @@ pub const FLUSH_INTERVAL_SECS: u64 = 5;
 const DEGRADED_AFTER_FAILS: u32 = 3;
 
 /// 实例指标追踪器。
+///
+/// `lux::EmbeddedClient` 未实现 `Debug`，故以 `expect` 放行 `missing_debug_implementations`
+///（与 `host.rs::HostContext` 同款，lux 类型约束）。
+#[expect(missing_debug_implementations)]
 pub struct StatTracker {
     stat: InstanceStat,
     inst_id: String,

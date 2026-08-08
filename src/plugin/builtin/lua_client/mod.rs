@@ -142,21 +142,23 @@ impl Source for LuaClient {
                 inst.inst_id
             );
         }
-        // 状态快照（spec §13）：启动写 running，collect/reload/退出 更新。
-        let script_ver = script_version(&scripts_root, &cfg.script);
-        let mut stat = crate::db::luastat::LuaStat {
-            status: "running".into(),
-            collect_count: 0,
-            collect_fail_count: 0,
-            last_collect_ts: 0,
-            last_collect_duration_ms: 0,
-            vm_restart_count: 0,
-            script_version: script_ver,
-            last_err: String::new(),
-        };
-        let _ = crate::db::luastat::write(&ctx.lux, inst.inst_id.as_ref(), &stat).await;
-        // 连续失败计数（内存，不落 lux；仅 stat.status 反映 degraded）。
+        // 状态追踪（spec §13）：StatTracker 封装 InstanceStat 计数 + 周期 flush。
+        // lua 保留自己的 consecutive_fail + cfg.fail_threshold（可配阈值，默认 10），
+        // 用 set_status 覆盖 StatTracker 内部固定阈值（DEGRADED_AFTER_FAILS=3）。
+        let mut tracker = crate::plugin::stat_tracker::StatTracker::new(
+            inst.inst_id.to_string(),
+            ctx.lux.clone(),
+        );
+        tracker.extra_insert(
+            "script_version",
+            serde_json::json!(script_version(&scripts_root, &cfg.script)),
+        );
+        let mut vm_restarts: u64 = 0;
+        // 连续失败计数（内存，不落 lux；驱动 cfg.fail_threshold 的 degraded 判定）。
         let mut consecutive_fail: u32 = 0;
+        let mut flush_ticker = tokio::time::interval(std::time::Duration::from_secs(
+            crate::plugin::stat_tracker::FLUSH_INTERVAL_SECS,
+        ));
 
         let mut lua = lua; // 可变（Evt::Reload 替换为新 VM）
         loop {
@@ -165,6 +167,7 @@ impl Source for LuaClient {
                 msg = cmd_rx.recv() => Evt::Cmd(msg),
                 Some(frame) = data_rx.recv() => Evt::Data(frame),
                 Some(()) = reload_rx.recv() => Evt::Reload, // None（watcher 退出/失败）忽略，不忙循环
+                _ = flush_ticker.tick() => { tracker.flush().await; continue; }
                 _ = ticker.tick() => Evt::Tick,
             };
             match evt {
@@ -218,22 +221,21 @@ impl Source for LuaClient {
                         }
                     }
                     // 状态采点（spec §13）：按周期计，任一 collect 失败记 fail 周期。
-                    stat.last_collect_ts = now;
-                    stat.last_collect_duration_ms = started.elapsed().as_millis() as u64;
+                    // tick_ok/fail 记账 + 更新 last_activity_*；lua 自己的 fail_threshold 判 degraded
+                    // 覆盖 StatTracker 内部固定阈值（保留 lua 可配阈值语义）。
                     if let Some(e) = tick_err {
-                        stat.collect_fail_count += 1;
-                        stat.last_err = e;
+                        tracker.tick_fail(&e);
                         consecutive_fail = consecutive_fail.saturating_add(1);
                         if consecutive_fail >= cfg.fail_threshold {
-                            stat.status = "degraded".into();
+                            tracker.set_status("degraded");
                         }
                     } else {
-                        stat.collect_count += 1;
-                        stat.last_err.clear();
+                        tracker.tick_ok(started.elapsed().as_millis() as u64);
                         consecutive_fail = 0;
-                        stat.status = "running".into();
                     }
-                    let _ = crate::db::luastat::write(&ctx.lux, inst.inst_id.as_ref(), &stat).await;
+                    if tracker.should_flush() {
+                        tracker.flush().await;
+                    }
                 }
                 Evt::Reload => {
                     match reload_vm(
@@ -248,13 +250,16 @@ impl Source for LuaClient {
                     {
                         Ok(new_lua) => {
                             lua = new_lua;
-                            stat.vm_restart_count += 1;
-                            stat.script_version = script_version(&scripts_root, &cfg.script);
+                            vm_restarts += 1;
+                            tracker
+                                .extra_insert("vm_restart_count", serde_json::json!(vm_restarts));
+                            tracker.extra_insert(
+                                "script_version",
+                                serde_json::json!(script_version(&scripts_root, &cfg.script)),
+                            );
                             consecutive_fail = 0;
-                            stat.status = "running".into();
-                            let _ =
-                                crate::db::luastat::write(&ctx.lux, inst.inst_id.as_ref(), &stat)
-                                    .await;
+                            tracker.set_status("running");
+                            tracker.flush().await;
                             tracing::info!("[luaClient] inst {} 热加载成功", inst.inst_id);
                         }
                         Err(e) => tracing::warn!(
@@ -267,8 +272,8 @@ impl Source for LuaClient {
         }
 
         // 退出标记 stopped（spec §13 status）。
-        stat.status = "stopped".into();
-        let _ = crate::db::luastat::write(&ctx.lux, inst.inst_id.as_ref(), &stat).await;
+        tracker.set_status("stopped");
+        tracker.flush().await;
     }
 }
 

@@ -4,7 +4,7 @@
 mod common;
 
 use common::test_data_dir;
-use rs_iot::db::luastat;
+use rs_iot::db::stat;
 use rs_iot::host::{BridgeRegistry, CtlRegistry, HostContext};
 use rs_iot::plugin::instance::InstanceManager;
 use rs_iot::plugin::traits::Processor;
@@ -77,32 +77,40 @@ async fn stat_written_after_collect() {
     };
     mgr.start_source(inst).await.expect("start lua");
 
-    // 等 1-2 个 collect 周期（period 1s）。
-    tokio::time::sleep(Duration::from_millis(1500)).await;
-    let stat = luastat::read(&client, "lua-st")
+    // 等 collect 周期 + stat 周期 flush（StatTracker 每 FLUSH_INTERVAL_SECS=5s 落一次 lux，
+    // 非每 tick 落；period 1s → ~6s 至少一轮 collect + 一次 flush）。
+    tokio::time::sleep(Duration::from_millis(6000)).await;
+    let stat = stat::read(&client, "lua-st")
         .await
         .expect("read stat")
         .expect("stat 应已写入");
     assert_eq!(stat.status, "running", "应 running");
     assert!(
-        stat.collect_count >= 1,
-        "collect_count ≥ 1，得到 {}",
-        stat.collect_count
+        stat.tick_count >= 1,
+        "tick_count ≥ 1，得到 {}",
+        stat.tick_count
     );
-    assert!(!stat.script_version.is_empty(), "script_version 非空");
-    assert_ne!(
-        stat.script_version, "unknown",
-        "脚本存在，version 应是真实 hash"
-    );
-    assert!(stat.last_collect_ts > 0, "last_collect_ts 已记");
+    let sv = stat
+        .extra
+        .get("script_version")
+        .and_then(|v| v.as_str())
+        .expect("script_version 存在");
+    assert!(!sv.is_empty(), "script_version 非空");
+    assert_ne!(sv, "unknown", "脚本存在，version 应是真实 hash");
+    assert!(stat.last_activity_ts > 0, "last_activity_ts 已记");
     assert!(
-        stat.last_collect_duration_ms > 0 || stat.collect_count >= 1,
+        stat.last_activity_duration_ms > 0 || stat.tick_count >= 1,
         "duration 已记或已采集"
     );
     // 🔴 1 间接：正常实例无自我热加载（vm_restart_count 应为 0）。直接测需构造 watcher
     // 失败（notify 平台依赖 flaky），降级间接——若 reload_rx None 误触发 reload，此处会非 0。
+    let vm_restarts = stat
+        .extra
+        .get("vm_restart_count")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
     assert_eq!(
-        stat.vm_restart_count, 0,
+        vm_restarts, 0,
         "正常运行不应触发热加载（vm_restart_count 应为 0）"
     );
 
@@ -174,7 +182,7 @@ async fn stat_marked_stopped_on_exit() {
     // 停实例 → run() 退出写 stopped。
     mgr.stop("lua-st2").await.expect("stop");
     tokio::time::sleep(Duration::from_millis(200)).await;
-    let stat = luastat::read(&client, "lua-st2")
+    let stat = stat::read(&client, "lua-st2")
         .await
         .expect("read")
         .expect("stat 存在");

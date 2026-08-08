@@ -6,7 +6,7 @@ mod common;
 use axum::body::Body;
 use axum::http::{header, Request, StatusCode};
 use rs_iot::api::{build_router, AppState};
-use rs_iot::db::luastat::LuaStat;
+use rs_iot::db::stat::InstanceStat;
 use rs_iot::host::{BridgeRegistry, CtlRegistry, HostContext};
 use rs_iot::plugin::instance::InstanceManager;
 use rs_iot::types::Hwid;
@@ -22,17 +22,20 @@ async fn app_with_stat(stat_inst: &str) -> (axum::Router, lux::ServerHandle) {
         .await
         .expect("bootstrap");
     if !stat_inst.is_empty() {
-        let stat = LuaStat {
+        // vm_restart_count / script_version 走 extra（M4 InstanceStat flatten 透传）。
+        let mut extra = serde_json::Map::new();
+        extra.insert("vm_restart_count".into(), serde_json::json!(1));
+        extra.insert("script_version".into(), serde_json::json!("deadbeef"));
+        let stat = InstanceStat {
             status: "running".into(),
-            collect_count: 3,
-            collect_fail_count: 0,
-            last_collect_ts: 99,
-            last_collect_duration_ms: 5,
-            vm_restart_count: 1,
-            script_version: "deadbeef".into(),
+            tick_count: 3,
+            fail_count: 0,
+            last_activity_ts: 99,
+            last_activity_duration_ms: 5,
             last_err: String::new(),
+            extra,
         };
-        rs_iot::db::luastat::write(&client, stat_inst, &stat)
+        rs_iot::db::stat::write(&client, stat_inst, &stat)
             .await
             .expect("write stat");
     }
@@ -89,11 +92,12 @@ async fn body_json(resp: axum::response::Response) -> serde_json::Value {
 async fn stats_returns_written_stat() {
     let (app, handle) = app_with_stat("lua-api").await;
     let token = login_token(&app).await;
+    // 实例指标已统一到 /api/v1/inst/stats（M4）；health 字段承载 InstanceStat。
     let resp = app
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/api/v1/lua/stats?inst_id=lua-api")
+                .uri("/api/v1/inst/stats?inst_id=lua-api")
                 .header(header::AUTHORIZATION, &token)
                 .body(Body::empty())
                 .expect("req"),
@@ -102,21 +106,21 @@ async fn stats_returns_written_stat() {
         .expect("call");
     assert_eq!(resp.status(), StatusCode::OK);
     let json = body_json(resp).await;
-    assert_eq!(json["status"], "running");
-    assert_eq!(json["collect_count"], 3);
-    assert_eq!(json["script_version"], "deadbeef");
+    assert_eq!(json["health"]["status"], "running");
+    assert_eq!(json["health"]["tick_count"], 3);
+    assert_eq!(json["health"]["script_version"], "deadbeef");
     common::stop_lux(handle).await;
 }
 
 #[tokio::test]
-async fn stats_missing_returns_empty_object() {
+async fn stats_missing_health_is_null() {
     let (app, handle) = app_with_stat("").await;
     let token = login_token(&app).await;
     let resp = app
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/api/v1/lua/stats?inst_id=nonexist")
+                .uri("/api/v1/inst/stats?inst_id=nonexist")
                 .header(header::AUTHORIZATION, &token)
                 .body(Body::empty())
                 .expect("req"),
@@ -125,9 +129,10 @@ async fn stats_missing_returns_empty_object() {
         .expect("call");
     assert_eq!(resp.status(), StatusCode::OK);
     let json = body_json(resp).await;
+    // 统一端点恒返 {inst_id, app_code, host_kind, state, health}；无 stat 时 health=null。
     assert!(
-        json.as_object().is_some_and(|m| m.is_empty()),
-        "无 stat 返回空对象 {{}}，得到 {json}"
+        json["health"].is_null(),
+        "无 stat 时 health 应为 null，得到 {json}"
     );
     common::stop_lux(handle).await;
 }
@@ -139,7 +144,7 @@ async fn stats_requires_token() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/api/v1/lua/stats?inst_id=x")
+                .uri("/api/v1/inst/stats?inst_id=x")
                 .body(Body::empty())
                 .expect("req"),
         )

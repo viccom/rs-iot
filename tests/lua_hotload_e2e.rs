@@ -7,7 +7,7 @@
 mod common;
 
 use common::test_data_dir;
-use rs_iot::db::luastat;
+use rs_iot::db::stat;
 use rs_iot::host::{BridgeRegistry, CtlRegistry, HostContext};
 use rs_iot::plugin::instance::InstanceManager;
 use rs_iot::plugin::traits::Processor;
@@ -85,12 +85,18 @@ async fn hotload_picks_up_script_change() {
     tokio::time::sleep(Duration::from_millis(1500)).await;
     let v1 = hget_cell(&client, "rtdata:devHL", "devHL.v").await;
     assert!(v1.contains('1'), "v1 应采集 v=1，得到 '{v1}'");
+    // 等 stat 周期 flush（StatTracker 每 5s 落一次 lux）拿到 v1 的 script_version。
+    tokio::time::sleep(Duration::from_millis(5000)).await;
     // 记录 v1 的 script_version（reload 后应变化，验 🟡 4 热加载更新 version）。
-    let sv1 = luastat::read(&client, "lua-hl")
+    let sv1 = stat::read(&client, "lua-hl")
         .await
         .expect("read stat")
         .expect("stat 存在")
-        .script_version;
+        .extra
+        .get("script_version")
+        .and_then(|v| v.as_str())
+        .expect("script_version 存在")
+        .to_string();
     assert_ne!(sv1, "unknown", "v1 脚本存在，version 应是真实 hash");
 
     // 改脚本：v=2 → notify 去抖（200ms）→ reload_vm（dry-run on_init）→ 新 collect（period 1s）。
@@ -106,12 +112,17 @@ async fn hotload_picks_up_script_change() {
         v2.contains('2'),
         "热加载后应采集 v=2，得到 '{v2}'（notify Windows 偶丢事件，spec §18）"
     );
-    // 热加载后 script_version 应更新（🟡 4 回归）：新 main.lua 内容不同 → sha256 不同。
-    let sv2 = luastat::read(&client, "lua-hl")
+    // 热加载后 script_version 应更新（🟡 4 回归）：reload 立即 flush（非周期），
+    // 新 main.lua 内容不同 → sha256 不同。
+    let sv2 = stat::read(&client, "lua-hl")
         .await
         .expect("read stat")
         .expect("stat 存在")
-        .script_version;
+        .extra
+        .get("script_version")
+        .and_then(|v| v.as_str())
+        .expect("script_version 存在")
+        .to_string();
     assert_ne!(
         sv2, sv1,
         "热加载后 script_version 应更新（v1={sv1}，v2={sv2}）"
