@@ -1,4 +1,4 @@
-//! 脚本加载与编译 + 注入受控 require（限定 scripts/<name>/lib/，spec §18 红线）。
+//! 脚本加载与编译 + 注入受控 require（限定 `scripts/<name>/lib/`，spec §18 红线）。
 //!
 //! 沙箱 `new_with` 未装 package 库（require 本就不可用），这里手动注入一个受控
 //! require 全局函数，路径限定在脚本目录的 lib/ 下，防穿越逃逸。

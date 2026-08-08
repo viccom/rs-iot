@@ -1,4 +1,4 @@
-//! 脚本目录约定解析：scripts/<name>/main.lua + 本地 lib/*.lua（require 限定）。
+//! 脚本目录约定解析：`scripts/<name>/main.lua` + 本地 lib/*.lua（require 限定）。
 
 use std::path::{Path, PathBuf};
 
