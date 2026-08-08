@@ -27,12 +27,98 @@ pub mod plugin;
 pub mod transform;
 pub mod types;
 
-use error::RsIotError;
+use error::{RsIotError, TResult};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 /// 构建版本标识（供 `/api/v1/sysinfo` 与日志使用）。
 pub const VERSION: &str = "20250123";
+
+/// 清理日志目录：保留最近 `max_days` 天（today .. today-(max_days-1)），删 `today-max_days`
+/// 及更早的 `rs-iot.log.YYYY-MM-DD` 文件；`max_size_mb>0` 时再按总大小删最旧直到低于阈值。
+/// 返回删除文件数。单文件 IO/解析失败仅 warn 跳过。
+///
+/// `today` 由调用方传入（cleanup task 传系统当前日期），使本函数纯函数可测。
+/// 文件名格式 `rs-iot.log.YYYY-MM-DD`（tracing-appender daily）；MB = 1_000_000 字节（SI）。
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "M3 Task 4 cleanup task 将调用；接入后移除此 attribute"
+    )
+)]
+fn purge_old_logs(
+    dir: &str,
+    today: chrono::NaiveDate,
+    max_days: u64,
+    max_size_mb: u64,
+) -> TResult<usize> {
+    use chrono::Days;
+    const PREFIX: &str = "rs-iot.log.";
+
+    let entries = std::fs::read_dir(dir)
+        .map_err(|e| RsIotError::Config(format!("read log dir '{dir}': {e}")))?;
+
+    // 收集 (路径, 日期, 字节大小)
+    let mut files: Vec<(std::path::PathBuf, chrono::NaiveDate, u64)> = Vec::new();
+    for ent in entries.flatten() {
+        let path = ent.path();
+        if !path.is_file() {
+            continue;
+        }
+        let Some(fname) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        let Some(date_str) = fname.strip_prefix(PREFIX) else {
+            continue; // 非日志文件
+        };
+        let Ok(date) = chrono::NaiveDate::parse_from_str(date_str, "%Y-%m-%d") else {
+            continue; // 文件名日期解析失败，跳过
+        };
+        let size = ent.metadata().map(|m| m.len()).unwrap_or(0);
+        files.push((path, date, size));
+    }
+
+    let mut removed = 0usize;
+
+    // 1) 按天删：保留最近 max_days 天（today .. today-(max_days-1)），删 today-max_days 及更早。
+    //    边界：date == today-max_days 即满 max_days 天，应删（"保留 N 天" 语义）。
+    if max_days > 0 {
+        let cutoff = today.checked_sub_days(Days::new(max_days)).unwrap_or(today);
+        files.retain(|(path, date, _size)| {
+            if *date <= cutoff {
+                if let Err(e) = std::fs::remove_file(path) {
+                    tracing::warn!("purge_old_logs: remove {} failed: {e}", path.display());
+                } else {
+                    removed += 1;
+                }
+                false // 已处理（删或失败），从列表移除
+            } else {
+                true
+            }
+        });
+    }
+
+    // 2) 按总大小删最旧
+    if max_size_mb > 0 {
+        let limit = max_size_mb.saturating_mul(1_000_000);
+        files.sort_by_key(|(_p, date, _s)| *date); // 最旧在前
+        let mut total: u64 = files.iter().map(|(_, _, s)| s).sum();
+        for (path, _date, size) in files {
+            if total <= limit {
+                break;
+            }
+            if let Err(e) = std::fs::remove_file(&path) {
+                tracing::warn!("purge_old_logs: remove {} failed: {e}", path.display());
+            } else {
+                removed += 1;
+                total = total.saturating_sub(size);
+            }
+        }
+    }
+
+    Ok(removed)
+}
 
 /// 初始化全局 tracing subscriber。
 ///
@@ -278,5 +364,80 @@ fn demo_datasim_config() -> types::InstConfig {
             slave_id: None,
         }],
         host_kind: types::HostKind::Builtin,
+    }
+}
+
+#[cfg(test)]
+mod log_purge_tests {
+    use super::purge_old_logs;
+    use chrono::NaiveDate;
+    use std::fs;
+
+    /// 造一个临时日志目录，返回路径（调用方负责清理）。
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("rsiot-purge-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("mkdir");
+        dir
+    }
+
+    fn touch(dir: &std::path::Path, fname: &str) {
+        fs::write(dir.join(fname), b"x").expect("write");
+    }
+
+    #[test]
+    fn purges_files_older_than_max_days() {
+        let dir = scratch("old");
+        let today = NaiveDate::from_ymd_opt(2026, 8, 8).unwrap();
+        touch(&dir, "rs-iot.log.2026-08-01"); // 7 天前 → 删
+        touch(&dir, "rs-iot.log.2026-08-07"); // 昨天 → 留
+        touch(&dir, "rs-iot.log.2026-08-08"); // 今天 → 留
+
+        let n = purge_old_logs(dir.to_str().unwrap(), today, 7, 0).expect("purge");
+        assert_eq!(n, 1);
+        assert!(!dir.join("rs-iot.log.2026-08-01").exists());
+        assert!(dir.join("rs-iot.log.2026-08-07").exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn max_days_zero_skips_age_purge() {
+        let dir = scratch("zerodays");
+        let today = NaiveDate::from_ymd_opt(2026, 8, 8).unwrap();
+        touch(&dir, "rs-iot.log.2020-01-01"); // 很旧但 max_days=0 不按天删
+        let n = purge_old_logs(dir.to_str().unwrap(), today, 0, 0).expect("purge");
+        assert_eq!(n, 0);
+        assert!(dir.join("rs-iot.log.2020-01-01").exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn purges_by_total_size_oldest_first() {
+        let dir = scratch("size");
+        let today = NaiveDate::from_ymd_opt(2026, 8, 8).unwrap();
+        // 三个文件各 1_000_000 字节，max_size_mb=2 → 留最新 2 个，删最旧 1 个
+        fs::write(dir.join("rs-iot.log.2026-08-06"), vec![b'a'; 1_000_000]).expect("w");
+        fs::write(dir.join("rs-iot.log.2026-08-07"), vec![b'b'; 1_000_000]).expect("w");
+        fs::write(dir.join("rs-iot.log.2026-08-08"), vec![b'c'; 1_000_000]).expect("w");
+
+        let n = purge_old_logs(dir.to_str().unwrap(), today, 0, 2).expect("purge");
+        assert_eq!(n, 1);
+        assert!(!dir.join("rs-iot.log.2026-08-06").exists()); // 最旧被删
+        assert!(dir.join("rs-iot.log.2026-08-08").exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ignores_non_log_files() {
+        let dir = scratch("nonlog");
+        let today = NaiveDate::from_ymd_opt(2026, 8, 8).unwrap();
+        touch(&dir, "rs-iot.log.2020-01-01"); // 旧日志 → 删
+        touch(&dir, "random.txt"); // 非日志 → 不动
+        touch(&dir, "rs-iot.log.notadate"); // 文件名日期解析失败 → 不动
+        let n = purge_old_logs(dir.to_str().unwrap(), today, 7, 0).expect("purge");
+        assert_eq!(n, 1);
+        assert!(dir.join("random.txt").exists());
+        assert!(dir.join("rs-iot.log.notadate").exists());
+        let _ = fs::remove_dir_all(&dir);
     }
 }
