@@ -91,13 +91,14 @@ async fn l2_set_value_writes_rtdata() {
     let _ = std::fs::remove_dir_all(&scripts);
 }
 
-/// 多设备实例 collect 只推 devices[0]（🔴 2 回归）。
+/// 平铺 collect 返回 `{tag=v}` 归 devices[0]（M2 向后兼容回归）。
 ///
-/// `collect` 无参不感知设备，不应遍历 `inst.devices` 重复调用（否则副作用翻倍 +
-/// 推所有设备）。配 2 设备，断言 devices[0] 有采集值、devices[1] 无——修复下 collect
-/// 单次化只推首个；若退回 `for dev` 循环，devSecond 也会被写入 → 断言失败。
+/// M2 起 collect 支持嵌套返回 `{[devid]={...}}` 多设备；但**平铺返回**（老脚本形态）
+/// 仍归 `devices[0]`（fallback_devid），devSecond 不被采集。配 2 设备 + 平铺 `{v=1}`，
+/// 断言 devFirst 有值、devSecond 无——若平铺误入嵌套分支（把 `v=1` 当 devid），devFirst
+/// 会落空 → 断言失败。
 #[tokio::test]
-async fn multi_device_collect_pushes_only_first_device() {
+async fn flat_collect_attributed_to_first_device() {
     let data_dir = test_data_dir("lua-multi-dev");
     let (handle, client) = common::start_lux(data_dir.to_str().expect("utf8")).await;
     rs_iot::db::identity::bootstrap(&client)
