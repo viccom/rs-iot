@@ -1,7 +1,6 @@
 //! 日志保留期清理（M3）：按天/按总大小删旧日志 + 周期 cleanup task。
 
 use crate::error::{RsIotError, TResult};
-use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 /// 清理日志目录：保留最近 `max_days` 天（today .. today-(max_days-1)），删 `today-max_days`
@@ -93,13 +92,16 @@ pub(crate) fn purge_old_logs(
 }
 
 /// 启动日志保留期清理 task：启动立即跑一次（清上次遗留）+ 每 1h 跑一次；
-/// `shutdown.child_token()` 绑定退出。失败仅 warn，不阻塞主流程。
+/// `shutdown.child_token()` 绑定退出（select! 响应 cancel 即退，无需 abort）。失败仅 warn，不阻塞主流程。
+///
+/// fire-and-forget（不返回 JoinHandle）：task 靠 child_token cancel 自行退出，非如
+/// axum/mqtt 那些需 abort 强杀的不可中断 task，故不加入关闭段的 abort 块。
 pub(crate) fn spawn_cleanup_task(
     dir: String,
     max_days: u64,
     max_size_mb: u64,
     shutdown: CancellationToken,
-) -> JoinHandle<()> {
+) {
     let lt = shutdown.child_token();
     tokio::spawn(async move {
         let run_once = || {
@@ -108,8 +110,12 @@ pub(crate) fn spawn_cleanup_task(
                 tracing::warn!("log cleanup: {e}");
             }
         };
-        run_once(); // 启动立即清一次
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(3600));
+        run_once(); // 启动立即清一次（清上次遗留）
+                    // 之后每 1h 跑一次；interval_at 延迟首次触发，避免与上面 run_once 在 t=0 重复
+        let mut interval = tokio::time::interval_at(
+            tokio::time::Instant::now() + std::time::Duration::from_secs(3600),
+            std::time::Duration::from_secs(3600),
+        );
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             tokio::select! {
@@ -117,7 +123,7 @@ pub(crate) fn spawn_cleanup_task(
                 _ = interval.tick() => run_once(),
             }
         }
-    })
+    });
 }
 
 #[cfg(test)]
