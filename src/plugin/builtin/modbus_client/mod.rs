@@ -88,7 +88,7 @@ use async_trait::async_trait;
 use codec::{decode_point, encode_value, Buf, WritePayload};
 use config::{parse_cfg, PollStrategy};
 use merge::{merge_regions, Region};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_modbus::client::{Context, Reader, Writer};
@@ -304,7 +304,7 @@ impl Source for ModbusClient {
         let poll_order = build_poll_order(&plans, cfg.poll_strategy);
         let req_timeout = Duration::from_secs(cfg.request_timeout_secs);
         // handle_write 反查 devid → slave_id（写命令按目标设备切 slave）。
-        let devid_to_slave: std::collections::HashMap<String, u8> = plans
+        let devid_to_slave: HashMap<String, u8> = plans
             .iter()
             .map(|p| (p.devid.clone(), p.slave_id))
             .collect();
@@ -440,7 +440,7 @@ async fn handle_write(
     session: &mut Option<Context>,
     data: &str,
     devid: &str,
-    devid_to_slave: &std::collections::HashMap<String, u8>,
+    devid_to_slave: &HashMap<String, u8>,
 ) {
     let req: serde_json::Value = match serde_json::from_str(data) {
         Ok(v) => v,
@@ -489,7 +489,7 @@ async fn handle_write(
     let slave_id = req
         .get("slave_id")
         .and_then(|v| v.as_u64())
-        .map(|v| v as u8)
+        .and_then(|v| u8::try_from(v).ok())
         .or_else(|| devid_to_slave.get(devid).copied());
     let slave_id = match slave_id {
         Some(s) => s,
