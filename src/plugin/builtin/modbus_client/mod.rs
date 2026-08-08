@@ -357,7 +357,14 @@ impl Source for ModbusClient {
                     // 按 devid 累积解码值（round_robin 下同 devid 的 region 散落序列各处，故聚合）。
                     let mut acc: BTreeMap<String, BTreeMap<String, SampleValue>> = BTreeMap::new();
                     let mut transport_failed = false;
+                    // 已超时 slave：跳过其剩余 region（spec §3.2 Sequential「超时 break 到下一
+                    // slave」；RoundRobin 同样受益——死从站后续 region 也大概率超时，跳过省时，
+                    // 避免死从站 K region 付 K×timeout 拖垮整轮）。换 slave（pi 变）自然解除。
+                    let mut timed_out_slave: Option<usize> = None;
                     for (pi, ri) in &poll_order {
+                        if timed_out_slave.is_some_and(|s| s == *pi) {
+                            continue;
+                        }
                         let plan = &plans[*pi];
                         let reg = &plan.regions[*ri];
                         sess.set_slave(Slave(plan.slave_id));
@@ -385,8 +392,9 @@ impl Source for ModbusClient {
                                 );
                             }
                             ReadOutcome::Timeout => {
+                                timed_out_slave = Some(*pi);
                                 tracing::warn!(
-                                    "[modbusClient] inst {inst_id} slave {} read {}+{} timeout ({}s)，跳过",
+                                    "[modbusClient] inst {inst_id} slave {} read {}+{} timeout ({}s)，跳过该 slave 剩余 region",
                                     plan.slave_id,
                                     reg.start,
                                     reg.len(),

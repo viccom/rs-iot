@@ -242,3 +242,43 @@ async fn sequential_strategy_also_collects() {
         "sequential 两 slave 均应入库: {got:?}"
     );
 }
+
+/// Sequential + 死从站(unit2)多 region：超时后跳过 unit2 剩余 region（spec §3.2 break-on-timeout）。
+/// 验证隔离不退化（m1/m3 入库、m2 不入库）；break 让 m2 只付 1×timeout（时间性留 M3 真机）。
+#[tokio::test]
+async fn sequential_breaks_on_timeout_skipping_dead_slave_remaining_regions() {
+    let addr = spawn_mock_server().await;
+    let app = serde_json::json!({
+        "kind": "tcp",
+        "endpoint": addr.to_string(),
+        "period": 1,
+        "poll_strategy": "sequential",
+        "request_timeout_secs": 1,
+    });
+    // m2 两个 holding 点 gap=50 > 默认 gap_threshold(16) → merge 成 2 region。
+    let m2 = DeviceSpec {
+        label: "m2".into(),
+        value: "m2".into(),
+        children: vec![
+            ChildSpec {
+                label: "v0".into(),
+                value: "holding:0:i16".into(),
+                r#type: "i16".into(),
+            },
+            ChildSpec {
+                label: "v1".into(),
+                value: "holding:50:i16".into(),
+                r#type: "i16".into(),
+            },
+        ],
+        slave_id: Some(2),
+    };
+    let devices = vec![mk_dev("m1", 1), m2, mk_dev("m3", 3)];
+    let got = collect_samples("ms5", app, devices, 2, 8).await;
+    assert!(got.contains_key("m1.v0"), "slave1 入库: {got:?}");
+    assert!(got.contains_key("m3.v0"), "slave3 入库: {got:?}");
+    assert!(
+        !got.contains_key("m2.v0") && !got.contains_key("m2.v1"),
+        "死从站 m2 不应入库: {got:?}"
+    );
+}
