@@ -35,11 +35,13 @@ use tokio_util::sync::CancellationToken;
 pub const VERSION: &str = "20250123";
 
 /// 清理日志目录：保留最近 `max_days` 天（today .. today-(max_days-1)），删 `today-max_days`
-/// 及更早的 `rs-iot.log.YYYY-MM-DD` 文件；`max_size_mb>0` 时再按总大小删最旧直到低于阈值。
-/// 返回删除文件数。单文件 IO/解析失败仅 warn 跳过。
+/// 及更早的 `rs-iot.log.YYYY-MM-DD` 文件；`max_size_mb>0` 时再按总大小删最旧直到低于阈值
+/// （size-purge 跳过 today —— tracing-appender 正在写的活动文件，删了丢日志）。返回删除文件数。
+/// 单文件 IO/解析失败与目录 entry 迭代错误仅 warn 跳过。
 ///
-/// `today` 由调用方传入（cleanup task 传系统当前日期），使本函数纯函数可测。
-/// 文件名格式 `rs-iot.log.YYYY-MM-DD`（tracing-appender daily）；MB = 1_000_000 字节（SI）。
+/// 无隐式系统时钟依赖（`today` 由调用方注入，便于测试）。
+/// 文件名格式 `rs-iot.log.YYYY-MM-DD`（tracing-appender daily）；MB = 1_000_000 字节（SI）；
+/// 按 age 判定时 `date <= today-max_days` 即删（"保留最近 max_days 天" 边界语义）。
 #[cfg_attr(
     not(test),
     expect(
@@ -61,7 +63,11 @@ fn purge_old_logs(
 
     // 收集 (路径, 日期, 字节大小)
     let mut files: Vec<(std::path::PathBuf, chrono::NaiveDate, u64)> = Vec::new();
-    for ent in entries.flatten() {
+    for res in entries {
+        let Ok(ent) = res else {
+            tracing::warn!("purge_old_logs: iterate entry failed, skipped");
+            continue;
+        };
         let path = ent.path();
         if !path.is_file() {
             continue;
@@ -81,32 +87,35 @@ fn purge_old_logs(
 
     let mut removed = 0usize;
 
-    // 1) 按天删：保留最近 max_days 天（today .. today-(max_days-1)），删 today-max_days 及更早。
-    //    边界：date == today-max_days 即满 max_days 天，应删（"保留 N 天" 语义）。
+    // 1) 按天删：早于/等于 today - max_days（underflow 则跳过 —— 防御性默认"删无"）
     if max_days > 0 {
-        let cutoff = today.checked_sub_days(Days::new(max_days)).unwrap_or(today);
-        files.retain(|(path, date, _size)| {
-            if *date <= cutoff {
-                if let Err(e) = std::fs::remove_file(path) {
-                    tracing::warn!("purge_old_logs: remove {} failed: {e}", path.display());
+        if let Some(cutoff) = today.checked_sub_days(Days::new(max_days)) {
+            files.retain(|(path, date, _size)| {
+                if *date <= cutoff {
+                    if let Err(e) = std::fs::remove_file(path) {
+                        tracing::warn!("purge_old_logs: remove {} failed: {e}", path.display());
+                    } else {
+                        removed += 1;
+                    }
+                    false // 已处理（删或失败），从列表移除
                 } else {
-                    removed += 1;
+                    true
                 }
-                false // 已处理（删或失败），从列表移除
-            } else {
-                true
-            }
-        });
+            });
+        }
     }
 
-    // 2) 按总大小删最旧
+    // 2) 按总大小删最旧（跳过 today —— tracing-appender 正在写的活动文件，删了丢日志）
     if max_size_mb > 0 {
         let limit = max_size_mb.saturating_mul(1_000_000);
         files.sort_by_key(|(_p, date, _s)| *date); // 最旧在前
         let mut total: u64 = files.iter().map(|(_, _, s)| s).sum();
-        for (path, _date, size) in files {
+        for (path, date, size) in files {
             if total <= limit {
                 break;
+            }
+            if date == today {
+                continue; // 不删当天活动日志
             }
             if let Err(e) = std::fs::remove_file(&path) {
                 tracing::warn!("purge_old_logs: remove {} failed: {e}", path.display());
@@ -438,6 +447,18 @@ mod log_purge_tests {
         assert_eq!(n, 1);
         assert!(dir.join("random.txt").exists());
         assert!(dir.join("rs-iot.log.notadate").exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn size_purge_never_deletes_today() {
+        let dir = scratch("today");
+        let today = NaiveDate::from_ymd_opt(2026, 8, 8).unwrap();
+        // 只有 today 的文件，2MB 超 max_size_mb=1 —— 但 today 是活动日志，不可删
+        fs::write(dir.join("rs-iot.log.2026-08-08"), vec![b'x'; 2_000_000]).expect("w");
+        let n = purge_old_logs(dir.to_str().unwrap(), today, 0, 1).expect("purge");
+        assert_eq!(n, 0);
+        assert!(dir.join("rs-iot.log.2026-08-08").exists());
         let _ = fs::remove_dir_all(&dir);
     }
 }
