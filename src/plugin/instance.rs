@@ -37,6 +37,8 @@ pub enum InstState {
 #[derive(Debug)]
 struct InstanceHandle {
     token: CancellationToken,
+    /// supervisor task 的 handle（M3 自愈可信）：supervisor 内部唯一 await source/sink
+    /// task 的 join，按 token 判定 Failed。`stop` await 此 handle，3s 超时语义不变。
     join: JoinHandle<()>,
 }
 
@@ -91,13 +93,33 @@ impl InstanceManager {
         let tx = self.hub_tx.clone();
         let token_run = token.clone();
         let id_for_log = id_key.clone();
-        let join = tokio::spawn(async move {
+        let source_join = tokio::spawn(async move {
             source.run(ctx, inst, tx, cmd_rx, token_run).await;
             tracing::info!("[instance] source {id_for_log} exited");
         });
 
+        // supervisor（M3 自愈可信）：唯一 await source_join，按 token 判定最终状态。
+        // task 退出（panic/早退/配置错误 return）且 token 未 cancel → 标 Failed + 告警。
+        let states_sup = self.states.clone();
+        let token_sup = token.clone();
+        let id_sup = id_key.clone();
+        let sup_join = tokio::spawn(async move {
+            let _ = source_join.await; // panic 以 JoinError 返回，被吞；转 Failed 判定
+            if !token_sup.is_cancelled() {
+                states_sup.insert(id_sup.clone(), InstState::Failed);
+                tracing::error!("[instance] {id_sup} task exited unexpectedly → Failed");
+            }
+            // token 已 cancel = 主动 stop（stop 已标 Stopping→Stopped），不干预
+        });
+
         self.states.insert(id_key.clone(), InstState::Running);
-        self.handles.insert(id_key, InstanceHandle { token, join });
+        self.handles.insert(
+            id_key,
+            InstanceHandle {
+                token,
+                join: sup_join,
+            },
+        );
         Ok(())
     }
 
@@ -123,13 +145,32 @@ impl InstanceManager {
         let ctx = self.ctx.clone();
         let token_run = token.clone();
         let id_for_log = id_key.clone();
-        let join = tokio::spawn(async move {
+        let source_join = tokio::spawn(async move {
             sink.run(ctx, inst, sample_rx, cmd_rx, token_run).await;
             tracing::info!("[instance] sink {id_for_log} exited");
         });
 
+        // supervisor（M3 自愈可信）：唯一 await sink task join，按 token 判定最终状态。
+        // task 退出（panic/早退/配置错误 return）且 token 未 cancel → 标 Failed + 告警。
+        let states_sup = self.states.clone();
+        let token_sup = token.clone();
+        let id_sup = id_key.clone();
+        let sup_join = tokio::spawn(async move {
+            let _ = source_join.await;
+            if !token_sup.is_cancelled() {
+                states_sup.insert(id_sup.clone(), InstState::Failed);
+                tracing::error!("[instance] {id_sup} task exited unexpectedly → Failed");
+            }
+        });
+
         self.states.insert(id_key.clone(), InstState::Running);
-        self.handles.insert(id_key, InstanceHandle { token, join });
+        self.handles.insert(
+            id_key,
+            InstanceHandle {
+                token,
+                join: sup_join,
+            },
+        );
         Ok(())
     }
 
