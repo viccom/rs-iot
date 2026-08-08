@@ -15,17 +15,43 @@ mod http;
 
 use crate::host::HostContext;
 use crate::plugin::builtin::lua_client::io_engine::IoEngine;
-use crate::types::{CtlMessage, InstConfig, InstId, Sample};
+use crate::types::{CtlMessage, InstConfig, InstId, Sample, SampleValue};
 use mlua::{Lua, LuaSerdeExt, LuaString, Value};
 use tokio::sync::mpsc;
+
+/// 组 `Sample` 推 hub（`set_value`/`set_values` 共用，DRY）。
+///
+/// `values` 空 → 直接返回（无点不上报）。`tx.send` 失败（hub 关）→ warn（对标
+/// `run()` collect 推 hub 容错语义）。timestamp 取当前本地秒。
+async fn push_sample(
+    tx: &mpsc::Sender<Sample>,
+    hwid: &crate::types::Hwid,
+    devid: String,
+    values: std::collections::BTreeMap<String, SampleValue>,
+) {
+    if values.is_empty() {
+        return;
+    }
+    let sample = Sample {
+        hwid: hwid.clone(),
+        devid,
+        values,
+        timestamp: chrono::Local::now().timestamp(),
+    };
+    if tx.send(sample).await.is_err() {
+        tracing::warn!("[luaClient] set_value(s): hub 关闭，值未上报");
+    }
+}
 
 /// 在 `lua` 上注册 ctx 全局对象 + host 函数（`run` 调用）。
 ///
 /// - L1 `ctx:request(frame, timeout_ms) -> resp|nil,err`：async，经 `create_async_function`
 ///   桥接，脚本 `ctx:request(...)` 调用时 mlua 自动驱动协程，内部 `io.request` → IO task
 ///   独占处理 → oneshot 回执（spec §8 模式 Z）。
-/// - L2 `ctx:set_value(tag, v)`：async，推 [`Sample`] 到 hub（数据上行总线，与 collect
-///   同路径，pipeline 入库）；devid 取 `inst.devices[0]`（脚本操作本实例首设备）。
+/// - L2 `ctx:set_value(devid, tag, v)`：async，推 [`Sample`] 到 hub（数据上行总线，与
+///   collect 同路径，pipeline 入库）；devid 由脚本显式传入（多设备支持）。
+/// - L2 `ctx:set_values(devid, {tag=v,...})`：async，批量推一个设备多 tag（一个 [`Sample`]，
+///   多点同时刻 timestamp，贴合 `on_data` 被动帧多点一次上报）。
 /// - L2 `ctx:get_value(devid, tag) -> str|nil`：async，读 lux `rtdata:<devid>` 最新值
 ///   （`[ts, localTime, value]` cell → value 字符串）。
 /// - L2 `ctx:get_device(devid) -> table|nil`：async，读 lux `HGETALL rtdata:<devid>`
@@ -155,41 +181,53 @@ pub(super) fn register(
     )?;
     ctx.set("send_command", send_fn)?;
 
-    // --- L2 ctx:set_value(tag, v) → 推 Sample 到 hub（数据上行总线，与 collect 同路径）---
-    // devid 取 inst.devices.first()（脚本操作自身实例首设备；多设备扩展后置）。
-    // value 经 lua_value_to_sample（number/int/bool/string）转 SampleValue。
-    // tx.send 失败（hub 关）→ 不致命，warn（对标 run() collect 推 hub 的容错语义）。
+    // --- L2 ctx:set_value(devid, tag, v) → 推 Sample 到 hub（数据上行总线）---
+    // devid 由脚本显式传入（多设备支持：脚本可对 ctx:list_devices() 的任一 devid 上报）。
+    // value 经 lua_value_to_sample 转 SampleValue；单点便捷，等价 set_values(devid,{[tag]=v})。
     let tx_set = tx.clone();
     let hwid_set = ctx_host.hwid.clone();
-    let devid_set = inst
-        .devices
-        .first()
-        .map(|d| d.value.clone())
-        .unwrap_or_default();
-    let set_value_fn =
-        lua.create_async_function(move |_lua, (_self, tag, v): (Value, LuaString, Value)| {
+    let set_value_fn = lua.create_async_function(
+        move |_lua, (_self, devid, tag, v): (Value, LuaString, LuaString, Value)| {
             let tx = tx_set.clone();
             let hwid = hwid_set.clone();
-            let devid = devid_set.clone();
             async move {
+                let devid = devid.to_string_lossy().to_string();
                 let tag = tag.to_string_lossy().to_string();
                 let sv = super::lua_value_to_sample(&v)
                     .ok_or_else(|| mlua::Error::RuntimeError("set_value: 不支持的值类型".into()))?;
                 let mut values = std::collections::BTreeMap::new();
                 values.insert(tag, sv);
-                let sample = Sample {
-                    hwid,
-                    devid,
-                    values,
-                    timestamp: chrono::Local::now().timestamp(),
-                };
-                if tx.send(sample).await.is_err() {
-                    tracing::warn!("[luaClient] set_value: hub 关闭，值未上报");
-                }
+                push_sample(&tx, &hwid, devid, values).await;
                 Ok(())
             }
-        })?;
+        },
+    )?;
     ctx.set("set_value", set_value_fn)?;
+
+    // --- L2 ctx:set_values(devid, {tag=v,...}) → 批量推一个设备多 tag（一个 Sample）---
+    // 贴合 Sample 多变量语义：on_data 解析被动帧多点一次上报（点间同时刻 timestamp）。
+    // table 经 pairs 遍历 → BTreeMap；空 table 不上报。
+    let tx_sv = tx.clone();
+    let hwid_sv = ctx_host.hwid.clone();
+    let set_values_fn = lua.create_async_function(
+        move |_lua, (_self, devid, table): (Value, LuaString, mlua::Table)| {
+            let tx = tx_sv.clone();
+            let hwid = hwid_sv.clone();
+            async move {
+                let devid = devid.to_string_lossy().to_string();
+                let mut values = std::collections::BTreeMap::new();
+                for pair in table.pairs::<String, Value>() {
+                    let (k, v) = pair?;
+                    if let Some(sv) = super::lua_value_to_sample(&v) {
+                        values.insert(k, sv);
+                    }
+                }
+                push_sample(&tx, &hwid, devid, values).await;
+                Ok(())
+            }
+        },
+    )?;
+    ctx.set("set_values", set_values_fn)?;
 
     // --- L2 ctx:get_value(devid, tag) -> str|nil ---
     // 读 lux HGET rtdata:<devid> field=<devid>.<tag> → [ts, localTime, value] → value_str。

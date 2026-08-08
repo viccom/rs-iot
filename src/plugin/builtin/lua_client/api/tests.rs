@@ -321,7 +321,7 @@ async fn set_value_pushes_sample_to_hub() {
     };
     register(&lua, ctx_host, &inst, io, tx).expect("register");
 
-    lua.load("ctx:set_value('temp', 42.5)")
+    lua.load("ctx:set_value('devX', 'temp', 42.5)")
         .exec_async()
         .await
         .expect("set_value");
@@ -338,6 +338,103 @@ async fn set_value_pushes_sample_to_hub() {
         }
         other => panic!("temp 应是 Float(42.5)，实得 {other:?}"),
     }
+
+    let _ = crate::db::shutdown_lux(handle).await;
+    let _ = std::fs::remove_dir_all(&data_dir);
+}
+
+/// L2 set_values(devid, {tag=v,...}) 批量推一个 Sample（多 tag 同时刻）。
+#[tokio::test]
+async fn set_values_pushes_multi_tag_sample() {
+    let lua = Lua::new();
+    let io = spawn_mock_io();
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<crate::types::Sample>(8);
+    let (ctx_host, handle, data_dir) = setup_ctx("l2-setvalues").await;
+    let inst = InstConfig {
+        inst_id: "it".into(),
+        inst_name: "it".into(),
+        app_code: PluginName::new("luaClient"),
+        app_type: AppType::South,
+        auto_start: false,
+        app_config: serde_json::json!({"script":"a","endpoint":"x"}),
+        devices: vec![DeviceSpec {
+            label: "d".into(),
+            value: "devX".into(),
+            children: vec![],
+            slave_id: None,
+        }],
+        host_kind: HostKind::Builtin,
+    };
+    register(&lua, ctx_host, &inst, io, tx).expect("register");
+
+    lua.load("ctx:set_values('devX', { temp = 42.5, hum = 60 })")
+        .exec_async()
+        .await
+        .expect("set_values");
+
+    let s = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+        .await
+        .expect("超时")
+        .expect("应收到一个 Sample");
+    assert_eq!(s.devid, "devX", "一个 Sample 一个 devid");
+    assert_eq!(s.values.len(), 2, "应含 2 个 tag（批量）");
+    match s.values.get("temp") {
+        Some(crate::types::SampleValue::Float(f)) => {
+            assert!((f - 42.5).abs() < 1e-9, "temp 应为 42.5，实得 {f}")
+        }
+        other => panic!("temp 应是 Float(42.5)，实得 {other:?}"),
+    }
+    match s.values.get("hum") {
+        Some(crate::types::SampleValue::Int(i)) => assert_eq!(*i, 60, "hum 应为 60"),
+        other => panic!("hum 应是 Int(60)，实得 {other:?}"),
+    }
+
+    let _ = crate::db::shutdown_lux(handle).await;
+    let _ = std::fs::remove_dir_all(&data_dir);
+}
+
+/// L2 set_value(devid, tag, v) 按 devid 路由：多设备实例对不同 devid 各推一个 Sample。
+#[tokio::test]
+async fn set_value_routes_by_devid() {
+    let lua = Lua::new();
+    let io = spawn_mock_io();
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<crate::types::Sample>(8);
+    let (ctx_host, handle, data_dir) = setup_ctx("l2-route").await;
+    let inst = InstConfig {
+        inst_id: "it".into(),
+        inst_name: "it".into(),
+        app_code: PluginName::new("luaClient"),
+        app_type: AppType::South,
+        auto_start: false,
+        app_config: serde_json::json!({"script":"a","endpoint":"x"}),
+        devices: vec![
+            DeviceSpec {
+                label: "A".into(),
+                value: "devA".into(),
+                children: vec![],
+                slave_id: None,
+            },
+            DeviceSpec {
+                label: "B".into(),
+                value: "devB".into(),
+                children: vec![],
+                slave_id: None,
+            },
+        ],
+        host_kind: HostKind::Builtin,
+    };
+    register(&lua, ctx_host, &inst, io, tx).expect("register");
+
+    lua.load("ctx:set_value('devB', 'v', 2)")
+        .exec_async()
+        .await
+        .expect("set_value devB");
+
+    let s = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+        .await
+        .expect("超时")
+        .expect("应收到 Sample");
+    assert_eq!(s.devid, "devB", "devid 应路由到 devB（非 devices[0]）");
 
     let _ = crate::db::shutdown_lux(handle).await;
     let _ = std::fs::remove_dir_all(&data_dir);

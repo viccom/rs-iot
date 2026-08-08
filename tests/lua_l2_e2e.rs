@@ -22,14 +22,14 @@ async fn l2_set_value_writes_rtdata() {
         .await
         .expect("bootstrap");
 
-    // 脚本：collect 调 set_value("temp", 42.5)（devid=devices[0]=devL2），返 nil
+    // 脚本：collect 调 set_value("devL2", "temp", 42.5)（显式 devid=devices[0]=devL2），返 nil
     // （set_value 已推 hub，不走 collect table 路径）。
     let scripts = std::env::temp_dir().join(format!("lua-l2-{}", std::process::id()));
     let script_dir = scripts.join("l2");
     std::fs::create_dir_all(&script_dir).expect("mkdir");
     std::fs::write(
         script_dir.join("main.lua"),
-        "function collect()\n    ctx:set_value(\"temp\", 42.5)\n    return nil\nend\n",
+        "function collect()\n    ctx:set_value(\"devL2\", \"temp\", 42.5)\n    return nil\nend\n",
     )
     .expect("write");
 
