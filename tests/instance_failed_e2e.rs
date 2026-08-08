@@ -181,7 +181,6 @@ async fn normal_stop_marks_stopped_not_failed() {
 
     mgr.stop("obe").await.expect("stop");
     assert_eq!(mgr.status().get("obe").copied(), Some(InstState::Stopped));
-    assert_ne!(mgr.status().get("obe").copied(), Some(InstState::Failed));
 
     common::stop_lux(handle).await;
 }
