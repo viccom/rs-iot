@@ -54,6 +54,7 @@ async fn on_data_pushes_to_luakv() {
         shutdown: shutdown.clone(),
         ctl_registry: CtlRegistry::new(),
         bridge_registry: BridgeRegistry::new(),
+        metrics: std::sync::Arc::new(rs_iot::process_metrics::ProcessMetrics::new()),
     };
     let (hub_tx, hub_rx) = tokio::sync::mpsc::channel::<Sample>(64);
     let mgr = Arc::new(InstanceManager::new(ctx.clone(), hub_tx));

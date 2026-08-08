@@ -1,0 +1,129 @@
+//! 进程级指标（M4）：核心框架咽喉部位的 AtomicU64 计数器，REST /sysstatus 直读。
+//!
+//! 不落 lux（热路径无 await；进程级语义是本进程实时健康，重启归零合理）。
+//! 注入 HostContext（所有 task 共享）+ AppState（REST 直读）。
+
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::Instant;
+
+/// 进程级指标集合（Instant/Atomic 均实现 Debug，故 derive Debug 通过 missing_debug_implementations）。
+#[derive(Debug)]
+pub struct ProcessMetrics {
+    /// 进程启动时刻（REST 算 uptime）。
+    pub started: Instant,
+    // 控制下行（CtlRegistry）
+    /// 控制命令投递尝试次数（含成功/drop/not_found）。
+    pub ctl_send_count: AtomicU64,
+    /// 控制命令因 channel 满被丢弃次数。
+    pub ctl_dropped_count: AtomicU64,
+    /// 控制命令未找到目标实例次数。
+    pub ctl_not_found_count: AtomicU64,
+    // 数据上行（pipeline）
+    /// pipeline 处理成功的 Sample 数。
+    pub pipeline_processed_count: AtomicU64,
+    /// pipeline 写 lux 失败次数。
+    pub pipeline_write_fail_count: AtomicU64,
+    // hub 背压（gauge）
+    /// hub channel 最新深度（gauge）。
+    pub hub_depth_last: AtomicU64,
+    /// hub channel 历史最大深度（gauge）。
+    pub hub_depth_max: AtomicU64,
+    // 北向（mqtt）
+    /// mqtt 发布成功次数。
+    pub mqtt_publish_count: AtomicU64,
+    /// mqtt 发布失败次数。
+    pub mqtt_publish_fail_count: AtomicU64,
+    /// mqtt 当前是否已连接（gauge，1=true/0=false）。
+    pub mqtt_connected: AtomicBool,
+}
+
+impl ProcessMetrics {
+    /// 构造（所有计数器 0，started = now）。
+    pub fn new() -> Self {
+        Self {
+            started: Instant::now(),
+            ctl_send_count: AtomicU64::new(0),
+            ctl_dropped_count: AtomicU64::new(0),
+            ctl_not_found_count: AtomicU64::new(0),
+            pipeline_processed_count: AtomicU64::new(0),
+            pipeline_write_fail_count: AtomicU64::new(0),
+            hub_depth_last: AtomicU64::new(0),
+            hub_depth_max: AtomicU64::new(0),
+            mqtt_publish_count: AtomicU64::new(0),
+            mqtt_publish_fail_count: AtomicU64::new(0),
+            mqtt_connected: AtomicBool::new(false),
+        }
+    }
+
+    /// ctl_send_count +1（Relaxed）。
+    pub fn ctl_send(&self) {
+        self.ctl_send_count.fetch_add(1, Ordering::Relaxed);
+    }
+    /// ctl_dropped_count +1。
+    pub fn ctl_dropped(&self) {
+        self.ctl_dropped_count.fetch_add(1, Ordering::Relaxed);
+    }
+    /// ctl_not_found_count +1。
+    pub fn ctl_not_found(&self) {
+        self.ctl_not_found_count.fetch_add(1, Ordering::Relaxed);
+    }
+    /// pipeline 处理成功 +1。
+    pub fn pipeline_processed(&self) {
+        self.pipeline_processed_count
+            .fetch_add(1, Ordering::Relaxed);
+    }
+    /// pipeline 写失败 +1。
+    pub fn pipeline_write_fail(&self) {
+        self.pipeline_write_fail_count
+            .fetch_add(1, Ordering::Relaxed);
+    }
+    /// 更新 hub 深度 gauge（last + fetch_max）。
+    pub fn hub_depth(&self, depth: usize) {
+        let d = depth as u64;
+        self.hub_depth_last.store(d, Ordering::Relaxed);
+        self.hub_depth_max.fetch_max(d, Ordering::Relaxed);
+    }
+    /// mqtt publish 成功 +1。
+    pub fn mqtt_publish(&self) {
+        self.mqtt_publish_count.fetch_add(1, Ordering::Relaxed);
+    }
+    /// mqtt publish 失败 +1。
+    pub fn mqtt_publish_fail(&self) {
+        self.mqtt_publish_fail_count.fetch_add(1, Ordering::Relaxed);
+    }
+    /// 更新 mqtt 连接状态。
+    pub fn mqtt_connected(&self, connected: bool) {
+        self.mqtt_connected.store(connected, Ordering::Relaxed);
+    }
+}
+
+impl Default for ProcessMetrics {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn counters_increment() {
+        let m = ProcessMetrics::new();
+        m.ctl_send();
+        m.ctl_send();
+        m.ctl_dropped();
+        assert_eq!(m.ctl_send_count.load(Ordering::Relaxed), 2);
+        assert_eq!(m.ctl_dropped_count.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn hub_depth_tracks_max() {
+        let m = ProcessMetrics::new();
+        m.hub_depth(10);
+        m.hub_depth(5);
+        m.hub_depth(20);
+        assert_eq!(m.hub_depth_last.load(Ordering::Relaxed), 20);
+        assert_eq!(m.hub_depth_max.load(Ordering::Relaxed), 20);
+    }
+}

@@ -47,6 +47,7 @@ async fn l2_set_value_writes_rtdata() {
         shutdown: shutdown.clone(),
         ctl_registry: CtlRegistry::new(),
         bridge_registry: BridgeRegistry::new(),
+        metrics: std::sync::Arc::new(rs_iot::process_metrics::ProcessMetrics::new()),
     };
     let (hub_tx, hub_rx) = tokio::sync::mpsc::channel::<Sample>(64);
     let mgr = Arc::new(InstanceManager::new(ctx.clone(), hub_tx));
@@ -128,6 +129,7 @@ async fn flat_collect_attributed_to_first_device() {
         shutdown: shutdown.clone(),
         ctl_registry: CtlRegistry::new(),
         bridge_registry: BridgeRegistry::new(),
+        metrics: std::sync::Arc::new(rs_iot::process_metrics::ProcessMetrics::new()),
     };
     let (hub_tx, hub_rx) = tokio::sync::mpsc::channel::<Sample>(64);
     let mgr = Arc::new(InstanceManager::new(ctx.clone(), hub_tx));

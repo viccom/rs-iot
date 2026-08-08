@@ -26,6 +26,8 @@ mod log_cleanup;
 pub mod pipeline;
 /// 插件系统（trait 契约、注册表、实例管理、内置实现）。
 pub mod plugin;
+/// 进程级指标（M4）：Atomic 计数器，REST /sysstatus 直读。
+pub mod process_metrics;
 pub mod transform;
 pub mod types;
 
@@ -123,12 +125,14 @@ pub async fn run_app_with_shutdown(
 
     let ctl_registry = host::CtlRegistry::new();
     let bridge_registry = host::BridgeRegistry::new();
+    let metrics = std::sync::Arc::new(process_metrics::ProcessMetrics::new());
     let ctx = host::HostContext {
         lux: client.clone(),
         hwid: hwid.clone(),
         shutdown: shutdown.clone(),
         ctl_registry,
         bridge_registry: bridge_registry.clone(),
+        metrics: metrics.clone(),
     };
 
     let (hub_tx, hub_rx) = tokio::sync::mpsc::channel::<types::Sample>(256);
@@ -167,6 +171,7 @@ pub async fn run_app_with_shutdown(
         hwid: hwid.clone(),
         jwt_secret: cfg.jwt_secret.clone(),
         version: VERSION,
+        metrics: metrics.clone(),
     };
     let app = api::build_router(state);
     let api_port = cfg.api_port;

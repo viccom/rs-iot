@@ -132,4 +132,6 @@ pub struct HostContext {
     pub ctl_registry: CtlRegistry,
     /// bridge 连接分发表（外部插件 sidecarClient）。
     pub bridge_registry: BridgeRegistry,
+    /// 进程级指标（M4）。
+    pub metrics: std::sync::Arc<crate::process_metrics::ProcessMetrics>,
 }

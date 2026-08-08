@@ -46,6 +46,7 @@ async fn app_with_stat(stat_inst: &str) -> (axum::Router, lux::ServerHandle) {
         shutdown,
         ctl_registry: CtlRegistry::new(),
         bridge_registry: BridgeRegistry::new(),
+        metrics: std::sync::Arc::new(rs_iot::process_metrics::ProcessMetrics::new()),
     };
     let (hub_tx, _hub_rx) = tokio::sync::mpsc::channel(64);
     let mgr = Arc::new(InstanceManager::new(ctx, hub_tx));
@@ -55,6 +56,7 @@ async fn app_with_stat(stat_inst: &str) -> (axum::Router, lux::ServerHandle) {
         hwid: Hwid::new("it-hwid"),
         jwt_secret: "test-secret-0123456789abcdef".into(),
         version: "itest",
+        metrics: std::sync::Arc::new(rs_iot::process_metrics::ProcessMetrics::new()),
     };
     (build_router(state), handle)
 }

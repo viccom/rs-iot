@@ -102,6 +102,7 @@ async fn collect_pushes_sample_to_hub() {
         shutdown: CancellationToken::new(),
         ctl_registry: CtlRegistry::new(),
         bridge_registry: BridgeRegistry::new(),
+        metrics: std::sync::Arc::new(crate::process_metrics::ProcessMetrics::new()),
     };
     let inst = InstConfig {
         inst_id: "lua-it".into(),

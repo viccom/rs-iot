@@ -165,6 +165,7 @@ async fn send_command_routes_to_target() {
         shutdown: CancellationToken::new(),
         ctl_registry: ctl.clone(), // 共享：lua send_command → target cmd_rx
         bridge_registry: BridgeRegistry::new(),
+        metrics: std::sync::Arc::new(crate::process_metrics::ProcessMetrics::new()),
     };
     let inst = InstConfig {
         inst_id: "src".into(),
@@ -292,6 +293,7 @@ async fn setup_ctx(tag: &str) -> (HostContext, lux::ServerHandle, String) {
         shutdown: CancellationToken::new(),
         ctl_registry: CtlRegistry::new(),
         bridge_registry: BridgeRegistry::new(),
+        metrics: std::sync::Arc::new(crate::process_metrics::ProcessMetrics::new()),
     };
     (ctx_host, handle, data_dir)
 }

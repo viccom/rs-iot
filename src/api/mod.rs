@@ -32,6 +32,7 @@ pub struct AppState {
     pub hwid: crate::types::Hwid,
     pub jwt_secret: String,
     pub version: &'static str,
+    pub metrics: std::sync::Arc<crate::process_metrics::ProcessMetrics>,
 }
 
 /// 白名单路径（无需 JWT）。
