@@ -121,9 +121,3 @@ strip = true
 # Windows Service（仅 windows target）
 [target.'cfg(windows)'.dependencies]
 windows-service = "0.7"
-
-[dev-dependencies]
-# 集成测试（instance_failed_e2e）注册 mock source + impl Source trait
-# （集成测试 crate 是独立 crate，不自动继承 rs_iot 的依赖）
-inventory = "0.3"
-async-trait = "0.1"
