@@ -35,7 +35,7 @@
 
 **触发机制**（`lua_client/mod.rs:171-271` select!）：周期触发（`collect`，ticker `period`）+ 事件触发（`on_data` 被动帧 / `on_write` 写命令 / 热加载）；**无显式"条件触发"**（脚本内自定义逻辑实现）。**实例内串行**（一个 mlua VM 非可重入，collect 含 IO 往返期间主循环挂起，其余事件排队），**实例间并发**。
 
-### 1.2 RS485 总线多设备 —— P0 能力缺口（直接影响"100 仪表 RS485 为主"场景）
+### 1.2 RS485 总线多设备 —— P0 能力缺口（modbus M1 ✅ 已落地；lua M2 待实现）
 
 > **设计原则**（核实自代码 + 设计意图）：**一条通讯链路 = 一个实例**。RS485 总线上挂多台设备，由**一个实例独占该串口**统一管理——链路（open/重连/收发）由宿主封装，脚本/插件只管报文与设备逻辑。**不应**为总线上每台设备各建实例（串口 OS 独占，第二个实例 open 同一口必失败）。
 >
@@ -55,7 +55,7 @@
 1. lua `collect()` 内手动轮询多从站（组不同 uid 帧），结果归 `devices[0]` 单 devid（tag 加从站前缀区分，牺牲"每台设备独立 devid"）
 2. 每条 RS485 总线配 RS485↔以太网网关（如 Moxa NPort），多从站变 TCP endpoint，每从站一实例走 TCP（绕过串口独占，每从站独立 devid）
 
-**建议**：**P0** — `luaClient` 单实例多设备批量（`collect` 嵌套返回 + `set_values`）+ `modbusClient` 单实例多 slave 轮询。**完整设计（需求规格 / 功能设计 / 编码设计）见 [`superpowers/specs/2026-08-08-rs485-multi-device-design.md`](superpowers/specs/2026-08-08-rs485-multi-device-design.md)**。
+**建议**：**P0** — ✅ `modbusClient` 单实例多 slave 轮询**已落地（M1）**；⬜ `luaClient` 单实例多设备批量（`collect` 嵌套返回 + `set_values`）待 M2。完整设计见 [`superpowers/specs/2026-08-08-rs485-multi-device-design.md`](superpowers/specs/2026-08-08-rs485-multi-device-design.md)，M1 实现计划见 [`superpowers/plans/2026-08-08-modbus-multi-slave.md`](superpowers/plans/2026-08-08-modbus-multi-slave.md)。
 
 #### 1.2.1 modbus 多 slave 采集策略（设计输入）
 
@@ -172,7 +172,7 @@
 | ③ 埋点监测 | 🔴 仅 lua | 4 内置插件零计数 / 无 /metrics | **P0** 内置插件补 stat；P1 /metrics+资源 |
 | ④ 报文输出 | 🔴 无 | 无 dump 开关 / 无按需激活 | **P1** per-instance trace 开关 |
 | 协议覆盖 | ✅ 框架足够 | 具体协议（三菱/欧姆龙/AB） | 用 lua/外部补，不改核心 |
-| **RS485 总线多设备** | 🔴 单实例不支持多设备 | lua `set_value`/`collect` 绑 devices[0]；modbus 单 slave_id | **P0** lua 单实例多 devid + modbus 单实例多 slave 轮询（见 §1.2） |
+| **RS485 总线多设备** | 🟡 modbus ✅ M1 / lua 待 M2 | modbus 多 slave 已落地（device 级 slave_id + poll_strategy + 超时故障隔离）；lua `set_value`/`collect` 绑 devices[0] 待 M2 | **P0** lua 单实例多 devid（M2）；modbus 已完成（见 §1.2） |
 
 ## 7. 对任务 2/3/4/5 的影响（回应"是否需新增接口或功能"）
 
