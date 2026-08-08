@@ -17,10 +17,30 @@ pub async fn sysstatus(State(st): State<AppState>) -> Json<serde_json::Value> {
         Ok(EmbeddedValue::Int(n)) => n,
         _ => 0,
     };
+    let m = &st.metrics;
     Json(serde_json::json!({
         "status": "ok",
         "dbsize": dbsize,
         "instances": st.mgr.status(),
+        "metrics": {
+            "ctl_send_count": m.ctl_send_count.load(std::sync::atomic::Ordering::Relaxed),
+            "ctl_dropped_count": m.ctl_dropped_count.load(std::sync::atomic::Ordering::Relaxed),
+            "ctl_not_found_count": m.ctl_not_found_count.load(std::sync::atomic::Ordering::Relaxed),
+            "pipeline_processed_count": m.pipeline_processed_count.load(std::sync::atomic::Ordering::Relaxed),
+            "pipeline_write_fail_count": m.pipeline_write_fail_count.load(std::sync::atomic::Ordering::Relaxed),
+            "hub": {
+                "depth_last": m.hub_depth_last.load(std::sync::atomic::Ordering::Relaxed),
+                "depth_max": m.hub_depth_max.load(std::sync::atomic::Ordering::Relaxed),
+            },
+            "mqtt": {
+                "publish_count": m.mqtt_publish_count.load(std::sync::atomic::Ordering::Relaxed),
+                "publish_fail_count": m.mqtt_publish_fail_count.load(std::sync::atomic::Ordering::Relaxed),
+                "connected": m.mqtt_connected.load(std::sync::atomic::Ordering::Relaxed),
+            },
+        },
+        "process": {
+            "uptime_secs": m.started.elapsed().as_secs(),
+        }
     }))
 }
 
