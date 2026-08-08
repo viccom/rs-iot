@@ -137,7 +137,9 @@ async fn kv_set_get_roundtrip() {
 /// send_command 经 CtlRegistry 投到目标实例；未注册实例返回 false。
 #[tokio::test]
 async fn send_command_routes_to_target() {
-    let ctl = CtlRegistry::new();
+    let ctl = CtlRegistry::new(std::sync::Arc::new(
+        crate::process_metrics::ProcessMetrics::new(),
+    ));
     let (tx, mut rx) = tokio::sync::mpsc::channel::<crate::types::CtlMessage>(8);
     ctl.register("target", tx);
 
@@ -291,7 +293,9 @@ async fn setup_ctx(tag: &str) -> (HostContext, lux::ServerHandle, String) {
         lux: handle.client(),
         hwid: crate::types::Hwid::new("it"),
         shutdown: CancellationToken::new(),
-        ctl_registry: CtlRegistry::new(),
+        ctl_registry: CtlRegistry::new(std::sync::Arc::new(
+            crate::process_metrics::ProcessMetrics::new(),
+        )),
         bridge_registry: BridgeRegistry::new(),
         metrics: std::sync::Arc::new(crate::process_metrics::ProcessMetrics::new()),
     };

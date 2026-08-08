@@ -45,7 +45,9 @@ async fn l2_set_value_writes_rtdata() {
         lux: client.clone(),
         hwid: Hwid::new("it-hwid"),
         shutdown: shutdown.clone(),
-        ctl_registry: CtlRegistry::new(),
+        ctl_registry: CtlRegistry::new(std::sync::Arc::new(
+            rs_iot::process_metrics::ProcessMetrics::new(),
+        )),
         bridge_registry: BridgeRegistry::new(),
         metrics: std::sync::Arc::new(rs_iot::process_metrics::ProcessMetrics::new()),
     };
@@ -127,7 +129,9 @@ async fn flat_collect_attributed_to_first_device() {
         lux: client.clone(),
         hwid: Hwid::new("it-hwid"),
         shutdown: shutdown.clone(),
-        ctl_registry: CtlRegistry::new(),
+        ctl_registry: CtlRegistry::new(std::sync::Arc::new(
+            rs_iot::process_metrics::ProcessMetrics::new(),
+        )),
         bridge_registry: BridgeRegistry::new(),
         metrics: std::sync::Arc::new(rs_iot::process_metrics::ProcessMetrics::new()),
     };

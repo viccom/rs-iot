@@ -48,7 +48,9 @@ async fn lua_kv_set_persists_to_lux() {
         lux: client.clone(),
         hwid: Hwid::new("it-hwid"),
         shutdown: shutdown.clone(),
-        ctl_registry: CtlRegistry::new(),
+        ctl_registry: CtlRegistry::new(std::sync::Arc::new(
+            rs_iot::process_metrics::ProcessMetrics::new(),
+        )),
         bridge_registry: BridgeRegistry::new(),
         metrics: std::sync::Arc::new(rs_iot::process_metrics::ProcessMetrics::new()),
     };

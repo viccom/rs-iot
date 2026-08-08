@@ -122,7 +122,9 @@ async fn immediate_exit_marks_failed() {
         lux: client,
         hwid: Hwid::new("test"),
         shutdown: CancellationToken::new(),
-        ctl_registry: CtlRegistry::new(),
+        ctl_registry: CtlRegistry::new(std::sync::Arc::new(
+            rs_iot::process_metrics::ProcessMetrics::new(),
+        )),
         bridge_registry: BridgeRegistry::new(),
         metrics: std::sync::Arc::new(rs_iot::process_metrics::ProcessMetrics::new()),
     };
@@ -146,7 +148,9 @@ async fn panic_marks_failed() {
         lux: client,
         hwid: Hwid::new("test"),
         shutdown: CancellationToken::new(),
-        ctl_registry: CtlRegistry::new(),
+        ctl_registry: CtlRegistry::new(std::sync::Arc::new(
+            rs_iot::process_metrics::ProcessMetrics::new(),
+        )),
         bridge_registry: BridgeRegistry::new(),
         metrics: std::sync::Arc::new(rs_iot::process_metrics::ProcessMetrics::new()),
     };
@@ -170,7 +174,9 @@ async fn normal_stop_marks_stopped_not_failed() {
         lux: client,
         hwid: Hwid::new("test"),
         shutdown: CancellationToken::new(),
-        ctl_registry: CtlRegistry::new(),
+        ctl_registry: CtlRegistry::new(std::sync::Arc::new(
+            rs_iot::process_metrics::ProcessMetrics::new(),
+        )),
         bridge_registry: BridgeRegistry::new(),
         metrics: std::sync::Arc::new(rs_iot::process_metrics::ProcessMetrics::new()),
     };

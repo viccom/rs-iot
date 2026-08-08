@@ -45,7 +45,9 @@ async fn stat_written_after_collect() {
         lux: client.clone(),
         hwid: Hwid::new("it-hwid"),
         shutdown: shutdown.clone(),
-        ctl_registry: CtlRegistry::new(),
+        ctl_registry: CtlRegistry::new(std::sync::Arc::new(
+            rs_iot::process_metrics::ProcessMetrics::new(),
+        )),
         bridge_registry: BridgeRegistry::new(),
         metrics: std::sync::Arc::new(rs_iot::process_metrics::ProcessMetrics::new()),
     };
@@ -147,7 +149,9 @@ async fn stat_marked_stopped_on_exit() {
         lux: client.clone(),
         hwid: Hwid::new("it-hwid"),
         shutdown: shutdown.clone(),
-        ctl_registry: CtlRegistry::new(),
+        ctl_registry: CtlRegistry::new(std::sync::Arc::new(
+            rs_iot::process_metrics::ProcessMetrics::new(),
+        )),
         bridge_registry: BridgeRegistry::new(),
         metrics: std::sync::Arc::new(rs_iot::process_metrics::ProcessMetrics::new()),
     };

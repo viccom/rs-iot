@@ -123,9 +123,9 @@ pub async fn run_app_with_shutdown(
     db::identity::bootstrap(&client).await?;
     tracing::info!("identity bootstrap done");
 
-    let ctl_registry = host::CtlRegistry::new();
-    let bridge_registry = host::BridgeRegistry::new();
     let metrics = std::sync::Arc::new(process_metrics::ProcessMetrics::new());
+    let ctl_registry = host::CtlRegistry::new(metrics.clone());
+    let bridge_registry = host::BridgeRegistry::new();
     let ctx = host::HostContext {
         lux: client.clone(),
         hwid: hwid.clone(),

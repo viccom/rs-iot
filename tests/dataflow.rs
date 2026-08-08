@@ -75,7 +75,9 @@ async fn datasim_to_rtdata_end_to_end() {
         lux: client.clone(),
         hwid: Hwid::new("it-hwid"),
         shutdown: shutdown.clone(),
-        ctl_registry: CtlRegistry::new(),
+        ctl_registry: CtlRegistry::new(std::sync::Arc::new(
+            rs_iot::process_metrics::ProcessMetrics::new(),
+        )),
         bridge_registry: rs_iot::host::BridgeRegistry::new(),
         metrics: std::sync::Arc::new(rs_iot::process_metrics::ProcessMetrics::new()),
     };

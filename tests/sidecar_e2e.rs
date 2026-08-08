@@ -85,7 +85,9 @@ async fn setup(inst_id: &str, hb_secs: u64) -> Env {
         lux: client.clone(),
         hwid: rs_iot::types::Hwid::new("it-hwid"),
         shutdown: shutdown.clone(),
-        ctl_registry: CtlRegistry::new(),
+        ctl_registry: CtlRegistry::new(std::sync::Arc::new(
+            rs_iot::process_metrics::ProcessMetrics::new(),
+        )),
         bridge_registry: bridge_registry.clone(),
         metrics: std::sync::Arc::new(rs_iot::process_metrics::ProcessMetrics::new()),
     };

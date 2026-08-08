@@ -100,7 +100,9 @@ async fn collect_pushes_sample_to_hub() {
         lux: mock_lux().await,
         hwid: Hwid::new("it"),
         shutdown: CancellationToken::new(),
-        ctl_registry: CtlRegistry::new(),
+        ctl_registry: CtlRegistry::new(std::sync::Arc::new(
+            crate::process_metrics::ProcessMetrics::new(),
+        )),
         bridge_registry: BridgeRegistry::new(),
         metrics: std::sync::Arc::new(crate::process_metrics::ProcessMetrics::new()),
     };

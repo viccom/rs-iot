@@ -13,16 +13,19 @@ use tokio_util::sync::CancellationToken;
 /// 对标 Lite_IOT `pluginM.handlers map[string]chan CtlMessage` +
 /// `SendMessage(target, msg)`。北向（MQTT command）或 REST 把命令投到这里，
 /// 再路由到对应实例 task 的 `cmd_rx`。
-#[derive(Clone, Default, Debug)]
+#[derive(Clone, Debug)]
 pub struct CtlRegistry {
     map: Arc<DashMap<String, mpsc::Sender<CtlMessage>>>,
+    /// 进程级指标（M4）：send/dropped/not_found 分类计数。
+    metrics: Arc<crate::process_metrics::ProcessMetrics>,
 }
 
 impl CtlRegistry {
-    /// 构造空注册表。
-    pub fn new() -> Self {
+    /// 构造，绑定进程级指标计数器（M4）。
+    pub fn new(metrics: Arc<crate::process_metrics::ProcessMetrics>) -> Self {
         Self {
             map: Arc::new(DashMap::new()),
+            metrics,
         }
     }
 
@@ -37,14 +40,27 @@ impl CtlRegistry {
     }
 
     /// 投递命令到指定实例。返回是否找到实例并尝试投递（channel 满仍 `try_send` 丢弃，
-    /// 对标 Go 版 `default` 非阻塞语义；返回 `false` 表示实例未注册，供写入口给调用方 404 反馈）。
+    /// 对标 Go 版 `default` 非阻塞；返回 `false` = 实例未注册，供写入口给调用方 404 反馈）。
+    ///
+    /// M4：分类计数（send/dropped/not_found）+ channel 满 warn（不再静默丢命令）。
+    /// 返回值语义**不变**：命中 map → `true`（Full/Closed 也 `true`），未注册 → `false`。
     pub fn send(&self, inst: &str, msg: CtlMessage) -> bool {
-        // try_send 为同步操作、不跨 await，可在 DashMap 读锁内直接完成；
-        // 实例不存在返回 false；channel 满静默丢弃但返回 true（已找到实例）。
+        self.metrics.ctl_send();
         if let Some(ref_tx) = self.map.get(inst) {
-            let _ = ref_tx.value().try_send(msg);
-            true
+            match ref_tx.value().try_send(msg) {
+                Ok(()) => true,
+                Err(mpsc::error::TrySendError::Full(_)) => {
+                    self.metrics.ctl_dropped();
+                    tracing::warn!("[ctl] {inst} channel full, command dropped");
+                    true
+                }
+                Err(mpsc::error::TrySendError::Closed(_)) => {
+                    self.metrics.ctl_dropped();
+                    true
+                }
+            }
         } else {
+            self.metrics.ctl_not_found();
             false
         }
     }
@@ -134,4 +150,45 @@ pub struct HostContext {
     pub bridge_registry: BridgeRegistry,
     /// 进程级指标（M4）。
     pub metrics: std::sync::Arc<crate::process_metrics::ProcessMetrics>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::CtlMessage;
+    use std::sync::atomic::Ordering;
+    use std::sync::Arc;
+
+    fn registry() -> CtlRegistry {
+        CtlRegistry::new(Arc::new(crate::process_metrics::ProcessMetrics::new()))
+    }
+
+    fn dummy() -> CtlMessage {
+        CtlMessage {
+            instance: "x".into(),
+            devid: "d".into(),
+            cmd: "write".into(),
+            data: String::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn send_counts_and_returns_semantics_unchanged() {
+        let r = registry();
+        let (tx, mut rx) = mpsc::channel::<CtlMessage>(1);
+        r.register("a", tx);
+        // 未注册 → false + not_found++
+        assert!(!r.send("nope", dummy()));
+        assert_eq!(r.metrics.ctl_not_found_count.load(Ordering::Relaxed), 1);
+        // 命中 + Ok → true + send++
+        assert!(r.send("a", dummy()));
+        assert!(rx.recv().await.is_some(), "命令应送达");
+        assert_eq!(r.metrics.ctl_send_count.load(Ordering::Relaxed), 2);
+        // 命中 + channel 满 → true + dropped++
+        let (tx2, _rx2) = mpsc::channel::<CtlMessage>(1);
+        r.register("full", tx2);
+        assert!(r.send("full", dummy()), "满丢仍返 true（对标 Go default）");
+        assert!(r.send("full", dummy()), "第二次满");
+        assert_eq!(r.metrics.ctl_dropped_count.load(Ordering::Relaxed), 1);
+    }
 }

@@ -44,7 +44,9 @@ async fn app_with_stat(stat_inst: &str) -> (axum::Router, lux::ServerHandle) {
         lux: client.clone(),
         hwid: Hwid::new("it-hwid"),
         shutdown,
-        ctl_registry: CtlRegistry::new(),
+        ctl_registry: CtlRegistry::new(std::sync::Arc::new(
+            rs_iot::process_metrics::ProcessMetrics::new(),
+        )),
         bridge_registry: BridgeRegistry::new(),
         metrics: std::sync::Arc::new(rs_iot::process_metrics::ProcessMetrics::new()),
     };
