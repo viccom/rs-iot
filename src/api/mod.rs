@@ -37,7 +37,7 @@ pub struct AppState {
 }
 
 /// 白名单路径（无需 JWT）。
-pub const PUBLIC_PATHS: &[&str] = &["/api/v1/user/login", "/api/v1/user/register"];
+pub const PUBLIC_PATHS: &[&str] = &["/api/v1/user/login", "/api/v1/user/register", "/metrics"];
 
 pub fn is_public(path: &str) -> bool {
     PUBLIC_PATHS.contains(&path) || path.starts_with("/apitest")
@@ -83,6 +83,8 @@ pub async fn hget(lux: &lux::EmbeddedClient, key: &str, field: &str) -> Option<S
 pub fn build_router(state: AppState) -> axum::Router {
     use axum::routing::{get, post};
     let app = axum::Router::new()
+        // Prometheus 抓取端点（免 JWT，机器出口；spec §3）
+        .route("/metrics", get(routes_metrics::metrics))
         // 系统信息与插件实例
         .route("/api/v1/sysinfo", get(routes_sys::sysinfo))
         .route("/api/v1/sysstatus", get(routes_sys::sysstatus))
