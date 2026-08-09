@@ -46,6 +46,15 @@ impl Source for DataSim {
         let mut ticker = tokio::time::interval(std::time::Duration::from_secs(period_secs));
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
+        // StatTracker（M4 实例指标）+ flush ticker（周期落 lux stat:<inst>）。
+        let mut tracker = crate::plugin::stat_tracker::StatTracker::new(
+            inst.inst_id.to_string(),
+            ctx.lux.clone(),
+        );
+        let mut flush_ticker = tokio::time::interval(std::time::Duration::from_secs(
+            crate::plugin::stat_tracker::FLUSH_INTERVAL_SECS,
+        ));
+
         tracing::info!(
             "[dataSim] inst {} starting ({} devices, every {}s)",
             inst.inst_id,
@@ -64,7 +73,11 @@ impl Source for DataSim {
                         tracing::info!("[dataSim] inst {} cmd: {} (devid={})", inst.inst_id, m.cmd, m.devid);
                     }
                 }
+                _ = flush_ticker.tick() => {
+                    tracker.flush().await;
+                }
                 _ = ticker.tick() => {
+                    let started = std::time::Instant::now();
                     let now = chrono::Local::now().timestamp();
                     for dev in &devices {
                         let mut values = BTreeMap::new();
@@ -88,9 +101,17 @@ impl Source for DataSim {
                             break;
                         }
                     }
+                    tracker.tick_ok(started.elapsed().as_millis() as u64);
+                    if tracker.should_flush() {
+                        tracker.flush().await;
+                    }
                 }
             }
         }
+
+        // 统一退出处理（cancelled 触发；stat 落 stopped）。
+        tracker.set_status("stopped");
+        tracker.flush().await;
     }
 }
 
