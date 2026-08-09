@@ -97,6 +97,18 @@ impl ProcessMetrics {
     }
 }
 
+/// 现采进程 CPU%(sysinfo 单核百分比,多核机器可 >100)与常驻内存字节(sysinfo 0.32)。
+///
+/// `/sysstatus` 与 `/metrics` 复用(DRY)。`System::new_all()` 构造并刷新;
+/// `get_current_pid` 返回 `Result`,失败兜底 `Pid::from(0_usize)`。
+pub fn sample_process_resource() -> (f32, u64) {
+    let sys = sysinfo::System::new_all();
+    let pid = sysinfo::get_current_pid().unwrap_or_else(|_| sysinfo::Pid::from(0_usize));
+    sys.process(pid)
+        .map(|p| (p.cpu_usage(), p.memory()))
+        .unwrap_or((0.0, 0))
+}
+
 impl Default for ProcessMetrics {
     fn default() -> Self {
         Self::new()
@@ -125,5 +137,12 @@ mod tests {
         m.hub_depth(20);
         assert_eq!(m.hub_depth_last.load(Ordering::Relaxed), 20);
         assert_eq!(m.hub_depth_max.load(Ordering::Relaxed), 20);
+    }
+
+    #[test]
+    fn sample_process_resource_smoke() {
+        // sysinfo 现采,值随环境变化(cpu 首次可能 0);只验封装正确、不 panic、类型对。
+        let (cpu, mem) = sample_process_resource();
+        let _ = (cpu, mem);
     }
 }
