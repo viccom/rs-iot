@@ -225,6 +225,37 @@ async fn sidecar_dataup_and_command_roundtrip() {
         .await
         .expect("send ack");
 
+    // observed stat：DataUp 后 bridge 周期 flush（FLUSH_INTERVAL_SECS=5s），等下一周期
+    // 后 stat:sc1 应反映 observed tick（tick_count>=1）+ 连接元数据（reconnect_count/connected）。
+    // 严格 observed stat e2e 受 flush 周期限制，故在此显式等待。
+    tokio::time::sleep(Duration::from_secs(6)).await;
+    let stat_v = env
+        .client
+        .execute_value("GET", &["stat:sc1"])
+        .await
+        .expect("stat GET");
+    use lux::EmbeddedValue;
+    let stat_json = match stat_v {
+        EmbeddedValue::Bulk(b) => String::from_utf8_lossy(&b).to_string(),
+        EmbeddedValue::Simple(s) => s,
+        _ => String::new(),
+    };
+    assert!(!stat_json.is_empty(), "sidecar observed stat 应存在");
+    let stat: serde_json::Value = serde_json::from_str(&stat_json).expect("stat json");
+    assert!(
+        stat["tick_count"].as_u64() >= Some(1),
+        "observed stat 应计 DataUp，got {stat_json}"
+    );
+    assert_eq!(
+        stat["connected"],
+        json!(true),
+        "connected metadata, got {stat_json}"
+    );
+    assert!(
+        stat["reconnect_count"].as_u64() >= Some(1),
+        "reconnect_count metadata, got {stat_json}"
+    );
+
     teardown(env).await;
 }
 

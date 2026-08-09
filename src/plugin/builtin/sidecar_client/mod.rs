@@ -225,6 +225,13 @@ impl Source for SidecarClient {
         let (slot_tx, mut slot_rx) = mpsc::channel::<TcpStream>(1);
         ctx.bridge_registry.register(&inst_id, slot_tx);
 
+        // observed StatTracker（M4）：外部进程不写 lux，bridge 观察派生指标——
+        // 收 DataUp → tick_ok（duration=0，observed 无耗时概念）、连接/心跳 → extra、
+        // 断联 → degraded。语义是「rs-iot 观察到的外部活跃度」，非外部自报。
+        let mut tracker =
+            crate::plugin::stat_tracker::StatTracker::new(inst_id.clone(), ctx.lux.clone());
+        let mut reconnects: u64 = 0;
+
         let mut next_cmd_id: u64 = 1;
 
         'outer: loop {
@@ -235,6 +242,13 @@ impl Source for SidecarClient {
                     None => break 'outer,
                 },
             };
+
+            // 连接建立：记 reconnect（含首次）+ connected=true，status=running。
+            // observed 语义——此处是「bridge 拿到外部连接」的事件。
+            reconnects += 1;
+            tracker.extra_insert("reconnect_count", serde_json::json!(reconnects));
+            tracker.extra_insert("connected", serde_json::json!(true));
+            tracker.set_status("running");
 
             // 丢弃失联期间堆积的旧写命令（工业写命令"最新值生效"语义，不补发旧值）。
             while let Ok(stale) = cmd_rx.try_recv() {
@@ -278,6 +292,10 @@ impl Source for SidecarClient {
             let mut last_hb = Instant::now();
             let mut ticker = tokio::time::interval(hb_check);
             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            // observed stat 周期 flush ticker（与采集 ticker 解耦，5s 落一次 lux stat:<inst>）。
+            let mut flush_ticker = tokio::time::interval(std::time::Duration::from_secs(
+                crate::plugin::stat_tracker::FLUSH_INTERVAL_SECS,
+            ));
 
             loop {
                 tokio::select! {
@@ -327,6 +345,12 @@ impl Source for SidecarClient {
                                             break 'outer;
                                         }
                                     }
+                                    // observed tick_ok：bridge 观察到外部 DataUp 并已推 hub。
+                                    // duration=0（observed 无采集耗时概念，外部自测耗时不上报）。
+                                    tracker.tick_ok(0);
+                                    if tracker.should_flush() {
+                                        tracker.flush().await;
+                                    }
                                 }
                                 Ok(Recv::CommandAck(a)) => {
                                     if !a.ok {
@@ -336,24 +360,38 @@ impl Source for SidecarClient {
                                         );
                                     }
                                 }
-                                Ok(Recv::Heartbeat) => last_hb = Instant::now(),
+                                Ok(Recv::Heartbeat) => {
+                                    last_hb = Instant::now();
+                                    tracker.extra_insert(
+                                        "last_heartbeat_ts",
+                                        serde_json::json!(chrono::Local::now().timestamp()),
+                                    );
+                                }
                                 Ok(Recv::Hello(_)) => {
                                     tracing::warn!("[sidecarClient] inst {inst_id} duplicate Hello, ignore");
                                 }
                                 Err(e) => tracing::warn!("[sidecarClient] inst {inst_id} bad frame: {e}"),
                             },
                             Some(Err(e)) => {
+                                tracker.tick_fail(&format!("read err: {e}"));
                                 tracing::warn!("[sidecarClient] inst {inst_id} read err: {e}");
                                 break;
                             }
                             None => {
+                                tracker.set_status("degraded");
+                                tracker.flush().await;
                                 tracing::info!("[sidecarClient] inst {inst_id} connection closed");
                                 break;
                             }
                         }
                     }
+                    _ = flush_ticker.tick() => {
+                        tracker.flush().await;
+                    }
                     _ = ticker.tick() => {
                         if last_hb.elapsed() > hb_timeout {
+                            tracker.set_status("degraded");
+                            tracker.flush().await;
                             tracing::warn!("[sidecarClient] inst {inst_id} heartbeat timeout, disconnect");
                             break;
                         }
@@ -362,6 +400,9 @@ impl Source for SidecarClient {
             }
             // 连接断（非 token/非 hub 关）：回 'outer 等新连接（外部重连会重新分发）。
         }
+
+        tracker.set_status("stopped");
+        tracker.flush().await;
 
         ctx.bridge_registry.unregister(&inst_id);
         tracing::info!("[sidecarClient] inst {inst_id} exited");
