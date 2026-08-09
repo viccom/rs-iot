@@ -5,7 +5,10 @@
 // handler 接入后此处零 dead_code,`unused_expectations` 会提示移除本属性。
 #![expect(dead_code)]
 
+use crate::db::stat::InstanceStat;
+use crate::plugin::instance::InstState;
 use crate::process_metrics::ProcessMetrics;
+use crate::types::HostKind;
 use std::sync::atomic::Ordering;
 
 /// Prometheus exposition 文本 Content-Type(供 Task 4 handler 设置响应头)。
@@ -176,6 +179,132 @@ fn render_process(m: &ProcessMetrics, hwid: &str, version: &str, cpu: f32, mem: 
     s
 }
 
+/// per-instance 渲染输入(handler 从 mgr.status() + config_snapshot + lux stat 组装)。
+struct InstanceRow {
+    inst_id: String,
+    state: InstState,
+    app_code: String,
+    host_kind: &'static str,
+    /// 插件级 health + 计数;None = 实例刚启动尚未 flush stat。
+    health: Option<InstanceStat>,
+}
+
+/// HostKind → 受控词汇字符串(builtin/external,与 routes_stat::host_kind_str 一致)。
+fn host_kind_str(k: HostKind) -> &'static str {
+    match k {
+        HostKind::Builtin => "builtin",
+        HostKind::External => "external",
+    }
+}
+
+/// InstState → lowercase 字符串(serde 派生,新变体自动适配)。取引用避免依赖 Copy。
+fn state_str(s: &InstState) -> String {
+    serde_json::to_value(s)
+        .ok()
+        .and_then(|v| v.as_str().map(str::to_owned))
+        .unwrap_or_default()
+}
+
+/// per-instance 指标 → Prometheus 文本。
+///
+/// info family 输出所有实例(含无 stat 的,health 空串);tick/fail/duration/ts
+/// 只输出有 stat 的实例。`# HELP`/`# TYPE` 每 family 一次。
+fn render_instances(rows: &[InstanceRow]) -> String {
+    let mut s = String::new();
+
+    // info family(每实例一行)
+    family_header(
+        &mut s,
+        "rs_iot_instance_info",
+        "实例分类与状态(inst_id/app_code/host_kind/state/health)",
+        "gauge",
+    );
+    for r in rows {
+        let health = r.health.as_ref().map(|h| h.status.as_str()).unwrap_or("");
+        let labels = format!(
+            "{{inst_id=\"{}\",app_code=\"{}\",host_kind=\"{}\",state=\"{}\",health=\"{}\"}}",
+            escape_label(&r.inst_id),
+            escape_label(&r.app_code),
+            r.host_kind,
+            escape_label(&state_str(&r.state)),
+            escape_label(health),
+        );
+        metric_line(&mut s, "rs_iot_instance_info", &labels, "1");
+    }
+
+    // 有 stat 的实例(用于 tick/fail/duration/ts)
+    let with_stat: Vec<(&InstanceRow, &InstanceStat)> = rows
+        .iter()
+        .filter_map(|r| r.health.as_ref().map(|h| (r, h)))
+        .collect();
+
+    // tick_total(counter)
+    family_header(
+        &mut s,
+        "rs_iot_instance_tick_total",
+        "实例活动成功累计次数",
+        "counter",
+    );
+    for (r, h) in &with_stat {
+        metric_line(
+            &mut s,
+            "rs_iot_instance_tick_total",
+            &format!("{{inst_id=\"{}\"}}", escape_label(&r.inst_id)),
+            &h.tick_count.to_string(),
+        );
+    }
+
+    // fail_total(counter)
+    family_header(
+        &mut s,
+        "rs_iot_instance_fail_total",
+        "实例活动失败累计次数",
+        "counter",
+    );
+    for (r, h) in &with_stat {
+        metric_line(
+            &mut s,
+            "rs_iot_instance_fail_total",
+            &format!("{{inst_id=\"{}\"}}", escape_label(&r.inst_id)),
+            &h.fail_count.to_string(),
+        );
+    }
+
+    // last_activity_duration_ms(gauge)
+    family_header(
+        &mut s,
+        "rs_iot_instance_last_activity_duration_ms",
+        "实例最近一次活动耗时(毫秒)",
+        "gauge",
+    );
+    for (r, h) in &with_stat {
+        metric_line(
+            &mut s,
+            "rs_iot_instance_last_activity_duration_ms",
+            &format!("{{inst_id=\"{}\"}}", escape_label(&r.inst_id)),
+            &h.last_activity_duration_ms.to_string(),
+        );
+    }
+
+    // last_activity_ts(gauge, unix 秒)
+    family_header(
+        &mut s,
+        "rs_iot_instance_last_activity_ts",
+        "实例最近一次活动墙上时间(unix 秒)",
+        "gauge",
+    );
+    for (r, h) in &with_stat {
+        metric_line(
+            &mut s,
+            "rs_iot_instance_last_activity_ts",
+            &format!("{{inst_id=\"{}\"}}", escape_label(&r.inst_id)),
+            &h.last_activity_ts.to_string(),
+        );
+    }
+
+    s
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -238,5 +367,104 @@ mod tests {
                 assert!(name.ends_with("_total"), "counter {name} 应以 _total 结尾");
             }
         }
+    }
+
+    use crate::db::stat::InstanceStat;
+    use crate::plugin::instance::InstState;
+
+    fn row(
+        inst_id: &str,
+        state: InstState,
+        app_code: &str,
+        host_kind: &'static str,
+        health: Option<InstanceStat>,
+    ) -> InstanceRow {
+        InstanceRow {
+            inst_id: inst_id.into(),
+            state,
+            app_code: app_code.into(),
+            host_kind,
+            health,
+        }
+    }
+
+    fn stat_running() -> InstanceStat {
+        InstanceStat {
+            status: "running".into(),
+            tick_count: 100,
+            fail_count: 2,
+            last_activity_ts: 1700000000,
+            last_activity_duration_ms: 42,
+            last_err: String::new(),
+            extra: serde_json::Map::new(),
+        }
+    }
+
+    #[test]
+    fn render_instances_info_labels() {
+        let rows = vec![
+            row(
+                "opcua-1",
+                InstState::Running,
+                "opcuaClient",
+                "builtin",
+                Some(stat_running()),
+            ),
+            row("lua-1", InstState::Failed, "luaClient", "builtin", None),
+        ];
+        let out = render_instances(&rows);
+        // info family 头一次
+        assert!(out.contains("# HELP rs_iot_instance_info "));
+        assert!(out.contains("# TYPE rs_iot_instance_info gauge"));
+        // 有 stat 的实例:health=running
+        assert!(out.contains(
+            r#"rs_iot_instance_info{inst_id="opcua-1",app_code="opcuaClient",host_kind="builtin",state="running",health="running"} 1"#
+        ));
+        // 无 stat 的实例:health 空字符串
+        assert!(out.contains(
+            r#"rs_iot_instance_info{inst_id="lua-1",app_code="luaClient",host_kind="builtin",state="failed",health=""} 1"#
+        ));
+    }
+
+    #[test]
+    fn render_instances_counters_only_for_stat() {
+        let rows = vec![
+            row(
+                "opcua-1",
+                InstState::Running,
+                "opcuaClient",
+                "builtin",
+                Some(stat_running()),
+            ),
+            row("lua-1", InstState::Failed, "luaClient", "builtin", None),
+        ];
+        let out = render_instances(&rows);
+        // tick/fail/duration/ts 只输出有 stat 的实例
+        assert!(out.contains(r#"rs_iot_instance_tick_total{inst_id="opcua-1"} 100"#));
+        assert!(out.contains(r#"rs_iot_instance_fail_total{inst_id="opcua-1"} 2"#));
+        assert!(out.contains(r#"rs_iot_instance_last_activity_duration_ms{inst_id="opcua-1"} 42"#));
+        assert!(out.contains(r#"rs_iot_instance_last_activity_ts{inst_id="opcua-1"} 1700000000"#));
+        // 无 stat 的实例不应出现在 tick_total 行
+        assert!(
+            !out.contains(r#"rs_iot_instance_tick_total{inst_id="lua-1"}"#),
+            "无 stat 实例不应有 tick_total 行"
+        );
+    }
+
+    #[test]
+    fn render_instances_escapes_label_special_chars() {
+        // inst_id 含引号/反斜杠 → 必须 escape
+        let rows = vec![row(
+            r#"a"b\c"#,
+            InstState::Running,
+            "x",
+            "builtin",
+            Some(stat_running()),
+        )];
+        let out = render_instances(&rows);
+        assert!(
+            out.contains(r#"inst_id="a\"b\\c""#),
+            "inst_id 特殊字符应被 escape,实际:\n{out}"
+        );
     }
 }
