@@ -18,6 +18,14 @@ pub async fn sysstatus(State(st): State<AppState>) -> Json<serde_json::Value> {
         _ => 0,
     };
     let m = &st.metrics;
+    // sysinfo 0.32 现采：进程 CPU% 与内存字节。
+    // System::new_all() 构造并刷新；get_current_pid 返回 Result，失败兜底 Pid 0。
+    let sys = sysinfo::System::new_all();
+    let pid = sysinfo::get_current_pid().unwrap_or_else(|_| sysinfo::Pid::from(0_usize));
+    let (cpu, mem) = sys
+        .process(pid)
+        .map(|p| (p.cpu_usage(), p.memory()))
+        .unwrap_or((0.0, 0));
     Json(serde_json::json!({
         "status": "ok",
         "dbsize": dbsize,
@@ -40,6 +48,8 @@ pub async fn sysstatus(State(st): State<AppState>) -> Json<serde_json::Value> {
         },
         "process": {
             "uptime_secs": m.started.elapsed().as_secs(),
+            "cpu_pct": cpu,
+            "mem_bytes": mem,
         }
     }))
 }
