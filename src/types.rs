@@ -162,6 +162,16 @@ pub enum HostKind {
     External,
 }
 
+impl HostKind {
+    /// 受控词汇字符串(builtin/external),供 Prometheus label / REST 输出复用。
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Builtin => "builtin",
+            Self::External => "external",
+        }
+    }
+}
+
 /// 设备规格（对标 Lite_IOT devices：label/value/children）。
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct DeviceSpec {

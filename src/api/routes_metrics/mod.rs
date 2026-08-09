@@ -6,7 +6,7 @@ use axum::response::IntoResponse;
 
 pub(crate) mod render;
 
-use render::{host_kind_str, render_instances, render_process, InstanceRow, METRICS_CONTENT_TYPE};
+use render::{render_instances, render_process, InstanceRow, METRICS_CONTENT_TYPE};
 
 /// `GET /metrics`(Prometheus 文本格式,免 JWT)。
 ///
@@ -27,7 +27,7 @@ pub async fn metrics(State(st): State<AppState>) -> axum::response::Response {
         let class = st.mgr.config_snapshot(&inst_id);
         let (app_code, host_kind) = class
             .as_ref()
-            .map(|c| (c.app_code.to_string(), host_kind_str(c.host_kind)))
+            .map(|c| (c.app_code.to_string(), c.host_kind.as_str()))
             .unwrap_or((String::new(), ""));
         // stat 读失败 → None(该实例 per-instance 计数缺,但 info 行仍输出)。
         let health = crate::db::stat::read(&st.lux, &inst_id)

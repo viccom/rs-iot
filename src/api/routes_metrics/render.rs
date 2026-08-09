@@ -3,7 +3,6 @@
 use crate::db::stat::InstanceStat;
 use crate::plugin::instance::InstState;
 use crate::process_metrics::ProcessMetrics;
-use crate::types::HostKind;
 use std::sync::atomic::Ordering;
 
 /// Prometheus exposition 文本 Content-Type(供 metrics handler 设置响应头)。
@@ -190,21 +189,25 @@ pub(crate) struct InstanceRow {
     pub(crate) health: Option<InstanceStat>,
 }
 
-/// HostKind → 受控词汇字符串(builtin/external,与 routes_stat::host_kind_str 一致)。
-pub(crate) fn host_kind_str(k: HostKind) -> &'static str {
-    match k {
-        HostKind::Builtin => "builtin",
-        HostKind::External => "external",
+/// InstState → lowercase 字符串(穷尽 match,新变体编译期强制审查;规则 7)。
+fn state_str(s: &InstState) -> &'static str {
+    match s {
+        InstState::Starting => "starting",
+        InstState::Running => "running",
+        InstState::Stopping => "stopping",
+        InstState::Stopped => "stopped",
+        InstState::Failed => "failed",
     }
 }
 
-/// InstState → lowercase 字符串(serde 派生,新变体自动适配)。取引用避免依赖 Copy。
-fn state_str(s: &InstState) -> String {
-    serde_json::to_value(s)
-        .ok()
-        .and_then(|v| v.as_str().map(str::to_owned))
-        .unwrap_or_default()
-}
+/// per-instance metric family 规格:(name, help, type, value getter)。
+/// 抽出别名避免内联复杂类型触发 clippy::type_complexity。
+type InstanceFamilySpec = (
+    &'static str,
+    &'static str,
+    &'static str,
+    fn(&InstanceStat) -> String,
+);
 
 /// per-instance 指标 → Prometheus 文本。
 ///
@@ -227,7 +230,7 @@ pub(crate) fn render_instances(rows: &[InstanceRow]) -> String {
             escape_label(&r.inst_id),
             escape_label(&r.app_code),
             r.host_kind,
-            escape_label(&state_str(&r.state)),
+            escape_label(state_str(&r.state)),
             escape_label(health),
         );
         metric_line(&mut s, "rs_iot_instance_info", &labels, "1");
@@ -239,68 +242,43 @@ pub(crate) fn render_instances(rows: &[InstanceRow]) -> String {
         .filter_map(|r| r.health.as_ref().map(|h| (r, h)))
         .collect();
 
-    // tick_total(counter)
-    family_header(
-        &mut s,
-        "rs_iot_instance_tick_total",
-        "实例活动成功累计次数",
-        "counter",
-    );
-    for (r, h) in &with_stat {
-        metric_line(
-            &mut s,
+    // tick/fail/duration/ts(仅有 stat 的实例;元组数组对齐 render_process 约定)
+    let families: &[InstanceFamilySpec] = &[
+        (
             "rs_iot_instance_tick_total",
-            &format!("{{inst_id=\"{}\"}}", escape_label(&r.inst_id)),
-            &h.tick_count.to_string(),
-        );
-    }
-
-    // fail_total(counter)
-    family_header(
-        &mut s,
-        "rs_iot_instance_fail_total",
-        "实例活动失败累计次数",
-        "counter",
-    );
-    for (r, h) in &with_stat {
-        metric_line(
-            &mut s,
+            "实例活动成功累计次数",
+            "counter",
+            |h: &InstanceStat| h.tick_count.to_string(),
+        ),
+        (
             "rs_iot_instance_fail_total",
-            &format!("{{inst_id=\"{}\"}}", escape_label(&r.inst_id)),
-            &h.fail_count.to_string(),
-        );
-    }
-
-    // last_activity_duration_ms(gauge)
-    family_header(
-        &mut s,
-        "rs_iot_instance_last_activity_duration_ms",
-        "实例最近一次活动耗时(毫秒)",
-        "gauge",
-    );
-    for (r, h) in &with_stat {
-        metric_line(
-            &mut s,
+            "实例活动失败累计次数",
+            "counter",
+            |h: &InstanceStat| h.fail_count.to_string(),
+        ),
+        (
             "rs_iot_instance_last_activity_duration_ms",
-            &format!("{{inst_id=\"{}\"}}", escape_label(&r.inst_id)),
-            &h.last_activity_duration_ms.to_string(),
-        );
-    }
-
-    // last_activity_ts(gauge, unix 秒)
-    family_header(
-        &mut s,
-        "rs_iot_instance_last_activity_ts",
-        "实例最近一次活动墙上时间(unix 秒)",
-        "gauge",
-    );
-    for (r, h) in &with_stat {
-        metric_line(
-            &mut s,
+            "实例最近一次活动耗时(毫秒)",
+            "gauge",
+            |h: &InstanceStat| h.last_activity_duration_ms.to_string(),
+        ),
+        (
             "rs_iot_instance_last_activity_ts",
-            &format!("{{inst_id=\"{}\"}}", escape_label(&r.inst_id)),
-            &h.last_activity_ts.to_string(),
-        );
+            "实例最近一次活动墙上时间(unix 秒)",
+            "gauge",
+            |h: &InstanceStat| h.last_activity_ts.to_string(),
+        ),
+    ];
+    for (name, help, ty, getter) in families {
+        family_header(&mut s, name, help, ty);
+        for (r, h) in &with_stat {
+            metric_line(
+                &mut s,
+                name,
+                &format!("{{inst_id=\"{}\"}}", escape_label(&r.inst_id)),
+                &getter(h),
+            );
+        }
     }
 
     s
@@ -463,6 +441,37 @@ mod tests {
         assert!(
             out.contains(r#"inst_id="a\"b\\c""#),
             "inst_id 特殊字符应被 escape,实际: {out}"
+        );
+    }
+
+    #[test]
+    fn render_instances_empty_has_family_headers_only() {
+        // 空输入:5 个 instance family 头(info/tick/fail/duration/ts),无数据行。
+        let out = render_instances(&[]);
+        assert_eq!(
+            out.lines()
+                .filter(|l| l.starts_with("# TYPE rs_iot_instance"))
+                .count(),
+            5,
+            "空输入应有 5 个 instance family 头"
+        );
+        assert!(!out.contains("{inst_id="), "空输入无数据行");
+    }
+
+    #[test]
+    fn render_instances_escapes_newline_in_label() {
+        // inst_id 含换行 → escape 为 \n(Prometheus label 规范)。
+        let rows = vec![row(
+            "a\nb",
+            InstState::Running,
+            "x",
+            "builtin",
+            Some(stat_running()),
+        )];
+        let out = render_instances(&rows);
+        assert!(
+            out.contains(r#"inst_id="a\nb""#),
+            "换行应 escape 为 \\n,实际: {out}"
         );
     }
 }

@@ -8,7 +8,6 @@
 //! 不带 inst_id → 全实例数组。默认 JWT 保护。
 
 use crate::api::AppState;
-use crate::types::HostKind;
 use axum::extract::{Query, State};
 use axum::response::IntoResponse;
 use axum::Json;
@@ -32,7 +31,7 @@ pub async fn stats(State(st): State<AppState>, Query(q): Query<InstQuery>) -> Re
             let class = st.mgr.config_snapshot(&inst_id);
             let (app_code, host_kind) = class
                 .as_ref()
-                .map(|c| (c.app_code.to_string(), host_kind_str(c.host_kind)))
+                .map(|c| (c.app_code.to_string(), c.host_kind.as_str()))
                 .unwrap_or((String::new(), ""));
             Json(serde_json::json!({
                 "inst_id": inst_id,
@@ -53,7 +52,7 @@ pub async fn stats(State(st): State<AppState>, Query(q): Query<InstQuery>) -> Re
                 let class = st.mgr.config_snapshot(&inst_id);
                 let (app_code, host_kind) = class
                     .as_ref()
-                    .map(|c| (c.app_code.to_string(), host_kind_str(c.host_kind)))
+                    .map(|c| (c.app_code.to_string(), c.host_kind.as_str()))
                     .unwrap_or((String::new(), ""));
                 arr.push(serde_json::json!({
                     "inst_id": inst_id,
@@ -65,14 +64,6 @@ pub async fn stats(State(st): State<AppState>, Query(q): Query<InstQuery>) -> Re
             }
             Json(serde_json::Value::Array(arr)).into_response()
         }
-    }
-}
-
-/// HostKind → 字符串（builtin/external）。
-fn host_kind_str(k: HostKind) -> &'static str {
-    match k {
-        HostKind::Builtin => "builtin",
-        HostKind::External => "external",
     }
 }
 
