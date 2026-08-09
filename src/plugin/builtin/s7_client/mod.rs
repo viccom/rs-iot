@@ -365,6 +365,16 @@ impl Source for S7Client {
         let mut ticker = tokio::time::interval(period);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
+        // StatTracker（M4 实例指标）+ flush ticker（周期落 lux stat:<inst>）。
+        let mut tracker = crate::plugin::stat_tracker::StatTracker::new(
+            inst.inst_id.to_string(),
+            ctx.lux.clone(),
+        );
+        let mut reconnects: u64 = 0;
+        let mut flush_ticker = tokio::time::interval(std::time::Duration::from_secs(
+            crate::plugin::stat_tracker::FLUSH_INTERVAL_SECS,
+        ));
+
         let mut client: Option<S7Conn> = None;
 
         loop {
@@ -382,15 +392,27 @@ impl Source for S7Client {
                         }
                     }
                 }
+                _ = flush_ticker.tick() => {
+                    tracker.flush().await;
+                }
                 _ = ticker.tick() => {
                     if client.is_none() {
                         match connect(&cfg).await {
                             Ok(c) => {
+                                reconnects += 1;
+                                tracker.extra_insert(
+                                    "reconnect_count",
+                                    serde_json::json!(reconnects),
+                                );
                                 tracing::info!("[s7Client] inst {inst_id} connected {}", cfg.endpoint);
                                 client = Some(c);
                             }
                             Err(e) => {
+                                tracker.tick_fail(&format!("connect failed: {e}"));
                                 tracing::warn!("[s7Client] inst {inst_id} connect failed: {e}");
+                                if tracker.should_flush() {
+                                    tracker.flush().await;
+                                }
                                 continue;
                             }
                         }
@@ -399,6 +421,8 @@ impl Source for S7Client {
                         Some(c) => c,
                         None => continue,
                     };
+                    let started = std::time::Instant::now();
+                    let mut tick_ok = true;
                     for (devid, pts) in &devices {
                         if pts.is_empty() {
                             continue;
@@ -442,6 +466,8 @@ impl Source for S7Client {
                                 }
                             }
                             Err(e) => {
+                                tick_ok = false;
+                                tracker.tick_fail(&format!("read failed: {e}"));
                                 tracing::warn!("[s7Client] inst {inst_id} read failed: {e}");
                                 // 连接类错误：drop 旧 client，下个 tick 重连（库的
                                 // auto_reconnect 也可能在后台恢复，此处兜底）。
@@ -452,6 +478,12 @@ impl Source for S7Client {
                             }
                         }
                     }
+                    if tick_ok {
+                        tracker.tick_ok(started.elapsed().as_millis() as u64);
+                    }
+                    if tracker.should_flush() {
+                        tracker.flush().await;
+                    }
                 }
             }
         }
@@ -460,6 +492,10 @@ impl Source for S7Client {
             let _ = c.disconnect().await;
         }
         tracing::info!("[s7Client] inst {inst_id} exited");
+
+        // 统一退出处理（cancelled 触发；stat 落 stopped）。
+        tracker.set_status("stopped");
+        tracker.flush().await;
     }
 }
 
