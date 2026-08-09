@@ -313,12 +313,26 @@ impl Source for ModbusClient {
         let mut ticker = tokio::time::interval(period);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
+        let mut tracker = crate::plugin::stat_tracker::StatTracker::new(
+            inst.inst_id.to_string(),
+            ctx.lux.clone(),
+        );
+        // exception（modbus 协议层错误码）独立计数——与 transport 失败区分（后者拆 session）。
+        let mut exceptions: u64 = 0;
+        let mut flush_ticker = tokio::time::interval(std::time::Duration::from_secs(
+            crate::plugin::stat_tracker::FLUSH_INTERVAL_SECS,
+        ));
+
         let mut session: Option<Context> = None;
 
         loop {
             let evt = tokio::select! {
                 _ = token.cancelled() => break,
                 msg = cmd_rx.recv() => Evt::Cmd(msg),
+                _ = flush_ticker.tick() => {
+                    tracker.flush().await;
+                    continue;
+                }
                 _ = ticker.tick() => Evt::Tick,
             };
             match evt {
@@ -354,6 +368,8 @@ impl Source for ModbusClient {
                     };
                     // 单 tick 内所有 devid 共用一个 timestamp（点间一致，对标 opcua/s7 批量读语义）。
                     let now = chrono::Local::now().timestamp();
+                    // tick 计时（tick_ok 上报耗时；一轮轮询=从首个 region read 到 acc 发送完）。
+                    let tick_started = std::time::Instant::now();
                     // 按 devid 累积解码值（round_robin 下同 devid 的 region 散落序列各处，故聚合）。
                     let mut acc: BTreeMap<String, BTreeMap<String, SampleValue>> = BTreeMap::new();
                     let mut transport_failed = false;
@@ -384,6 +400,9 @@ impl Source for ModbusClient {
                                 }
                             }
                             ReadOutcome::Exception(exc) => {
+                                exceptions += 1;
+                                tracker
+                                    .extra_insert("exception_count", serde_json::json!(exceptions));
                                 tracing::warn!(
                                     "[modbusClient] inst {inst_id} slave {} read {}+{} exception: {exc:?}",
                                     plan.slave_id,
@@ -432,10 +451,22 @@ impl Source for ModbusClient {
                             break;
                         }
                     }
+                    // tick 语义=「一轮轮询」：transport_failed→fail（拆 session，下 tick 重连），
+                    // 否则 ok（含 exception/timeout——故障隔离不拆总线，仍计入 exception_count）。
+                    if transport_failed {
+                        tracker.tick_fail("transport failed");
+                    } else {
+                        tracker.tick_ok(tick_started.elapsed().as_millis() as u64);
+                    }
+                    if tracker.should_flush() {
+                        tracker.flush().await;
+                    }
                 }
             }
         }
         // Context drop 即关连接（tokio-modbus 无显式 disconnect API）。
+        tracker.set_status("stopped");
+        tracker.flush().await;
         tracing::info!("[modbusClient] inst {inst_id} exited");
     }
 }
