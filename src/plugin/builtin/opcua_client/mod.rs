@@ -323,6 +323,16 @@ impl Source for OpcuaClient {
         let mut ticker = tokio::time::interval(period);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
+        // StatTracker（M4 实例指标）+ flush ticker（周期落 lux stat:<inst>）。
+        let mut tracker = crate::plugin::stat_tracker::StatTracker::new(
+            inst.inst_id.to_string(),
+            ctx.lux.clone(),
+        );
+        let mut reconnects: u64 = 0;
+        let mut flush_ticker = tokio::time::interval(std::time::Duration::from_secs(
+            crate::plugin::stat_tracker::FLUSH_INTERVAL_SECS,
+        ));
+
         let mut session: Option<std::sync::Arc<Session>> = None;
         let mut ev_handle: Option<JoinHandle<StatusCode>> = None;
 
@@ -341,16 +351,28 @@ impl Source for OpcuaClient {
                         }
                     }
                 }
+                _ = flush_ticker.tick() => {
+                    tracker.flush().await;
+                }
                 _ = ticker.tick() => {
                     if session.is_none() {
                         match connect(&cfg).await {
                             Ok((s, h)) => {
+                                reconnects += 1;
+                                tracker.extra_insert(
+                                    "session_reconnect_count",
+                                    serde_json::json!(reconnects),
+                                );
                                 tracing::info!("[opcuaClient] inst {inst_id} connected {}", cfg.endpoint);
                                 session = Some(s);
                                 ev_handle = Some(h);
                             }
                             Err(e) => {
+                                tracker.tick_fail(&format!("connect failed: {e}"));
                                 tracing::warn!("[opcuaClient] inst {inst_id} connect failed: {e}");
+                                if tracker.should_flush() {
+                                    tracker.flush().await;
+                                }
                                 continue;
                             }
                         }
@@ -359,6 +381,8 @@ impl Source for OpcuaClient {
                         Some(s) => s.clone(),
                         None => continue,
                     };
+                    let started = std::time::Instant::now();
+                    let mut tick_ok = true;
                     for (devid, pairs) in &devices {
                         if pairs.is_empty() {
                             continue;
@@ -385,6 +409,8 @@ impl Source for OpcuaClient {
                                 }
                             }
                             Err(e) => {
+                                tick_ok = false;
+                                tracker.tick_fail(&format!("read failed: {e:?}"));
                                 tracing::warn!("[opcuaClient] inst {inst_id} read failed: {e:?}");
                                 // 读失败可能因断连，下次 tick 重连
                                 session = None;
@@ -394,6 +420,12 @@ impl Source for OpcuaClient {
                                 break;
                             }
                         }
+                    }
+                    if tick_ok {
+                        tracker.tick_ok(started.elapsed().as_millis() as u64);
+                    }
+                    if tracker.should_flush() {
+                        tracker.flush().await;
                     }
                 }
             }
@@ -406,6 +438,10 @@ impl Source for OpcuaClient {
             h.abort();
         }
         tracing::info!("[opcuaClient] inst {inst_id} exited");
+
+        // 统一退出处理（cancelled 触发；stat 落 stopped）。
+        tracker.set_status("stopped");
+        tracker.flush().await;
     }
 }
 
