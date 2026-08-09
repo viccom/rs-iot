@@ -67,15 +67,20 @@ impl MqttPub {
                                 ctx.ctl_registry.send(&inst, cmd);
                             }
                         }
+                        Ok(Event::Incoming(Packet::ConnAck(_))) => {
+                            ctx.metrics.mqtt_connected(true);
+                            tracing::info!("[mqtt] connected to broker");
+                        }
                         Ok(_) => {}
                         Err(e) => {
+                            ctx.metrics.mqtt_connected(false);
                             tracing::warn!("[mqtt] connection error: {e}");
                             tokio::time::sleep(Duration::from_secs(2)).await;
                         }
                     }
                 }
                 _ = ticker.tick() => {
-                    publish_rtdata(&ctx, &hwid, &client).await;
+                    publish_rtdata(&ctx, &hwid, &client, &ctx.metrics).await;
                 }
             }
         }
@@ -86,7 +91,12 @@ impl MqttPub {
 ///
 /// lux rtdata 结构：key=`rtdata:<devid>`，hash field=`<devid>.<tag>`（或 `<tag>`），
 /// value=`[ts, localTime, value]` JSON。组装为 `{hwid, devid, values:{field: value}, timestamp}`。
-async fn publish_rtdata(ctx: &HostContext, hwid: &crate::types::Hwid, client: &AsyncClient) {
+async fn publish_rtdata(
+    ctx: &HostContext,
+    hwid: &crate::types::Hwid,
+    client: &AsyncClient,
+    metrics: &crate::process_metrics::ProcessMetrics,
+) {
     let keys = match ctx.lux.execute_value("KEYS", &["rtdata:*"]).await {
         Ok(lux::EmbeddedValue::Array(a)) => a,
         _ => return,
@@ -112,11 +122,15 @@ async fn publish_rtdata(ctx: &HostContext, hwid: &crate::types::Hwid, client: &A
         let topic = format!("{hwid}/{devid}/datas");
         match serde_json::to_vec(&payload) {
             Ok(bytes) => {
-                if let Err(e) = client
+                match client
                     .publish(topic.clone(), QoS::AtMostOnce, false, bytes)
                     .await
                 {
-                    tracing::warn!("[mqtt] publish {topic} failed: {e}");
+                    Ok(()) => metrics.mqtt_publish(),
+                    Err(e) => {
+                        metrics.mqtt_publish_fail();
+                        tracing::warn!("[mqtt] publish {topic} failed: {e}");
+                    }
                 }
             }
             Err(e) => tracing::warn!("[mqtt] encode payload failed: {e}"),
