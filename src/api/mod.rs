@@ -19,6 +19,7 @@ pub mod routes_device;
 pub mod routes_group;
 pub mod routes_inst;
 pub mod routes_lua;
+pub mod routes_metrics;
 pub mod routes_rtdata;
 pub mod routes_stat;
 pub mod routes_sys;
