@@ -1,15 +1,12 @@
-//! Prometheus `/metrics` 端点(M4 指标的标准化机器可读出口)。spec §3-§6。
+//! `/metrics` 端点 render 层(Prometheus 文本格式化的纯函数)。spec §3-§6。
 
-use crate::api::AppState;
 use crate::db::stat::InstanceStat;
 use crate::plugin::instance::InstState;
 use crate::process_metrics::ProcessMetrics;
 use crate::types::HostKind;
-use axum::extract::State;
-use axum::response::IntoResponse;
 use std::sync::atomic::Ordering;
 
-/// Prometheus exposition 文本 Content-Type(供 Task 4 handler 设置响应头)。
+/// Prometheus exposition 文本 Content-Type(供 metrics handler 设置响应头)。
 pub(crate) const METRICS_CONTENT_TYPE: &str = "text/plain; version=0.0.4; charset=utf-8";
 
 /// 写 metric family 头(`# HELP` + `# TYPE`),每 family 一次。
@@ -31,7 +28,13 @@ fn escape_label(v: &str) -> String {
 }
 
 /// 进程级指标 → Prometheus 文本(标识 + 资源 + ctl/pipeline/hub/mqtt)。
-fn render_process(m: &ProcessMetrics, hwid: &str, version: &str, cpu: f32, mem: u64) -> String {
+pub(crate) fn render_process(
+    m: &ProcessMetrics,
+    hwid: &str,
+    version: &str,
+    cpu: f32,
+    mem: u64,
+) -> String {
     let mut s = String::new();
     let rel = Ordering::Relaxed;
 
@@ -178,17 +181,17 @@ fn render_process(m: &ProcessMetrics, hwid: &str, version: &str, cpu: f32, mem: 
 }
 
 /// per-instance 渲染输入(handler 从 mgr.status() + config_snapshot + lux stat 组装)。
-struct InstanceRow {
-    inst_id: String,
-    state: InstState,
-    app_code: String,
-    host_kind: &'static str,
+pub(crate) struct InstanceRow {
+    pub(crate) inst_id: String,
+    pub(crate) state: InstState,
+    pub(crate) app_code: String,
+    pub(crate) host_kind: &'static str,
     /// 插件级 health + 计数;None = 实例刚启动尚未 flush stat。
-    health: Option<InstanceStat>,
+    pub(crate) health: Option<InstanceStat>,
 }
 
 /// HostKind → 受控词汇字符串(builtin/external,与 routes_stat::host_kind_str 一致)。
-fn host_kind_str(k: HostKind) -> &'static str {
+pub(crate) fn host_kind_str(k: HostKind) -> &'static str {
     match k {
         HostKind::Builtin => "builtin",
         HostKind::External => "external",
@@ -207,7 +210,7 @@ fn state_str(s: &InstState) -> String {
 ///
 /// info family 输出所有实例(含无 stat 的,health 空串);tick/fail/duration/ts
 /// 只输出有 stat 的实例。`# HELP`/`# TYPE` 每 family 一次。
-fn render_instances(rows: &[InstanceRow]) -> String {
+pub(crate) fn render_instances(rows: &[InstanceRow]) -> String {
     let mut s = String::new();
 
     // info family(每实例一行)
@@ -303,49 +306,6 @@ fn render_instances(rows: &[InstanceRow]) -> String {
     s
 }
 
-/// `GET /metrics`(Prometheus 文本格式,免 JWT)。
-///
-/// 组合进程级与 per-instance 指标。per-instance 部分遍历 `mgr.status()`(进程级
-/// state)、`config_snapshot`(分类)、lux `stat:<inst>`(health/计数)三者组装。
-/// 单实例 stat 读失败时跳过该实例的 per-instance 计数行(tick/fail/duration/ts),
-/// info 行照常输出(health 空串),进程级指标照常输出(失败降级,见 spec §6)。
-pub async fn metrics(State(st): State<AppState>) -> axum::response::Response {
-    let m = &st.metrics;
-    let (cpu, mem) = crate::process_metrics::sample_process_resource();
-
-    let mut body = render_process(m, st.hwid.as_ref(), st.version, cpu, mem);
-
-    // per-instance:遍历实例 + 读 lux stat。
-    let states = st.mgr.status();
-    let mut rows: Vec<InstanceRow> = Vec::with_capacity(states.len());
-    for (inst_id, state) in states {
-        let class = st.mgr.config_snapshot(&inst_id);
-        let (app_code, host_kind) = class
-            .as_ref()
-            .map(|c| (c.app_code.to_string(), host_kind_str(c.host_kind)))
-            .unwrap_or((String::new(), ""));
-        // stat 读失败 → None(该实例 per-instance 计数缺,但 info 行仍输出)。
-        let health = crate::db::stat::read(&st.lux, &inst_id)
-            .await
-            .ok()
-            .flatten();
-        rows.push(InstanceRow {
-            inst_id,
-            state,
-            app_code,
-            host_kind,
-            health,
-        });
-    }
-    body.push_str(&render_instances(&rows));
-
-    (
-        [(axum::http::header::CONTENT_TYPE, METRICS_CONTENT_TYPE)],
-        body,
-    )
-        .into_response()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -409,9 +369,6 @@ mod tests {
             }
         }
     }
-
-    use crate::db::stat::InstanceStat;
-    use crate::plugin::instance::InstState;
 
     fn row(
         inst_id: &str,
@@ -505,7 +462,7 @@ mod tests {
         let out = render_instances(&rows);
         assert!(
             out.contains(r#"inst_id="a\"b\\c""#),
-            "inst_id 特殊字符应被 escape,实际:\n{out}"
+            "inst_id 特殊字符应被 escape,实际: {out}"
         );
     }
 }
