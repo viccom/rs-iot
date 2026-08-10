@@ -18,6 +18,7 @@ pub mod routes_command;
 pub mod routes_device;
 pub mod routes_group;
 pub mod routes_inst;
+pub mod routes_logs;
 pub mod routes_lua;
 pub mod routes_metrics;
 pub mod routes_rtdata;
@@ -137,6 +138,8 @@ pub fn build_router(state: AppState) -> axum::Router {
         )
         // 实时数据查询
         .route("/api/v1/rtdatas", get(routes_rtdata::rtdatas))
+        // 日志 ring buffer 快照(最近 N 条结构化日志;默认 JWT 保护)
+        .route("/api/v1/logs/recent", get(routes_logs::recent))
         // 静态前端
         .route("/apitest", get(frontend::index_redirect))
         .route("/", get(frontend::root_redirect));
