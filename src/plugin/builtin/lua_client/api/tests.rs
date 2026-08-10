@@ -17,6 +17,8 @@ fn spawn_mock_io() -> IoEngine {
             responder: Box::new(|_| Ok(vec![])),
         }),
         tx,
+        "test-inst".into(),
+        crate::io_trace::TraceRegistry::new(),
     )
 }
 

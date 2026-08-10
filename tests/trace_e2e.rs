@@ -131,3 +131,33 @@ async fn trace_without_jwt_401() {
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     common::stop_lux(handle).await;
 }
+
+#[tokio::test]
+async fn lua_trace_dump_runs_on_request_without_panic() {
+    // 验证:activate 后 io_engine 的 request 路径调 dump 不 panic(registry 状态正确)。
+    // hex 输出格式靠 io_trace::tests::hex_format 单测;此处验接入正确性。
+    use rs_iot::io_trace::{dump, Dir, TraceRegistry};
+    let registry = TraceRegistry::new();
+    registry.activate("lua-1", now_unix_ms_test() + 60_000);
+
+    // 模拟 io_engine 的 dump 调用点(TX frame / RX resp)。
+    let frame = vec![0x01, 0x02, 0x03];
+    let resp = vec![0x01, 0x02, 0x03, 0xAA];
+    dump(&registry, "lua-1", Dir::Tx, &frame);
+    dump(&registry, "lua-1", Dir::Rx, &resp);
+
+    // registry 状态:仍激活
+    assert!(registry.get("lua-1").unwrap().check_alive());
+    assert!(registry.active_ids().contains(&"lua-1".to_string()));
+
+    registry.deactivate("lua-1");
+    assert!(registry.get("lua-1").is_none());
+}
+
+fn now_unix_ms_test() -> i64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}

@@ -70,10 +70,13 @@ impl IoEngine {
 }
 
 /// 启动 IO task（独占 backend）。`on_data_tx` 接被动帧（无在飞 request 时 recv_idle 收到）。
-/// 返回 IoEngine 句柄（Lua 侧 request 用）。
+/// 返回 IoEngine 句柄（Lua 侧 request 用）。`inst_id` + `trace_registry` 用于报文 trace
+/// （request TX/RX + recv_idle 被动 RX 三点 dump；trace 关闭时 dump 快速路径跳过）。
 pub(super) fn spawn_io_task(
     mut backend: Box<dyn IoBackend>,
     on_data_tx: mpsc::Sender<Vec<u8>>,
+    inst_id: String,
+    trace_registry: crate::io_trace::TraceRegistry,
 ) -> IoEngine {
     let (tx, mut rx) = mpsc::channel::<IoRequest>(64);
     tokio::spawn(async move {
@@ -82,13 +85,18 @@ pub(super) fn spawn_io_task(
                 biased; // request 优先：有 request 时立即处理，不被 recv_idle 阻塞
                 req = rx.recv() => match req {
                     Some(req) => {
+                        crate::io_trace::dump(&trace_registry, &inst_id, crate::io_trace::Dir::Tx, &req.frame);
                         let r = backend.request(&req.frame).await;
+                        if let Ok(resp) = &r {
+                            crate::io_trace::dump(&trace_registry, &inst_id, crate::io_trace::Dir::Rx, resp);
+                        }
                         let _ = req.reply_to.send(r);
                     }
                     None => break, // 所有 IoEngine 句柄 drop → 退出
                 },
                 res = backend.recv_idle() => {
                     if let Some(frame) = res {
+                        crate::io_trace::dump(&trace_registry, &inst_id, crate::io_trace::Dir::Rx, &frame);
                         let _ = on_data_tx.send(frame).await; // 主循环 drop → 忽略
                     }
                     // None（idle 无数据/未连接）→ 回 loop 重 select!（recv_idle 重启）
@@ -108,7 +116,12 @@ mod tests {
     /// 测试用：spawn_io_task 配一个丢弃被动帧的 on_data channel（单测不测 on_data）。
     fn spawn_no_on_data(backend: Box<dyn IoBackend>) -> IoEngine {
         let (tx, _rx) = mpsc::channel::<Vec<u8>>(8);
-        spawn_io_task(backend, tx)
+        spawn_io_task(
+            backend,
+            tx,
+            "test-inst".into(),
+            crate::io_trace::TraceRegistry::new(),
+        )
     }
 
     #[tokio::test]
@@ -215,7 +228,12 @@ mod tests {
 
         let backend = Box::new(TcpIo::new(format!("127.0.0.1:{port}"), 50));
         let (on_data_tx, mut on_data_rx) = mpsc::channel::<Vec<u8>>(8);
-        let _engine = spawn_io_task(backend, on_data_tx);
+        let _engine = spawn_io_task(
+            backend,
+            on_data_tx,
+            "test-inst".into(),
+            crate::io_trace::TraceRegistry::new(),
+        );
 
         let frame = tokio::time::timeout(Duration::from_secs(2), on_data_rx.recv())
             .await
