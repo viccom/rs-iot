@@ -23,6 +23,7 @@ pub mod routes_metrics;
 pub mod routes_rtdata;
 pub mod routes_stat;
 pub mod routes_sys;
+pub mod routes_trace;
 pub mod routes_user;
 
 /// axum 共享状态。
@@ -125,6 +126,13 @@ pub fn build_router(state: AppState) -> axum::Router {
         .route("/api/v1/lua/scripts", get(routes_lua::list_scripts))
         // 命令下发（写命令经 CtlRegistry 路由到实例 cmd_rx；默认 JWT 保护）
         .route("/api/v1/command/send", post(routes_command::send))
+        // 报文 trace 开关（per-instance 运行时激活/查询/关闭；默认 JWT 保护）
+        .route(
+            "/api/v1/inst/trace",
+            get(routes_trace::list)
+                .post(routes_trace::start)
+                .delete(routes_trace::stop),
+        )
         // 实时数据查询
         .route("/api/v1/rtdatas", get(routes_rtdata::rtdatas))
         // 静态前端
