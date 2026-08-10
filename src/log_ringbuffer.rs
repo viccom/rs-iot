@@ -4,6 +4,8 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
+use tracing::field::{Field, Visit};
+use tracing_subscriber::layer::{Context, Layer};
 
 /// 一条日志(结构化,tracing event 经 Visit 收集)。
 #[derive(Debug, Clone, serde::Serialize)]
@@ -73,20 +75,69 @@ impl LogRingBuffer {
 }
 
 /// 当前 UTC 时间 RFC3339(ISO8601)。
-///
-/// 暂仅供测试引用；Task 3 的 `RingBufferLayer` 将在构造 `LogEntry` 时调用，
-/// 届时移除下方的 `expect(dead_code)` 限定。
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "Task 3 RingBufferLayer 接入后启用")
-)]
 fn now_iso8601() -> String {
     chrono::Utc::now().to_rfc3339()
+}
+
+/// tracing subscriber layer:截获 event → LogEntry → push LogRingBuffer。
+///
+/// 独立 EnvFilter("info,io_trace=trace")经 `.with_filter()` attach(见 init_tracing)。
+#[derive(Debug)]
+pub struct RingBufferLayer {
+    /// 共享 ring buffer(Arc,init_tracing 建后注入 + AppState 同一实例)。
+    pub buffer: std::sync::Arc<LogRingBuffer>,
+}
+
+impl<S: tracing::Subscriber> Layer<S> for RingBufferLayer {
+    fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
+        let meta = event.metadata();
+        let mut visitor = EntryVisitor::default();
+        event.record(&mut visitor);
+        self.buffer.push(LogEntry {
+            ts: now_iso8601(),
+            level: meta.level().as_str().to_string(),
+            target: meta.target().to_string(),
+            message: visitor.message,
+            fields: visitor.fields,
+        });
+    }
+}
+
+/// Visit:message 字段(名 "message")→ message;str 字段 → fields(不带引号);其余 → fields(Debug)。
+#[derive(Default)]
+struct EntryVisitor {
+    message: String,
+    fields: HashMap<String, String>,
+}
+
+impl Visit for EntryVisitor {
+    fn record_str(&mut self, field: &Field, value: &str) {
+        // str 字段直接存(不带 Debug 引号):inst_id/dir/hex 等。
+        if field.name() == "message" {
+            self.message = value.to_string();
+        } else {
+            self.fields
+                .insert(field.name().to_string(), value.to_string());
+        }
+    }
+
+    fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+        // message 字段经 display 包装(DisplayValue 的 Debug=Display),得可读文本(R1)。
+        // 其余非 str 字段(bool/i64/u64/error)归这里。
+        let s = format!("{value:?}");
+        if field.name() == "message" {
+            self.message = s;
+        } else {
+            self.fields.insert(field.name().to_string(), s);
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+    use tracing_subscriber::{layer::Layer, prelude::*, EnvFilter};
 
     fn entry(level: &str, target: &str, message: &str) -> LogEntry {
         LogEntry {
@@ -169,5 +220,72 @@ mod tests {
         let s = now_iso8601();
         // RFC3339 含 'T' 和 时区(Z 或 +00:00)
         assert!(s.contains('T'), "ISO8601 应含 T: {s}");
+    }
+
+    /// 用一个含 RingBufferLayer 的 dispatcher 驱动 tracing 宏,验 LogEntry 收集。
+    fn with_layer_driver<F: FnOnce(&Arc<LogRingBuffer>)>(cap: usize, filter: &str, body: F) {
+        let buffer = Arc::new(LogRingBuffer::new(cap));
+        let layer = RingBufferLayer {
+            buffer: buffer.clone(),
+        }
+        .with_filter(EnvFilter::new(filter));
+        let subscriber = tracing_subscriber::registry().with(layer);
+        let dispatch = tracing::dispatcher::Dispatch::new(subscriber);
+        tracing::dispatcher::with_default(&dispatch, || body(&buffer));
+    }
+
+    #[test]
+    fn layer_captures_info_event() {
+        with_layer_driver(100, "info", |buf| {
+            tracing::info!("hello world");
+            let r = buf.recent(None, None, 100);
+            assert_eq!(r.len(), 1);
+            assert_eq!(r[0].level, "INFO");
+            assert_eq!(r[0].message, "hello world", "message 应可读不带引号(R1)");
+        });
+    }
+
+    #[test]
+    fn layer_captures_structured_fields() {
+        with_layer_driver(100, "info", |buf| {
+            tracing::info!(inst_id = "modbus-1", dir = "TX", "frame");
+            let r = buf.recent(None, None, 100);
+            assert_eq!(
+                r[0].fields.get("inst_id").unwrap(),
+                "modbus-1",
+                "str 字段不带引号"
+            );
+            assert_eq!(r[0].fields.get("dir").unwrap(), "TX");
+        });
+    }
+
+    #[test]
+    fn layer_message_with_format_args() {
+        with_layer_driver(100, "info", |buf| {
+            tracing::info!("v={}", 42);
+            let r = buf.recent(None, None, 100);
+            assert_eq!(r[0].message, "v=42", "格式化 message 可读(R1)");
+        });
+    }
+
+    #[test]
+    fn layer_captures_io_trace_target() {
+        // 报文 trace:trace level + target io_trace。filter 含 io_trace=trace 才进。
+        with_layer_driver(100, "info,io_trace=trace", |buf| {
+            tracing::trace!(target: "io_trace", inst_id = "lua-1", hex = "01 03", "dump");
+            let r = buf.recent(None, Some("io_trace"), 100);
+            assert_eq!(r.len(), 1);
+            assert_eq!(r[0].target, "io_trace");
+            assert_eq!(r[0].fields.get("hex").unwrap(), "01 03");
+        });
+    }
+
+    #[test]
+    fn layer_filter_excludes_debug_by_default() {
+        // filter=info → debug 不进 buffer
+        with_layer_driver(100, "info", |buf| {
+            tracing::debug!("not captured");
+            assert!(buf.recent(None, None, 100).is_empty());
+        });
     }
 }
