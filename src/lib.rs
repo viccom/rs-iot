@@ -21,6 +21,8 @@ pub mod error;
 pub mod host;
 /// 硬件 ID 生成。
 pub mod hwid;
+/// 报文 trace：per-instance 运行时开关 + 字节 dump（裸报文调试）。
+pub mod io_trace;
 /// 日志保留期清理（按天/按总大小 + 周期 cleanup task）。
 mod log_cleanup;
 pub mod pipeline;
