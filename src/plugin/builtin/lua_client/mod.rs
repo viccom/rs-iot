@@ -113,7 +113,14 @@ impl Source for LuaClient {
         );
 
         // 4. 注册 ctx API。
-        if let Err(e) = api::register(&lua, ctx.clone(), &inst, io_engine.clone(), tx.clone()) {
+        if let Err(e) = api::register(
+            &lua,
+            ctx.clone(),
+            &inst,
+            io_engine.clone(),
+            tx.clone(),
+            cfg.transport.as_str(),
+        ) {
             tracing::warn!("[luaClient] inst {} ctx API 注册失败：{e}", inst.inst_id);
             return;
         }
@@ -395,7 +402,7 @@ async fn reload_vm(
 ) -> mlua::Result<mlua::Lua> {
     let lua = engine::new_vm(cfg)?;
     load_main(&lua, lctx)?;
-    api::register(&lua, ctx_host, inst, io, tx)?;
+    api::register(&lua, ctx_host, inst, io, tx, cfg.transport.as_str())?;
     // dry-run on_init（hook 兜底死循环；失败 → Err → 主循环回退旧 VM）。
     if lua.globals().get::<mlua::Function>("on_init").is_ok() {
         let r: mlua::Result<()> = lua.load("on_init()").eval_async().await;

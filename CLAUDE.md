@@ -158,6 +158,7 @@ cargo build --no-default-features --features "lua,modbus,opcua"      # 选装部
 - **新增二进制行为**：`main.rs` 子命令分发 → 逻辑在 `lib.rs`（前台）或 `service/`（服务态）——前台与服务态共用 `run_app_with_shutdown`，shutdown 来源不同（ctrl_c vs SCM/sigterm）。
 - **实例自愈可信（M3）**：`start_source`/`start_sink` spawn source/sink task 后，再 spawn 一个 supervisor task（`spawn_supervisor`）唯一 await 其 join，task 退出且 `token` 未 cancel → 标 `InstState::Failed` + `error!`（覆盖 panic/配置错误早退/异常 return）；主动 `stop` 走 Stopping→Stopped（token cancel）不误判。状态仅内存（进程重启重置）。不自重启（后置）。`GET /api/v1/inststatus` 返回 Failed 实例；运维 `startinst` 重拉（Failed→Starting→Running）。**注意**：对 Failed 实例调 `stopinst` 会把状态改写为 Stopped（stop 总以 Stopped 收尾，操作员 stop 视为确认）；Failed 的 `error!` 日志已落盘，状态查询窗口在 stop 前可见。
 - **新增/修改插件埋点**：遵循 `docs/instrumentation-conventions.md` 6 约束。内置插件用 `StatTracker`（select! 加 flush ticker + tick_ok/fail）；进程级部件用 `ProcessMetrics`（atomic，/sysstatus 直读）。实例指标统一查 `GET /api/v1/inst/stats`（`{inst_id, app_code, host_kind, state, health}`，废弃的 `/api/v1/lua/stats` 已移除）。进程级 + per-instance 指标另经 `GET /metrics`（Prometheus exposition 文本，免 JWT）对接监控栈——同一 M4 数据源的机器出口（vs `/sysstatus`/`/inst/stats` 的 JSON 人查出口）。
+- **lua 脚本链路感知**：luaClient 通讯链路由宿主 IO task 管（open/connect/收发/重连/trace，脚本不碰），脚本只经 `ctx:request(frame, timeout)` 组帧/解帧。`ctx:transport()` 返回底层链路类型（`"tcp"`/`"serial"`/`"udp"`，与 `app_config.kind` 一致），脚本据此选帧格式（serial→PDU+CRC16、tcp→MBAP 头）。当前三种传输都是 client/主站侧；**TCP/UDP Server 不支持**（与请求-响应模型冲突，后置，详见 `docs/lua-script-guide.md`「链路角色」）。一个实例一条链路；同链路多从站由脚本 `collect()` 循环轮询（M2 多设备输出）。
 
 ## 安全边界
 

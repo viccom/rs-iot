@@ -16,6 +16,19 @@ pub(super) enum Transport {
     Udp,
 }
 
+impl Transport {
+    /// lua `ctx:transport()` / 日志用的字符串形式（与 `app_config.kind` 一致）。
+    ///
+    /// 脚本据此选帧格式（serial → PDU+CRC16、tcp → MBAP 头、udp → 裸 RTU/自定义）。
+    pub(super) fn as_str(&self) -> &'static str {
+        match self {
+            Transport::Tcp => "tcp",
+            Transport::Serial => "serial",
+            Transport::Udp => "udp",
+        }
+    }
+}
+
 /// 接收成帧模式（spec §8）。Plan 1 MVP 仅用 `Timeout`。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum RecvMode {

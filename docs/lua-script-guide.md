@@ -63,6 +63,22 @@ luaClient 是 rs-iot 的南向 `Source`（与 modbus/opcua/s7 同构，`inventor
 
 - `ctx:request(frame, timeout_ms) -> resp|nil, err?`：主动一问一答。`frame` 字符串（含二进制，
   `"\x01\x03..."`）；`timeout_ms` 毫秒；返回响应字节串或 `nil, err`。tcp/serial/udp 统一入口。
+- `ctx:transport() -> str`：返回底层链路类型 `"tcp"`/`"serial"`/`"udp"`（与 `app_config.kind` 一致，
+  同步）。脚本据此**选帧格式**——同一份脚本自适应不同链路：
+
+  ```lua
+  function collect()
+      local pdu = string.pack(">BBHH", unit, 3, addr, qty)
+      -- serial/udp 走 RTU 帧（PDU + CRC16），tcp 走 MBAP 头（无 CRC）
+      local frame
+      if ctx:transport() == "serial" or ctx:transport() == "udp" then
+          frame = pdu .. string.pack("<H", crc16(pdu))
+      else
+          frame = string.pack(">I2I2I2BB", 1, 0, 6, unit, 3) .. string.pack(">I2I2", addr, qty)
+      end
+      return decode(ctx:request(frame, 200))
+  end
+  ```
 
 ### L2 数据（自身实例）
 
@@ -121,14 +137,44 @@ luaClient 是 rs-iot 的南向 `Source`（与 modbus/opcua/s7 同构，`inventor
 | `hook_instr_limit` | num | — | 指令 hook 阈值（防死循环，spec §9.2） |
 | `fail_threshold` | num | `10` | 连续 collect 失败 N 次标记 degraded |
 
+## 通讯链路抽象（必读）
+
+脚本作者须先理解 lua 采集的链路分工模型：
+
+- **链路由 rs-iot 管，脚本不碰**：open/connect/收发/重连/报文 trace 全在宿主 IO task（`io_engine`）。
+  脚本只经 `ctx:request(frame, timeout)` 组帧/解帧——**拿不到也不持有任何连接对象**。
+- **一个实例一条链路**：`io_engine` 单 backend（tcp/serial/udp 三选一）。不同厂商协议 / 不同串口参数 /
+  不同物理接口 → 必须不同实例（不同脚本，或同脚本多实例配不同 `serial_port`/`endpoint`）。
+- **同一条链路多从站**（RS485/RS485-like 总线，同协议同参数不同 unit id）：脚本在 `collect()` 里
+  循环组不同 uid 帧轮询，经同一个 `ctx:request` 发收；M2 多设备输出（`collect` 嵌套返回 `{[devid]={tag=v}}`）。
+- **重连自愈内置**：连接失败/读写 err/对端关闭 → 宿主置 `None`，下次 `ctx:request` 自动重连/重 open。
+  重连频率受 collect period 天然限速，**脚本无需写任何重连逻辑**。
+- **感知链路类型**：脚本调 `ctx:transport()`（见 L1 通讯）得知当前链路，据此选帧格式（RTU+CRC / MBAP）。
+
 ## 传输
 
-- **tcp**（`kind="tcp"`，`endpoint="ip:port"`）：独占 `TcpStream`，懒连接 + 断连重连。
+- **tcp**（`kind="tcp"`，`endpoint="ip:port"`）：独占 `TcpStream`，懒连接 + 断连重连。**TCP client** 角色。
 - **serial**（`kind="serial"`，`serial_port=...`）：tokio-serial，RTU 帧走串口（Linux 需 libudev-dev）。
-- **udp**（`kind="udp"`，`endpoint="ip:port"`）：connected `UdpSocket`，datagram 边界天然保帧。
+  串口直连（RS485 主站 / RS232 点对点）。
+- **udp**（`kind="udp"`，`endpoint="ip:port"`）：connected `UdpSocket`，datagram 边界天然保帧。**UDP client** 角色。
 
 三种传输统一 `ctx:request`（IO task 独占处理，spec §8 模式 Z）。`recv_mode` 控被动帧成帧
 （`on_data`）：当前 `timeout`（idle 静默）；length/delimiter/fixed 后置。
+
+### 链路角色：当前支持 / 后置
+
+当前三种传输都是 **client / 主站**侧（脚本主动发请求、等响应）。
+
+**TCP Server / UDP Server 本阶段不支持**——rs-iot 做监听服务器、等网络客户端连入的场景。原因：
+`ctx:request` 的"一问一答"模型与 server 的"被动收多客户端"根本冲突。现实里此类场景的约束：
+
+- **Modbus over net 类**（如 rs-iot 作 Modbus TCP slave）：Modbus 协议要求**只允许单连接**，仍可套用
+  请求-响应模型，但需 accept 单连接 + 客户端断开后重新 listen。
+- **特殊推送类协议**：网络中**多客户端同时推送实时数据集**（如多台仪表主动上报），需多客户端管理
+  + `on_data` 被动帧按客户端路由——超出当前单连接 `IoBackend` trait 能力。
+
+后期按需评估实现：需新 IO 模型（accept 循环 + 客户端表 + 被动帧路由），属架构级扩展，非加一个
+backend 可解决。触发条件：现场出现明确的 server 侧协议需求。
 
 ## 示例
 

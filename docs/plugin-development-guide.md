@@ -412,6 +412,8 @@ inventory::submit! {
 
 **报文 trace（P1 #2，`io_trace`）**：收发报文 hex dump，per-instance 运行时开关（`POST /api/v1/inst/trace` 按需激活，惰性超时关闭）。**阶段 1 已覆盖 lua（io_engine direct dump：request TX/RX + recv_idle 被动 RX 三点）+ modbus 4 传输（`TraceIo<T>` 包底层 IO，`src/io_trace.rs`）**；opcua/s7（非裸报文协议，线缆字节无意义）/sidecar（bridge IPC 帧）后置。新增裸报文协议插件：底层 IO 包一层 `TraceIo<T>` 即可接入（trace 关闭时 dump 快速路径几乎零成本）。
 
+**链路类型感知（lua）**：lua 脚本经 `ctx:transport()`（返回 `"tcp"`/`"serial"`/`"udp"`）感知底层链路，据此选帧格式（与 `TraceIo` 报文 trace 同属 lua IO 层能力，详见 [`lua-script-guide.md`](lua-script-guide.md)「通讯链路抽象」）。
+
 **自愈（M3）**：§4.5 的懒连接 + 断线重连（`Option<Conn>` + `is_connection_error()`）是 v1 既有范式；**`Failed` 状态真实写入 + 实例 supervisor 已落地**（M3）：`InstanceManager::spawn_supervisor` 唯一 await source task join，task 异常退出（panic/配置错误早退）且 token 未 cancel → 标 `InstState::Failed` + `error!` 落盘；运维 `startinst` 重拉。统一指数退避/熔断仍未做（见场景评估 §2 后续项）。
 
 **写新插件时的实务建议**：① 按 §4.5 范式实现基础重连；② `select!` 加 flush ticker + `StatTracker`（`tick_ok`/`tick_fail`）；③ 若是裸报文协议，底层 IO 包 `TraceIo<T>` 接入报文 trace。三步对照任一内置插件（如 `data_sim`/`modbus_client`）即可。

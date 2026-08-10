@@ -66,13 +66,16 @@ async fn push_sample(
 /// - L6 `now()`/`time()`：当前本地毫秒/秒时间戳（f64）。
 ///
 /// `tx` 为 hub [`mpsc::Sender`]（L2 `set_value` 推 [`Sample`]）；`ctx_host` 提供 lux
-/// （L2/L4 读写）+ `ctl_registry`（L3 路由）。
+/// （L2/L4 读写）+ `ctl_registry`（L3 路由）。`transport` 为底层链路类型字符串
+///（`cfg.transport.as_str()`，"tcp"/"serial"/"udp"），供 `ctx:transport()` 暴露给脚本
+///（脚本据此选帧格式：serial 加 CRC16、tcp 加 MBAP 头）。
 pub(super) fn register(
     lua: &Lua,
     ctx_host: HostContext,
     inst: &InstConfig,
     io: IoEngine,
     tx: mpsc::Sender<Sample>,
+    transport: &'static str,
 ) -> mlua::Result<()> {
     let ctx = lua.create_table()?;
 
@@ -340,6 +343,13 @@ pub(super) fn register(
         Ok(t)
     })?;
     ctx.set("list_devices", list_devices_fn)?;
+
+    // --- L1+ ctx:transport() -> str：底层链路类型（tcp/serial/udp）---
+    // 脚本据此选帧格式（serial → PDU+CRC16、tcp → MBAP 头、udp → 裸 RTU/自定义）。
+    // 与 app_config.kind 一致；同步（配置解析产物，register 传入 &'static str）。
+    // _self 吸收冒号语法隐式 self（ctx:transport()）。
+    let transport_fn = lua.create_function(move |_lua, _self: Value| Ok(transport))?;
+    ctx.set("transport", transport_fn)?;
 
     // --- L5 ctx:http_get/http_post（feature lua-http）---
     // 实现移 http.rs（守 <500）；此处委托 http::register 注册到同一 ctx 表。
