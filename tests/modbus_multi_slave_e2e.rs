@@ -108,6 +108,7 @@ async fn collect_samples(
         )),
         bridge_registry: BridgeRegistry::new(),
         metrics: std::sync::Arc::new(rs_iot::process_metrics::ProcessMetrics::new()),
+        trace_registry: rs_iot::io_trace::TraceRegistry::new(),
     };
     let (hub_tx, mut hub_rx) = tokio::sync::mpsc::channel::<Sample>(64);
     let mgr = std::sync::Arc::new(InstanceManager::new(ctx, hub_tx));

@@ -128,6 +128,9 @@ pub async fn run_app_with_shutdown(
     let metrics = std::sync::Arc::new(process_metrics::ProcessMetrics::new());
     let ctl_registry = host::CtlRegistry::new(metrics.clone());
     let bridge_registry = host::BridgeRegistry::new();
+    // 报文 trace 注册表：HostContext（task dump）与 AppState（REST 激活/查询）共享同一实例
+    //（TraceRegistry 内部 Arc<DashMap>，clone 共享状态——REST activate 立即影响 task dump）。
+    let trace_registry = crate::io_trace::TraceRegistry::new();
     let ctx = host::HostContext {
         lux: client.clone(),
         hwid: hwid.clone(),
@@ -135,6 +138,7 @@ pub async fn run_app_with_shutdown(
         ctl_registry,
         bridge_registry: bridge_registry.clone(),
         metrics: metrics.clone(),
+        trace_registry: trace_registry.clone(),
     };
 
     let (hub_tx, hub_rx) = tokio::sync::mpsc::channel::<types::Sample>(256);
@@ -174,6 +178,7 @@ pub async fn run_app_with_shutdown(
         jwt_secret: cfg.jwt_secret.clone(),
         version: VERSION,
         metrics: metrics.clone(),
+        trace_registry: trace_registry.clone(),
     };
     let app = api::build_router(state);
     let api_port = cfg.api_port;

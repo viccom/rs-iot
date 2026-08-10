@@ -31,6 +31,7 @@ async fn test_app() -> (axum::Router, lux::ServerHandle) {
         )),
         bridge_registry: rs_iot::host::BridgeRegistry::new(),
         metrics: std::sync::Arc::new(rs_iot::process_metrics::ProcessMetrics::new()),
+        trace_registry: rs_iot::io_trace::TraceRegistry::new(),
     };
     let (hub_tx, _hub_rx) = tokio::sync::mpsc::channel(64);
     let mgr = Arc::new(InstanceManager::new(ctx, hub_tx));
@@ -41,6 +42,7 @@ async fn test_app() -> (axum::Router, lux::ServerHandle) {
         jwt_secret: "test-secret-0123456789abcdef".into(),
         version: "itest",
         metrics: std::sync::Arc::new(rs_iot::process_metrics::ProcessMetrics::new()),
+        trace_registry: rs_iot::io_trace::TraceRegistry::new(),
     };
     (build_router(state), handle)
 }

@@ -90,6 +90,7 @@ async fn setup(inst_id: &str, hb_secs: u64) -> Env {
         )),
         bridge_registry: bridge_registry.clone(),
         metrics: std::sync::Arc::new(rs_iot::process_metrics::ProcessMetrics::new()),
+        trace_registry: rs_iot::io_trace::TraceRegistry::new(),
     };
     let (hub_tx, hub_rx) = mpsc::channel::<Sample>(64);
     let mgr = Arc::new(InstanceManager::new(ctx.clone(), hub_tx));

@@ -127,6 +127,7 @@ async fn immediate_exit_marks_failed() {
         )),
         bridge_registry: BridgeRegistry::new(),
         metrics: std::sync::Arc::new(rs_iot::process_metrics::ProcessMetrics::new()),
+        trace_registry: rs_iot::io_trace::TraceRegistry::new(),
     };
     let mgr = InstanceManager::new(ctx, hub_tx);
 
@@ -153,6 +154,7 @@ async fn panic_marks_failed() {
         )),
         bridge_registry: BridgeRegistry::new(),
         metrics: std::sync::Arc::new(rs_iot::process_metrics::ProcessMetrics::new()),
+        trace_registry: rs_iot::io_trace::TraceRegistry::new(),
     };
     let mgr = InstanceManager::new(ctx, hub_tx);
 
@@ -179,6 +181,7 @@ async fn normal_stop_marks_stopped_not_failed() {
         )),
         bridge_registry: BridgeRegistry::new(),
         metrics: std::sync::Arc::new(rs_iot::process_metrics::ProcessMetrics::new()),
+        trace_registry: rs_iot::io_trace::TraceRegistry::new(),
     };
     let mgr = InstanceManager::new(ctx, hub_tx);
 

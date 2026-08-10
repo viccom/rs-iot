@@ -150,6 +150,8 @@ pub struct HostContext {
     pub bridge_registry: BridgeRegistry,
     /// 进程级指标（M4）。
     pub metrics: std::sync::Arc<crate::process_metrics::ProcessMetrics>,
+    /// 报文 trace 开关注册表（P1 子系统 2）：per-instance 运行时激活。
+    pub trace_registry: crate::io_trace::TraceRegistry,
 }
 
 #[cfg(test)]

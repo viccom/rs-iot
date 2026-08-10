@@ -35,6 +35,7 @@ async fn gated_plugin_returns_config_error_when_feature_off() {
         )),
         bridge_registry: rs_iot::host::BridgeRegistry::new(),
         metrics: std::sync::Arc::new(rs_iot::process_metrics::ProcessMetrics::new()),
+        trace_registry: rs_iot::io_trace::TraceRegistry::new(),
     };
     let (hub_tx, _hub_rx) = tokio::sync::mpsc::channel::<Sample>(64);
     let mgr = InstanceManager::new(ctx, hub_tx);

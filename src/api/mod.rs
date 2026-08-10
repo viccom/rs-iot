@@ -34,6 +34,8 @@ pub struct AppState {
     pub jwt_secret: String,
     pub version: &'static str,
     pub metrics: std::sync::Arc<crate::process_metrics::ProcessMetrics>,
+    /// 报文 trace 开关注册表（REST 端点激活/查询/关闭）。
+    pub trace_registry: crate::io_trace::TraceRegistry,
 }
 
 /// 白名单路径（无需 JWT）。
