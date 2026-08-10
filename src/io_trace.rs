@@ -7,9 +7,12 @@
 //! direct dump(frame 已在手)。trace 关闭时 `dump` 快速路径仅一次 DashMap get + AtomicBool load。
 
 use dashmap::DashMap;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::Arc;
+use std::task::{Context as TaskContext, Poll};
 use std::time::{SystemTime, UNIX_EPOCH};
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 /// 字节流方向。
 #[derive(Copy, Clone, Debug)]
@@ -130,9 +133,86 @@ fn now_unix_ms() -> i64 {
         .unwrap_or(0)
 }
 
+/// transport 拦截层:包装底层 IO,在 `poll_read`/`poll_write` 拦截字节调 `dump`。
+///
+/// 仅服务 modbus(字节被 tokio-modbus 吞)。trace 关闭时 `dump` 快速路径跳过。
+/// `derive(Debug)`:tcp 路径 `tcp::attach_slave` 要求 `T: Debug`(`TcpStream: Debug`);
+/// RTU 路径 `rtu::attach_slave` 不要求(故 `TraceIo<UdpIo>` 不实现 Debug 也可走 rtu)。
+#[derive(Debug)]
+pub struct TraceIo<T> {
+    /// 被包装的底层 transport(TcpStream / UdpIo / SerialStream)。
+    inner: T,
+    /// 实例 ID(dump 标识)。
+    inst_id: String,
+    /// 开关注册表。
+    registry: TraceRegistry,
+}
+
+impl<T> TraceIo<T> {
+    /// 构造:包一层 transport,绑定实例 ID + 开关注册表。
+    pub fn new(inner: T, inst_id: String, registry: TraceRegistry) -> Self {
+        Self {
+            inner,
+            inst_id,
+            registry,
+        }
+    }
+}
+
+impl<T: AsyncRead + Unpin> AsyncRead for TraceIo<T> {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        let this = self.get_mut();
+        let inner = Pin::new(&mut this.inner);
+        match inner.poll_read(cx, buf) {
+            Poll::Ready(Ok(())) => {
+                let filled = buf.filled();
+                if !filled.is_empty() {
+                    dump(&this.registry, &this.inst_id, Dir::Rx, filled);
+                }
+                Poll::Ready(Ok(()))
+            }
+            other => other,
+        }
+    }
+}
+
+impl<T: AsyncWrite + Unpin> AsyncWrite for TraceIo<T> {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        let this = self.get_mut();
+        let inner = Pin::new(&mut this.inner);
+        match inner.poll_write(cx, buf) {
+            Poll::Ready(Ok(n)) => {
+                // 仅 dump 本次实际写入的字节(Pending/部分写由下次 poll_write 续写时 dump)。
+                dump(&this.registry, &this.inst_id, Dir::Tx, &buf[..n]);
+                Poll::Ready(Ok(n))
+            }
+            other => other,
+        }
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<std::io::Result<()>> {
+        let this = self.get_mut();
+        Pin::new(&mut this.inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<std::io::Result<()>> {
+        let this = self.get_mut();
+        Pin::new(&mut this.inner).poll_shutdown(cx)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::{duplex, AsyncReadExt, AsyncWriteExt};
 
     fn future_deadline_ms(extra_ms: i64) -> i64 {
         now_unix_ms() + extra_ms
@@ -198,5 +278,52 @@ mod tests {
         let r = TraceRegistry::new();
         r.activate("expired", future_deadline_ms(-1_000));
         dump(&r, "expired", Dir::Tx, &[0x01]); // 过期:check_alive 清 active,不 panic
+    }
+
+    #[tokio::test]
+    async fn trace_io_forwards_write_bytes() {
+        // TraceIo 包装 duplex 一端:写透传到另一端,字节不丢不改。
+        let (client, mut server) = duplex(64);
+        let registry = TraceRegistry::new();
+        registry.activate("inst", now_unix_ms() + 60_000);
+        let mut traced = TraceIo::new(client, "inst".into(), registry);
+        traced.write_all(&[0x01, 0x03, 0xAB]).await.unwrap();
+        let mut buf = [0u8; 3];
+        server.read_exact(&mut buf).await.unwrap();
+        assert_eq!(&buf, &[0x01, 0x03, 0xAB]);
+    }
+
+    #[tokio::test]
+    async fn trace_io_forwards_read_bytes() {
+        // 读方向:对端写字节,TraceIo 透传读出。
+        let (client, mut server) = duplex(64);
+        let registry = TraceRegistry::new();
+        registry.activate("inst", now_unix_ms() + 60_000);
+        server.write_all(&[0x05, 0x06]).await.unwrap();
+        let mut traced = TraceIo::new(client, "inst".into(), registry);
+        let mut buf = [0u8; 2];
+        traced.read_exact(&mut buf).await.unwrap();
+        assert_eq!(&buf, &[0x05, 0x06]);
+    }
+
+    #[tokio::test]
+    async fn trace_io_inactive_still_forwards() {
+        // trace 未激活:TraceIo 仍透传(dump 快速跳过),字节不丢。
+        let (client, mut server) = duplex(64);
+        let registry = TraceRegistry::new(); // 未 activate
+        let mut traced = TraceIo::new(client, "inst".into(), registry);
+        traced.write_all(&[0x07]).await.unwrap();
+        let mut buf = [0u8; 1];
+        server.read_exact(&mut buf).await.unwrap();
+        assert_eq!(&buf, &[0x07]);
+    }
+
+    #[test]
+    fn trace_io_debug_impl() {
+        // tcp::attach_slave 要求 T: Debug;TraceIo<TcpStream> 须实现 Debug。
+        let (client, _server) = tokio::io::duplex(64);
+        let registry = TraceRegistry::new();
+        let t = TraceIo::new(client, "inst".into(), registry);
+        let _s = format!("{t:?}");
     }
 }
