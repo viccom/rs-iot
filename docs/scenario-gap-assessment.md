@@ -31,11 +31,11 @@
 - **一份插件代码 + N 个独立运行实例**：`find_source(app_code)` 拿同一工厂，但每次 `start_source` 调 `create()` 新建 struct 实例，**每实例独立 task / CancellationToken / cmd_rx(64) / 连接 / 配置 / 点表**
 - **唯一共享的是 hub**（所有 Sample 汇聚 `mpsc::<Sample>(256)`，pipeline 单消费）；**单实例崩/启停不影响其他**
 - 20 台同型号 PLC = 20 个 `inst_id`（同 `app_code`，各自 `app_config` + `devices`）→ 完全支持
-- lua 同构：一份脚本可被多实例引用，每实例独立 VM/IO task/`stat`/`luakv`，**实例间并发**；lua **一条通讯链路 = 一个实例**（IO task 独占链路，脚本不碰链路只组报文），但当前是**单设备输出语义**（`set_value`/`collect` 硬绑 `devices[0]`，`api/mod.rs:164-168`），一条链路多设备需扩展单实例多 devid（见 §1.2）
+- lua 同构：一份脚本可被多实例引用，每实例独立 VM/IO task/`stat`/`luakv`，**实例间并发**；lua **一条通讯链路 = 一个实例**（IO task 独占链路，脚本不碰链路只组报文）。**M2 已支持单实例多设备输出**：`set_value(devid, tag, v)` 3 参 + `set_values` 批量 + `collect` 嵌套返回 `{[devid]={tag=v}}` 自动判定（见 §1.2）
 
 **触发机制**（`lua_client/mod.rs:171-271` select!）：周期触发（`collect`，ticker `period`）+ 事件触发（`on_data` 被动帧 / `on_write` 写命令 / 热加载）；**无显式"条件触发"**（脚本内自定义逻辑实现）。**实例内串行**（一个 mlua VM 非可重入，collect 含 IO 往返期间主循环挂起，其余事件排队），**实例间并发**。
 
-### 1.2 RS485 总线多设备 —— P0 能力缺口（modbus M1 ✅ 已落地；lua M2 待实现）
+### 1.2 RS485 总线多设备 —— ✅ 已落地（modbus M1 + lua M2）
 
 > **设计原则**（核实自代码 + 设计意图）：**一条通讯链路 = 一个实例**。RS485 总线上挂多台设备，由**一个实例独占该串口**统一管理——链路（open/重连/收发）由宿主封装，脚本/插件只管报文与设备逻辑。**不应**为总线上每台设备各建实例（串口 OS 独占，第二个实例 open 同一口必失败）。
 >
@@ -75,20 +75,22 @@
 ## 2. 自诊断 / 自愈评估（诉求①，重点）
 
 ### 现状
+> **M3（2026-08-09）已修复 P0 两项**：Failed 状态真实写入 + 实例 supervisor。下列"现状/缺口"为 M3 前基线，保留作演进参照；最新状态见建议表的状态列。
+
 - 各插件有**基础重连**，但策略异构、无统一框架：
   - `opcuaClient`：库级 `session_retry_limit(3)`；读失败拆 session 下 tick 重连（`opcua_client/mod.rs:240,387-395`）
   - `modbusClient`：固定 `sleep(reconnect_secs)`（默认 2s，**非退避**，`modbus_client/mod.rs:226-230`）
   - `s7Client`：**唯一**用 `is_connection_error()` 区分连接错误（`s7_client/mod.rs:448-450`），库 `auto_reconnect`
   - `luaClient`：靠采集周期天然限速，**无 reconnect_secs/无退避**（`lua_client/mod.rs:138-143`）
   - `mqttPub`：固定 sleep 2s（`mqtt_pub/mod.rs:71-74`）
-- 实例状态 5 态枚举（`instance.rs:24-35`），但 **`Failed` 定义了却从未写入**——插件 `run()` 早退（如配置错误 return）仍被标 `Running`（`instance.rs:99`），外部观察"在运行"实际 task 已死
-- 实例 task **panic/早退不会自重启**，也不会标 Failed，需人工 stop+start
+- ~~实例状态 5 态枚举（`instance.rs:24-35`），但 **`Failed` 定义了却从未写入**~~ → **M3 已修复**：`InstanceManager::spawn_supervisor`（`instance.rs:187-203`）唯一 await source task join，task 异常退出（panic/配置错误早退）且 token 未 cancel → 标 `Failed` + `error!` 落盘
+- ~~实例 task **panic/早退不会自重启，也不会标 Failed**~~ → **M3 已修复**（supervisor 标 Failed；自重启后置，目前 REST `startinst` 重拉）
 
 ### 缺口
-- 🔴 **Failed 状态不真实**（task 死了仍显 Running）——直接破坏"自诊断"可信度
-- 🔴 **无实例 watchdog**（panic/早退不自愈）
-- 🟠 无统一退避/熔断/重试上限（modbus/mqtt 固定间隔，opcua 仅库级上限）
-- 🟠 连接状态（`io_connected`/`last_io_err`）不对外暴露（`luastat.rs:6` 注释承认 v1 后置）
+- ~~🔴 **Failed 状态不真实**（task 死了仍显 Running）~~ → **M3 已修复**
+- ~~🔴 **无实例 watchdog**（panic/早退不自愈）~~ → **M3 已修复**（supervisor 标 Failed + 告警；自动重启后置）
+- 🟠 无统一退避/熔断/重试上限（modbus/mqtt 固定间隔，opcua 仅库级上限）——**仍未做**
+- 🟠 连接状态（`io_connected`/`last_io_err`）不对外暴露 ——**仍未做**（M4 InstanceStat 核心字段未含 connected，部分插件经 `extra` 透传如 sidecar `connected`）
 
 ### 建议
 | 优先级 | 项 | 说明 |
@@ -124,10 +126,10 @@
 
 ## 4. 埋点监测评估（诉求③：宿主 + 插件埋点值）
 
-### 现状
-- ✅ **仅 `luaClient` 有结构化指标**：`stat:<inst>` JSON 含 `status`/`collect_count`/`collect_fail_count`/`last_collect_ts`/`last_collect_duration_ms`/`vm_restart_count`/`script_version`/`last_err`（`luastat.rs:12-30`），REST `GET /api/v1/lua/stats?inst_id=` 暴露（`routes_lua.rs:27`）
-- ✅ lux `DBSIZE` 在 `/sysstatus` 暴露（粗略宿主指标）
-- ❌ **opcua/modbus/s7/dataSim 零计数器**——无采集次数/成功率/延迟/连接状态/错误计数，只散落 `warn!` 文本
+### 现状（M4 已统一，2026-08-09）
+- ✅ **全部内置插件 + sidecar + mqttPub 经 `StatTracker` 写 lux `stat:<inst>` `InstanceStat`**（M4，替代 lua 专属 `luastat`）：核心 6 字段 `status`/`tick_count`/`fail_count`/`last_activity_ts`/`last_activity_duration_ms`/`last_err`；插件扩展经 `extra` 透传（opcua `session_reconnect_count`、modbus `exception_count`、s7 `reconnect_count`、lua `vm_restart_count`/`script_version`、sidecar `connected`/`heartbeat`）。REST 统一 `GET /api/v1/inst/stats?inst_id=`（**旧 `/api/v1/lua/stats` 已废弃移除**）。约定见 [`instrumentation-conventions.md`](instrumentation-conventions.md)
+- ✅ lux `DBSIZE` 在 `/sysstatus` 暴露（粗略宿主指标）；进程级 CPU/mem/uptime（M4 Phase 4，sysinfo 现采）
+- ✅ **进程级 + per-instance 指标另经 `GET /metrics`（Prometheus exposition 文本，免 JWT）**（P1 #1）对接监控栈——M4 数据源的机器出口
 - ❌ 无 `/metrics`/Prometheus/OpenMetrics 端点（`Cargo.toml` 无 metrics crate）
 - ❌ 无 CPU/内存/uptime/hub 队列水位
 
@@ -167,12 +169,12 @@
 
 | 诉求 | 现状评级 | 关键缺口 | 建议优先级 |
 |---|---|---|---|
-| ① 自诊断自愈 | 🟠 弱 | Failed 不真实 / 无 watchdog / 无统一退避 | **P0** Failed+watchdog；P1 退避+连接状态；P2 熔断 |
+| ① 自诊断自愈 | 🟢 好（M3 ✅） | ~~Failed 不真实 / 无 watchdog~~ 已修（M3 supervisor 标 Failed + 告警）；统一退避/熔断/连接状态后置 | **P0** ✅ Failed+watchdog（M3）；P1 退避+连接状态；P2 熔断 |
 | ② 故障定位 | 🟢 好（日志落盘 M3 + ring buffer 快照 P1 子系统 3 ✅） | ~~文件日志默认关 / 退出丢末尾 / 无故障前快照~~ 已修（M3 默认文件+flush + P1 ring buffer+GET 快照）；错误聚合/限流后置 | **P0** ✅ 默认文件+保留期+flush；P1 ✅ ring buffer；聚合后置 |
-| ③ 埋点监测 | 🔴 仅 lua | 4 内置插件零计数 / 无 /metrics | **P0** 内置插件补 stat；P1 /metrics+资源 |
+| ③ 埋点监测 | 🟢 全覆盖（M4 ✅） | ~~仅 lua / 4 内置插件零计数 / 无 /metrics~~ 已修（M4 全插件 StatTracker + InstanceStat + P1 /metrics + 进程级 CPU/mem） | **P0** ✅ 内置插件补 stat（M4）；P1 ✅ /metrics+资源 |
 | ④ 报文输出 | 🟡 阶段 1（lua+modbus ✅；opcua/s7/sidecar 后置） | 阶段 1 已补 per-instance dump 开关 + 运行时激活（`TraceIo<T>` 拦截 + direct dump 分工）；opcua/s7 非裸报文协议、sidecar 是 bridge IPC 帧，后置 | **P1** per-instance trace 开关（阶段 1 已落地） |
 | 协议覆盖 | ✅ 框架足够 | 具体协议（三菱/欧姆龙/AB） | 用 lua/外部补，不改核心 |
-| **RS485 总线多设备** | 🟡 modbus ✅ M1 / lua 待 M2 | modbus 多 slave 已落地（device 级 slave_id + poll_strategy + 超时故障隔离）；lua `set_value`/`collect` 绑 devices[0] 待 M2 | **P0** lua 单实例多 devid（M2）；modbus 已完成（见 §1.2） |
+| **RS485 总线多设备** | ✅ modbus M1 + lua M2 已落地 | modbus 多 slave（device 级 slave_id + poll_strategy + 超时故障隔离）+ lua 单实例多 devid（`set_value` 3 参 + `set_values` + `collect` 嵌套）均已完成（见 §1.2） | ✅ 已完成 |
 
 ## 7. 对任务 2/3/4/5 的影响（回应"是否需新增接口或功能"）
 

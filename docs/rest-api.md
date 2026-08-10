@@ -1,8 +1,8 @@
 # rs-iot REST API 文档
 
 > 管理 API（axum）。默认端口 **8780**（`config.rs` 默认值；仓库 `config.toml` 改为 **8790** 避让本机占用，下文示例统一用 8790）。
-> 鉴权：JWT（24h）+ `X-Access-Key` + 白名单。共 34 条路由（32 业务 + `/apitest` + `/`）。
-> 所有端点前缀 `/api/v1`；请求/响应体均为 JSON（`Content-Type: application/json`）。
+> 鉴权：JWT（24h）+ `X-Access-Key` + 白名单。业务前缀 `/api/v1`；`/metrics` 为顶层路径（免 JWT，Prometheus 抓取）。
+> 请求/响应体均为 JSON（`Content-Type: application/json`），唯 `/metrics` 返回 Prometheus 文本。
 
 ## 1. 总览
 
@@ -23,7 +23,7 @@
 
 中间件按顺序判定，**任一通过即放行**：
 
-1. **白名单**：`/api/v1/user/login`、`/api/v1/user/register`（注：`register` 路由**当前未注册**，白名单项悬空）、`/apitest*`
+1. **白名单**：`/api/v1/user/login`、`/api/v1/user/register`（注：`register` 路由**当前未注册**，白名单项悬空）、`/metrics`（Prometheus 抓取，机器出口）、`/apitest*`
 2. **`X-Access-Key` 直通**：请求头 `x-access-key` 与 lux `GET accesskey` 的值非空且相等 → 放行（机器对机器，对标 Lite_IOT `globalAccessKey`）
 3. **JWT**：`Authorization: <裸 token>`（**不剥离 `Bearer ` 前缀**，客户端直接传 token 字符串）或 Cookie `token=<jwt>`，HS256 校验
 
@@ -71,7 +71,7 @@ curl -s -XPOST -H "Authorization: $TOKEN" -H 'Content-Type: application/json' \
 | POST | `/api/v1/startinst` | `{"inst_id":"..."}` | `{"status":"ok"}`；不存在 404；配置非法 400；非南向 400 |
 | POST | `/api/v1/stopinst` | `{"inst_id":"..."}` | `{"status":"ok"}` |
 
-- `<state>` ∈ `starting`/`running`/`stopping`/`stopped`/`failed`（注：`failed` 当前代码未写入）
+- `<state>` ∈ `starting`/`running`/`stopping`/`stopped`/`failed`。**`failed` 由 M3 supervisor 真实写入**：实例 task 异常退出（panic/配置错误早退/非正常 return）且未被主动 stop → 标 `failed` + `error!` 落盘；运维 `startinst` 可重拉（`failed → starting → running`）。主动 `stopinst` 走 `stopping → stopped`（token cancel）不误判
 - `startinst` 仅支持**南向 Source**（拒绝北向 `app_type=north`）
 
 ### 4.2 实例 CRUD（`routes_inst.rs`，lux Hash `instances`）
@@ -87,20 +87,25 @@ curl -s -XPOST -H "Authorization: $TOKEN" -H 'Content-Type: application/json' \
 - **外部插件**（`host_kind:"external"`）：每次 `set` 调 `ext_token::issue` **覆盖旧 token**（旧 token 即失效），明文 `plugin_token` 仅此次返回（管理员交付外部进程）。重复 set 同实例 = 轮换 token
 - `inst/delete` 连带清除外插件 token + 该实例全部 Lua kv（`luakv`）
 
-**建普通采集实例示例**（modbus）：
+**建普通采集实例示例**（modbus，RS485 多 slave 单实例）：
 ```bash
 curl -s -XPOST -H "Authorization: $TOKEN" -H 'Content-Type: application/json' \
   http://localhost:8790/api/v1/inst/set -d '{
     "inst_id":"mb1",
     "object":{
       "inst_name":"modbus 电表","app_code":"modbusClient","app_type":"south",
-      "app_config":{"kind":"tcp","endpoint":"192.168.1.10:502","slave_id":1,"period":2},
-      "devices":[{"label":"电表","value":"devA","children":[
-        {"label":"电压","value":"holding:0:f32:ABCD","type":"float"}
-      ]}]
+      "app_config":{"kind":"tcp","endpoint":"192.168.1.10:502","period":2,
+        "poll_strategy":"round_robin","request_timeout_secs":2},
+      "devices":[
+        {"label":"电表A","value":"devA","slave_id":1,"children":[
+          {"label":"电压","value":"holding:0:f32:ABCD","type":"float"}]},
+        {"label":"电表B","value":"devB","slave_id":2,"children":[
+          {"label":"电压","value":"holding:0:f32:ABCD","type":"float"}]}
+      ]
     }
   }'
 ```
+- **M1 RS485 多 slave**：`slave_id` 下沉到设备级（`DeviceSpec.slave_id`），一条总线（同 `app_config` 串口参数）多从站由单实例轮询；`poll_strategy` = `round_robin`（默认，齐头并进）/ `sequential`（单设备多点时间一致）；`request_timeout_secs` per-request 超时跳过（单 slave 无响应故障隔离，不拖垮整轮）。单 slave 旧配置（`app_config.slave_id`）向后兼容回退。详见 CLAUDE.md「modbus_client 端到端」
 
 **建外部插件实例示例**（sidecarClient，返回 plugin_token）：
 ```bash
@@ -161,12 +166,11 @@ curl -s -XPOST -H "Authorization: $TOKEN" -H 'Content-Type: application/json' \
 
 | Method | Path | Body/Query | 响应 |
 |---|---|---|---|
-| GET | `/api/v1/lua/stats` | `?inst_id=` | lux `stat:<inst>` JSON（采集计数/耗时/degraded 等）；无则 `{}` |
 | POST | `/api/v1/lua/reload` | `?inst_id=` | `{"status":"ok"}`；实例不存在 404；非 luaClient 400 |
 | GET | `/api/v1/lua/scripts` | — | `{"scripts":["<目录名>",...]}` |
 
 - `reload` 仅对 `app_code=="luaClient"` 生效（stop+start，IO 重连）；与文件 notify 自动热加载等价
-- 仅 luaClient 有结构化运行指标；opcua/modbus/s7 暂无（见 [场景缺口评估](scenario-gap-assessment.md)）
+- **实例运行指标（含 luaClient）已统一到 `GET /api/v1/inst/stats`**（M4，见 §4.10）；旧 `GET /api/v1/lua/stats` 已移除
 
 ### 4.7 写命令下发（`routes_command.rs`）
 
@@ -196,6 +200,29 @@ curl -s -XPOST -H "Authorization: $TOKEN" -H 'Content-Type: application/json' \
 | GET | `/apitest` | 公开 | 内嵌 apiTest 页面（`index.html`） |
 | GET | `/` | JWT | 302 → `/apitest`（未带凭据访问根路径会得 401） |
 
+### 4.10 可观测性（`routes_metrics.rs` / `routes_stat.rs` / `routes_trace.rs` / `routes_logs.rs`）
+
+> M4 统一埋点 + P1 三子系统（/metrics + 报文 trace + 日志 ring buffer）。
+
+| Method | Path | 鉴权 | Body/Query | 响应 |
+|---|---|---|---|---|
+| GET | `/metrics` | **公开** | — | Prometheus exposition 文本（`Content-Type: text/plain; version=0.0.4`） |
+| GET | `/api/v1/inst/stats` | JWT | `?inst_id=`（可选） | `{inst_id, app_code, host_kind, state, health}`（health = lux `stat:<inst>` InstanceStat） |
+| POST | `/api/v1/inst/trace` | JWT | `{"inst_id":"...","duration_secs":60}` | `{"status":"ok","deadline_ms":...}`；实例未运行 404 |
+| GET | `/api/v1/inst/trace` | JWT | — | `{"active":["<inst_id>",...]}`（已惰性过滤超时项） |
+| DELETE | `/api/v1/inst/trace` | JWT | `?inst_id=` | `{"status":"ok"}` |
+| GET | `/api/v1/logs/recent` | JWT | `?level=&target=&limit=`（均可选） | `[LogEntry]`（最近 N 条结构化日志） |
+
+**`/metrics`**（P1 #1，机器出口）：进程级 14 metric family（`rs_iot_info`/`uptime_seconds`/`process_cpu_pct`/`process_mem_bytes`/`ctl_*_total`/`pipeline_*_total`/`hub_depth[_max]`/`mqtt_*`）+ per-instance 5（`rs_iot_instance_info{inst_id,app_code,host_kind,state,health}` + `instance_tick_total`/`fail_total`/`last_activity_duration_ms`/`last_activity_ts`）。命名遵循 Prometheus 规范（counter `_total`、gauge 无后缀、耗时 `_ms`/字节 `_bytes`）。对接 Prometheus/Grafana：`job: rs-iot, /metrics`，免认证（内网信任，跨网加 IP 白名单/mTLS）。
+
+**`/api/v1/inst/stats`**（M4）：替代废弃的 `/api/v1/lua/stats`，**全部内置插件**（dataSim/opcua/modbus/s7/lua/sidecar）+ 北向 mqttPub 统一经 `StatTracker` 写 lux `stat:<inst>` InstanceStat。核心 6 字段：`status`（running/degraded/stopped）/`tick_count`/`fail_count`/`last_activity_ts`/`last_activity_duration_ms`/`last_err`；插件扩展字段经 `extra` 透传（如 opcua `session_reconnect_count`、modbus `exception_count`、lua `vm_restart_count`/`script_version`）。
+
+**`/api/v1/inst/trace`**（P1 #2，报文 trace 开关）：per-instance 运行时激活收发字节 hex dump（裸报文调试）。激活后该实例收发字节进 tracing target `io_trace`（抓包风格 `[inst_id] TX/RX <hex>`，惰性超时关闭）。**覆盖 lua（io_engine direct dump：request TX/RX + recv_idle 被动 RX 三点）+ modbus 4 传输（`TraceIo<T>` 包底层 IO——TCP/RTU serial/RTU tcp/RTU udp）**；opcua/s7（非裸报文协议）/sidecar（bridge IPC 帧）后置。
+
+**`/api/v1/logs/recent`**（P1 #3，日志 ring buffer 快照）：内存 ring buffer 截获最近 N 条日志（`[log].ring_buffer_capacity` 默认 2000），结构化 `LogEntry{ts, level, target, message, fields}`。`level=`（>= 给定，如 `warn` → error+warn）/`target=`（精确，如 `io_trace`）/`limit=`（默认 200）。**报文 trace 衔接**：`?target=io_trace` 拉报文 hex（ring buffer 用独立 filter `info,io_trace=trace` 抓 trace level）。内存态（重启清空，"最近"快照），常规运行日志落盘靠 daily 文件（M3）。
+
+> **报文 trace 按设计不落盘**：trace 报文（trace level）只进内存 ring buffer（2000 条/实例，按需激活、用完关闭），不写入日志文件——避免 hex 数据撑爆磁盘；常规运行日志（info/warn/error）才 daily 落盘。
+
 ## 5. 数据模型（`src/types.rs`）
 
 ```
@@ -219,4 +246,4 @@ CtlMessage { instance:InstId, devid, cmd, data:<JSON 文本> }
 
 ## 6. 已知限制与完备性
 
-当前 API 定位为**单管理员调试/运维**（对标 Lite_IOT）。要支撑「管理员 + 多用户前端系统」尚有缺口（无授权层、无用户自服务、无批量/分页/历史、命令无回执、无 healthz/metrics、错误格式不统一等），详见 [`docs/api-completeness-assessment.md`](api-completeness-assessment.md)。
+当前 API 定位为**单管理员调试/运维**（对标 Lite_IOT）。要支撑「管理员 + 多用户前端系统」尚有缺口（无授权层、无用户自服务、无批量/分页/历史、命令无回执、无 `/healthz`、错误格式不统一等），详见 [`docs/api-completeness-assessment.md`](api-completeness-assessment.md)。**可观测性已具备**：`/metrics`（Prometheus）+ `/api/v1/inst/stats`（per-instance JSON）+ `/api/v1/inst/trace`（报文 trace）+ `/api/v1/logs/recent`（日志快照）四端点覆盖指标/诊断/日志三个维度。

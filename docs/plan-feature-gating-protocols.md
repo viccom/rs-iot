@@ -1,7 +1,7 @@
 # 方案 B：内置协议 Cargo feature 裁剪 —— 评估与风险控制
 
-> **状态**：评估 + 方案设计完成，待确认后实施
-> **日期**：2026-08-07
+> **状态**：✅ 已实施（README 里程碑 M11，`--no-default-features --features "lua,modbus"` 等组合可编译 + 优雅降级，CI minimal job 守护）
+> **日期**：2026-08-07（评估）/ 2026-08-08（实施落地）
 > **关联**：`docs/plugin-extension-strategy.md`（上层策略，本方案是其第 6/7 节"现场裁剪"的具体落地）
 > **目标**：把 `opcua_client` / `modbus_client` / `s7_client` 三个南向协议插件改为可选 Cargo feature，实现"现场按需编译 + 系统依赖可选 + 二进制体积裁剪"，**零运行时风险、零行为破坏**。
 

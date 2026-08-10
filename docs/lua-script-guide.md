@@ -155,11 +155,29 @@ dry-run `on_init` 验证）。失败回退旧 VM（永不半生效）。
 
 兜底：`POST /api/v1/lua/reload?inst_id=<id>`（stop + start，IO 重连）。
 
-## 状态监测
+## 状态监测（M4 统一埋点）
 
-lux `stat:<inst>` JSON（每 collect 周期采点）：
+lux `stat:<inst>` 存 `InstanceStat` JSON（`StatTracker` 周期 flush，每 collect 周期更新）。**核心 6 字段所有插件一致**：
 
-- `running` / `stopped` / `degraded`（连续失败 ≥ `fail_threshold`）。
-- `collect_count` / `collect_errors` / `last_collect_ms` / `reload_count` / `script_version`。
+- `status`：`running` / `degraded`（连续失败 ≥ 阈值）/ `stopped`。
+- `tick_count` / `fail_count`：活动成功/失败累计计数。
+- `last_activity_ts` / `last_activity_duration_ms`：最近活动时间戳与耗时。
+- `last_err`：最近失败原因（成功时清空）。
 
-REST：`GET /api/v1/lua/stats?inst_id=<id>`（读 stat）/ `GET /api/v1/lua/scripts`（列脚本）。
+lua 专有扩展字段经 `extra` 透传：`vm_restart_count`（VM 重建次数）、`script_version`（main.lua sha256 前 8 hex）、`consecutive_fail`。
+
+REST：`GET /api/v1/inst/stats?inst_id=<id>`（读 stat，M4 统一端点，**旧 `GET /api/v1/lua/stats` 已废弃移除**）/ `GET /api/v1/lua/scripts`（列脚本）。埋点约定详见 [`instrumentation-conventions.md`](instrumentation-conventions.md)。
+
+## 报文 trace（P1 #2）
+
+lua 实例收发报文可 per-instance 按需激活 hex dump（裸报文调试）：
+
+```bash
+# 激活 60s
+curl -X POST -H "Authorization: <token>" -H 'Content-Type: application/json' \
+  -d '{"inst_id":"<id>","duration_secs":60}' localhost:8790/api/v1/inst/trace
+# 拉报文 hex（经日志 ring buffer，target=io_trace）
+curl -H "Authorization: <token>" "localhost:8790/api/v1/logs/recent?target=io_trace&limit=10"
+```
+
+激活后该实例 `ctx:request` 的 request TX/RX + `recv_idle` 被动 RX **三点**字节进 tracing target `io_trace`（抓包风格 hex）。**按设计只进内存 ring buffer（2000 条/实例，不落盘）**，惰性超时关闭。lua 走 io_engine direct dump（frame 已在手）；modbus 走 `TraceIo<T>` 拦截层。

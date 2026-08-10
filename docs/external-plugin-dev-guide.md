@@ -55,12 +55,12 @@ accept_hello_timeout_secs = 10
 
 ```bash
 # 登录拿 JWT（注意 body 字段：user_id / pass）
-TOKEN=$(curl -s -XPOST http://localhost:8780/api/v1/user/login \
+TOKEN=$(curl -s -XPOST http://localhost:8790/api/v1/user/login \
   -H 'Content-Type: application/json' \
   -d '{"user_id":"admin","pass":"admin"}' | jq -r .token)
 
 # 建实例（app_code=sidecarClient, host_kind=external）→ 响应含 plugin_token（仅此次）
-curl -s -XPOST http://localhost:8780/api/v1/inst/set \
+curl -s -XPOST http://localhost:8790/api/v1/inst/set \
   -H "Authorization: $TOKEN" -H 'Content-Type: application/json' \
   -d '{
     "inst_id":"ext1",
@@ -75,7 +75,7 @@ curl -s -XPOST http://localhost:8780/api/v1/inst/set \
   }' | jq .    # → {"status":"ok","plugin_token":"<hex>"}
 
 # 启动实例（注册 slot，等外部接入）
-curl -s -XPOST http://localhost:8780/api/v1/startinst \
+curl -s -XPOST http://localhost:8790/api/v1/startinst \
   -H "Authorization: $TOKEN" -H 'Content-Type: application/json' \
   -d '{"inst_id":"ext1"}'
 ```
@@ -159,6 +159,7 @@ function main():
 
 - **验入库**：`redis-cli -p 6390 HGETALL rtdata:<devid>`（DataUp → bridge → pipeline → lux）
 - **rs-iot 日志**：grep `[sidecarClient]`（连接/配置推送/断连/写命令丢弃均有日志）
+- **查 sidecar 实例 health**（M4 统一埋点）：`GET /api/v1/inst/stats?inst_id=<ext>` → `{state, health}`（health 含 `connected`/`heartbeat` 扩展字段，经 `extra` 透传；每收 DataUp → `tick_ok`）
 - **token 错**：外部会收到 `HelloAck{ok:false, msg}`，连接被关
 - **配置变更生效**：`stopinst` + `startinst`（外部重连拿新 ConfigPush；PoC 不做自动 notify）
 - **发写命令验证回路**：`POST /api/v1/command/send` → 外部打印/执行 → CommandAck

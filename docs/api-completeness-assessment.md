@@ -19,7 +19,7 @@
 | 大数据量**分页/过滤** | ❌ **不具备** | 所有 list 端点全量返回；实例/设备上百后会爆 |
 | 写命令**执行反馈** | ❌ **不具备** | command/send 只确认投递，无回执/结果/超时 |
 | 实时数据**历史/趋势** | ❌ **不具备** | rtdatas 只读最新快照，无时间范围/聚合 |
-| 健康探针 / 指标 | ❌ **不具备** | 无 /healthz；无 /metrics（见 [场景缺口评估](scenario-gap-assessment.md)） |
+| 健康探针 / 指标 | 🟡 **部分具备** | `/metrics`（Prometheus，P1 #1）+ `/api/v1/inst/stats`（per-instance JSON，M4）+ `/api/v1/logs/recent`（日志快照，P1 #3）已上；`/healthz` 仍缺（sysstatus 带鉴权+业务数据，不适合 k8s/LB 探活） |
 
 **总结论**：当前 API **不足以直接支撑"管理员 + 多用户前端系统"**。它是一个合格的"网关运维 API"，但缺少从"工具"到"产品"的几项关键能力——授权层、用户自服务、分页、命令回执是前置硬缺口。
 
@@ -60,8 +60,8 @@
 ### E. 运维与契约
 | # | 缺口 | 说明 |
 |---|---|---|
-| E1 | 无 `/healthz`/`/readyz` | sysstatus 带鉴权+业务数据，不适合 k8s/LB 探活 |
-| E2 | 无 `/metrics`/审计日志查询 | 见 [场景缺口评估](scenario-gap-assessment.md) §4 |
+| E1 | 无 `/healthz`/`/readyz` | sysstatus 带鉴权+业务数据，不适合 k8s/LB 探活（**`/metrics` 已具备指标出口，但探活专用 `/healthz` 仍缺**） |
+| E2 | ~~无 `/metrics`/审计日志查询~~ → **部分具备** | `/metrics`（Prometheus，P1）+ `/api/v1/logs/recent`（最近日志快照，P1 #3）+ `/api/v1/inst/stats`（M4）已上；完整审计日志查询（谁在何时改了什么）仍缺 |
 | E3 | DTO 校验不一致 | inst/set 强校验（好）；device/user/accesskey set 裸 JSON 直写无校验，易入脏数据 |
 | E4 | 错误响应格式不统一 | 有的 `(status, "字符串")`，有的 `{"status":"error","msg"}`，有的 `{"status":"ok"}`；无统一 envelope |
 | E5 | Authorization 不剥离 Bearer | 客户端须传裸 token，与通用 `Bearer xxx` 约定相悖 |
@@ -79,9 +79,15 @@
 ### Phase 2 —— 好用的前端（P1）
 - **D2 历史查询**：lux 时序存储（Stream/列表）+ `GET /api/v1/rtdatas/history?dev_id=&from=&to=&interval=`（对接场景评估的时序 downsample）
 - **C2 批量操作**：批量 set/delete/启停/命令
-- **E1 healthz** + **E2 /metrics**（见场景评估）
+- **E1 healthz**（**E2 /metrics 已完成，P1 #1，commit 1acacb0**；探活专用 `/healthz` 仍待补）
 - **A2 token 吊销**：登出/删用户/改 accesskey 即时失效（ lux 黑名单或短 TTL + refresh）
 - **D3 实时推送**：WebSocket/SSE 订阅设备值变化（替代前端轮询）
+
+### Phase 1.5 —— 可观测性（P1，已完成 2026-08-09 ~ 2026-08-10）
+- ✅ **`/metrics`**（Prometheus 端点，免 JWT，进程级 + per-instance 指标）
+- ✅ **`/api/v1/inst/stats`**（M4 统一 per-instance JSON 指标，替代废弃 `/api/v1/lua/stats`）
+- ✅ **`/api/v1/inst/trace`**（报文 hex dump 按需激活，lua + modbus 4 传输）
+- ✅ **`/api/v1/logs/recent`**（日志 ring buffer 最近 N 条快照）
 
 ### Phase 3 —— 企业级（P2）
 - **A3 AccessKey 分作用域**：按用户/实例/读写分发，支持灰度轮换
@@ -90,6 +96,6 @@
 
 ## 5. 与场景评估的关系
 
-本文件聚焦"前端系统能力"（认证授权 / CRUD / 分页 / 命令回执 / 历史查询）。运维可观测性（埋点 /metrics、报文 trace、日志 ring buffer、自愈）见 [`scenario-gap-assessment.md`](scenario-gap-assessment.md)。两者交集（/metrics、/healthz、inst/stats）在各自文中互为引用，不重复展开。
+本文件聚焦"前端系统能力"（认证授权 / CRUD / 分页 / 命令回执 / 历史查询）。运维可观测性（埋点 /metrics、报文 trace、日志 ring buffer、自愈）见 [`scenario-gap-assessment.md`](scenario-gap-assessment.md)。**可观测性交集已落地**：`/metrics`（P1 #1）、`/api/v1/inst/stats`（M4）、`/api/v1/inst/trace`（P1 #2）、`/api/v1/logs/recent`（P1 #3）四端点覆盖指标/诊断/日志三维度（详见 [`rest-api.md`](rest-api.md) §4.10）。前端系统侧仍未补的：授权层(A1)、用户自服务(B)、分页(C1)、命令回执(D1)、`/healthz`(E1) 等前置硬缺口。
 
 > 以上为评估建议，是否实现、实现哪些，由项目决策。

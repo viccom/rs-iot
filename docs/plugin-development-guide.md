@@ -312,6 +312,7 @@ async fn run(&self, ctx, inst, tx, mut cmd_rx, token) {
 - **断线重连**：读失败 + 连接错误 → `conn = None`，下个 tick 重连（对标 opcua `session=None`）
 - **`MissedTickBehavior::Skip`**：积压 tick 跳过，不补偿（避免catch-up 风暴）
 - **`tx.send(sample).await.is_err()` → break**：hub 关闭（pipeline 挂），task 退出
+- **埋点（M4）**：task 内持 `StatTracker::new(inst_id, ctx.lux.clone())`，select! 加第 4 分支 `flush_ticker.tick() → tracker.flush()`；采集成功 `tracker.tick_ok(elapsed_ms)`、失败 `tracker.tick_fail(reason)`。连接底层 IO 包 `TraceIo::new(stream, inst_id, ctx.trace_registry.clone())` 接入报文 trace（详见 [§4.12](#412-运行指标与诊断m4--p1-已落地)）
 
 ### 4.6 写命令（`cmd_rx` + `handle_write`）
 
@@ -397,22 +398,23 @@ inventory::submit! {
 最小参考：`src/plugin/builtin/datasim/mod.rs`（DataSim，模拟采集，~130 行）。协议采集参考：
 `opcua_client/mod.rs`（中等，批量读 + 类型映射）、`s7_client/mod.rs`（中等，批量读 + 大端解码）。
 
-### 4.12 运行指标与诊断（v1 规划，待实现）
+### 4.12 运行指标与诊断（M4 + P1 已落地）
 
-> 本节是**前瞻指引**：当前仅 `luaClient` 有完整运行指标（`stat:<inst>`），opcua/modbus/s7 的指标暴露、报文 trace、统一自愈尚在规划。缺口与优先级见 [`scenario-gap-assessment.md`](scenario-gap-assessment.md)。新增插件应**预留埋点位置**，便于后续统一接入零返工。
+> 本节是**已落地的统一规范**：M4 把"埋点"从 lua 专属提升为框架统一 + 全覆盖（`StatTracker` + `InstanceStat`），P1 补报文 trace（`io_trace`）+ `/metrics` Prometheus 端点。新增插件**直接接入**下列机制，无需"预留"。完整约定见 [`instrumentation-conventions.md`](instrumentation-conventions.md)。
 
-**指标埋点（对标 `luaClient` `stat:<inst>`，见 `db/luastat.rs`）**：每个 Source task 建议维护并周期写入 lux `stat:<inst_id>`：
+**指标埋点（M4，`StatTracker`）**：每个 Source task 持有一个 `StatTracker`（`src/plugin/stat_tracker.rs`），周期（`FLUSH_INTERVAL_SECS`）+ 阈值触发 flush 到 lux `stat:<inst_id>`（`db/stat.rs` `InstanceStat`）。核心 6 字段所有插件一致：
 - `status`：`running` / `degraded`（连续失败 ≥ 阈值）/ `stopped`
-- `collect_count` / `collect_fail_count`：采集成功/失败计数
-- `last_collect_ts` / `last_collect_duration_ms`：最后采集时间戳与耗时
-- `connected`（规划）：当前连接状态
-- `last_err`（规划）：最后错误描述
+- `tick_count` / `fail_count`：活动成功/失败累计计数
+- `last_activity_ts` / `last_activity_duration_ms`：最近活动墙上时间戳与耗时
+- `last_err`：最近失败原因（成功时清空）
 
-**报文 trace（规划）**：收发报文经统一 hex dump 工具，受 per-instance 开关控制（REST 按需激活，到时自动关）——见场景评估 §5。
+插件扩展字段经 `extra`（serde flatten）透传——如 opcua `session_reconnect_count`、modbus `exception_count`、s7 `reconnect_count`、lua `vm_restart_count`/`script_version`、sidecar `connected`/`heartbeat`。`select!` 主循环加 flush ticker + `tick_ok(elapsed_ms)`/`tick_fail(reason)` 两个上报入口（参考任一内置插件实现）。
 
-**自愈策略**：§4.5 的懒连接 + 断线重连（`Option<Conn>` + `is_connection_error()`）是 v1 既有范式；统一指数退避、`Failed` 状态真实写入、实例 watchdog 见场景评估 §2。
+**报文 trace（P1 #2，`io_trace`）**：收发报文 hex dump，per-instance 运行时开关（`POST /api/v1/inst/trace` 按需激活，惰性超时关闭）。**阶段 1 已覆盖 lua（io_engine direct dump：request TX/RX + recv_idle 被动 RX 三点）+ modbus 4 传输（`TraceIo<T>` 包底层 IO，`src/io_trace.rs`）**；opcua/s7（非裸报文协议，线缆字节无意义）/sidecar（bridge IPC 帧）后置。新增裸报文协议插件：底层 IO 包一层 `TraceIo<T>` 即可接入（trace 关闭时 dump 快速路径几乎零成本）。
 
-**写新插件时的实务建议**：先按 §4.5 范式实现基础重连；在 task 内提前维护采集计数/耗时（即使暂不写 lux），后续 stat 统一接入时只补"写 lux"一步。
+**自愈（M3）**：§4.5 的懒连接 + 断线重连（`Option<Conn>` + `is_connection_error()`）是 v1 既有范式；**`Failed` 状态真实写入 + 实例 supervisor 已落地**（M3）：`InstanceManager::spawn_supervisor` 唯一 await source task join，task 异常退出（panic/配置错误早退）且 token 未 cancel → 标 `InstState::Failed` + `error!` 落盘；运维 `startinst` 重拉。统一指数退避/熔断仍未做（见场景评估 §2 后续项）。
+
+**写新插件时的实务建议**：① 按 §4.5 范式实现基础重连；② `select!` 加 flush ticker + `StatTracker`（`tick_ok`/`tick_fail`）；③ 若是裸报文协议，底层 IO 包 `TraceIo<T>` 接入报文 trace。三步对照任一内置插件（如 `data_sim`/`modbus_client`）即可。
 
 ---
 
@@ -526,6 +528,10 @@ Command/CommandAck/Heartbeat）。**完整规范见 [`external-plugin-protocol.m
 
 - Python：`examples/ext-plugin-python/`（见其 README）
 - Go（OPC DA）：`examples/ext-plugin-opcda-go/`（huskar-t/opcda，Windows-only，COM）
+
+### 7.6 运行指标（sidecarClient 已接入 M4 统一埋点）
+
+sidecarClient 实例的 health 经 `GET /api/v1/inst/stats?inst_id=<ext>` 查（与内置插件同出口）。`StatTracker` 上报：每收 `DataUp` 帧 → `tick_ok`；扩展字段经 `extra` 透传 `connected`（外部进程在线）/`heartbeat`（最近心跳 ts）。外部进程自身诊断不依赖 rs-iot 埋点（独立进程自带），rs-iot 侧只把连接状态/心跳纳入统一 stat。
 
 ---
 
@@ -674,7 +680,8 @@ Rust 模块系统对 `foo.rs` vs `foo/mod.rs` 透明，迁移**零代码改动**
 - [ ] 写命令 `handle_write`（cmd_rx 分支 + JSON data + 未连接 warn 丢弃）
 - [ ] 错误 `tracing::warn!` 降级，绝不 panic
 - [ ] 日志 `[pluginName]` 前缀
-- [ ] 预留指标埋点（采集成功/失败计数、最后采集 ts/耗时，对标 `stat:<inst>`，见 [§4.12](#412-运行指标与诊断v1-规划待实现)）
+- [ ] 接入 `StatTracker`（`tick_ok`/`tick_fail` + flush ticker，对标 `instrumentation-conventions.md`，见 [§4.12](#412-运行指标与诊断m4--p1-已落地)）
+- [ ] 裸报文协议插件：底层 IO 包 `TraceIo<T>` 接入报文 trace（见 [§4.12](#412-运行指标与诊断m4--p1-已落地)）
 - [ ] `pub` 项有 `///` doc 注释（中文）
 - [ ] 单测覆盖纯函数（解析/编解码/类型映射）
 - [ ] 四项质量门全绿（fmt / clippy -D warnings / test / doc -D warnings）
