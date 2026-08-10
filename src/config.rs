@@ -135,6 +135,8 @@ pub struct LogConfig {
     pub max_days: u64,
     /// 目录总大小上限（MB）；0 = 不限，>0 时按最旧优先删直到低于阈值。
     pub max_size_mb: u64,
+    /// 日志 ring buffer 容量（P1 子系统 3，默认 2000）。内存快照最近 N 条供 API 查询。
+    pub ring_buffer_capacity: usize,
 }
 
 impl Default for LogConfig {
@@ -144,6 +146,7 @@ impl Default for LogConfig {
             level: "info".into(),
             max_days: 7,
             max_size_mb: 0,
+            ring_buffer_capacity: 2000,
         }
     }
 }
@@ -197,5 +200,23 @@ mod tests {
         assert_eq!(cfg.log.dir, "");
         assert_eq!(cfg.log.max_days, 7);
         assert_eq!(cfg.log.max_size_mb, 0);
+    }
+
+    #[test]
+    fn log_config_ring_buffer_capacity_default() {
+        // 缺字段走 Default 2000（struct-level #[serde(default)] 委托 Default impl）
+        let cfg: LogConfig = toml::from_str(r#"level = "info""#).unwrap();
+        assert_eq!(cfg.ring_buffer_capacity, 2000);
+    }
+
+    #[test]
+    fn log_config_ring_buffer_capacity_explicit() {
+        // 显式值覆盖默认
+        let cfg: LogConfig = toml::from_str(
+            r#"level = "info"
+ring_buffer_capacity = 500"#,
+        )
+        .unwrap();
+        assert_eq!(cfg.ring_buffer_capacity, 500);
     }
 }
