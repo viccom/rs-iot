@@ -37,6 +37,8 @@ pub struct AppState {
     pub metrics: std::sync::Arc<crate::process_metrics::ProcessMetrics>,
     /// 报文 trace 开关注册表（REST 端点激活/查询/关闭）。
     pub trace_registry: crate::io_trace::TraceRegistry,
+    /// 日志 ring buffer（GET /api/v1/logs/recent 读）。
+    pub log_ringbuffer: std::sync::Arc<crate::log_ringbuffer::LogRingBuffer>,
 }
 
 /// 白名单路径（无需 JWT）。

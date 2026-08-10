@@ -50,12 +50,18 @@ pub const VERSION: &str = "20250123";
 /// `cfg = None` 表示仅终端、级别 info（供 install/uninstall 等管理命令使用）。
 /// 用 `try_init` 容忍重复调用（进程级 subscriber 单例，重复设置静默忽略）。
 ///
-/// 返回 `WorkerGuard`：调用方必须持有到 shutdown 末尾 drop，触发 non_blocking worker
-/// drain 完剩余日志，保证故障末尾落盘（M3，修复 `std::mem::forget` 丢末尾问题）。
-/// `None` = 文件层未启用（dir 空 或 建目录失败），无需持有。
+/// 返回 tuple：
+/// - `WorkerGuard`：调用方必须持有到 shutdown 末尾 drop，触发 non_blocking worker
+///   drain 完剩余日志，保证故障末尾落盘（M3，修复 `std::mem::forget` 丢末尾问题）。
+///   `None` = 文件层未启用（dir 空 或 建目录失败），无需持有。
+/// - `Arc<LogRingBuffer>`：日志 ring buffer（P1 子系统 3），注入 AppState 供
+///   `GET /api/v1/logs/recent` 读。同一 Arc 被 `RingBufferLayer` 持有截获日志。
 pub fn init_tracing(
     cfg: Option<&config::LogConfig>,
-) -> Option<tracing_appender::non_blocking::WorkerGuard> {
+) -> (
+    Option<tracing_appender::non_blocking::WorkerGuard>,
+    std::sync::Arc<crate::log_ringbuffer::LogRingBuffer>,
+) {
     use tracing_subscriber::{fmt, layer::Layer, prelude::*, EnvFilter};
 
     let default_level = cfg.map(|c| c.level.as_str()).unwrap_or("info");
@@ -84,13 +90,34 @@ pub fn init_tracing(
         }
     }
 
+    // P1 子系统 3：日志 ring buffer（tracing layer 截获最近 N 条日志到内存）。
+    // 独立 EnvFilter("info,io_trace=trace")：全局 filter 是 info 会滤掉 trace level，
+    // ring buffer layer 用独立 filter 才能抓报文 trace（target io_trace，trace level）。
+    let ring_capacity = cfg.map(|c| c.ring_buffer_capacity).unwrap_or(2000);
+    let ring_buffer = std::sync::Arc::new(crate::log_ringbuffer::LogRingBuffer::new(ring_capacity));
+    let ring_filter =
+        EnvFilter::try_new("info,io_trace=trace").unwrap_or_else(|_| EnvFilter::new("info"));
+    layers.push(
+        crate::log_ringbuffer::RingBufferLayer {
+            buffer: ring_buffer.clone(),
+        }
+        .with_filter(ring_filter)
+        .boxed(),
+    );
+
     let _ = tracing_subscriber::registry().with(layers).try_init();
-    guard
+    (guard, ring_buffer)
 }
 
 /// CLI `run` 入口：内部建 shutdown + ctrl_c 监听，委托给 `run_app_with_shutdown`。
-#[tracing::instrument(skip(cfg))]
-pub async fn run_app(cfg: config::AppConfig) -> Result<(), RsIotError> {
+///
+/// `log_ringbuffer` 由调用方（binary 入口 `init_tracing` 解构得到）注入，透传至
+/// `run_app_with_shutdown` → AppState（同一 Arc 供 `RingBufferLayer` 与 GET 端点共享）。
+#[tracing::instrument(skip(cfg, log_ringbuffer))]
+pub async fn run_app(
+    cfg: config::AppConfig,
+    log_ringbuffer: std::sync::Arc<crate::log_ringbuffer::LogRingBuffer>,
+) -> Result<(), RsIotError> {
     let shutdown = CancellationToken::new();
     let s = shutdown.clone();
     tokio::spawn(async move {
@@ -98,7 +125,7 @@ pub async fn run_app(cfg: config::AppConfig) -> Result<(), RsIotError> {
         tracing::info!("ctrl_c received, shutting down");
         s.cancel();
     });
-    run_app_with_shutdown(cfg, shutdown).await
+    run_app_with_shutdown(cfg, shutdown, log_ringbuffer).await
 }
 
 /// 服务态入口（M4 Windows Service / systemd）：shutdown 由外部（SCM/sigterm）触发。
@@ -106,10 +133,11 @@ pub async fn run_app(cfg: config::AppConfig) -> Result<(), RsIotError> {
 /// 数据流（hub 模式，STEP 5 pull 化）：N 个 Source ──hub(mpsc)──► pipeline
 /// ──Processor──► lux HSET rtdata:{devid}；北向 `MqttPub` 独立常驻，
 /// 周期从 lux 抽取 rtdata → PUBLISH `{hwid}/{devid}/datas`。
-#[tracing::instrument(skip(cfg, shutdown))]
+#[tracing::instrument(skip(cfg, shutdown, log_ringbuffer))]
 pub async fn run_app_with_shutdown(
     cfg: config::AppConfig,
     shutdown: CancellationToken,
+    log_ringbuffer: std::sync::Arc<crate::log_ringbuffer::LogRingBuffer>,
 ) -> Result<(), RsIotError> {
     let hwid = types::Hwid::from(hwid::hardware_id());
     tracing::info!(%hwid, "rs-iot starting");
@@ -181,6 +209,7 @@ pub async fn run_app_with_shutdown(
         version: VERSION,
         metrics: metrics.clone(),
         trace_registry: trace_registry.clone(),
+        log_ringbuffer,
     };
     let app = api::build_router(state);
     let api_port = cfg.api_port;
@@ -333,7 +362,7 @@ mod init_tracing_tests {
             dir: dir.to_str().unwrap().to_string(),
             ..Default::default()
         };
-        let guard = init_tracing(Some(&cfg));
+        let (guard, _ring) = init_tracing(Some(&cfg));
         assert!(guard.is_some(), "dir 非空应返回 Some(guard)");
         drop(guard); // 先释放日志文件句柄，再清理目录
         let _ = std::fs::remove_dir_all(&dir);
@@ -345,7 +374,7 @@ mod init_tracing_tests {
             dir: String::new(),
             ..Default::default()
         };
-        let guard = init_tracing(Some(&cfg));
+        let (guard, _ring) = init_tracing(Some(&cfg));
         assert!(guard.is_none(), "dir 空应返回 None");
     }
 }

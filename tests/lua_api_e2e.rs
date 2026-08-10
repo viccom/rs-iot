@@ -61,6 +61,7 @@ async fn app_with_stat(stat_inst: &str) -> (axum::Router, lux::ServerHandle) {
         version: "itest",
         metrics: std::sync::Arc::new(rs_iot::process_metrics::ProcessMetrics::new()),
         trace_registry: rs_iot::io_trace::TraceRegistry::new(),
+        log_ringbuffer: std::sync::Arc::new(rs_iot::log_ringbuffer::LogRingBuffer::new(2000)),
     };
     (build_router(state), handle)
 }

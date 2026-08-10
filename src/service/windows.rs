@@ -72,7 +72,8 @@ fn service_main(_arguments: Vec<std::ffi::OsString>) {
 
     // config 加载成功后初始化日志（含文件输出）。service_main 早期错误（register/config load）
     // 在此之前无 subscriber，由 SCM 事件日志兜底。持有 guard 直到关闭流程末尾显式 drop flush。
-    let _log_guard = rs_iot::init_tracing(Some(&cfg.log));
+    // ring_buffer 随 cfg 一并 move 进 app 线程，注入 run_app_with_shutdown → AppState。
+    let (_log_guard, log_ringbuffer) = rs_iot::init_tracing(Some(&cfg.log));
 
     let shutdown = CancellationToken::new();
     let shutdown_clone = shutdown.clone();
@@ -90,7 +91,11 @@ fn service_main(_arguments: Vec<std::ffi::OsString>) {
             }
         };
         let ok = rt
-            .block_on(rs_iot::run_app_with_shutdown(cfg, shutdown_clone))
+            .block_on(rs_iot::run_app_with_shutdown(
+                cfg,
+                shutdown_clone,
+                log_ringbuffer,
+            ))
             .is_ok();
         let _ = done_tx.send(ok);
         // rt 在此后 drop；若慢，service_main 已 exit(0) 回收，不影响
