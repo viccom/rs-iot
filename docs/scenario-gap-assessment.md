@@ -108,7 +108,7 @@
 
 ### 缺口
 - 🔴 **`config.toml` 默认未启用文件日志层**（`[log].dir` 缺省空，开箱仅终端）——现场不配就无落盘日志
-- 🟠 **无"故障前 N 条日志"环形缓冲**：诉求"拿到故障前一段时间的日志"只能去翻 daily 文件，无内存 ring buffer 可快照
+- ✅ **内存 ring buffer 已落地**（P1 子系统 3，2026-08-10：`RingBufferLayer` 截获最近 N 条 + `GET /api/v1/logs/recent` 快照，独立 filter `io_trace=trace` 衔接报文 trace）；诉求"拿到故障前一段时间的日志"可 REST 取（落盘仍有 daily 文件 M3 兜底）
 - 🟠 **WorkerGuard 被 `std::mem::forget`**（`lib.rs:70`）——进程异常退出时不 flush，丢最后几条日志（恰是故障现场）
 - 🟠 **daily 轮转不删旧文件**——长期运行无限堆积，无大小轮转/保留期
 - 🟡 错误无聚合/限流——持续断连时相同 warn 每周期重复刷屏，淹没关键信息
@@ -168,7 +168,7 @@
 | 诉求 | 现状评级 | 关键缺口 | 建议优先级 |
 |---|---|---|---|
 | ① 自诊断自愈 | 🟠 弱 | Failed 不真实 / 无 watchdog / 无统一退避 | **P0** Failed+watchdog；P1 退避+连接状态；P2 熔断 |
-| ② 故障定位 | 🟡 中（日志好，但默认不落盘 + 无 ring buffer） | 文件日志默认关 / 退出丢末尾 / 无故障前快照 | **P0** 默认文件+保留期+flush；P1 ring buffer+聚合 |
+| ② 故障定位 | 🟢 好（日志落盘 M3 + ring buffer 快照 P1 子系统 3 ✅） | ~~文件日志默认关 / 退出丢末尾 / 无故障前快照~~ 已修（M3 默认文件+flush + P1 ring buffer+GET 快照）；错误聚合/限流后置 | **P0** ✅ 默认文件+保留期+flush；P1 ✅ ring buffer；聚合后置 |
 | ③ 埋点监测 | 🔴 仅 lua | 4 内置插件零计数 / 无 /metrics | **P0** 内置插件补 stat；P1 /metrics+资源 |
 | ④ 报文输出 | 🟡 阶段 1（lua+modbus ✅；opcua/s7/sidecar 后置） | 阶段 1 已补 per-instance dump 开关 + 运行时激活（`TraceIo<T>` 拦截 + direct dump 分工）；opcua/s7 非裸报文协议、sidecar 是 bridge IPC 帧，后置 | **P1** per-instance trace 开关（阶段 1 已落地） |
 | 协议覆盖 | ✅ 框架足够 | 具体协议（三菱/欧姆龙/AB） | 用 lua/外部补，不改核心 |
@@ -188,7 +188,7 @@
 0. **P0（RS485 现场可用性，最优先）**：单实例支持"一条链路多设备"——`luaClient` 单实例多 devid 输出（`set_value` 加 devid 参数 / `collect` 多设备）+ `modbusClient` 单实例多 slave 轮询。设计是"一条链路一个实例"，但当前单实例只能管单设备/单 slave，须扩展（见 §1.2）。不改代码的临时方案：lua 脚本内手动轮询（结果归单 devid）或 RS485↔以太网网关。
 1. **P0（自愈可信 + 日志兜底）**：Failed 状态真实写入 + 实例 watchdog；默认文件日志 + 保留期 + 退出 flush。这俩是"现场可用性"底线。
 2. **P0（埋点补齐）**：opcua/modbus/s7 补 per-instance stat + 统一 REST 端点。把 lua 的范例推广到全部内置插件。
-3. **P1（可观测体系）**：`/metrics` ✅（2026-08-09 `0d4eb22`，免认证 + 手写 Prometheus 文本 + M4 数据源，spec `superpowers/specs/2026-08-09-metrics-prometheus-design.md`）+ 进程资源指标 ✅（M4 `/sysstatus`）+ 报文 trace 开关 ✅ 阶段 1（2026-08-10，lua+modbus 裸报文 + `TraceIo<T>` transport 拦截层，spec `superpowers/specs/2026-08-10-packet-trace-design.md`；opcua/s7 非裸报文协议、sidecar 是 bridge IPC 帧，后置）+ 日志 ring buffer ⬜（子系统 3，独立 spec）。
+3. **P1（可观测体系）**：`/metrics` ✅（2026-08-09 `0d4eb22`，免认证 + 手写 Prometheus 文本 + M4 数据源，spec `superpowers/specs/2026-08-09-metrics-prometheus-design.md`）+ 进程资源指标 ✅（M4 `/sysstatus`）+ 报文 trace 开关 ✅ 阶段 1（2026-08-10，lua+modbus 裸报文 + `TraceIo<T>` transport 拦截层，spec `superpowers/specs/2026-08-10-packet-trace-design.md`；opcua/s7 非裸报文协议、sidecar 是 bridge IPC 帧，后置）+ 日志 ring buffer ✅（2026-08-10，`RingBufferLayer` 截获最近 N 条 + `GET /api/v1/logs/recent`，spec `superpowers/specs/2026-08-10-log-ringbuffer-design.md`；报文 trace 经独立 filter 进 buffer 衔接子系统 2）。
 4. **P1（自愈增强）**：统一退避 + 连接状态暴露。
 5. **P2**：熔断、结构化日志、trace 帧可视化、队列水位。
 
