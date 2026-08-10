@@ -25,6 +25,8 @@ pub mod hwid;
 pub mod io_trace;
 /// 日志保留期清理（按天/按总大小 + 周期 cleanup task）。
 mod log_cleanup;
+/// 日志 ring buffer（P1 子系统 3）：tracing layer 截获最近 N 条日志到内存。
+pub mod log_ringbuffer;
 pub mod pipeline;
 /// 插件系统（trait 契约、注册表、实例管理、内置实现）。
 pub mod plugin;
