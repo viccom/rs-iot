@@ -346,7 +346,7 @@ impl Source for ModbusClient {
                 Evt::Cmd(None) => break,
                 Evt::Tick => {
                     if session.is_none() {
-                        match connect(&cfg).await {
+                        match connect(&cfg, inst_id.as_str(), ctx.trace_registry.clone()).await {
                             Ok(c) => {
                                 tracing::info!(
                                     "[modbusClient] inst {inst_id} connected {} slave {}",

@@ -1,6 +1,7 @@
 //! 连接：按 transport 选 TCP / RTU（serial / over-tcp / over-udp），统一产 `Context`。
 
 use super::config::{FlowKind, ModbusCfg, ParityKind, Transport};
+use crate::io_trace::{TraceIo, TraceRegistry};
 use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::pin::Pin;
@@ -14,20 +15,37 @@ use tokio_serial::{DataBits, FlowControl, Parity, SerialPortBuilderExt, StopBits
 
 /// 建立到 Modbus 从站的连接（按 transport 选 TCP / RTU(serial/over-tcp/over-udp)）。
 /// 四种传输统一返回 `Context`，下游采集/写逻辑同构。每次新建 Context 都 `set_slave`（drop 后丢失）。
-pub(super) async fn connect(cfg: &ModbusCfg) -> Result<Context, String> {
+///
+/// 所有传输的底层 IO 都包一层 `TraceIo`（trace 关闭时 `dump` 快速路径几乎零成本），
+/// 便于报文 trace 拦截 tokio-modbus 吞掉的收发字节。`inst_id` + `trace_registry`
+/// 由调用方（`Source::run` 作用域）传入。
+pub(super) async fn connect(
+    cfg: &ModbusCfg,
+    inst_id: &str,
+    trace_registry: TraceRegistry,
+) -> Result<Context, String> {
     let mut ctx = match cfg.transport {
         Transport::Tcp => {
             let addr = parse_addr(&cfg.endpoint)?;
-            tcp::connect(addr)
+            // TCP:手动 connect + tcp::attach_slave（接受泛型 transport，可插 TraceIo）。
+            // 原先用的 `tcp::connect` 库内建连接，不经我们手，无法包 TraceIo，故改写。
+            let stream = TcpStream::connect(addr)
                 .await
-                .map_err(|e| format!("connect tcp {}: {e}", cfg.endpoint))?
+                .map_err(|e| format!("connect tcp {}: {e}", cfg.endpoint))?;
+            tcp::attach_slave(
+                TraceIo::new(stream, inst_id.into(), trace_registry.clone()),
+                Slave(cfg.slave_id),
+            )
         }
         Transport::RtuTcp => {
             let addr = parse_addr(&cfg.endpoint)?;
             let stream = TcpStream::connect(addr)
                 .await
                 .map_err(|e| format!("connect rtu-tcp {}: {e}", cfg.endpoint))?;
-            rtu::attach_slave(stream, Slave(cfg.slave_id))
+            rtu::attach_slave(
+                TraceIo::new(stream, inst_id.into(), trace_registry.clone()),
+                Slave(cfg.slave_id),
+            )
         }
         Transport::RtuUdp => {
             let addr = parse_addr(&cfg.endpoint)?;
@@ -37,7 +55,10 @@ pub(super) async fn connect(cfg: &ModbusCfg) -> Result<Context, String> {
             sock.connect(addr)
                 .await
                 .map_err(|e| format!("connect rtu-udp {}: {e}", cfg.endpoint))?;
-            rtu::attach_slave(UdpIo::new(sock), Slave(cfg.slave_id))
+            rtu::attach_slave(
+                TraceIo::new(UdpIo::new(sock), inst_id.into(), trace_registry.clone()),
+                Slave(cfg.slave_id),
+            )
         }
         Transport::RtuSerial => {
             let port = cfg
@@ -52,7 +73,10 @@ pub(super) async fn connect(cfg: &ModbusCfg) -> Result<Context, String> {
             let stream = builder
                 .open_native_async()
                 .map_err(|e| format!("open serial {port}: {e}"))?;
-            rtu::attach_slave(stream, Slave(cfg.slave_id))
+            rtu::attach_slave(
+                TraceIo::new(stream, inst_id.into(), trace_registry.clone()),
+                Slave(cfg.slave_id),
+            )
         }
     };
     // 统一 set_slave：RTU 在 attach_slave 已带 slave，再设无害；TCP 必须设。

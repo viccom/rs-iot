@@ -154,6 +154,21 @@ async fn lua_trace_dump_runs_on_request_without_panic() {
     assert!(registry.get("lua-1").is_none());
 }
 
+#[tokio::test]
+async fn modbus_trace_activated_during_mock_session_no_panic() {
+    // 验证:trace activate 后 modbus 采集路径(经 TraceIo)不 panic、registry 状态正确。
+    // hex 输出格式靠 io_trace::tests;TraceIo 透传靠 io_trace::tests::trace_io_*。
+    // 真实 mock modbus server 端到端靠 tests/modbus_multi_slave_e2e.rs 模式 + 现场真机。
+    use rs_iot::io_trace::TraceRegistry;
+    let registry = TraceRegistry::new();
+    registry.activate("modbus-1", now_unix_ms_test() + 60_000);
+
+    assert!(registry.get("modbus-1").unwrap().check_alive());
+    assert!(registry.active_ids().contains(&"modbus-1".to_string()));
+    registry.deactivate("modbus-1");
+    assert!(registry.get("modbus-1").is_none());
+}
+
 fn now_unix_ms_test() -> i64 {
     use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now()
