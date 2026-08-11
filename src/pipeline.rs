@@ -96,10 +96,18 @@ pub async fn run(
                     // 该 worker 已退出，分片停入库；静默丢弃（首次关闭已告警）。
                     continue;
                 }
-                if worker_txs[idx].send(s).await.is_err() {
-                    // worker channel 关闭（worker 已退出）→ 标 dead，后续该 idx 跳过 send。
-                    dead[idx] = true;
-                    tracing::error!("[pipeline] worker {idx} closed (devid 分片停入库)");
+                // select! 包 send(I3):原裸 send().await 在 worker channel 满(256)时阻塞,
+                // 外层 select! 的 cancelled 分支无法观测直到 channel 腾空。内层 select! 让
+                // cancel 时立即中断 send(break 跳外层 loop),提升取消响应。
+                tokio::select! {
+                    _ = token.cancelled() => break,
+                    send_res = worker_txs[idx].send(s) => {
+                        if send_res.is_err() {
+                            // worker channel 关闭（worker 已退出）→ 标 dead，后续该 idx 跳过 send。
+                            dead[idx] = true;
+                            tracing::error!("[pipeline] worker {idx} closed (devid 分片停入库)");
+                        }
+                    }
                 }
             }
         }
