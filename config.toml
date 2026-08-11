@@ -8,10 +8,16 @@ bind_host = "127.0.0.1"
 data_dir = "./data/lux"
 save_interval_secs = 300
 
+[pipeline]
+# worker 数。0 = auto（min(cpu,8)）。50万点/秒建议 auto 或 4-8。
+# workers=1 退回单 worker（阶段1 形态）。
+workers = 0
+
 [mqtt]
 # 公共 MQTT broker（匿名，开发/验证用；生产部署换私有 broker + credentials）
 host = "broker.emqx.io"
 port = 1883
+# publish 周期（秒）。50万点下全量序列化压力大，建议 ≥2s；默认 5s 合理。
 publish_interval_secs = 5
 
 [bridge]
