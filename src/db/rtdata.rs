@@ -12,6 +12,8 @@ use lux::EmbeddedClient;
 /// field = `<devid>.<tag>`（若 tag 已含 devid 则不重复），value = JSON `[ts, localTime, value]`。
 ///
 /// 保留签名以兼容 REST/测试存量调用；内部委托 `write_batch`（单 Sample 切片）。
+/// `hwid` 不参与 rtdata 写入（rtdata key 仅按 devid），构造空 Hwid 仅为填 Sample 结构
+/// （`write_batch` 不读 hwid）。
 pub async fn write(
     c: &EmbeddedClient,
     hwid: &str,
@@ -174,7 +176,9 @@ mod batch_tests {
         let mut s2 = sample("d1", &[("t1", 99.0)]);
         s2.timestamp = 1_700_000_010; // 后到
         write_batch(&c, &[s1, s2]).await.unwrap();
-        // 最终值应是 99（后入覆盖）；取 value（field d1.t1 对应 cell [ts,localTime,val]）。
+        // 最终值应是 99（后入覆盖）；取 value（field d1.t1 对应 cell [ts,localTime,valStr]）。
+        // cell = [ts, localTime, valStr]，解析后精确断言 valStr == "99"
+        // （非子串匹配：避免 "199"/"990" 假阳性通过）。
         let arr = c.execute_value("HGETALL", &["rtdata:d1"]).await.unwrap();
         let cells: Vec<String> = match &arr {
             lux::EmbeddedValue::Array(a) => a
@@ -189,9 +193,12 @@ mod batch_tests {
                 .collect(),
             _ => vec![],
         };
-        assert!(
-            cells.iter().any(|c| c.contains("\"99\"")),
-            "后入应覆盖，实际: {cells:?}"
+        let cell_json: serde_json::Value =
+            serde_json::from_str(cells.first().expect("至少一个 cell")).expect("cell 是合法 JSON");
+        assert_eq!(
+            cell_json[2],
+            serde_json::json!("99"),
+            "后入应覆盖，最终值应是 99，实际 cells: {cells:?}"
         );
     }
 
