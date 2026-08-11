@@ -290,6 +290,7 @@ impl Source for SidecarClient {
             tracing::info!("[sidecarClient] inst {inst_id} external connected, config pushed");
 
             let mut last_hb = Instant::now();
+            // 心跳超时检测 ticker(非采集,不接 jitter——jitter 会改变超时判定语义)。
             let mut ticker = tokio::time::interval(hb_check);
             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             // observed stat 周期 flush ticker（与采集 ticker 解耦，5s 落一次 lux stat:<inst>）。
