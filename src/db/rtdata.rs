@@ -28,7 +28,9 @@ pub async fn write(
         values: values.clone(),
         timestamp,
     };
-    write_batch(c, std::slice::from_ref(&sample)).await
+    write_batch(c, std::slice::from_ref(&sample))
+        .await
+        .map(|_| ())
 }
 
 /// 批量写入多个 Sample 到 lux rtdata（收益①：同 devid 多点合成一条 HSET 多对）。
@@ -38,13 +40,17 @@ pub async fn write(
 /// 故弃 PreparedPipeline，用 B 形态：聚合后逐 devid 一次 execute HSET 多对。
 ///
 /// 同 devid 跨 Sample → 后入覆盖（HSET 多对后值覆盖前值，靠 field 名相同）。
-/// 空批直接返回（不提交）。local_time 批内取一次。
+/// 空批直接返回 Ok(0)。local_time 批内取一次。
+///
+/// **per-devid 容错（I1）**：单个 devid execute 失败不丢整批剩余——计 n_failed + continue
+/// 后续 devid。返回 `Ok(n_failed)`(0=全成功;>0=部分 devid lux 写失败,调用方记
+/// `pipeline_write_fail_n` + warn)。prep 错(serde_json cell 编码)仍 `?` 传播。
 pub async fn write_batch(
     c: &EmbeddedClient,
     samples: &[crate::types::Sample],
-) -> Result<(), RsIotError> {
+) -> Result<usize, RsIotError> {
     if samples.is_empty() {
-        return Ok(());
+        return Ok(0);
     }
     use std::collections::BTreeMap;
     let local_time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
@@ -71,6 +77,8 @@ pub async fn write_batch(
         }
     }
     // B 形态（bench 证明最快）：聚合后逐 devid 一次 execute("HSET", 多对 argv)。
+    // per-devid 容错(I1):单个 devid execute 失败不丢整批,计 n_failed + continue。
+    let mut n_failed = 0;
     for (devid, pairs) in &by_devid {
         let key = format!("rtdata:{devid}");
         let mut argv: Vec<String> = Vec::with_capacity(1 + pairs.len() * 2);
@@ -80,9 +88,11 @@ pub async fn write_batch(
             argv.push(v.clone());
         }
         let argv_ref: Vec<&str> = argv.iter().map(|s| s.as_str()).collect();
-        c.execute("HSET", &argv_ref[..]).await?;
+        if c.execute("HSET", &argv_ref[..]).await.is_err() {
+            n_failed += 1;
+        }
     }
-    Ok(())
+    Ok(n_failed)
 }
 
 #[cfg(test)]

@@ -193,24 +193,37 @@ async fn flush_batch(
     }
     let n = buf.len();
     match db::rtdata::write_batch(lux, buf).await {
-        Ok(()) => {
+        Ok(n_failed) => {
             ctx.metrics.pipeline_processed_batch(n);
             ctx.metrics.pipeline_batch();
+            if n_failed > 0 {
+                // I1:per-devid 容错,部分 devid 写失败(其余成功,不丢整批)。记失败数 + warn。
+                ctx.metrics.pipeline_write_fail_n(n_failed);
+                maybe_warn(
+                    last_fail_warn,
+                    &format!("write_batch {n_failed} devid 写失败(其余成功)"),
+                );
+            }
         }
         Err(e) => {
+            // prep 错(serde_json cell 编码等),整批未写。
             ctx.metrics.pipeline_write_fail();
-            // 去重 warn：首次或距上次 ≥1s 才记（防 lux 挂时每 50ms 一条洪水）。
-            let now = Instant::now();
-            let should_warn = last_fail_warn
-                .map(|t| now.duration_since(t) >= Duration::from_secs(1))
-                .unwrap_or(true);
-            if should_warn {
-                tracing::warn!("[pipeline] write_batch failed: {e}");
-                *last_fail_warn = Some(now);
-            }
+            maybe_warn(last_fail_warn, &format!("write_batch prep 错: {e}"));
         }
     }
     buf.clear();
+}
+
+/// 限流 warn:首次或距上次 ≥1s 才记(防 lux 挂时 N×20 warn/s 洪水)。
+fn maybe_warn(last: &mut Option<Instant>, msg: &str) {
+    let now = Instant::now();
+    let should = last
+        .map(|t| now.duration_since(t) >= Duration::from_secs(1))
+        .unwrap_or(true);
+    if should {
+        tracing::warn!("[pipeline] {msg}");
+        *last = Some(now);
+    }
 }
 
 #[cfg(test)]

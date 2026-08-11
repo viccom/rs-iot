@@ -81,6 +81,11 @@ impl ProcessMetrics {
         self.pipeline_write_fail_count
             .fetch_add(1, Ordering::Relaxed);
     }
+    /// pipeline 写失败 +n(批量;I1:per-devid 容错时一次 flush 多 devid 失败)。
+    pub fn pipeline_write_fail_n(&self, n: usize) {
+        self.pipeline_write_fail_count
+            .fetch_add(n as u64, Ordering::Relaxed);
+    }
     /// pipeline 处理成功 +n(批量)。
     pub fn pipeline_processed_batch(&self, n: usize) {
         self.pipeline_processed_count
