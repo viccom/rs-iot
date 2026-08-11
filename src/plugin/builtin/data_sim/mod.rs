@@ -43,7 +43,13 @@ impl Source for DataSim {
             .and_then(|v| v.as_u64())
             .unwrap_or(3);
 
-        let mut ticker = tokio::time::interval(std::time::Duration::from_secs(period_secs));
+        let period = std::time::Duration::from_secs(period_secs);
+        // jitter 相位：FNV-1a(inst_id) % period，多实例首次 tick 散布，削整点脉冲。
+        let phase = std::time::Duration::from_millis(crate::plugin::ticker::phase_ms(
+            inst.inst_id.as_str(),
+            period,
+        ));
+        let mut ticker = tokio::time::interval_at(tokio::time::Instant::now() + phase, period);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         // StatTracker（M4 实例指标）+ flush ticker（周期落 lux stat:<inst>）。
