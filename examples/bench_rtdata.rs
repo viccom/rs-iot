@@ -13,6 +13,9 @@
 //!   不计入计时——四个 bench 测的是纯 lux 写路径，公平对比写策略。
 //! - temp data_dir 用 `std::env::temp_dir()` + pid + nanos 唯一化（不引入 tempfile 依赖）。
 //! - RESP 端口 0（OS 分配），仅本地，bench 走进程内 `handle.client()`，不连 RESP。
+//! - 每场景跑 `ROUNDS + 1` 轮，**首轮作 warmup 丢弃**（不计入 rates）：四场景顺序跑同一批
+//!   key（rtdata:dev0..dev99），warmup 吸收哈希槽/类型首次分配成本，使每个场景都测稳态、可比。
+//! - 报告 mean + min + max（ROUNDS 轮），操作员可据 min/max 判别异常首轮或抖动。
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -41,6 +44,16 @@ struct PreppedDev {
     key: String,
     /// (field, cell) 对，field = `<devid>.<tag>`，cell = JSON `[ts, localTime, val]`。
     pairs: Vec<(String, String)>,
+}
+
+/// 单场景稳态吞吐统计（warmup 丢弃后的 ROUNDS 轮聚合）。
+struct BenchStats {
+    /// 均值点/秒。
+    mean: f64,
+    /// 最小点/秒。
+    min: f64,
+    /// 最大点/秒。
+    max: f64,
 }
 
 /// 构造 `n_samples` 个 Sample，各带 `n_points` 个点（devid 互异，值用 Float）。
@@ -110,11 +123,23 @@ fn avg(xs: &[f64]) -> f64 {
     xs.iter().sum::<f64>() / xs.len() as f64
 }
 
+/// 从 ROUNDS 轮 rates 算 mean/min/max。
+fn stats(rates: &[f64]) -> BenchStats {
+    let min = rates.iter().copied().fold(f64::INFINITY, f64::min);
+    let max = rates.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    BenchStats {
+        mean: avg(rates),
+        min,
+        max,
+    }
+}
+
 /// A：逐点 HSET（baseline，复刻 `rtdata::write` 逐点 execute）。
-async fn bench_a(client: &EmbeddedClient, devs: &[PreppedDev]) -> Result<f64, LuxError> {
+async fn bench_a(client: &EmbeddedClient, devs: &[PreppedDev]) -> Result<BenchStats, LuxError> {
     let total = points_total(devs);
     let mut rates = Vec::with_capacity(ROUNDS);
-    for _ in 0..ROUNDS {
+    // 首轮 warmup 丢弃（round == 0 不计入 rates），吸收哈希槽首次分配成本。
+    for round in 0..=ROUNDS {
         let t0 = Instant::now();
         for d in devs {
             for (field, cell) in &d.pairs {
@@ -123,16 +148,18 @@ async fn bench_a(client: &EmbeddedClient, devs: &[PreppedDev]) -> Result<f64, Lu
                     .await?;
             }
         }
-        rates.push(total as f64 / t0.elapsed().as_secs_f64());
+        if round > 0 {
+            rates.push(total as f64 / t0.elapsed().as_secs_f64());
+        }
     }
-    Ok(avg(&rates))
+    Ok(stats(&rates))
 }
 
 /// B：HSET 多对（每 Sample/devid 一次 execute，多对 field/value 一次提交）。
-async fn bench_b(client: &EmbeddedClient, devs: &[PreppedDev]) -> Result<f64, LuxError> {
+async fn bench_b(client: &EmbeddedClient, devs: &[PreppedDev]) -> Result<BenchStats, LuxError> {
     let total = points_total(devs);
     let mut rates = Vec::with_capacity(ROUNDS);
-    for _ in 0..ROUNDS {
+    for round in 0..=ROUNDS {
         let t0 = Instant::now();
         for d in devs {
             let mut argv: Vec<&str> = Vec::with_capacity(1 + d.pairs.len() * 2);
@@ -143,16 +170,18 @@ async fn bench_b(client: &EmbeddedClient, devs: &[PreppedDev]) -> Result<f64, Lu
             }
             client.execute("HSET", &argv).await?;
         }
-        rates.push(total as f64 / t0.elapsed().as_secs_f64());
+        if round > 0 {
+            rates.push(total as f64 / t0.elapsed().as_secs_f64());
+        }
     }
-    Ok(avg(&rates))
+    Ok(stats(&rates))
 }
 
 /// C：PreparedPipeline 全批一次提交（每 devid 一条多对 HSET，push_argv 后一次 discard）。
-async fn bench_c(client: &EmbeddedClient, devs: &[PreppedDev]) -> Result<f64, LuxError> {
+async fn bench_c(client: &EmbeddedClient, devs: &[PreppedDev]) -> Result<BenchStats, LuxError> {
     let total = points_total(devs);
     let mut rates = Vec::with_capacity(ROUNDS);
-    for _ in 0..ROUNDS {
+    for round in 0..=ROUNDS {
         let t0 = Instant::now();
         let mut pipe = PreparedPipeline::new();
         for d in devs {
@@ -166,13 +195,15 @@ async fn bench_c(client: &EmbeddedClient, devs: &[PreppedDev]) -> Result<f64, Lu
             pipe.push_argv(argv)?;
         }
         client.execute_prepared_pipeline_discard(&pipe).await?;
-        rates.push(total as f64 / t0.elapsed().as_secs_f64());
+        if round > 0 {
+            rates.push(total as f64 / t0.elapsed().as_secs_f64());
+        }
     }
-    Ok(avg(&rates))
+    Ok(stats(&rates))
 }
 
 /// D：N×clone 并发（N=CLONES）：client.clone() 各处理 chunk，每 chunk 一个 PreparedPipeline + discard。
-async fn bench_d(client: &EmbeddedClient, devs: &[PreppedDev]) -> Result<f64, LuxError> {
+async fn bench_d(client: &EmbeddedClient, devs: &[PreppedDev]) -> Result<BenchStats, LuxError> {
     let total = points_total(devs);
     let chunk_size = devs.len().div_ceil(CLONES);
     // 预切分一次（计时区外）：Arc 包裹，spawn 时 cheap clone（不重复拷贝 payload）。
@@ -181,7 +212,7 @@ async fn bench_d(client: &EmbeddedClient, devs: &[PreppedDev]) -> Result<f64, Lu
         .map(|c| Arc::new(c.to_vec()))
         .collect();
     let mut rates = Vec::with_capacity(ROUNDS);
-    for _ in 0..ROUNDS {
+    for round in 0..=ROUNDS {
         let t0 = Instant::now();
         let mut handles = Vec::with_capacity(chunks.len());
         for chunk in &chunks {
@@ -210,9 +241,11 @@ async fn bench_d(client: &EmbeddedClient, devs: &[PreppedDev]) -> Result<f64, Lu
                 .map_err(|e| LuxError::Command(format!("bench D task join 失败: {e}")))?;
             inner?;
         }
-        rates.push(total as f64 / t0.elapsed().as_secs_f64());
+        if round > 0 {
+            rates.push(total as f64 / t0.elapsed().as_secs_f64());
+        }
     }
-    Ok(avg(&rates))
+    Ok(stats(&rates))
 }
 
 /// 构造 bench 用的 lux `ServerConfig`：Tiered 持久化 + save_interval 60s + 端口 0（OS 分配）。
@@ -259,29 +292,41 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let total_per_round = points_total(&devs);
 
     println!(
-        "lux rtdata bench — {N_SAMPLES} devid × {N_POINTS} 点 = {total_per_round} 点/轮, {ROUNDS} 轮, 场景 D 并发 {CLONES}"
+        "lux rtdata bench — {N_SAMPLES} devid × {N_POINTS} 点 = {total_per_round} 点/轮, warmup 1 + 计时 {ROUNDS} 轮, 场景 D 并发 {CLONES}"
     );
-    println!("{:-<60}", "");
+    println!("{:-<72}", "");
 
     let a = bench_a(&client, &devs).await?;
-    println!("{:>10} {:>12.0} 点/秒", "A 逐点", a);
+    println!(
+        "{:>10}  mean {:>10.0}  min {:>10.0}  max {:>10.0}  点/秒",
+        "A 逐点", a.mean, a.min, a.max
+    );
 
     let b = bench_b(&client, &devs).await?;
-    println!("{:>10} {:>12.0} 点/秒", "B 多对", b);
+    println!(
+        "{:>10}  mean {:>10.0}  min {:>10.0}  max {:>10.0}  点/秒",
+        "B 多对", b.mean, b.min, b.max
+    );
 
     let c = bench_c(&client, &devs).await?;
-    println!("{:>10} {:>12.0} 点/秒", "C 管道", c);
+    println!(
+        "{:>10}  mean {:>10.0}  min {:>10.0}  max {:>10.0}  点/秒",
+        "C 管道", c.mean, c.min, c.max
+    );
 
     let d = bench_d(&client, &devs).await?;
-    println!("{:>10} {:>12.0} 点/秒", "D 并发", d);
-
-    println!("{:-<60}", "");
     println!(
-        "加速比: B/A={:.2}x  C/A={:.2}x  D/A={:.2}x  D/C={:.2}x",
-        b / a,
-        c / a,
-        d / a,
-        d / c
+        "{:>10}  mean {:>10.0}  min {:>10.0}  max {:>10.0}  点/秒",
+        "D 并发", d.mean, d.min, d.max
+    );
+
+    println!("{:-<72}", "");
+    println!(
+        "加速比(mean): B/A={:.2}x  C/A={:.2}x  D/A={:.2}x  D/C={:.2}x",
+        b.mean / a.mean,
+        c.mean / a.mean,
+        d.mean / a.mean,
+        d.mean / c.mean,
     );
 
     // 优雅关闭：先 SAVE 刷盘再 shutdown（对标 db::shutdown_lux）。
