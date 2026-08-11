@@ -73,11 +73,6 @@ impl ProcessMetrics {
     pub fn ctl_not_found(&self) {
         self.ctl_not_found_count.fetch_add(1, Ordering::Relaxed);
     }
-    /// pipeline 处理成功 +1。
-    pub fn pipeline_processed(&self) {
-        self.pipeline_processed_count
-            .fetch_add(1, Ordering::Relaxed);
-    }
     /// pipeline 写失败 +1。
     pub fn pipeline_write_fail(&self) {
         self.pipeline_write_fail_count

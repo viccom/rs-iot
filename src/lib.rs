@@ -292,7 +292,10 @@ pub async fn run_app_with_shutdown(
 
     shutdown.cancelled().await;
 
-    pipeline_handle.abort();
+    // 等 dispatcher 走完退出路径(token.cancel 级联 + drop worker_txs + join worker),
+    // 让 worker 的 best-effort flush 在 shutdown_lux 前完成(防丢最后 ≤50ms 数据)。
+    // 5s timeout 兜底防 worker 卡 lux 写致 shutdown 挂死(B3 修复:原 abort() 抢占退出)。
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(5), pipeline_handle).await;
     mqtt_handle.abort();
     axum_handle.abort();
     if let Some(h) = bridge_handle {

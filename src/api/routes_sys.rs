@@ -30,6 +30,8 @@ pub async fn sysstatus(State(st): State<AppState>) -> Json<serde_json::Value> {
             "ctl_not_found_count": m.ctl_not_found_count.load(std::sync::atomic::Ordering::Relaxed),
             "pipeline_processed_count": m.pipeline_processed_count.load(std::sync::atomic::Ordering::Relaxed),
             "pipeline_write_fail_count": m.pipeline_write_fail_count.load(std::sync::atomic::Ordering::Relaxed),
+            "pipeline_batch_count": m.pipeline_batch_count.load(std::sync::atomic::Ordering::Relaxed),
+            "pipeline_workers_active": m.pipeline_workers_active.load(std::sync::atomic::Ordering::Relaxed),
             "hub": {
                 "depth_last": m.hub_depth_last.load(std::sync::atomic::Ordering::Relaxed),
                 "depth_max": m.hub_depth_max.load(std::sync::atomic::Ordering::Relaxed),

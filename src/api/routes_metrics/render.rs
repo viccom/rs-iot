@@ -112,10 +112,29 @@ pub(crate) fn render_process(
             "pipeline 写 lux 失败次数",
             m.pipeline_write_fail_count.load(rel),
         ),
+        (
+            "rs_iot_pipeline_batch_total",
+            "pipeline 提交批次数(平均批大小 = processed/batch)",
+            m.pipeline_batch_count.load(rel),
+        ),
     ] {
         family_header(&mut s, name, help, "counter");
         metric_line(&mut s, name, "", &val.to_string());
     }
+
+    // pipeline worker 活跃数(gauge;下降=worker 异常退出,该 devid 分片停入库)
+    family_header(
+        &mut s,
+        "rs_iot_pipeline_workers",
+        "pipeline 活跃 worker 数(下降=worker 异常退出,该分片停入库)",
+        "gauge",
+    );
+    metric_line(
+        &mut s,
+        "rs_iot_pipeline_workers",
+        "",
+        &m.pipeline_workers_active.load(rel).to_string(),
+    );
 
     // hub 背压(gauge)
     family_header(&mut s, "rs_iot_hub_depth", "hub channel 当前深度", "gauge");
@@ -303,13 +322,13 @@ mod tests {
     fn render_process_has_help_type_and_values() {
         let m = proc_metrics();
         let out = render_process(&m, "eiot_abc", "0.1.0", 12.5, 8192);
-        // 全部 14 个 metric family 都在场(防误删某 family 静默通过)
+        // 全部 16 个 metric family 都在场(防误删某 family 静默通过)
         assert_eq!(
             out.lines()
                 .filter(|line| line.starts_with("# TYPE "))
                 .count(),
-            14,
-            "应输出 14 个 metric family"
+            16,
+            "应输出 16 个 metric family"
         );
         // HELP / TYPE 每个 family 齐全
         assert!(out.contains("# HELP rs_iot_info "));
