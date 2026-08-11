@@ -27,6 +27,8 @@ pub struct ProcessMetrics {
     pub pipeline_batch_count: AtomicU64,
     /// pipeline 活跃 worker 数(gauge)。
     pub pipeline_workers_active: AtomicU64,
+    /// pipeline worker 异常死亡数(panic;counter)。
+    pub pipeline_worker_deaths_count: AtomicU64,
     // hub 背压（gauge）
     /// hub channel 最新深度（gauge）。
     pub hub_depth_last: AtomicU64,
@@ -53,6 +55,7 @@ impl ProcessMetrics {
             pipeline_write_fail_count: AtomicU64::new(0),
             pipeline_batch_count: AtomicU64::new(0),
             pipeline_workers_active: AtomicU64::new(0),
+            pipeline_worker_deaths_count: AtomicU64::new(0),
             hub_depth_last: AtomicU64::new(0),
             hub_depth_max: AtomicU64::new(0),
             mqtt_publish_count: AtomicU64::new(0),
@@ -101,6 +104,12 @@ impl ProcessMetrics {
     /// 出循环后单次调用，对称成立）。
     pub fn worker_exited(&self) {
         self.pipeline_workers_active.fetch_sub(1, Ordering::Relaxed);
+    }
+    /// worker 异常死亡(panic)+1(I2:dispatcher join 检测 panic 时补调 worker_exited
+    /// 后计死亡,运维可统计 worker 历史死亡次数)。
+    pub fn worker_died(&self) {
+        self.pipeline_worker_deaths_count
+            .fetch_add(1, Ordering::Relaxed);
     }
     /// 更新 hub 深度 gauge（last + fetch_max）。
     pub fn hub_depth(&self, depth: usize) {
@@ -184,5 +193,9 @@ mod tests {
         assert_eq!(m.pipeline_workers_active.load(Ordering::Relaxed), 4);
         m.worker_exited();
         assert_eq!(m.pipeline_workers_active.load(Ordering::Relaxed), 3);
+        // worker 异常死亡计数(I2)
+        m.worker_died();
+        m.worker_died();
+        assert_eq!(m.pipeline_worker_deaths_count.load(Ordering::Relaxed), 2);
     }
 }

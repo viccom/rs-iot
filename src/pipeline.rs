@@ -7,6 +7,10 @@
 //! 背压链：Source `tx: mpsc::Sender<Sample>`（send 背压）→ hub（512）→ dispatcher
 //! → worker channel（256）→ worker 攒批 → lux。dispatcher `send().await` 阻塞即
 //! 背压传导至 hub，hub 满则 Source send 阻塞，形成端到端背压。
+//!
+//! HOL blocking：dispatcher 串行路由，某 worker channel 满(256)时 send 阻塞，其他空闲
+//! worker 暂时饿死(head-of-line)。量级不瓶颈(路由 ~300ns/sample，远快于 lux 写)；lux
+//! SAVE 期间全 worker 变慢会触发全局背压(端到端背压特性，非 bug)。
 
 use crate::db;
 use crate::host::HostContext;
@@ -106,13 +110,28 @@ pub async fn run(
     token.cancel();
     drop(worker_txs);
     for (i, t) in worker_tasks.into_iter().enumerate() {
-        let _ = tokio::time::timeout(Duration::from_secs(3), t).await;
-        tracing::info!("[pipeline] worker {i} joined");
+        match tokio::time::timeout(Duration::from_secs(3), t).await {
+            Ok(Ok(())) => tracing::info!("[pipeline] worker {i} joined"),
+            Ok(Err(e)) if e.is_panic() => {
+                // worker panic:task 内未调 worker_exited,补 gauge 减 + 计死亡数(I2 修复:
+                // 原 abort 抢占 + 无 panic 检测,gauge 永久偏 + 无死亡计数)。
+                ctx.metrics.worker_exited();
+                ctx.metrics.worker_died();
+                tracing::error!("[pipeline] worker {i} panic: {e}");
+            }
+            Ok(Err(e)) => tracing::warn!("[pipeline] worker {i} join error: {e}"),
+            Err(_) => tracing::warn!("[pipeline] worker {i} join timeout(仍 detach 运行)"),
+        }
     }
     tracing::info!("[pipeline] stopped");
 }
 
 /// 单 worker：攒批窗口 50ms → `write_batch`。所有 lux 错误 catch 降级，不 propagate。
+///
+/// **Processor 契约**：`process(s)` 在 select! recv 分支内 await，cancel 延迟 = process 时长。
+/// 故 `process` 须非阻塞/快速；慢逻辑(脚本 eval/重 CPU)应内部 `spawn_blocking`，否则阻塞
+/// worker 线程 + 取消不安全(Rhai 同步 `eval_with_scope` 即此隐患，见 `transform/rhai.rs`；
+/// 本框架不强制，由 Processor 实现负责)。
 ///
 /// 攒批：`tokio::time::interval` 50ms flush ticker（首个立即 tick 跳过）；recv 与
 /// flush 在 select! 中竞争——有数据则攒入 buf，到窗口则批量写。失败仅 warn（≥1s
@@ -120,9 +139,10 @@ pub async fn run(
 /// 准确），buf 照常 clear（丢这批，不阻塞后续）。
 ///
 /// 退出路径：select! 的 `token.cancelled` 与 `rx.recv() == None` 两分支都 break，
-/// 出循环后先 best-effort flush 残留 buf（防正常 shutdown 丢最后 ≤50ms 数据），再调
-/// 一次 `worker_exited()`。对称保证：`set_workers_active(n)` + n×`worker_exited()`
-/// 不会下溢（详见 `ProcessMetrics::worker_exited` 契约）。
+/// 出循环后先 best-effort flush 残留 buf,再调一次 `worker_exited()`。
+/// 正常 shutdown 丢失窗口 = flush(≤50ms) + worker channel(≤256/worker) + hub(≤512)积压;
+/// 最新值语义下旧数据过期可接受。对称:`set_workers_active(n)` + n×`worker_exited()`
+/// 不下溢;panic 路径 task 内未调 worker_exited,由 dispatcher join 检测补调(见 `run` 退出段)。
 async fn worker_run(
     ctx: HostContext,
     mut rx: mpsc::Receiver<Sample>,
@@ -151,7 +171,8 @@ async fn worker_run(
             }
         }
     }
-    // 退出前 best-effort flush 残留 buf（正常 shutdown 不丢最后 ≤50ms 数据）。
+    // 退出前 best-effort flush 残留 buf。丢失窗口见上方 worker_run doc(flush ≤50ms
+    // + worker channel 256/worker + hub 512 积压)。
     if !buf.is_empty() {
         flush_batch(&ctx, &lux, &mut buf, &mut last_fail_warn).await;
     }

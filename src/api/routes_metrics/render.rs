@@ -117,6 +117,11 @@ pub(crate) fn render_process(
             "pipeline 提交批次数(平均批大小 = processed/batch)",
             m.pipeline_batch_count.load(rel),
         ),
+        (
+            "rs_iot_pipeline_worker_deaths_total",
+            "pipeline worker 异常死亡数(panic)",
+            m.pipeline_worker_deaths_count.load(rel),
+        ),
     ] {
         family_header(&mut s, name, help, "counter");
         metric_line(&mut s, name, "", &val.to_string());
@@ -322,13 +327,13 @@ mod tests {
     fn render_process_has_help_type_and_values() {
         let m = proc_metrics();
         let out = render_process(&m, "eiot_abc", "0.1.0", 12.5, 8192);
-        // 全部 16 个 metric family 都在场(防误删某 family 静默通过)
+        // 全部 17 个 metric family 都在场(防误删某 family 静默通过)
         assert_eq!(
             out.lines()
                 .filter(|line| line.starts_with("# TYPE "))
                 .count(),
-            16,
-            "应输出 16 个 metric family"
+            17,
+            "应输出 17 个 metric family"
         );
         // HELP / TYPE 每个 family 齐全
         assert!(out.contains("# HELP rs_iot_info "));

@@ -11,9 +11,9 @@ use lux::EmbeddedClient;
 /// 写入一条 Sample 的所有变量到 `rtdata:<devid>`。
 /// field = `<devid>.<tag>`（若 tag 已含 devid 则不重复），value = JSON `[ts, localTime, value]`。
 ///
-/// 保留签名以兼容 REST/测试存量调用；内部委托 `write_batch`（单 Sample 切片）。
-/// `hwid` 不参与 rtdata 写入（rtdata key 仅按 devid），构造空 Hwid 仅为填 Sample 结构
-/// （`write_batch` 不读 hwid）。
+/// **test-only 存量入口**（`lua_client/api/tests.rs` 用；REST `/rtdatas` 是 HGETALL 读路径，
+/// 不调本函数）。内部委托 `write_batch`（单 Sample 切片）。`hwid` 不参与 rtdata 写入
+/// （rtdata key 仅按 devid），构造空 Hwid 仅为填 Sample 结构（`write_batch` 不读 hwid）。
 pub async fn write(
     c: &EmbeddedClient,
     hwid: &str,
