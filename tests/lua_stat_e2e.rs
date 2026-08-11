@@ -57,7 +57,7 @@ async fn stat_written_after_collect() {
     let mgr = Arc::new(InstanceManager::new(ctx.clone(), hub_tx));
     let proc: Arc<dyn Processor> = Arc::new(Passthrough);
     let pt = shutdown.child_token();
-    let _pipeline = tokio::spawn(rs_iot::pipeline::run(ctx, hub_rx, proc, pt));
+    let _pipeline = tokio::spawn(rs_iot::pipeline::run(ctx, hub_rx, proc, 1, pt));
 
     let inst = InstConfig {
         inst_id: "lua-st".into(),
@@ -163,7 +163,7 @@ async fn stat_marked_stopped_on_exit() {
     let mgr = Arc::new(InstanceManager::new(ctx.clone(), hub_tx));
     let proc: Arc<dyn Processor> = Arc::new(Passthrough);
     let pt = shutdown.child_token();
-    let _pipeline = tokio::spawn(rs_iot::pipeline::run(ctx, hub_rx, proc, pt));
+    let _pipeline = tokio::spawn(rs_iot::pipeline::run(ctx, hub_rx, proc, 1, pt));
 
     let inst = InstConfig {
         inst_id: "lua-st2".into(),

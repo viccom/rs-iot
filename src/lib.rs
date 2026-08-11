@@ -185,7 +185,7 @@ pub async fn run_app_with_shutdown(
         event_tx: event_bus.clone(),
     };
 
-    let (hub_tx, hub_rx) = tokio::sync::mpsc::channel::<types::Sample>(256);
+    let (hub_tx, hub_rx) = tokio::sync::mpsc::channel::<types::Sample>(512);
     let mgr = Arc::new(plugin::instance::InstanceManager::new(ctx.clone(), hub_tx));
 
     // 北向 MQTT 发布器（pull 模式，STEP 5）：常驻独立 task，周期从 lux 抽取 rtdata 发布。
@@ -202,6 +202,7 @@ pub async fn run_app_with_shutdown(
         ctx.clone(),
         hub_rx,
         processor,
+        cfg.pipeline.workers,
         pipeline_token,
     ));
 

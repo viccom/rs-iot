@@ -91,6 +91,7 @@ async fn datasim_to_rtdata_end_to_end() {
         ctx,
         hub_rx,
         processor,
+        1, // 测试用单 worker（deterministic，验入库逻辑）
         pipeline_token,
     ));
 

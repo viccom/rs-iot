@@ -492,7 +492,7 @@ async fn setup(inst_id: &str, devices: Vec<DeviceSpec>, state: Arc<ServerState>)
     let mgr = Arc::new(InstanceManager::new(ctx.clone(), hub_tx));
     let proc: Arc<dyn Processor> = Arc::new(Passthrough);
     let pt = shutdown.child_token();
-    let _pipeline = tokio::spawn(rs_iot::pipeline::run(ctx, hub_rx, proc, pt));
+    let _pipeline = tokio::spawn(rs_iot::pipeline::run(ctx, hub_rx, proc, 1, pt));
 
     // s7Client 实例：port 指向 mock server，period=1s 加快采集。
     let inst = InstConfig {

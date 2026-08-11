@@ -97,7 +97,7 @@ async fn setup(inst_id: &str, hb_secs: u64) -> Env {
     let mgr = Arc::new(InstanceManager::new(ctx.clone(), hub_tx));
     let proc: Arc<dyn Processor> = Arc::new(Passthrough);
     let pt = shutdown.child_token();
-    let _pipeline = tokio::spawn(rs_iot::pipeline::run(ctx, hub_rx, proc, pt));
+    let _pipeline = tokio::spawn(rs_iot::pipeline::run(ctx, hub_rx, proc, 1, pt));
 
     // bridge acceptor（127.0.0.1:0，OS 分配端口）。
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")

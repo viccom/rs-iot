@@ -60,7 +60,7 @@ async fn lua_kv_set_persists_to_lux() {
     let mgr = Arc::new(InstanceManager::new(ctx.clone(), hub_tx));
     let proc: Arc<dyn Processor> = Arc::new(Passthrough);
     let pt = shutdown.child_token();
-    let _pipeline = tokio::spawn(rs_iot::pipeline::run(ctx, hub_rx, proc, pt));
+    let _pipeline = tokio::spawn(rs_iot::pipeline::run(ctx, hub_rx, proc, 1, pt));
 
     let inst = InstConfig {
         inst_id: "lua-kv-it".into(),

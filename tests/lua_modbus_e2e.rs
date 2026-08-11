@@ -65,7 +65,7 @@ async fn lua_modbus_collect_and_write_roundtrip() {
     let mgr = Arc::new(InstanceManager::new(ctx.clone(), hub_tx));
     let proc: Arc<dyn Processor> = Arc::new(Passthrough);
     let pt = shutdown.child_token();
-    let _pipeline = tokio::spawn(rs_iot::pipeline::run(ctx, hub_rx, proc, pt));
+    let _pipeline = tokio::spawn(rs_iot::pipeline::run(ctx, hub_rx, proc, 1, pt));
 
     // scripts_root 指向仓库 scripts/ 目录（CARGO_MANIFEST_DIR）。
     let scripts_root = concat!(env!("CARGO_MANIFEST_DIR"), "/scripts");

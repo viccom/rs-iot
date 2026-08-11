@@ -98,6 +98,12 @@ impl ProcessMetrics {
             .store(n as u64, Ordering::Relaxed);
     }
     /// worker 退出 -1。
+    ///
+    /// 契约：调用次数 ≤ `set_workers_active` 设的值，且须在 `set_workers_active`
+    /// 之后调用。对称使用（启动时 `set_workers_active(n)` + 退出时 n×`worker_exited`）
+    /// 保证不会下溢。`fetch_sub` 在 0 时 wrap 到 `u64::MAX`（AtomicU64 无下溢保护），
+    /// 故 worker 退出路径须保证只调一次（pipeline worker 的 `select!` 两 break 分支
+    /// 出循环后单次调用，对称成立）。
     pub fn worker_exited(&self) {
         self.pipeline_workers_active.fetch_sub(1, Ordering::Relaxed);
     }
