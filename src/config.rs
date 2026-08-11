@@ -126,6 +126,11 @@ impl Default for BridgeConfig {
 /// pipeline 数据面配置。
 ///
 /// 阶段1 单 worker（bench 已证明够 50 万/秒）；阶段2 起用多 worker（auto/手动）。
+//
+// 注：用 `#[derive(Default)]` 而非文件内其他 Config 的 `impl Default`——
+// `workers: 0 == usize::default()`，clippy `derivable_impls` 强制 derive（CI `-D warnings` 门槛）；
+// 语义与手写 `impl Default { workers: 0 }` 字节等价。其他 Config 因字段需非默认值（port=6390 等）
+// 无法 derive，故用 impl——本结构体例外。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PipelineConfig {
