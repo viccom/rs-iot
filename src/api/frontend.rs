@@ -13,6 +13,11 @@ pub async fn index_redirect() -> Response {
     serve("index.html")
 }
 
+/// `/scada` → SCADA 采集器监控终端（amber-phosphor 工业控制柜风格）。
+pub async fn scada_terminal() -> Response {
+    serve("scada.html")
+}
+
 /// `/` → 重定向到 `/apitest`
 pub async fn root_redirect() -> Response {
     Redirect::to("/apitest").into_response()

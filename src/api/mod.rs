@@ -46,7 +46,7 @@ pub struct AppState {
 pub const PUBLIC_PATHS: &[&str] = &["/api/v1/user/login", "/api/v1/user/register", "/metrics"];
 
 pub fn is_public(path: &str) -> bool {
-    PUBLIC_PATHS.contains(&path) || path.starts_with("/apitest")
+    PUBLIC_PATHS.contains(&path) || path.starts_with("/apitest") || path.starts_with("/scada")
 }
 
 // ---------- lux Hash 读写 helper（供各 routes 复用） ----------
@@ -142,6 +142,7 @@ pub fn build_router(state: AppState) -> axum::Router {
         .route("/api/v1/logs/recent", get(routes_logs::recent))
         // 静态前端
         .route("/apitest", get(frontend::index_redirect))
+        .route("/scada", get(frontend::scada_terminal))
         .route("/", get(frontend::root_redirect));
 
     app.layer(axum::middleware::from_fn_with_state(
