@@ -948,24 +948,21 @@ function startSSE(){
 }
 function onSSELog(entry){
   // 增量 prepend：State.logs + DOM afterbegin，尾裁剪 MAX_STREAM。
-  // filter 切换时走原 renderLogStream 全量；此处不主动过滤（仅日志流，io_trace 由 packet 路径入）。
+  // 后端已过滤 io_trace（报文走 packet 通道），此处 entry 均为普通日志。
+  // filter 切换时走原 renderLogStream 全量。
   State.logs.unshift(entry);
   if(State.logs.length>MAX_STREAM) State.logs.length=MAX_STREAM;
-  // 仅当当前视图未过滤掉此条时 prepend（避免显示后被 renderLogStream 清掉的不一致）。
-  if((entry.target||'')!=='io_trace'){
-    const tg=$('#lg-target').value.trim();
-    if(!tg || entry.target===tg){
-      if(!State.lgLevel || levelRank(entry.level)>=levelRank(State.lgLevel)){
-        const el=document.createElement('div');
-        el.className=`le ${(entry.level||'').toLowerCase()}`;
-        el.innerHTML=`<span class="ts">${fmtAge(entry.ts)}</span><span class="lv">${(entry.level||'').toUpperCase()}</span><span class="tg">${esc(entry.target||'')}</span><span class="msg">${esc(entry.message||'')}${entry.fields&&Object.keys(entry.fields).length?` <span class="fld">${esc(JSON.stringify(entry.fields))}</span>`:''}</span>`;
-        const box=$('#lg-stream');
-        // 若当前是空状态占位，先清空。
-        const empty=box.querySelector('.empty-state'); if(empty)box.innerHTML='';
-        box.insertBefore(el, box.firstChild);
-        // 尾裁剪 DOM（与 State.logs 对齐）。
-        while(box.children.length>MAX_STREAM) box.lastChild.remove();
-      }
+  // 仅当当前视图未过滤掉此条时 prepend。
+  const tg=$('#lg-target').value.trim();
+  if(!tg || entry.target===tg){
+    if(!State.lgLevel || levelRank(entry.level)>=levelRank(State.lgLevel)){
+      const el=document.createElement('div');
+      el.className=`le ${(entry.level||'').toLowerCase()}`;
+      el.innerHTML=`<span class="ts">${fmtAge(entry.ts)}</span><span class="lv">${(entry.level||'').toUpperCase()}</span><span class="tg">${esc(entry.target||'')}</span><span class="msg">${esc(entry.message||'')}${entry.fields&&Object.keys(entry.fields).length?` <span class="fld">${esc(JSON.stringify(entry.fields))}</span>`:''}</span>`;
+      const box=$('#lg-stream');
+      const empty=box.querySelector('.empty-state'); if(empty)box.innerHTML='';
+      box.insertBefore(el, box.firstChild);
+      while(box.children.length>MAX_STREAM) box.lastChild.remove();
     }
   }
   renderOverviewLogs();

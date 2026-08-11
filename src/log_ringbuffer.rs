@@ -98,11 +98,14 @@ impl<S: tracing::Subscriber> Layer<S> for RingBufferLayer {
             fields: visitor.fields,
         };
         self.buffer.push(entry.clone());
-        // 扇出到 SSE 事件总线(阶段一):无消费者时 publish 静默,零开销。
-        // Arc 共享:N 个 SSE 客户端收同一份日志,避免深拷贝。
-        self.sender.publish(crate::event_bus::EventPayload::Log {
-            entry: std::sync::Arc::new(entry),
-        });
+        // 通讯报文（target=io_trace）走独立 packet 通道（io_trace::dump 直推
+        // EventPayload::Packet），不进 log SSE 通道避免双推；ring buffer 仍保留
+        // 供 GET /logs/recent?target=io_trace 补拉（SSE 断连兜底）。
+        if entry.target != "io_trace" {
+            self.sender.publish(crate::event_bus::EventPayload::Log {
+                entry: std::sync::Arc::new(entry),
+            });
+        }
     }
 }
 
