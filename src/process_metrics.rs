@@ -23,6 +23,10 @@ pub struct ProcessMetrics {
     pub pipeline_processed_count: AtomicU64,
     /// pipeline 写 lux 失败次数。
     pub pipeline_write_fail_count: AtomicU64,
+    /// pipeline 提交批次数(算平均批大小 = processed/batch)。
+    pub pipeline_batch_count: AtomicU64,
+    /// pipeline 活跃 worker 数(gauge)。
+    pub pipeline_workers_active: AtomicU64,
     // hub 背压（gauge）
     /// hub channel 最新深度（gauge）。
     pub hub_depth_last: AtomicU64,
@@ -47,6 +51,8 @@ impl ProcessMetrics {
             ctl_not_found_count: AtomicU64::new(0),
             pipeline_processed_count: AtomicU64::new(0),
             pipeline_write_fail_count: AtomicU64::new(0),
+            pipeline_batch_count: AtomicU64::new(0),
+            pipeline_workers_active: AtomicU64::new(0),
             hub_depth_last: AtomicU64::new(0),
             hub_depth_max: AtomicU64::new(0),
             mqtt_publish_count: AtomicU64::new(0),
@@ -76,6 +82,24 @@ impl ProcessMetrics {
     pub fn pipeline_write_fail(&self) {
         self.pipeline_write_fail_count
             .fetch_add(1, Ordering::Relaxed);
+    }
+    /// pipeline 处理成功 +n(批量)。
+    pub fn pipeline_processed_batch(&self, n: usize) {
+        self.pipeline_processed_count
+            .fetch_add(n as u64, Ordering::Relaxed);
+    }
+    /// pipeline 提交批次 +1。
+    pub fn pipeline_batch(&self) {
+        self.pipeline_batch_count.fetch_add(1, Ordering::Relaxed);
+    }
+    /// 设活跃 worker 数。
+    pub fn set_workers_active(&self, n: usize) {
+        self.pipeline_workers_active
+            .store(n as u64, Ordering::Relaxed);
+    }
+    /// worker 退出 -1。
+    pub fn worker_exited(&self) {
+        self.pipeline_workers_active.fetch_sub(1, Ordering::Relaxed);
     }
     /// 更新 hub 深度 gauge（last + fetch_max）。
     pub fn hub_depth(&self, depth: usize) {
@@ -144,5 +168,20 @@ mod tests {
         // sysinfo 现采,值随环境变化(cpu 首次可能 0);只验封装正确、不 panic、类型对。
         let (cpu, mem) = sample_process_resource();
         let _ = (cpu, mem);
+    }
+
+    #[test]
+    fn pipeline_batch_and_workers_metrics() {
+        let m = ProcessMetrics::new();
+        m.pipeline_processed_batch(5);
+        m.pipeline_processed_batch(3);
+        m.pipeline_batch();
+        m.pipeline_batch();
+        assert_eq!(m.pipeline_processed_count.load(Ordering::Relaxed), 8);
+        assert_eq!(m.pipeline_batch_count.load(Ordering::Relaxed), 2);
+        m.set_workers_active(4);
+        assert_eq!(m.pipeline_workers_active.load(Ordering::Relaxed), 4);
+        m.worker_exited();
+        assert_eq!(m.pipeline_workers_active.load(Ordering::Relaxed), 3);
     }
 }
