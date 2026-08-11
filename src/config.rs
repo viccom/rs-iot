@@ -18,6 +18,8 @@ pub struct AppConfig {
     pub log: LogConfig,
     /// 外部插件 bridge 配置（进程外南向插件经 TCP 接入）。
     pub bridge: BridgeConfig,
+    /// pipeline 数据面配置（worker 数等）。
+    pub pipeline: PipelineConfig,
 }
 
 /// lux ServerConfig 的子集映射（仅暴露我们关心的字段）。
@@ -59,6 +61,7 @@ impl Default for AppConfig {
             mqtt: MqttConfig::default(),
             log: LogConfig::default(),
             bridge: BridgeConfig::default(),
+            pipeline: PipelineConfig::default(),
         }
     }
 }
@@ -118,6 +121,16 @@ impl Default for BridgeConfig {
             max_connections: 512,
         }
     }
+}
+
+/// pipeline 数据面配置。
+///
+/// 阶段1 单 worker（bench 已证明够 50 万/秒）；阶段2 起用多 worker（auto/手动）。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PipelineConfig {
+    /// worker 数。0 = auto(min(cpu,8))；阶段1 用 1，阶段2 起用 auto/手动。
+    pub workers: usize,
 }
 
 /// 日志配置。终端输出始终开启；`dir` 非空时额外写文件（daily 轮转 + 保留期清理）。
@@ -218,5 +231,19 @@ ring_buffer_capacity = 500"#,
         )
         .unwrap();
         assert_eq!(cfg.ring_buffer_capacity, 500);
+    }
+
+    #[test]
+    fn pipeline_config_default_auto() {
+        // 缺 [pipeline] section → Default(workers=0=auto);阶段1 单 worker 由 Task 7 的 auto_workers 把 0 转 1
+        let cfg: AppConfig = toml::from_str("").unwrap();
+        assert_eq!(cfg.pipeline.workers, 0, "默认 0=auto");
+    }
+
+    #[test]
+    fn pipeline_config_workers_explicit() {
+        // 显式 [pipeline] workers=N 覆盖默认;锁 partial-default 契约:用户只设 workers,缺字段仍走 Default
+        let cfg: AppConfig = toml::from_str("[pipeline]\nworkers = 4").unwrap();
+        assert_eq!(cfg.pipeline.workers, 4);
     }
 }
