@@ -52,11 +52,12 @@ pub async fn write_batch(
     if samples.is_empty() {
         return Ok(0);
     }
-    use std::collections::BTreeMap;
+    use std::collections::HashMap;
     let local_time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
-    // devid -> Vec<(field, cell)>；Vec 保序（同 devid 多 Sample 后入覆盖靠 field 名相同，
-    // HSET 多对后值覆盖前值）。
-    let mut by_devid: BTreeMap<&str, Vec<(String, String)>> = BTreeMap::new();
+    // devid -> Vec<(field, cell)>；HashMap O(1) 聚合(N1:各 devid 独立 execute 无序依赖,
+    // 原 BTreeMap 保序非必需)。Vec 保序(同 devid 多 Sample 后入覆盖靠 field 名相同,HSET
+    // 多对后值覆盖前值)。
+    let mut by_devid: HashMap<&str, Vec<(String, String)>> = HashMap::new();
     for s in samples {
         let entry = by_devid.entry(s.devid.as_str()).or_default();
         for (tag, val) in &s.values {

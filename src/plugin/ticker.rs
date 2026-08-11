@@ -19,7 +19,7 @@ pub(crate) fn fnv1a_64(s: &str) -> u64 {
 /// 返回首次 tick 的 jitter 相位(毫秒数):`fnv1a(inst_id) % period`。
 /// 同 inst_id + 同 period → 完全相同(确定性);不同 inst_id → 散布在 [0, period)。
 #[must_use]
-pub fn phase_ms(inst_id: &str, period: Duration) -> u64 {
+pub(crate) fn phase_ms(inst_id: &str, period: Duration) -> u64 {
     let period_ms = period.as_millis().max(1) as u64;
     fnv1a_64(inst_id) % period_ms
 }
