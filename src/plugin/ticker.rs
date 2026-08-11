@@ -13,8 +13,9 @@ fn fnv1a_64(s: &str) -> u64 {
     h
 }
 
-/// 返回带 jitter 相位的 interval:首次 tick 延迟 `fnv1a(inst_id) % period`。
+/// 返回首次 tick 的 jitter 相位(毫秒数):`fnv1a(inst_id) % period`。
 /// 同 inst_id + 同 period → 完全相同(确定性);不同 inst_id → 散布在 [0, period)。
+#[must_use]
 pub fn phase_ms(inst_id: &str, period: Duration) -> u64 {
     let period_ms = period.as_millis().max(1) as u64;
     fnv1a_64(inst_id) % period_ms
@@ -40,5 +41,10 @@ mod tests {
         assert!(unique.len() >= 4, "相位应散布,实际 unique={unique:?}");
         // 全部在 [0, 1000)
         assert!(phases.iter().all(|&x| x < 1000));
+    }
+    #[test]
+    fn phase_zero_period_no_panic() {
+        // period=0 → max(1) 兜底 → % 1 = 0,不 panic,退化为无 jitter
+        assert_eq!(phase_ms("instA", Duration::ZERO), 0);
     }
 }
