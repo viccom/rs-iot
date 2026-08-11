@@ -76,7 +76,7 @@ async fn multi_source_persist_across_workers() {
     for i in 0..4u32 {
         mgr.start_source(datasim_inst(i))
             .await
-            .expect("start sim{i}");
+            .expect(&format!("start sim{i}"));
     }
     tokio::time::sleep(Duration::from_millis(2500)).await; // ≥2 轮采集 + flush
 
