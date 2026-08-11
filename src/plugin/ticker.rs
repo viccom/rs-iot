@@ -4,7 +4,10 @@
 use std::time::Duration;
 
 /// FNV-1a 64bit(确定性,无外部依赖)。
-fn fnv1a_64(s: &str) -> u64 {
+///
+/// `pub(crate)` 供 `pipeline::route` 复用(DRY:devid 分片与 inst_id 抖动同算法,
+/// 任一方改算法另一方自动跟随,无复制漂移)。
+pub(crate) fn fnv1a_64(s: &str) -> u64 {
     let mut h: u64 = 0xcbf29ce484222325;
     for b in s.bytes() {
         h ^= b as u64;

@@ -10,24 +10,20 @@
 
 use crate::db;
 use crate::host::HostContext;
+use crate::plugin::ticker::fnv1a_64;
 use crate::plugin::traits::Processor;
 use crate::types::Sample;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-/// devid → worker idx（FNV-1a 64bit，与 `plugin::ticker::fnv1a_64` 同算法保一致）。
+/// devid → worker idx（FNV-1a 64bit，复用 `plugin::ticker::fnv1a_64`）。
 ///
 /// 同 devid 恒映射同 worker（同设备数据落同一 lux field，无并发写竞争）；
 /// 不同 devid 散布到 [0, n) 多 worker（负载分摊）。`n.max(1)` 防 0 除。
 fn route(devid: &str, n: usize) -> usize {
-    let mut h: u64 = 0xcbf29ce484222325;
-    for b in devid.bytes() {
-        h ^= b as u64;
-        h = h.wrapping_mul(0x100000001b3);
-    }
-    (h as usize) % n.max(1)
+    (fnv1a_64(devid) as usize) % n.max(1)
 }
 
 /// 解析 worker 数：`requested > 0` 直接用；否则按 CPU 并行度自动，上限 8
@@ -45,8 +41,10 @@ fn auto_workers(requested: usize) -> usize {
 /// 启动 dispatcher + N worker。dispatcher 持有 `hub_rx`，按 devid 路由。
 ///
 /// dispatcher 是 hub 的唯一消费者（背压传导点）；每 worker 独占一个 lux session
-/// 与攒批 buffer。dispatcher 退出后经父 `token` 级联 cancel 所有 worker，
-/// 再 3s timeout join 每个 worker task（防 worker 卡 lux 写）。
+/// 与攒批 buffer。dispatcher 退出后先 `token.cancel()` 级联 cancel 所有 worker
+/// （同时处理卡 `flush.tick` 与卡 `rx.recv` 的 worker），再 `drop(worker_txs)`
+/// 让 worker 的 `rx.recv()` 返 None，最后 3s timeout join 每个 worker task
+/// （防 worker 卡 lux 写）。
 pub async fn run(
     ctx: HostContext,
     mut hub_rx: mpsc::Receiver<Sample>,
@@ -70,6 +68,9 @@ pub async fn run(
         })
         .unzip();
 
+    // dead[idx]=true: 该 worker channel 已关闭，dispatcher 跳过后续 send（防忙循环 + 日志洪水）。
+    let mut dead: Vec<bool> = vec![false; n];
+
     // dispatcher: 唯一 hub_rx 消费者，路由 + 背压 send。
     loop {
         tokio::select! {
@@ -87,15 +88,23 @@ pub async fn run(
                 };
                 ctx.metrics.hub_depth(hub_rx.len());
                 let idx = route(&s.devid, n);
+                if dead[idx] {
+                    // 该 worker 已退出，分片停入库；静默丢弃（首次关闭已告警）。
+                    continue;
+                }
                 if worker_txs[idx].send(s).await.is_err() {
-                    // worker channel 关闭（worker 已退出）→ 该 devid 分片停入库。
-                    // dispatcher 不退出（其他分片仍可入库），仅告警。
+                    // worker channel 关闭（worker 已退出）→ 标 dead，后续该 idx 跳过 send。
+                    dead[idx] = true;
                     tracing::error!("[pipeline] worker {idx} closed (devid 分片停入库)");
                 }
             }
         }
     }
-    // 退出:cancel 所有 worker token（经父 token 已级联）+ 等 task（3s timeout）。
+    // 退出：先 cancel 父 token（级联所有 worker child token，同时处理卡 flush.tick 与
+    // 卡 rx.recv 的 worker——两条 break 分支统一走此路径），再 drop worker_txs
+    // （让仍在 rx.recv() 的 worker 立即返 None），最后 3s timeout join。
+    token.cancel();
+    drop(worker_txs);
     for (i, t) in worker_tasks.into_iter().enumerate() {
         let _ = tokio::time::timeout(Duration::from_secs(3), t).await;
         tracing::info!("[pipeline] worker {i} joined");
@@ -106,12 +115,14 @@ pub async fn run(
 /// 单 worker：攒批窗口 50ms → `write_batch`。所有 lux 错误 catch 降级，不 propagate。
 ///
 /// 攒批：`tokio::time::interval` 50ms flush ticker（首个立即 tick 跳过）；recv 与
-/// flush 在 select! 中竞争——有数据则攒入 buf，到窗口则批量写。失败仅 warn +
-/// `pipeline_write_fail`，buf 照常 clear（丢这批，不阻塞后续）。
+/// flush 在 select! 中竞争——有数据则攒入 buf，到窗口则批量写。失败仅 warn（≥1s
+/// 间隔去重，防 lux 挂时 N×20 warn/s 洪水）+ `pipeline_write_fail`（每次都计，计数器
+/// 准确），buf 照常 clear（丢这批，不阻塞后续）。
 ///
 /// 退出路径：select! 的 `token.cancelled` 与 `rx.recv() == None` 两分支都 break，
-/// 出循环后调一次 `worker_exited()`。对称保证：`set_workers_active(n)` + n×
-/// `worker_exited()` 不会下溢（详见 `ProcessMetrics::worker_exited` 契约）。
+/// 出循环后先 best-effort flush 残留 buf（防正常 shutdown 丢最后 ≤50ms 数据），再调
+/// 一次 `worker_exited()`。对称保证：`set_workers_active(n)` + n×`worker_exited()`
+/// 不会下溢（详见 `ProcessMetrics::worker_exited` 契约）。
 async fn worker_run(
     ctx: HostContext,
     mut rx: mpsc::Receiver<Sample>,
@@ -120,6 +131,8 @@ async fn worker_run(
     token: CancellationToken,
 ) {
     let mut buf: Vec<Sample> = Vec::new();
+    // 上次 write_batch 失败告警时刻；None=未失败过。≥1s 才再 warn（防洪水），计数器仍每次计。
+    let mut last_fail_warn: Option<Instant> = None;
     let mut flush = tokio::time::interval(Duration::from_millis(50));
     flush.tick().await; // 跳过首个立即 tick
     loop {
@@ -134,26 +147,49 @@ async fn worker_run(
                 None => break,
             },
             _ = flush.tick() => {
-                if buf.is_empty() {
-                    continue;
-                }
-                let n = buf.len();
-                match db::rtdata::write_batch(&lux, &buf).await {
-                    Ok(()) => {
-                        ctx.metrics.pipeline_processed_batch(n);
-                        ctx.metrics.pipeline_batch();
-                    }
-                    Err(e) => {
-                        ctx.metrics.pipeline_write_fail();
-                        tracing::warn!("[pipeline] write_batch failed: {e}");
-                    }
-                }
-                buf.clear();
+                flush_batch(&ctx, &lux, &mut buf, &mut last_fail_warn).await;
             }
         }
     }
+    // 退出前 best-effort flush 残留 buf（正常 shutdown 不丢最后 ≤50ms 数据）。
+    if !buf.is_empty() {
+        flush_batch(&ctx, &lux, &mut buf, &mut last_fail_warn).await;
+    }
     ctx.metrics.worker_exited();
     tracing::info!("[pipeline] worker exited");
+}
+
+/// 攒批写出 + 降级：`write_batch` 成功计 `processed_batch(n)+batch()`，失败计
+/// `write_fail()` + warn（≥1s 去重）。无论成败 `buf.clear()`。
+async fn flush_batch(
+    ctx: &HostContext,
+    lux: &lux::EmbeddedClient,
+    buf: &mut Vec<Sample>,
+    last_fail_warn: &mut Option<Instant>,
+) {
+    if buf.is_empty() {
+        return;
+    }
+    let n = buf.len();
+    match db::rtdata::write_batch(lux, buf).await {
+        Ok(()) => {
+            ctx.metrics.pipeline_processed_batch(n);
+            ctx.metrics.pipeline_batch();
+        }
+        Err(e) => {
+            ctx.metrics.pipeline_write_fail();
+            // 去重 warn：首次或距上次 ≥1s 才记（防 lux 挂时每 50ms 一条洪水）。
+            let now = Instant::now();
+            let should_warn = last_fail_warn
+                .map(|t| now.duration_since(t) >= Duration::from_secs(1))
+                .unwrap_or(true);
+            if should_warn {
+                tracing::warn!("[pipeline] write_batch failed: {e}");
+                *last_fail_warn = Some(now);
+            }
+        }
+    }
+    buf.clear();
 }
 
 #[cfg(test)]
@@ -193,5 +229,22 @@ mod tests {
             .map(|n| n.get())
             .unwrap_or(4);
         assert_eq!(auto, cpu.min(8));
+    }
+
+    /// route 与 ticker::fnv1a_64 共用同一算法（DRY 锁定：任一方改算法此测试拦漂移）。
+    #[test]
+    fn route_uses_ticker_fnv1a() {
+        // route(d, n) = fnv1a_64(d) % n  →  fnv1a_64(d) = route(d, n) + k*n。
+        // 取 n=1：route(d, 1) 恒 0，故 fnv1a_64(d) 必 = route(d, large) % large 的同源。
+        // 直接跨模块比对：route(d, n) == (fnv1a_64(d) as usize) % n。
+        for d in ["devA", "d0", "d1", "d2", "d3", "d4", "d5", "d6", "d7"] {
+            for n in [1usize, 2, 4, 8] {
+                assert_eq!(
+                    route(d, n),
+                    (fnv1a_64(d) as usize) % n.max(1),
+                    "route({d}, {n}) 必须等于 fnv1a_64({d}) % {n}"
+                );
+            }
+        }
     }
 }
