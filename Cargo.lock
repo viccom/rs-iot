@@ -2681,6 +2681,7 @@ dependencies = [
  "tokio-modbus",
  "tokio-s7",
  "tokio-serial",
+ "tokio-stream",
  "tokio-util",
  "toml",
  "tower",
@@ -3562,6 +3563,7 @@ dependencies = [
  "futures-core",
  "pin-project-lite",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]

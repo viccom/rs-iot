@@ -91,6 +91,7 @@ async fn collect_via_serial(
         bridge_registry: BridgeRegistry::new(),
         metrics: Arc::new(rs_iot::process_metrics::ProcessMetrics::new()),
         trace_registry: rs_iot::io_trace::TraceRegistry::new(),
+        event_tx: rs_iot::event_bus::EventBus::dummy(),
     };
     let (hub_tx, mut hub_rx) = mpsc::channel::<Sample>(64);
     let mgr = Arc::new(InstanceManager::new(ctx, hub_tx));
@@ -313,6 +314,7 @@ async fn collect_via_tcp(
         bridge_registry: BridgeRegistry::new(),
         metrics: Arc::new(rs_iot::process_metrics::ProcessMetrics::new()),
         trace_registry: rs_iot::io_trace::TraceRegistry::new(),
+        event_tx: rs_iot::event_bus::EventBus::dummy(),
     };
     let (hub_tx, mut hub_rx) = mpsc::channel::<Sample>(64);
     let mgr = Arc::new(InstanceManager::new(ctx, hub_tx));
@@ -475,6 +477,7 @@ async fn lua_client_modbus_multi_device_outputs() {
         bridge_registry: BridgeRegistry::new(),
         metrics: Arc::new(rs_iot::process_metrics::ProcessMetrics::new()),
         trace_registry: rs_iot::io_trace::TraceRegistry::new(),
+        event_tx: rs_iot::event_bus::EventBus::dummy(),
     };
     let (hub_tx, mut hub_rx) = mpsc::channel::<Sample>(64);
     let mgr = Arc::new(InstanceManager::new(ctx, hub_tx));
@@ -635,6 +638,7 @@ async fn p1_three_subsystems_metrics_logs_trace() {
         bridge_registry: BridgeRegistry::new(),
         metrics: process_metrics_arc.clone(),
         trace_registry: trace_registry.clone(),
+        event_tx: rs_iot::event_bus::EventBus::dummy(),
     };
     let (hub_tx, _hub_rx) = mpsc::channel::<Sample>(64);
     let mgr = Arc::new(InstanceManager::new(ctx, hub_tx));
@@ -676,6 +680,7 @@ async fn p1_three_subsystems_metrics_logs_trace() {
         metrics: process_metrics_arc.clone(),
         trace_registry: trace_registry.clone(),
         log_ringbuffer: log_ringbuffer.clone(),
+        event_bus: rs_iot::event_bus::EventBus::dummy(),
     };
     let (base_url, axum_h) = spawn_axum(state).await;
 

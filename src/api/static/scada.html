@@ -928,6 +928,72 @@ async function enterApp(){
   $('#opNm').textContent=State.user; $('#opAv').textContent=(State.user[0]||'A').toUpperCase();
   await loadAll();
   startPolling();
+  startSSE();
+}
+
+/* ---------- SSE 实时推送（日志/报文/实例状态） ---------- */
+let sse=null;
+const MAX_STREAM=200;
+function startSSE(){
+  if(sse)sse.close();
+  sse=new EventSource('/api/v1/events?types=log,packet,state');
+  sse.addEventListener('log', e=>onSSELog(JSON.parse(e.data)));
+  sse.addEventListener('packet', e=>onSSEPacket(JSON.parse(e.data)));
+  sse.addEventListener('state', e=>onSSEState(JSON.parse(e.data)));
+  sse.onerror=()=>{
+    markLink(false);
+    // 重连由 EventSource 自动进行；补拉一次 logs/recent 兜底丢帧。
+    if(State.authed && !State.sim) loadLogs(State.lgLevel, $('#lg-target').value.trim());
+  };
+}
+function onSSELog(entry){
+  // 增量 prepend：State.logs + DOM afterbegin，尾裁剪 MAX_STREAM。
+  // filter 切换时走原 renderLogStream 全量；此处不主动过滤（仅日志流，io_trace 由 packet 路径入）。
+  State.logs.unshift(entry);
+  if(State.logs.length>MAX_STREAM) State.logs.length=MAX_STREAM;
+  // 仅当当前视图未过滤掉此条时 prepend（避免显示后被 renderLogStream 清掉的不一致）。
+  if((entry.target||'')!=='io_trace'){
+    const tg=$('#lg-target').value.trim();
+    if(!tg || entry.target===tg){
+      if(!State.lgLevel || levelRank(entry.level)>=levelRank(State.lgLevel)){
+        const el=document.createElement('div');
+        el.className=`le ${(entry.level||'').toLowerCase()}`;
+        el.innerHTML=`<span class="ts">${fmtAge(entry.ts)}</span><span class="lv">${(entry.level||'').toUpperCase()}</span><span class="tg">${esc(entry.target||'')}</span><span class="msg">${esc(entry.message||'')}${entry.fields&&Object.keys(entry.fields).length?` <span class="fld">${esc(JSON.stringify(entry.fields))}</span>`:''}</span>`;
+        const box=$('#lg-stream');
+        // 若当前是空状态占位，先清空。
+        const empty=box.querySelector('.empty-state'); if(empty)box.innerHTML='';
+        box.insertBefore(el, box.firstChild);
+        // 尾裁剪 DOM（与 State.logs 对齐）。
+        while(box.children.length>MAX_STREAM) box.lastChild.remove();
+      }
+    }
+  }
+  renderOverviewLogs();
+}
+function onSSEPacket(pkt){
+  // 报文：构造 io_trace 等价 LogEntry 入 State.logs（与 /logs/recent 同构），prepend DOM。
+  const entry={ts:pkt.ts, level:'debug', target:'io_trace', message:`${pkt.dir==='tx'?'TX':'RX'} ${pkt.hex||''}`, fields:{dir:(pkt.dir||'').toUpperCase(), hex:pkt.hex, inst_id:pkt.inst_id}};
+  State.logs.unshift(entry);
+  if(State.logs.length>MAX_STREAM) State.logs.length=MAX_STREAM;
+  const el=document.createElement('div');
+  el.className=`pkt ${(pkt.dir||'').toLowerCase()}`;
+  el.innerHTML=`<span class="dir">${(pkt.dir||'').toUpperCase()}</span><span class="inst">${esc(pkt.inst_id||'')}</span><span class="hex">${esc(pkt.hex||'')}</span><span class="ts">${fmtAge(pkt.ts)}</span>`;
+  const box=$('#pkt-stream');
+  const empty=box.querySelector('.empty-state'); if(empty)box.innerHTML='';
+  box.insertBefore(el, box.firstChild);
+  while(box.children.length>MAX_STREAM) box.lastChild.remove();
+  const cntEl=$('#tab-pkt-cnt'); if(cntEl)cntEl.textContent=State.logs.filter(l=>l.target==='io_trace').length;
+}
+function onSSEState(s){
+  // 实例状态变更：更新 State.stats + 刷新概览状态计数 + 采集器表。
+  const idx=State.stats.findIndex(x=>x.inst_id===s.inst_id);
+  if(idx>=0) State.stats[idx]={...State.stats[idx], state:s.state};
+  else if(s.inst_id && State.insts[s.inst_id]){
+    // 新实例（SSE 推送但本地 stats 未含）：补一条最小记录，下次 tick 轮询补全 health。
+    State.stats.push({inst_id:s.inst_id, app_code:s.app_code, host_kind:s.host_kind, state:s.state, health:null});
+  }
+  renderCollectors();
+  renderOverviewStates();
 }
 
 /* ---------- data load ---------- */
@@ -1061,6 +1127,7 @@ function markLink(ok,lbl){
 }
 function forceLogin(msg){
   State.authed=false; clearInterval(State.pollT);
+  if(sse){sse.close(); sse=null;}
   $('#veil').classList.remove('hidden'); $('#lg-err').textContent=msg;
 }
 

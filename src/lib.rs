@@ -18,6 +18,8 @@ pub mod config;
 pub mod db;
 /// 库错误类型（`RsIotError`、`TResult`）。
 pub mod error;
+/// 事件总线（SSE 实时推送 · 阶段一）：进程内 broadcast 扇出。
+pub mod event_bus;
 pub mod host;
 /// 硬件 ID 生成。
 pub mod hwid;
@@ -56,11 +58,14 @@ pub const VERSION: &str = "20250123";
 ///   `None` = 文件层未启用（dir 空 或 建目录失败），无需持有。
 /// - `Arc<LogRingBuffer>`：日志 ring buffer（P1 子系统 3），注入 AppState 供
 ///   `GET /api/v1/logs/recent` 读。同一 Arc 被 `RingBufferLayer` 持有截获日志。
+/// - `EventBus`：SSE 事件总线（阶段一）。同一 bus 注入 `RingBufferLayer`（日志扇出）、
+///   `HostContext`（报文/状态扇出）、`AppState`（SSE endpoint 订阅），三方共享。
 pub fn init_tracing(
     cfg: Option<&config::LogConfig>,
 ) -> (
     Option<tracing_appender::non_blocking::WorkerGuard>,
     std::sync::Arc<crate::log_ringbuffer::LogRingBuffer>,
+    crate::event_bus::EventBus,
 ) {
     use tracing_subscriber::{fmt, layer::Layer, prelude::*, EnvFilter};
 
@@ -97,26 +102,32 @@ pub fn init_tracing(
     let ring_buffer = std::sync::Arc::new(crate::log_ringbuffer::LogRingBuffer::new(ring_capacity));
     let ring_filter =
         EnvFilter::try_new("info,io_trace=trace").unwrap_or_else(|_| EnvFilter::new("info"));
+    // 阶段一 SSE：建事件总线（容量 256 对标 hub），同一 bus 注入 RingBufferLayer
+    // （日志扇出）、HostContext（报文/状态扇出）、AppState（SSE endpoint 订阅）。
+    let event_bus = crate::event_bus::EventBus::new(256);
     layers.push(
         crate::log_ringbuffer::RingBufferLayer {
             buffer: ring_buffer.clone(),
+            sender: event_bus.clone(),
         }
         .with_filter(ring_filter)
         .boxed(),
     );
 
     let _ = tracing_subscriber::registry().with(layers).try_init();
-    (guard, ring_buffer)
+    (guard, ring_buffer, event_bus)
 }
 
 /// CLI `run` 入口：内部建 shutdown + ctrl_c 监听，委托给 `run_app_with_shutdown`。
 ///
-/// `log_ringbuffer` 由调用方（binary 入口 `init_tracing` 解构得到）注入，透传至
-/// `run_app_with_shutdown` → AppState（同一 Arc 供 `RingBufferLayer` 与 GET 端点共享）。
-#[tracing::instrument(skip(cfg, log_ringbuffer))]
+/// `log_ringbuffer` 与 `event_bus` 由调用方（binary 入口 `init_tracing` 解构得到）注入，
+/// 透传至 `run_app_with_shutdown` → AppState（同一 Arc/EventBus 供 `RingBufferLayer`
+/// 与 GET 端点 / SSE 共享）。
+#[tracing::instrument(skip(cfg, log_ringbuffer, event_bus))]
 pub async fn run_app(
     cfg: config::AppConfig,
     log_ringbuffer: std::sync::Arc<crate::log_ringbuffer::LogRingBuffer>,
+    event_bus: crate::event_bus::EventBus,
 ) -> Result<(), RsIotError> {
     let shutdown = CancellationToken::new();
     let s = shutdown.clone();
@@ -125,7 +136,7 @@ pub async fn run_app(
         tracing::info!("ctrl_c received, shutting down");
         s.cancel();
     });
-    run_app_with_shutdown(cfg, shutdown, log_ringbuffer).await
+    run_app_with_shutdown(cfg, shutdown, log_ringbuffer, event_bus).await
 }
 
 /// 服务态入口（M4 Windows Service / systemd）：shutdown 由外部（SCM/sigterm）触发。
@@ -133,11 +144,12 @@ pub async fn run_app(
 /// 数据流（hub 模式，STEP 5 pull 化）：N 个 Source ──hub(mpsc)──► pipeline
 /// ──Processor──► lux HSET rtdata:{devid}；北向 `MqttPub` 独立常驻，
 /// 周期从 lux 抽取 rtdata → PUBLISH `{hwid}/{devid}/datas`。
-#[tracing::instrument(skip(cfg, shutdown, log_ringbuffer))]
+#[tracing::instrument(skip(cfg, shutdown, log_ringbuffer, event_bus))]
 pub async fn run_app_with_shutdown(
     cfg: config::AppConfig,
     shutdown: CancellationToken,
     log_ringbuffer: std::sync::Arc<crate::log_ringbuffer::LogRingBuffer>,
+    event_bus: crate::event_bus::EventBus,
 ) -> Result<(), RsIotError> {
     let hwid = types::Hwid::from(hwid::hardware_id());
     tracing::info!(%hwid, "rs-iot starting");
@@ -160,7 +172,8 @@ pub async fn run_app_with_shutdown(
     let bridge_registry = host::BridgeRegistry::new();
     // 报文 trace 注册表：HostContext（task dump）与 AppState（REST 激活/查询）共享同一实例
     //（TraceRegistry 内部 Arc<DashMap>，clone 共享状态——REST activate 立即影响 task dump）。
-    let trace_registry = crate::io_trace::TraceRegistry::new();
+    // with_sender 注入事件总线：dump 激活时扇出 Packet 到 SSE。
+    let trace_registry = crate::io_trace::TraceRegistry::with_sender(event_bus.clone());
     let ctx = host::HostContext {
         lux: client.clone(),
         hwid: hwid.clone(),
@@ -169,6 +182,7 @@ pub async fn run_app_with_shutdown(
         bridge_registry: bridge_registry.clone(),
         metrics: metrics.clone(),
         trace_registry: trace_registry.clone(),
+        event_tx: event_bus.clone(),
     };
 
     let (hub_tx, hub_rx) = tokio::sync::mpsc::channel::<types::Sample>(256);
@@ -210,6 +224,7 @@ pub async fn run_app_with_shutdown(
         metrics: metrics.clone(),
         trace_registry: trace_registry.clone(),
         log_ringbuffer,
+        event_bus,
     };
     let app = api::build_router(state);
     let api_port = cfg.api_port;
@@ -362,7 +377,7 @@ mod init_tracing_tests {
             dir: dir.to_str().unwrap().to_string(),
             ..Default::default()
         };
-        let (guard, _ring) = init_tracing(Some(&cfg));
+        let (guard, _ring, _event_bus) = init_tracing(Some(&cfg));
         assert!(guard.is_some(), "dir 非空应返回 Some(guard)");
         drop(guard); // 先释放日志文件句柄，再清理目录
         let _ = std::fs::remove_dir_all(&dir);
@@ -374,7 +389,7 @@ mod init_tracing_tests {
             dir: String::new(),
             ..Default::default()
         };
-        let (guard, _ring) = init_tracing(Some(&cfg));
+        let (guard, _ring, _event_bus) = init_tracing(Some(&cfg));
         assert!(guard.is_none(), "dir 空应返回 None");
     }
 }

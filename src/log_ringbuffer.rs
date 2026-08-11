@@ -74,11 +74,6 @@ impl LogRingBuffer {
     }
 }
 
-/// 当前 UTC 时间 RFC3339(ISO8601)。
-fn now_iso8601() -> String {
-    chrono::Utc::now().to_rfc3339()
-}
-
 /// tracing subscriber layer:截获 event → LogEntry → push LogRingBuffer。
 ///
 /// 独立 EnvFilter("info,io_trace=trace")经 `.with_filter()` attach(见 init_tracing)。
@@ -86,6 +81,8 @@ fn now_iso8601() -> String {
 pub struct RingBufferLayer {
     /// 共享 ring buffer(Arc,init_tracing 建后注入 + AppState 同一实例)。
     pub buffer: std::sync::Arc<LogRingBuffer>,
+    /// SSE 事件总线(阶段一):每条日志扇出。无 SSE 客户端时 publish 静默零开销。
+    pub sender: crate::event_bus::EventBus,
 }
 
 impl<S: tracing::Subscriber> Layer<S> for RingBufferLayer {
@@ -93,12 +90,18 @@ impl<S: tracing::Subscriber> Layer<S> for RingBufferLayer {
         let meta = event.metadata();
         let mut visitor = EntryVisitor::default();
         event.record(&mut visitor);
-        self.buffer.push(LogEntry {
-            ts: now_iso8601(),
+        let entry = LogEntry {
+            ts: crate::event_bus::now_iso8601(),
             level: meta.level().as_str().to_string(),
             target: meta.target().to_string(),
             message: visitor.message,
             fields: visitor.fields,
+        };
+        self.buffer.push(entry.clone());
+        // 扇出到 SSE 事件总线(阶段一):无消费者时 publish 静默,零开销。
+        // Arc 共享:N 个 SSE 客户端收同一份日志,避免深拷贝。
+        self.sender.publish(crate::event_bus::EventPayload::Log {
+            entry: std::sync::Arc::new(entry),
         });
     }
 }
@@ -217,7 +220,8 @@ mod tests {
 
     #[test]
     fn now_iso8601_is_rfc3339() {
-        let s = now_iso8601();
+        // now_iso8601 已迁至 event_bus(crate 共用),此处验证其格式契约不变。
+        let s = crate::event_bus::now_iso8601();
         // RFC3339 含 'T' 和 时区(Z 或 +00:00)
         assert!(s.contains('T'), "ISO8601 应含 T: {s}");
     }
@@ -227,6 +231,7 @@ mod tests {
         let buffer = Arc::new(LogRingBuffer::new(cap));
         let layer = RingBufferLayer {
             buffer: buffer.clone(),
+            sender: crate::event_bus::EventBus::dummy(),
         }
         .with_filter(EnvFilter::new(filter));
         let subscriber = tracing_subscriber::registry().with(layer);

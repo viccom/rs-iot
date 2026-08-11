@@ -171,6 +171,7 @@ async fn send_command_routes_to_target() {
         bridge_registry: BridgeRegistry::new(),
         metrics: std::sync::Arc::new(crate::process_metrics::ProcessMetrics::new()),
         trace_registry: crate::io_trace::TraceRegistry::new(),
+        event_tx: crate::event_bus::EventBus::dummy(),
     };
     let inst = InstConfig {
         inst_id: "src".into(),
@@ -302,6 +303,7 @@ async fn setup_ctx(tag: &str) -> (HostContext, lux::ServerHandle, String) {
         bridge_registry: BridgeRegistry::new(),
         metrics: std::sync::Arc::new(crate::process_metrics::ProcessMetrics::new()),
         trace_registry: crate::io_trace::TraceRegistry::new(),
+        event_tx: crate::event_bus::EventBus::dummy(),
     };
     (ctx_host, handle, data_dir)
 }

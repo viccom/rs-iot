@@ -23,6 +23,16 @@ pub enum Dir {
     Rx,
 }
 
+impl Dir {
+    /// 方向字符串(SSE `Packet.dir`:"tx"/"rx")。
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Tx => "tx",
+            Self::Rx => "rx",
+        }
+    }
+}
+
 /// 单实例 trace 状态(并发访问)。
 #[derive(Debug)]
 pub struct TraceState {
@@ -55,16 +65,37 @@ impl TraceState {
 }
 
 /// per-instance trace 开关注册表。挂 `HostContext` + `AppState`(共享同一实例,Arc 内部)。
-#[derive(Clone, Default, Debug)]
+#[derive(Clone, Debug)]
 pub struct TraceRegistry {
     map: Arc<DashMap<String, Arc<TraceState>>>,
+    /// SSE 事件总线(阶段一):dump 激活时扇出 Packet。
+    /// `new()` 自建 dummy(测试用,publish 静默),`with_sender()` 注入真 bus(生产用,
+    /// 与 SSE endpoint / 其他生产者共享同一 bus)。dump 经此字段发布,5 个调用点零改。
+    event_tx: crate::event_bus::EventBus,
+}
+
+impl Default for TraceRegistry {
+    /// 默认 = 空 map + 孤立 event sender（与 `new()` 一致，测试用）。
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl TraceRegistry {
-    /// 构造空注册表。
+    /// 构造空注册表 + 孤立 event sender(测试用,publish 静默)。
     pub fn new() -> Self {
         Self {
             map: Arc::new(DashMap::new()),
+            event_tx: crate::event_bus::EventBus::dummy(),
+        }
+    }
+
+    /// 构造并注入事件总线(生产:`run_app_with_shutdown` 建真 channel 后注入,
+    /// 与 SSE endpoint / 其他生产者共享同一 bus)。
+    pub fn with_sender(event_tx: crate::event_bus::EventBus) -> Self {
+        Self {
+            map: Arc::new(DashMap::new()),
+            event_tx,
         }
     }
 
@@ -104,12 +135,22 @@ pub fn dump(registry: &TraceRegistry, inst_id: &str, dir: Dir, bytes: &[u8]) {
     if !state.check_alive() {
         return;
     }
+    let hex_str = hex(bytes);
     tracing::trace!(
         target: "io_trace",
         inst_id,
         dir = ?dir,
-        hex = %hex(bytes),
+        hex = %hex_str,
     );
+    // 扇出到 SSE 事件总线(阶段一):前端报文流实时滚动。复用 hex_str 避免重复格式化。
+    registry
+        .event_tx
+        .publish(crate::event_bus::EventPayload::Packet {
+            inst_id: inst_id.to_string(),
+            dir: dir.as_str(),
+            hex: hex_str,
+            ts: crate::event_bus::now_iso8601(),
+        });
 }
 
 /// hex 工具:空格分隔大写字节序列(如 `"01 03 0A FF"`)。

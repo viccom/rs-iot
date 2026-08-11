@@ -106,6 +106,7 @@ async fn collect_pushes_sample_to_hub() {
         bridge_registry: BridgeRegistry::new(),
         metrics: std::sync::Arc::new(crate::process_metrics::ProcessMetrics::new()),
         trace_registry: crate::io_trace::TraceRegistry::new(),
+        event_tx: crate::event_bus::EventBus::dummy(),
     };
     let inst = InstConfig {
         inst_id: "lua-it".into(),

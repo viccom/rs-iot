@@ -50,6 +50,7 @@ async fn app_with_stat(stat_inst: &str) -> (axum::Router, lux::ServerHandle) {
         bridge_registry: BridgeRegistry::new(),
         metrics: std::sync::Arc::new(rs_iot::process_metrics::ProcessMetrics::new()),
         trace_registry: rs_iot::io_trace::TraceRegistry::new(),
+        event_tx: rs_iot::event_bus::EventBus::dummy(),
     };
     let (hub_tx, _hub_rx) = tokio::sync::mpsc::channel(64);
     let mgr = Arc::new(InstanceManager::new(ctx, hub_tx));
@@ -62,6 +63,7 @@ async fn app_with_stat(stat_inst: &str) -> (axum::Router, lux::ServerHandle) {
         metrics: std::sync::Arc::new(rs_iot::process_metrics::ProcessMetrics::new()),
         trace_registry: rs_iot::io_trace::TraceRegistry::new(),
         log_ringbuffer: std::sync::Arc::new(rs_iot::log_ringbuffer::LogRingBuffer::new(2000)),
+        event_bus: rs_iot::event_bus::EventBus::dummy(),
     };
     (build_router(state), handle)
 }

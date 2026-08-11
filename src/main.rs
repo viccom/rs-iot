@@ -49,18 +49,18 @@ async fn main() -> anyhow::Result<()> {
         Command::Run => {
             let cfg = rs_iot::config::AppConfig::load_or_default(cli.config.as_deref())?;
             // 持有 guard 到 run 返回（main 退出时 drop → flush 故障末尾日志）；
-            // ring_buffer 注入 run_app → AppState（GET /api/v1/logs/recent 读）。
-            let (_log_guard, log_ringbuffer) = rs_iot::init_tracing(Some(&cfg.log));
-            run::run(cfg, log_ringbuffer).await?;
+            // ring_buffer + event_bus 注入 run_app → AppState（GET 端点 / SSE 共享）。
+            let (_log_guard, log_ringbuffer, event_bus) = rs_iot::init_tracing(Some(&cfg.log));
+            run::run(cfg, log_ringbuffer, event_bus).await?;
         }
         Command::Install => {
-            // init_tracing(None) 恒返回 None guard（仅终端），ring_buffer 不用丢弃
-            let (_log_guard, _ring_buffer) = rs_iot::init_tracing(None);
+            // init_tracing(None) 恒返回 None guard（仅终端），ring_buffer/event_bus 不用丢弃
+            let (_log_guard, _ring_buffer, _event_bus) = rs_iot::init_tracing(None);
             service::install()?
         }
         Command::Uninstall => {
-            // init_tracing(None) 恒返回 None guard（仅终端），ring_buffer 不用丢弃
-            let (_log_guard, _ring_buffer) = rs_iot::init_tracing(None);
+            // init_tracing(None) 恒返回 None guard（仅终端），ring_buffer/event_bus 不用丢弃
+            let (_log_guard, _ring_buffer, _event_bus) = rs_iot::init_tracing(None);
             service::uninstall()?
         }
         #[cfg(windows)]

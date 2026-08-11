@@ -16,6 +16,7 @@ pub mod auth;
 pub mod frontend;
 pub mod routes_command;
 pub mod routes_device;
+pub mod routes_events;
 pub mod routes_group;
 pub mod routes_inst;
 pub mod routes_logs;
@@ -40,6 +41,8 @@ pub struct AppState {
     pub trace_registry: crate::io_trace::TraceRegistry,
     /// 日志 ring buffer（GET /api/v1/logs/recent 读）。
     pub log_ringbuffer: std::sync::Arc<crate::log_ringbuffer::LogRingBuffer>,
+    /// SSE 事件总线（GET /api/v1/events 订阅；与 HostContext/TraceRegistry 共享同一 bus）。
+    pub event_bus: crate::event_bus::EventBus,
 }
 
 /// 白名单路径（无需 JWT）。
@@ -140,6 +143,8 @@ pub fn build_router(state: AppState) -> axum::Router {
         .route("/api/v1/rtdatas", get(routes_rtdata::rtdatas))
         // 日志 ring buffer 快照(最近 N 条结构化日志;默认 JWT 保护)
         .route("/api/v1/logs/recent", get(routes_logs::recent))
+        // SSE 实时推送(日志/报文/实例状态;默认 JWT 保护,走 cookie)
+        .route("/api/v1/events", get(routes_events::events))
         // 静态前端
         .route("/apitest", get(frontend::index_redirect))
         .route("/scada", get(frontend::scada_terminal))

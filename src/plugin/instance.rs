@@ -92,6 +92,7 @@ impl InstanceManager {
         self.states.insert(id_key.clone(), InstState::Starting);
         self.configs.insert(id_key.clone(), inst.clone());
         self.ctx.ctl_registry.register(&id_key, cmd_tx);
+        self.emit_state(&id_key, InstState::Starting);
 
         let ctx = self.ctx.clone();
         let tx = self.hub_tx.clone();
@@ -105,6 +106,7 @@ impl InstanceManager {
         let sup_join = self.spawn_supervisor(id_key.clone(), token.clone(), source_join);
 
         self.states.insert(id_key.clone(), InstState::Running);
+        self.emit_state(&id_key, InstState::Running);
         self.handles.insert(
             id_key,
             InstanceHandle {
@@ -134,6 +136,7 @@ impl InstanceManager {
         self.states.insert(id_key.clone(), InstState::Starting);
         self.configs.insert(id_key.clone(), inst.clone());
         self.ctx.ctl_registry.register(&id_key, cmd_tx);
+        self.emit_state(&id_key, InstState::Starting);
 
         let ctx = self.ctx.clone();
         let token_run = token.clone();
@@ -146,6 +149,7 @@ impl InstanceManager {
         let sup_join = self.spawn_supervisor(id_key.clone(), token.clone(), sink_join);
 
         self.states.insert(id_key.clone(), InstState::Running);
+        self.emit_state(&id_key, InstState::Running);
         self.handles.insert(
             id_key,
             InstanceHandle {
@@ -160,6 +164,7 @@ impl InstanceManager {
     #[tracing::instrument(skip(self), fields(hwid = %self.ctx.hwid, inst_id = %inst_id))]
     pub async fn stop(&self, inst_id: &str) -> Result<(), RsIotError> {
         self.states.insert(inst_id.to_string(), InstState::Stopping);
+        self.emit_state(inst_id, InstState::Stopping);
         self.ctx.ctl_registry.unregister(inst_id);
         if let Some((_, h)) = self.handles.remove(inst_id) {
             h.token.cancel();
@@ -170,6 +175,7 @@ impl InstanceManager {
             }
         }
         self.states.insert(inst_id.to_string(), InstState::Stopped);
+        self.emit_state(inst_id, InstState::Stopped);
         Ok(())
     }
 
@@ -191,6 +197,8 @@ impl InstanceManager {
         inner: JoinHandle<()>,
     ) -> JoinHandle<()> {
         let states = self.states.clone();
+        let event_tx = self.ctx.event_tx.clone();
+        let configs = self.configs.clone();
         tokio::spawn(async move {
             if let Err(e) = inner.await {
                 tracing::warn!("[instance] {id} task join error: {e}");
@@ -198,6 +206,17 @@ impl InstanceManager {
             if !token.is_cancelled() {
                 states.insert(id.clone(), InstState::Failed);
                 tracing::error!("[instance] {id} task exited unexpectedly → Failed");
+                // SSE 推送 Failed 状态：前端概览即时变（不等 2s 轮询）。
+                // configs 闭包内查（无 self）；缺配置（极端：start 中途 configs 被清）静默跳过。
+                if let Some(cfg) = configs.get(&id).map(|r| r.value().clone()) {
+                    event_tx.publish(crate::event_bus::EventPayload::State {
+                        inst_id: id.clone(),
+                        state: InstState::Failed,
+                        app_code: cfg.app_code.as_ref().to_string(),
+                        host_kind: cfg.host_kind,
+                        ts: crate::event_bus::now_iso8601(),
+                    });
+                }
             }
         })
     }
@@ -213,5 +232,25 @@ impl InstanceManager {
     /// 取实例配置快照（/inst/stats 分类用：app_code + host_kind）。
     pub fn config_snapshot(&self, inst_id: &str) -> Option<InstConfig> {
         self.configs.get(inst_id).map(|r| r.value().clone())
+    }
+
+    /// SSE 推送实例状态变更（阶段一）：start_source/start_sink/stop 的状态流转 + supervisor
+    /// 的 Failed 分支统一经此发布 `EventPayload::State`。前端概览状态计数即时刷新（不等 2s 轮询）。
+    ///
+    /// 用 `config_snapshot` 取 app_code + host_kind（缺配置静默跳过——如实例已被清）。
+    /// 无 SSE 消费者时 `publish` 静默零开销。
+    fn emit_state(&self, inst_id: &str, state: InstState) {
+        let Some(cfg) = self.config_snapshot(inst_id) else {
+            return;
+        };
+        self.ctx
+            .event_tx
+            .publish(crate::event_bus::EventPayload::State {
+                inst_id: inst_id.to_string(),
+                state,
+                app_code: cfg.app_code.as_ref().to_string(),
+                host_kind: cfg.host_kind,
+                ts: crate::event_bus::now_iso8601(),
+            });
     }
 }

@@ -14,6 +14,8 @@ lux = { path = "../lux" }
 # 异步运行时
 tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["rt", "codec"] }
+# SSE 实时推送(阶段一):broadcast → Stream(BroadcastStream,需 sync feature)。
+tokio-stream = { version = "0.1", features = ["sync"] }
 
 # 日志
 tracing = "0.1"
@@ -23,8 +25,10 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 anyhow = "1"
 thiserror = "2"
 
-# 序列化 / 配置
-serde = { version = "1", features = ["derive"] }
+# 序列化 / 配置。
+# +rc:EventPayload::Log 用 Arc<LogEntry>(N 个 SSE 客户端共享同一份日志,避免深拷贝)。
+# LogEntry 树状无 cycle,启用 Arc/Rc 序列化安全。
+serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
 toml = "0.8"
 

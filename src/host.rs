@@ -152,6 +152,9 @@ pub struct HostContext {
     pub metrics: std::sync::Arc<crate::process_metrics::ProcessMetrics>,
     /// 报文 trace 开关注册表（P1 子系统 2）：per-instance 运行时激活。
     pub trace_registry: crate::io_trace::TraceRegistry,
+    /// SSE 事件总线（阶段一）：生产者（log_ringbuffer / io_trace / instance emit_state）
+    /// 投递事件，SSE endpoint 订阅。无消费者时 publish 静默零开销。
+    pub event_tx: crate::event_bus::EventBus,
 }
 
 #[cfg(test)]
