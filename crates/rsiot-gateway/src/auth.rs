@@ -53,7 +53,11 @@ pub fn verify_token(token: &str, secret: &str) -> Option<String> {
 
 /// axum 鉴权中间件（对标 rs-iot `auth_middleware`）。
 ///
-/// 放行 PUBLIC_PATHS；其余取 `Authorization: Bearer <jwt>` 验证，失败 401。
+/// 放行 PUBLIC_PATHS；其余按以下顺序取 token 验证，失败 401：
+/// 1. `Authorization: Bearer <jwt>`（REST / fetch 用）。
+/// 2. URL query `?token=<jwt>`（EventSource 用——标准 EventSource API 不能设 header，
+///    监控 SSE / AI 面板 SSE 必须经 query 传凭证）。
+///
 /// 状态类型 `Arc<GwState>`（与 build_router 的 with_state 对齐）。
 pub async fn auth_middleware(State(st): State<Arc<GwState>>, req: Request, next: Next) -> Response {
     let path = req.uri().path().to_string();
@@ -64,7 +68,14 @@ pub async fn auth_middleware(State(st): State<Arc<GwState>>, req: Request, next:
         .headers()
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.strip_prefix("Bearer ").map(|t| t.to_string()));
+        .and_then(|s| s.strip_prefix("Bearer ").map(|t| t.to_string()))
+        .or_else(|| {
+            // EventSource 不能设 header，支持 ?token=<jwt> query 参数。
+            req.uri().query().and_then(|q| {
+                q.split('&')
+                    .find_map(|kv| kv.strip_prefix("token=").map(|s| s.to_string()))
+            })
+        });
     match token {
         Some(t) => match verify_token(&t, st.jwt_secret.as_str()) {
             Some(_) => next.run(req).await,
