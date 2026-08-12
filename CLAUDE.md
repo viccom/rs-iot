@@ -54,6 +54,8 @@ POST /api/v1/command/send ─┼─► CtlRegistry.try_send(64) ──► 实例
 
 子 crate 与主 crate 的耦合边界：gateway 只透传主 crate REST（零改动）；rsiot-mcp 调主 crate REST，主 crate 有 2 个待补端点（`POST /lua/script/save` + `GET /config`，属主 crate 自身能力补全，见选型报告 §八）。
 
+**前端工程**（`frontend/`，M1 起）：Vue3 + Vite + TypeScript SPA（工业监控界面 + AI 面板）。`src/views/Login.vue` 登录、`src/views/Monitor.vue` 占位监控（M2 实装）、`src/api/client.ts` fetch 封装（自动带 JWT、401 区分已登录态 token 失效 vs 登录中业务 401）、`src/stores/auth.ts`（Pinia token 状态）、`src/router.ts`（history 模式 + 守卫）。**构建产物 `dist/` 经 rust-embed 嵌入 `crates/rsiot-gateway`**（gateway `static_assets.rs` 服务静态资源 + SPA fallback），`dist/` 不入库（`.gitignore`）。dev：`cd frontend && npm run dev`（Vite :5173，proxy `/api` → gateway :8080 同源无 CORS）；build：`npm run build`（产 `dist/` 后重编 gateway 才嵌入新前端）。
+
 **lux Hash 布局**（对标 Lite_IOT `bRedka`，清单见 `src/db/identity.rs:3-11`）：
 `users` / `passwords`(bcrypt) / `groups` / `instances` / `devices` / `children` / `accesskey` / `ext_tokens`(外部插件 token: field=instId, value=JSON{token_hash,created_at,enabled}) / `rtdata:<devId>`（field=`<devid>.<tag>`，value=`[ts, localTime, value]` JSON）。
 
@@ -108,6 +110,10 @@ RSIOT_BASE=http://127.0.0.1:8790 RSIOT_JWT=<token> ./target/debug/rsiot-mcp   # 
 
 ./target/debug/rsiot-gateway gateway.toml      # gateway 前台运行
 RSIOT_GW_CONFIG=gateway.toml ./target/debug/rsiot-gateway   # gateway 配置走环境变量
+
+cd frontend && npm run dev       # 前端 dev（Vite :5173 HMR，proxy /api → gateway :8080）
+cd frontend && npm run build     # 前端 build（产 dist/，需重编 gateway -p rsiot-gateway 才嵌入新前端）
+cd frontend && npm run test      # 前端单测（vitest）
 ```
 
 ### Feature 裁剪（内置协议可选）

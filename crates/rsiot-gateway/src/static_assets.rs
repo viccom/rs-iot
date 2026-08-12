@@ -40,9 +40,9 @@ pub async fn serve(uri: Uri) -> Response {
             .body(Body::from(content.data.into_owned()))
             .unwrap()
     } else if path.contains('.') {
-        // 带扩展名的路径视为静态文件缺失 → 404（防断链资源被当 HTML 返，
-        // 浏览器控制台报 "Unexpected token '<'"）。对标 rust-embed 官方 axum-spa 范例。
-        // （T1 审查 I1 follow-up，真实 dist 后才能测到此场景。）
+        // 带扩展名的路径视为静态文件缺失 → 404（防断链资源被当 HTML 返致控制台 Unexpected token）。
+        // 注意：判断的是"路径任意段含点"，vue-router history 路由惯例不含点（/login /scada），
+        // 含点路径基本只有静态资源（/assets/*.js），故此启发式安全。
         (StatusCode::NOT_FOUND, "not found").into_response()
     } else {
         // SPA fallback：非文件路径（如 /login）回退 index.html，交给 vue-router 处理。
