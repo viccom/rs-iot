@@ -64,26 +64,32 @@ export const useMonitorStore = defineStore('monitor', () => {
 
   /** 拉取实例列表（进程级 state + health）。 */
   async function loadInstances() {
-    const r = await fetch('/api/rsiot/api/v1/inst/stats', {
-      headers: { Authorization: `Bearer ${useAuthStore().token}` },
-    })
-    if (r.ok) instances.value = (await r.json()) as InstanceStat[]
+    try {
+      const r = await fetch('/api/rsiot/api/v1/inst/stats', {
+        headers: { Authorization: `Bearer ${useAuthStore().token}` },
+      })
+      if (r.ok) instances.value = (await r.json()) as InstanceStat[]
+    } catch { /* 轮询失败静默，下周期重试 */ }
   }
 
   /** 拉取 rtdata 全量快照。 */
   async function loadRtdata() {
-    const r = await fetch('/api/rsiot/api/v1/rtdatas', {
-      headers: { Authorization: `Bearer ${useAuthStore().token}` },
-    })
-    if (r.ok) rtdata.value = await r.json()
+    try {
+      const r = await fetch('/api/rsiot/api/v1/rtdatas', {
+        headers: { Authorization: `Bearer ${useAuthStore().token}` },
+      })
+      if (r.ok) rtdata.value = await r.json()
+    } catch { /* 轮询失败静默，下周期重试 */ }
   }
 
   /** 拉取进程级 sysstatus。 */
   async function loadSysstatus() {
-    const r = await fetch('/api/rsiot/api/v1/sysstatus', {
-      headers: { Authorization: `Bearer ${useAuthStore().token}` },
-    })
-    if (r.ok) sysstatus.value = await r.json()
+    try {
+      const r = await fetch('/api/rsiot/api/v1/sysstatus', {
+        headers: { Authorization: `Bearer ${useAuthStore().token}` },
+      })
+      if (r.ok) sysstatus.value = await r.json()
+    } catch { /* 轮询失败静默，下周期重试 */ }
   }
 
   /** 标签页隐藏时暂停轮询，恢复时继续（省资源 + 防后台节流）。 */
@@ -107,9 +113,10 @@ export const useMonitorStore = defineStore('monitor', () => {
       `/api/rsiot/api/v1/events?types=log,packet,state&token=${encodeURIComponent(tok)}`,
     )
     // JSON.parse 容错：畸形帧不应让 EventSource listener 抛错（抛错后该 kind 不再分发）。
-    sse.addEventListener('log', e => safe(JSON.parse((e as MessageEvent).data) as LogEntry, onLog))
-    sse.addEventListener('packet', e => safe(JSON.parse((e as MessageEvent).data) as PacketEntry, onPacket))
-    sse.addEventListener('state', e => safe(JSON.parse((e as MessageEvent).data) as StateEvent, onState))
+    // parse 须在 safe 内执行（thunk）——若作为 safe 实参先求值，parse 抛错会绕过 try。
+    sse.addEventListener('log', e => safe(() => onLog(JSON.parse((e as MessageEvent).data) as LogEntry)))
+    sse.addEventListener('packet', e => safe(() => onPacket(JSON.parse((e as MessageEvent).data) as PacketEntry)))
+    sse.addEventListener('state', e => safe(() => onState(JSON.parse((e as MessageEvent).data) as StateEvent)))
     // onerror：浏览器自动重连，这里静默（M4 完善：断线补拉 /api/v1/logs/recent）。
     sse.onerror = () => {}
     // 立即拉一次 + 周期轮询。
@@ -122,8 +129,8 @@ export const useMonitorStore = defineStore('monitor', () => {
   }
 
   /** SSE 帧 parse/handle 容错：畸形帧 warn 并跳过，不冒泡到 EventSource。 */
-  function safe<T>(v: T, handle: (v: T) => void) {
-    try { handle(v) } catch (e) { console.warn('monitor: drop malformed SSE frame', e) }
+  function safe(fn: () => void) {
+    try { fn() } catch (e) { console.warn('monitor: drop malformed SSE frame', e) }
   }
 
   /** 停止 SSE + 清理定时器（登出 / 路由切走时调用）。 */

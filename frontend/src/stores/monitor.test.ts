@@ -23,6 +23,10 @@ class FakeEventSource {
   emit(kind: string, data: unknown) {
     (this.listeners[kind] || []).forEach(cb => cb({ data: JSON.stringify(data) }))
   }
+  /** 直发原始 data（不经 JSON.stringify）——测畸形帧专用。 */
+  _emit(kind: string, raw: string) {
+    (this.listeners[kind] || []).forEach(cb => cb({ data: raw }))
+  }
   close() { /* no-op */ }
 }
 
@@ -118,5 +122,26 @@ describe('monitor store', () => {
     const s = useMonitorStore()
     s.selectInstance('foo')
     expect(s.selectedInstance).toBe('foo')
+  })
+
+  it('safe drops malformed SSE frame without throwing', () => {
+    // safe() 兑现的不变量：畸形帧（JSON.parse 抛错）被 safe 吞掉，不让异常逸出
+    // listener（逸出后该 kind 整类事件不再分发）。锁的是"parse 必须在 safe 内执行"。
+    const auth = useAuthStore()
+    auth.setAuth('tok', 'admin')
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async () =>
+      new Response('{}', { status: 200 }),
+    )
+    ;(globalThis as unknown as { document: unknown }).document = {
+      hidden: false, addEventListener: () => {}, removeEventListener: () => {},
+    }
+    const s = useMonitorStore()
+    s.start()
+    // 模拟畸形帧：直发非 JSON data。
+    expect(() => FakeEventSource.last!._emit('log', 'not json')).not.toThrow()
+    // 畸形帧被丢，logs 不增长。
+    expect(s.logs.length).toBe(0)
+    s.stop()
+    fetchSpy.mockRestore()
   })
 })
