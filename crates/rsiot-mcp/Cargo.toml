@@ -30,4 +30,6 @@ thiserror = "2"
 
 [dev-dependencies]
 # 集成测试用 rmcp client 经 duplex 拨号验证协议握手（dbx-mcp tests/protocol.rs 范式）。
+rmcp = { version = "2.2", features = ["client", "transport-io"] }
 tokio = { version = "1", features = ["io-util", "rt-multi-thread", "macros"] }
+async-trait = "0.1"

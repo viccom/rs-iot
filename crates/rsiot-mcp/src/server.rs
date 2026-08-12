@@ -73,6 +73,15 @@ pub struct InstanceRequest {
     pub inst_id: String,
 }
 
+/// `rsiot_save_lua_script`：写 lua 脚本。映射 `POST /api/v1/lua/script/save`。
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct SaveScriptRequest {
+    #[schemars(description = "Script directory name (e.g. \"devA\"), written to scripts/<name>/main.lua. Only [A-Za-z0-9_-].")]
+    pub name: String,
+    #[schemars(description = "Content of main.lua")]
+    pub content: String,
+}
+
 // ============ risk 框架 ============
 
 /// 工具风险三档（rs-iot 独有，对标 dbx-mcp `sql_risk` 但绑定工具名）。
@@ -242,6 +251,33 @@ impl RsiotMcpServer {
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         let body = serde_json::json!({ "inst_id": req.inst_id });
         backend_to_result(self.backend.post("/api/v1/stopinst", &body).await, "rsiot_stop_instance")
+    }
+
+    /// `rsiot_save_lua_script`：写 lua 脚本。映射 `POST /api/v1/lua/script/save`。
+    ///
+    /// **写操作**：修改 scripts/ 文件树（路径白名单由 rs-iot 主进程强制）。
+    /// 写后如需生效，调 `rsiot_start_instance` 或靠 luaClient notify 热加载。
+    #[tool(description = "Write a lua collection script to scripts/<name>/main.lua. After saving, start/reload the luaClient instance to apply. Requires approval.")]
+    async fn rsiot_save_lua_script(
+        &self,
+        Parameters(req): Parameters<SaveScriptRequest>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let body = serde_json::json!({ "name": req.name, "content": req.content });
+        backend_to_result(
+            self.backend.post("/api/v1/lua/script/save", &body).await,
+            "rsiot_save_lua_script",
+        )
+    }
+
+    /// `rsiot_get_config`：读脱敏配置。映射 `GET /api/v1/config`。
+    ///
+    /// 返回的配置已脱敏（jwt_secret/mqtt 凭据遮蔽为 "***"），agent 可安全读取做诊断。
+    #[tool(description = "Read the gateway configuration with secrets masked (jwt_secret and mqtt credentials shown as \"***\"). Read-only.")]
+    async fn rsiot_get_config(
+        &self,
+        Parameters(_): Parameters<NoParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        backend_to_result(self.backend.get("/api/v1/config").await, "rsiot_get_config")
     }
 }
 
@@ -504,6 +540,37 @@ mod tests {
         let (path, body) = &backend.recorded_posts()[0];
         assert_eq!(path, "/api/v1/stopinst");
         assert_eq!(body["inst_id"], "i9");
+    }
+
+    // ---- save_lua_script / get_config ----
+
+    #[tokio::test]
+    async fn save_script_posts_name_and_content() {
+        let backend = Arc::new(FakeBackend::new(json!(null)));
+        let server = RsiotMcpServer::new(backend.clone() as Arc<dyn RsiotBackend>);
+        server
+            .rsiot_save_lua_script(Parameters(SaveScriptRequest {
+                name: "devA".into(),
+                content: "function collect() end".into(),
+            }))
+            .await
+            .unwrap();
+        let (path, body) = &backend.recorded_posts()[0];
+        assert_eq!(path, "/api/v1/lua/script/save");
+        assert_eq!(body["name"], "devA");
+        assert_eq!(body["content"], "function collect() end");
+    }
+
+    #[tokio::test]
+    async fn get_config_hits_config_endpoint() {
+        let backend = Arc::new(FakeBackend::new(json!({"jwt_secret": "***"})));
+        let server = RsiotMcpServer::new(backend.clone() as Arc<dyn RsiotBackend>);
+        let result = server
+            .rsiot_get_config(Parameters(NoParams {}))
+            .await
+            .unwrap();
+        assert!(text_of(&result).contains("***"));
+        assert_eq!(backend.recorded_paths()[0], "/api/v1/config");
     }
 
     // ---- 错误路径（所有工具共用 backend_to_result）----
