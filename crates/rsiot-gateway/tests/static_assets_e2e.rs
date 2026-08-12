@@ -37,10 +37,13 @@ fn test_state() -> Arc<GwState> {
     Arc::new(GwState::from_config(&cfg).expect("state"))
 }
 
-/// `GET /` 返回嵌入的 index.html（含占位内容），状态 200。
+/// `GET /` 返回嵌入的 index.html，状态 200。
 ///
 /// 验证意图（规则7）：rust-embed 在编译期把 frontend/dist/index.html 嵌入二进制，
 /// fallback 必须把它吐出来——这是 gateway 作为前端入口的存在性判据。
+///
+/// 断言特征：真实 Vue 构建的 index.html 必含 `<div id="app">`（Vue mount 点）。
+/// （T4 起 placeholder dist 已替换为真实 Vue build。）
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn root_serves_index_html() {
     let gw = spawn(build_router(test_state())).await;
@@ -48,8 +51,8 @@ async fn root_serves_index_html() {
     assert_eq!(resp.status(), 200);
     let body = resp.text().await.expect("body");
     assert!(
-        body.contains("placeholder"),
-        "expected embedded index.html placeholder; got:\n{body}"
+        body.contains("<div id=\"app\">"),
+        "expected embedded Vue index.html (app mount point); got:\n{body}"
     );
 }
 
@@ -63,7 +66,29 @@ async fn spa_fallback_returns_index_html() {
     let resp = reqwest::get(format!("{gw}/login")).await.expect("request");
     assert_eq!(resp.status(), 200);
     let body = resp.text().await.expect("body");
-    assert!(body.contains("placeholder"), "SPA fallback to index.html");
+    assert!(
+        body.contains("<div id=\"app\">"),
+        "SPA fallback to index.html (app mount point)"
+    );
+}
+
+/// `GET /assets/missing.js`（带扩展名的缺失资源）返回 404，不回退 index.html。
+///
+/// 验证意图（规则7）：带扩展名的路径必为静态文件（非 SPA 路由），缺失资源若回退
+/// index.html（HTML），浏览器会把 HTML 当 JS 解析，控制台刷 "Unexpected token '<'"，
+/// 淹没真实错误。对标 rust-embed 官方 axum-spa 范例（T1 审查 I1 follow-up）。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn missing_asset_with_extension_returns_404() {
+    let gw = spawn(build_router(test_state())).await;
+    let resp = reqwest::get(format!("{gw}/assets/missing.js"))
+        .await
+        .expect("request");
+    assert_eq!(resp.status(), 404, "missing asset must 404, not index.html");
+    let body = resp.text().await.expect("body");
+    assert!(
+        !body.contains("<div id=\"app\">"),
+        "missing asset must not fall back to index.html; got:\n{body}"
+    );
 }
 
 /// 静态资源 fallback 优先级低于 `/api/*`：访问 `/api/gw/health` 不被 fallback 拦截。
