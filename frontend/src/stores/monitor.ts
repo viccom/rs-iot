@@ -29,6 +29,8 @@ export const useMonitorStore = defineStore('monitor', () => {
   const sysstatus = ref<Record<string, unknown>>({})
   /** 当前选中实例 ID（组件联动）。 */
   const selectedInstance = ref<string>('')
+  /** SSE 连接是否断开（onerror 置 true / onopen + 补拉成功复位 false）。 */
+  const offline = ref(false)
 
   let sse: EventSource | null = null
   let rtdataTimer: ReturnType<typeof setInterval> | null = null
@@ -92,6 +94,32 @@ export const useMonitorStore = defineStore('monitor', () => {
     } catch { /* 轮询失败静默，下周期重试 */ }
   }
 
+  /**
+   * 补拉最近日志（SSE 断线兜底，对标 scada.html:945）。
+   *
+   * SSE 断线期间丢的帧经 `GET /api/v1/logs/recent` 补回——返回数组最新在前，
+   * 与 `logs` 形态一致；按 `ts|message` 去重，新条目 prepend 后截断到 MAX_LOGS。
+   * 补拉成功（r.ok）复位 offline（说明网络恢复）；失败保持 offline，下轮重连再补。
+   */
+  async function loadLogsRecent() {
+    try {
+      const r = await fetch('/api/rsiot/api/v1/logs/recent?limit=200', {
+        headers: { Authorization: `Bearer ${useAuthStore().token}` },
+      })
+      if (r.ok) {
+        const entries: LogEntry[] = await r.json()
+        const seen = new Set(logs.value.map(l => `${l.ts}|${l.message}`))
+        // entries 最新在前；逐条 prepend 前反转，保持时间顺序（旧→新 unshift）。
+        for (const e of [...entries].reverse()) {
+          const k = `${e.ts}|${e.message}`
+          if (!seen.has(k)) { logs.value.unshift(e); seen.add(k) }
+        }
+        if (logs.value.length > MAX_LOGS) logs.value.length = MAX_LOGS
+        offline.value = false  // 补拉成功说明在线
+      }
+    } catch { /* 补拉失败保持 offline，下轮重连再补 */ }
+  }
+
   /** 标签页隐藏时暂停轮询，恢复时继续（省资源 + 防后台节流）。 */
   function onVisibility() {
     if (document.hidden) {
@@ -117,8 +145,14 @@ export const useMonitorStore = defineStore('monitor', () => {
     sse.addEventListener('log', e => safe(() => onLog(JSON.parse((e as MessageEvent).data) as LogEntry)))
     sse.addEventListener('packet', e => safe(() => onPacket(JSON.parse((e as MessageEvent).data) as PacketEntry)))
     sse.addEventListener('state', e => safe(() => onState(JSON.parse((e as MessageEvent).data) as StateEvent)))
-    // onerror：浏览器自动重连，这里静默（M4 完善：断线补拉 /api/v1/logs/recent）。
-    sse.onerror = () => {}
+    // SSE 连接成功 → 复位离线状态。
+    sse.onopen = () => { offline.value = false }
+    // onerror：置离线，浏览器自动重连；补拉 logs/recent 兜底断线期间丢帧
+    // （对标 scada.html:945）。
+    sse.onerror = () => {
+      offline.value = true
+      void loadLogsRecent()
+    }
     // 立即拉一次 + 周期轮询。
     void loadInstances()
     void loadRtdata()
@@ -154,12 +188,14 @@ export const useMonitorStore = defineStore('monitor', () => {
     rtdata,
     sysstatus,
     selectedInstance,
+    offline,
     onLog,
     onPacket,
     onState,
     loadInstances,
     loadRtdata,
     loadSysstatus,
+    loadLogsRecent,
     start,
     stop,
     selectInstance,

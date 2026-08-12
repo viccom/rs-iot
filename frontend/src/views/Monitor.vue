@@ -29,6 +29,10 @@ onUnmounted(() => monitor.stop())
       <h1>rs-iot 监控</h1>
       <button @click="drawerOpen = !drawerOpen">AI</button>
     </header>
+    <!-- 离线横幅（SSE 断开）：fixed top 覆盖，z-index 200（高于 AgentDrawer 100） -->
+    <div v-if="monitor.offline" class="offline-banner" role="status" aria-live="polite">
+      rs-iot 连接断开，重连中…
+    </div>
     <div class="body">
       <CollectorList />
       <main class="main">
@@ -69,4 +73,11 @@ onUnmounted(() => monitor.stop())
 }
 .tabs button.active { background: var(--color-primary); color: white; }
 .content { overflow: auto; }
+/* 离线横幅：fixed top 全宽覆盖（对标 scada.html markLink DOWN），z-index 200 高于 AgentDrawer。 */
+.offline-banner {
+  position: fixed; top: 0; left: 0; right: 0;
+  background: var(--color-danger); color: white;
+  padding: 6px; text-align: center; font-size: 13px;
+  z-index: 200;
+}
 </style>

@@ -11,6 +11,7 @@ class FakeEventSource {
   static instances: FakeEventSource[] = []
   url: string
   onerror: (() => void) | null = null
+  onopen: (() => void) | null = null
   private listeners: Record<string, ((e: { data: string }) => void)[]> = {}
   constructor(url: string) {
     this.url = url
@@ -114,6 +115,93 @@ describe('monitor store', () => {
     expect(s.logs[0].message).toBe('hello')
     expect(s.packets.length).toBe(1)
     expect(s.instances[0]).toMatchObject({ inst_id: 'i1', state: 'running' })
+    s.stop()
+    fetchSpy.mockRestore()
+  })
+
+  it('SSE onerror sets offline + loadLogsRecent补拉合并去重 + 复位 offline', async () => {
+    // 锁的不变量：SSE 断线 → offline=true + 补拉 logs/recent 把断线期间丢的帧
+    // 补回 logs（去重，不重复已有条目）→ 补拉成功后 offline=false。
+    // 对标 scada.html:945 的断线兜底模式。
+    const auth = useAuthStore()
+    auth.setAuth('tok', 'admin')
+    // 桩 fetch：start() 的 load* + loadLogsRecent 都走 fetch；后者 URL 含 logs/recent。
+    // 对非 logs/recent 请求返空对象（loadInstances/loadRtdata/loadSysstatus）；
+    // 对 logs/recent 返 3 条（1 条与现有重复，2 条新）——验去重 + 合并。
+    const existing: LogEntry = { ts: 't1', level: 'info', target: 't', message: 'old' }
+    const fresh: LogEntry[] = [
+      { ts: 't3', level: 'warn', target: 't', message: 'new2' },  // 最新
+      { ts: 't2', level: 'info', target: 't', message: 'new1' },
+      { ts: 't1', level: 'info', target: 't', message: 'old' },   // 与 existing 重复
+    ]
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      const url = String(input)
+      if (url.includes('/logs/recent')) return new Response(JSON.stringify(fresh), { status: 200 })
+      return new Response('{}', { status: 200 })
+    })
+    ;(globalThis as unknown as { document: unknown }).document = {
+      hidden: false, addEventListener: () => {}, removeEventListener: () => {},
+    }
+    const s = useMonitorStore()
+    s.onLog(existing)  // 预置一条已有日志（验去重）
+    expect(s.offline).toBe(false)
+    s.start()
+    // 模拟 SSE 断线：触发 onerror。
+    expect(FakeEventSource.last).not.toBeNull()
+    FakeEventSource.last!.onerror!()
+    expect(s.offline).toBe(true)
+    // onerror 内 void loadLogsRecent() 异步；loadLogsRecent 多层 await（fetch + r.json）
+    // 需排空微任务队列——用 setTimeout(0) 兜底（比 Promise.resolve 嵌套稳）。
+    await new Promise(r => setTimeout(r, 0))
+    // 补拉成功复位 offline；新增 2 条（new2/new1）合并，old 不重复。
+    expect(s.offline).toBe(false)
+    expect(s.logs.length).toBe(3)
+    // 最新在前：new2（补拉数组首项，最新）应在顶部。
+    expect(s.logs[0].message).toBe('new2')
+    expect(s.logs.map(l => l.message)).toEqual(['new2', 'new1', 'old'])
+    s.stop()
+    fetchSpy.mockRestore()
+  })
+
+  it('SSE onerror 补拉失败保持 offline（网络未恢复）', async () => {
+    // 补拉失败（fetch reject / 网络）时 offline 不复位——下轮重连再补。
+    const auth = useAuthStore()
+    auth.setAuth('tok', 'admin')
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      const url = String(input)
+      if (url.includes('/logs/recent')) throw new Error('network down')
+      return new Response('{}', { status: 200 })
+    })
+    ;(globalThis as unknown as { document: unknown }).document = {
+      hidden: false, addEventListener: () => {}, removeEventListener: () => {},
+    }
+    const s = useMonitorStore()
+    s.start()
+    expect(s.offline).toBe(false)
+    FakeEventSource.last!.onerror!()
+    expect(s.offline).toBe(true)
+    await new Promise(r => setTimeout(r, 0))
+    // 补拉失败 → offline 保持 true（等浏览器自动重连下轮再补）。
+    expect(s.offline).toBe(true)
+    s.stop()
+    fetchSpy.mockRestore()
+  })
+
+  it('SSE onopen 复位 offline', () => {
+    // 重连成功后 onopen 应复位离线状态（与 onerror 配对）。
+    const auth = useAuthStore()
+    auth.setAuth('tok', 'admin')
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async () =>
+      new Response('{}', { status: 200 }),
+    )
+    ;(globalThis as unknown as { document: unknown }).document = {
+      hidden: false, addEventListener: () => {}, removeEventListener: () => {},
+    }
+    const s = useMonitorStore()
+    s.start()
+    s.offline = true  // 模拟先断线
+    FakeEventSource.last!.onopen!()
+    expect(s.offline).toBe(false)
     s.stop()
     fetchSpy.mockRestore()
   })
