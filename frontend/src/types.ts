@@ -58,3 +58,39 @@ export interface StateEvent {
 
 /** rtdata cell：`[ts, localTime, value]`（经 lux JSON 序列化，数值可能是字符串）。 */
 export type RtdataCell = [number, string, string | number]
+
+/**
+ * serve 事件流帧（无 `event:` 头，kind 在 JSON body 内）。
+ *
+ * 与 rs-iot 的 SSE 不同（rs-iot 每帧带 `event:` 头、前端走
+ * `addEventListener(kind)`）；serve 的 SSE 是裸 NDJSON，前端用 `onmessage` 接
+ * 全部帧后按 body 内的 `kind` 分发。索引签名保留未知字段（usage /
+ * completion_summary 等），避免 serve 新增 kind 时前端 parse 失败。
+ */
+export interface ServeEvent {
+  /** 事件种类：turn_started / turn_phase / reasoning / text / tool_dispatch / tool_result / approval_request / turn_done 等。 */
+  kind: string
+  /** text / reasoning kind 的文本片段（增量）。 */
+  text?: string
+  /** turn_phase kind 的阶段标识。 */
+  phase?: string
+  /** tool_dispatch / tool_result 的工具调度元信息。 */
+  tool?: { id: string; name: string; readOnly?: boolean; partial?: boolean }
+  /** approval_request 的审批载荷（写操作触发）。 */
+  approval_request?: { id: string; tool: string; args?: unknown }
+  [k: string]: unknown
+}
+
+/** 单条聊天消息（对标 zacp ChatMessage，简化）。一条 assistant 消息聚合一个 turn。 */
+export interface ChatMessage {
+  /** 自增 ID（前端分配，无持久化）。 */
+  id: number
+  /** 角色：用户输入 / 助手回复。 */
+  role: 'user' | 'assistant'
+  /** 文本内容（assistant 消息由多个 text 事件增量拼接）。 */
+  text: string
+  /** 推理过程（reasoning 事件累积，可选）。 */
+  reasoning?: string
+  /** 本轮调用的工具列表（tool_dispatch 建立、tool_result 填充结果）。 */
+  toolCalls?: { id: string; name: string; args?: unknown; result?: unknown; error?: boolean }[]
+}
