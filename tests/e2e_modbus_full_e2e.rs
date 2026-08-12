@@ -681,6 +681,7 @@ async fn p1_three_subsystems_metrics_logs_trace() {
         trace_registry: trace_registry.clone(),
         log_ringbuffer: log_ringbuffer.clone(),
         event_bus: rs_iot::event_bus::EventBus::dummy(),
+        config: std::sync::Arc::new(rs_iot::config::AppConfig::default()),
     };
     let (base_url, axum_h) = spawn_axum(state).await;
 

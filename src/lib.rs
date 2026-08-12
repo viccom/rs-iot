@@ -226,6 +226,7 @@ pub async fn run_app_with_shutdown(
         trace_registry: trace_registry.clone(),
         log_ringbuffer,
         event_bus,
+        config: std::sync::Arc::new(cfg.clone()),
     };
     let app = api::build_router(state);
     let api_port = cfg.api_port;

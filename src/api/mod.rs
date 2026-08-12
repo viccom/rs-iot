@@ -43,6 +43,8 @@ pub struct AppState {
     pub log_ringbuffer: std::sync::Arc<crate::log_ringbuffer::LogRingBuffer>,
     /// SSE 事件总线（GET /api/v1/events 订阅；与 HostContext/TraceRegistry 共享同一 bus）。
     pub event_bus: crate::event_bus::EventBus,
+    /// 应用配置快照（GET /api/v1/config 脱敏读；只读 Arc 共享零成本）。
+    pub config: std::sync::Arc<crate::config::AppConfig>,
 }
 
 /// 白名单路径（无需 JWT）。
@@ -97,6 +99,7 @@ pub fn build_router(state: AppState) -> axum::Router {
         // 系统信息与插件实例
         .route("/api/v1/sysinfo", get(routes_sys::sysinfo))
         .route("/api/v1/sysstatus", get(routes_sys::sysstatus))
+        .route("/api/v1/config", get(routes_sys::config))
         .route("/api/v1/plugins", get(routes_sys::plugins))
         .route("/api/v1/inststatus", get(routes_sys::inststatus))
         .route("/api/v1/startinst", post(routes_sys::startinst))
@@ -130,6 +133,8 @@ pub fn build_router(state: AppState) -> axum::Router {
         // Lua 实例重载/脚本（spec §13，默认 JWT 保护；实例指标走 /api/v1/inst/stats）
         .route("/api/v1/lua/reload", post(routes_lua::reload))
         .route("/api/v1/lua/scripts", get(routes_lua::list_scripts))
+        // Lua 脚本写入（AI 写脚本入口：MCP save_script 工具 / 浮动面板；路径白名单 scripts/<name>）
+        .route("/api/v1/lua/script/save", post(routes_lua::save_script))
         // 命令下发（写命令经 CtlRegistry 路由到实例 cmd_rx；默认 JWT 保护）
         .route("/api/v1/command/send", post(routes_command::send))
         // 报文 trace 开关（per-instance 运行时激活/查询/关闭；默认 JWT 保护）

@@ -64,6 +64,7 @@ async fn app_with_stat(stat_inst: &str) -> (axum::Router, lux::ServerHandle) {
         trace_registry: rs_iot::io_trace::TraceRegistry::new(),
         log_ringbuffer: std::sync::Arc::new(rs_iot::log_ringbuffer::LogRingBuffer::new(2000)),
         event_bus: rs_iot::event_bus::EventBus::dummy(),
+        config: std::sync::Arc::new(rs_iot::config::AppConfig::default()),
     };
     (build_router(state), handle)
 }

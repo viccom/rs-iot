@@ -58,6 +58,37 @@ pub async fn plugins(State(_st): State<AppState>) -> Json<serde_json::Value> {
     }))
 }
 
+/// `GET /api/v1/config`：返回脱敏后的配置快照。
+///
+/// 供 AI agent（MCP `get_config` 工具）和运维读配置——**敏感字段遮蔽**
+/// （`jwt_secret` / `mqtt.password` / `mqtt.username`），结构保留便于 agent 理解配置形态。
+/// 对标 v1 §六安全边界"遮 jwt_secret/password/mqtt.password"。
+pub async fn config(State(st): State<AppState>) -> Json<serde_json::Value> {
+    Json(redact_config(&st.config))
+}
+
+/// 配置脱敏：深拷贝后遮蔽敏感字段（保留键、替换值为 `"***"`）。
+///
+/// 纯函数便于单测。遮蔽点：`jwt_secret`（顶层）、`mqtt.password`、`mqtt.username`。
+/// 其余字段原样（agent 需看 lux 端口/data_dir、bridge bind、log 级别等做诊断）。
+pub fn redact_config(cfg: &crate::config::AppConfig) -> serde_json::Value {
+    let mut v = serde_json::to_value(cfg).expect("AppConfig serializable");
+    if let Some(obj) = v.as_object_mut() {
+        if obj.contains_key("jwt_secret") {
+            obj.insert("jwt_secret".into(), serde_json::json!("***"));
+        }
+        if let Some(serde_json::Value::Object(mqtt)) = obj.get_mut("mqtt") {
+            if mqtt.contains_key("username") {
+                mqtt.insert("username".into(), serde_json::json!("***"));
+            }
+            if mqtt.contains_key("password") {
+                mqtt.insert("password".into(), serde_json::json!("***"));
+            }
+        }
+    }
+    v
+}
+
 pub async fn inststatus(State(st): State<AppState>) -> Json<serde_json::Value> {
     Json(serde_json::json!(st.mgr.status()))
 }
@@ -103,4 +134,42 @@ type Response = axum::response::Response;
 
 fn err(code: StatusCode, msg: &str) -> Response {
     (code, msg.to_string()).into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::AppConfig;
+
+    /// 敏感字段遮蔽，非敏感保留（规则7：业务逻辑变化时测试要失败——这里锁"绝不泄露密钥"）。
+    #[test]
+    fn redact_masks_secrets_keeps_structure() {
+        // 用 toml 构造带敏感值的配置（避免 field_reassign_with_default lint）。
+        let toml_str = r#"
+jwt_secret = "real-secret-32-bytes-aaaaaaaaaaaaa"
+[mqtt]
+username = "broker-user"
+password = "broker-pass"
+host = "broker.example.com"
+port = 1883
+"#;
+        let cfg: AppConfig = toml::from_str(toml_str).expect("parse");
+
+        let v = redact_config(&cfg);
+        // 敏感字段必须遮蔽（绝不泄露）。
+        assert_eq!(v["jwt_secret"], "***", "jwt_secret must be masked");
+        assert_eq!(v["mqtt"]["username"], "***", "mqtt username must be masked");
+        assert_eq!(v["mqtt"]["password"], "***", "mqtt password must be masked");
+        // 非敏感字段保留（agent 诊断需看端口/周期）。
+        assert_eq!(v["mqtt"]["port"], 1883, "mqtt port preserved");
+        assert_eq!(v["mqtt"]["host"], "broker.example.com", "mqtt host preserved");
+    }
+
+    /// 无密码的 broker（匿名）也不应泄露 username 结构。
+    #[test]
+    fn redact_handles_none_credentials() {
+        let cfg = AppConfig::default(); // mqtt.username/password 默认 None
+        let v = redact_config(&cfg);
+        assert_eq!(v["jwt_secret"], "***");
+    }
 }
