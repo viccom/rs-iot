@@ -46,23 +46,32 @@ export const useAgentStore = defineStore('agent', () => {
         messages.value.push({ id: nextId++, role: 'assistant', text: '', toolCalls: [] })
         running.value = true
         break
-      case 'text':
-        if (cur()?.role === 'assistant') cur()!.text += e.text || ''
+      case 'text': {
+        // 缓存 last 一次：消除 cur()! 非空断言链的 NPE 风险（review I2）——
+        // 同步路径下两次 cur() 间 messages 不变，但缓存零成本且防御未来 reset/异步插入。
+        const last = cur()
+        if (last?.role === 'assistant') last.text += e.text || ''
         break
-      case 'reasoning':
-        if (cur()?.role === 'assistant') cur()!.reasoning = (cur()!.reasoning || '') + (e.text || '')
+      }
+      case 'reasoning': {
+        const last = cur()
+        if (last?.role === 'assistant') last.reasoning = (last.reasoning || '') + (e.text || '')
         break
-      case 'tool_dispatch':
+      }
+      case 'tool_dispatch': {
         // 携带 args（serve tool.args 字符串）；readOnly 标记只读工具（不审批）。
-        if (e.tool) {
-          cur()?.toolCalls?.push({ id: e.tool.id, name: e.tool.name, args: e.tool.args })
+        const last = cur()
+        if (e.tool && last?.role === 'assistant' && last.toolCalls) {
+          last.toolCalls.push({ id: e.tool.id, name: e.tool.name, args: e.tool.args })
         }
         break
+      }
       case 'tool_result': {
         // serve 把工具结果放 body 的 tool 字段（含 id）：output=正常输出串、
         // err=失败原因串（非空表示失败，对标 T9 follow-up I1）。
         const tid = e.tool?.id
-        const tc = cur()?.toolCalls?.find(t => t.id === tid)
+        const last = cur()
+        const tc = last?.toolCalls?.find(t => t.id === tid)
         if (tc && e.tool) {
           tc.result = e.tool.output
           tc.error = !!e.tool.err
@@ -89,7 +98,8 @@ export const useAgentStore = defineStore('agent', () => {
   }
 
   /** 发任务。附当前监控选中实例上下文（页面感知：让 agent 知道用户在看哪个采集器）。
-   *  非 2xx 响应抛错（M2：submit 失败给 UI 反馈，由调用方 catch 提示用户）。 */
+   *  非 2xx 响应抛错（M2：submit 失败给 UI 反馈，由调用方 catch 提示用户），
+   *  错误带响应体（M5：让 AgentDrawer 的 errorMsg 更可读）。 */
   async function submit(input: string) {
     messages.value.push({ id: nextId++, role: 'user', text: input })
     const monitor = useMonitorStore()
@@ -97,20 +107,25 @@ export const useAgentStore = defineStore('agent', () => {
       ? `\n[上下文: 当前查看实例 ${monitor.selectedInstance}]`
       : ''
     const r = await api('/api/agent/submit', { method: 'POST', body: JSON.stringify({ input: input + ctx }) })
-    if (!r.ok) throw new Error(`submit failed: ${r.status}`)
+    if (!r.ok) throw new Error(`submit failed: ${r.status} ${await r.text().catch(() => '')}`.trim())
   }
 
-  /** 提交审批决策（写操作）：true 放行 / false 拒绝。 */
+  /** 提交审批决策（写操作）：true 放行 / false 拒绝。
+   *  非 2xx 响应抛错（review I1：approve 失败死锁——若 gateway/serve 返错且不
+   *  检查就清 approval，agent 仍在等决策但 UI 已无弹窗 → 用户无法重发 → 死锁），
+   *  错误带响应体（M5）。仅 2xx 才清 approval。 */
   async function approve(decision: boolean) {
     if (!approval.value) return
-    await api('/api/agent/approve', {
+    const r = await api('/api/agent/approve', {
       method: 'POST',
       body: JSON.stringify({ approval_id: approval.value.id, decision }),
     })
+    if (!r.ok) throw new Error(`approve failed: ${r.status} ${await r.text().catch(() => '')}`.trim())
     approval.value = null
   }
 
-  /** 取消当前 turn（用户中止）。 */
+  /** 取消当前 turn（用户中止）。失败不抛：turn_done SSE 会复位 running（容错
+   *  容忍高——用户已按停止，最坏情况是 running 多停留到下一个 turn_done）。 */
   async function cancel() {
     await api('/api/agent/cancel', { method: 'POST', body: '{}' })
   }
