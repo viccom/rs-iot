@@ -67,12 +67,12 @@ pub async fn auth_middleware(State(st): State<AppState>, req: Request, next: Nex
         }
     }
 
-    // Authorization header 或 Cookie token
+    // Authorization header（"Bearer <jwt>" 或裸 token）或 Cookie token
     let token = req
         .headers()
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string())
+        .map(|s| s.strip_prefix("Bearer ").unwrap_or(s).to_string())
         .or_else(|| {
             req.headers()
                 .get(axum::http::header::COOKIE)
