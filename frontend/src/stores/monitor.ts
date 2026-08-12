@@ -1,0 +1,160 @@
+// frontend/src/stores/monitor.ts
+import { defineStore } from 'pinia'
+import { ref } from 'vue'
+import type { InstanceStat, LogEntry, PacketEntry, StateEvent, RtdataCell } from '../types'
+import { useAuthStore } from './auth'
+
+/** 日志环形缓冲容量（最新在前）。 */
+const MAX_LOGS = 500
+/** 报文环形缓冲容量（最新在前）。 */
+const MAX_PACKETS = 200
+
+/**
+ * 监控 store：rs-iot SSE 事件分发（log/packet/state）+ rtdata/sysstatus 周期轮询。
+ *
+ * 事件来源 `GET /api/v1/events?types=log,packet,state`（经 gateway
+ * `/api/rsiot/api/v1/events`），每帧带 `event:` 头，前端 `addEventListener(kind)` 分发。
+ * rtdata/sysstatus 走普通 fetch（轮询），EventSource 无法设 header 故 token 走 query。
+ */
+export const useMonitorStore = defineStore('monitor', () => {
+  /** 实例列表（进程级 state + health）。 */
+  const instances = ref<InstanceStat[]>([])
+  /** 日志环形缓冲（最新在前，上限 MAX_LOGS）。 */
+  const logs = ref<LogEntry[]>([])
+  /** 报文环形缓冲（最新在前，上限 MAX_PACKETS）。 */
+  const packets = ref<PacketEntry[]>([])
+  /** rtdata 快照：`{devId: {tag: [ts, localTime, value]}}`。 */
+  const rtdata = ref<Record<string, Record<string, RtdataCell>>>({})
+  /** sysstatus 快照（dbsize / metrics / process 等）。 */
+  const sysstatus = ref<Record<string, unknown>>({})
+  /** 当前选中实例 ID（组件联动）。 */
+  const selectedInstance = ref<string>('')
+
+  let sse: EventSource | null = null
+  let rtdataTimer: ReturnType<typeof setInterval> | null = null
+  let sysstatusTimer: ReturnType<typeof setInterval> | null = null
+
+  /** 收到一条日志：prepend 并截断到 MAX_LOGS。 */
+  function onLog(e: LogEntry) {
+    logs.value.unshift(e)
+    if (logs.value.length > MAX_LOGS) logs.value.length = MAX_LOGS
+  }
+
+  /** 收到一帧报文：prepend 并截断到 MAX_PACKETS。 */
+  function onPacket(e: PacketEntry) {
+    packets.value.unshift(e)
+    if (packets.value.length > MAX_PACKETS) packets.value.length = MAX_PACKETS
+  }
+
+  /** 收到实例状态变更：更新现有实例或追加新实例。 */
+  function onState(e: StateEvent) {
+    const i = instances.value.findIndex(x => x.inst_id === e.inst_id)
+    if (i >= 0) {
+      instances.value[i] = { ...instances.value[i], state: e.state }
+    } else {
+      instances.value.push({
+        inst_id: e.inst_id,
+        app_code: e.app_code,
+        host_kind: e.host_kind,
+        state: e.state,
+        health: null,
+      })
+    }
+  }
+
+  /** 拉取实例列表（进程级 state + health）。 */
+  async function loadInstances() {
+    const r = await fetch('/api/rsiot/api/v1/inst/stats', {
+      headers: { Authorization: `Bearer ${useAuthStore().token}` },
+    })
+    if (r.ok) instances.value = (await r.json()) as InstanceStat[]
+  }
+
+  /** 拉取 rtdata 全量快照。 */
+  async function loadRtdata() {
+    const r = await fetch('/api/rsiot/api/v1/rtdatas', {
+      headers: { Authorization: `Bearer ${useAuthStore().token}` },
+    })
+    if (r.ok) rtdata.value = await r.json()
+  }
+
+  /** 拉取进程级 sysstatus。 */
+  async function loadSysstatus() {
+    const r = await fetch('/api/rsiot/api/v1/sysstatus', {
+      headers: { Authorization: `Bearer ${useAuthStore().token}` },
+    })
+    if (r.ok) sysstatus.value = await r.json()
+  }
+
+  /** 标签页隐藏时暂停轮询，恢复时继续（省资源 + 防后台节流）。 */
+  function onVisibility() {
+    if (document.hidden) {
+      if (rtdataTimer) { clearInterval(rtdataTimer); rtdataTimer = null }
+      if (sysstatusTimer) { clearInterval(sysstatusTimer); sysstatusTimer = null }
+    } else if (!rtdataTimer || !sysstatusTimer) {
+      rtdataTimer = setInterval(loadRtdata, 2000)
+      sysstatusTimer = setInterval(loadSysstatus, 5000)
+    }
+  }
+
+  /** 启动 SSE 订阅 + 周期轮询。登录后调用一次。 */
+  function start() {
+    // 重入守卫：避免 start() 二次调用泄漏上一组 SSE/timer（如登录→登出→再登录）。
+    if (sse) stop()
+    const tok = useAuthStore().token
+    // token 走 query（EventSource 不能设 header，gateway auth 支持 ?token=<jwt>）。
+    sse = new EventSource(
+      `/api/rsiot/api/v1/events?types=log,packet,state&token=${encodeURIComponent(tok)}`,
+    )
+    // JSON.parse 容错：畸形帧不应让 EventSource listener 抛错（抛错后该 kind 不再分发）。
+    sse.addEventListener('log', e => safe(JSON.parse((e as MessageEvent).data) as LogEntry, onLog))
+    sse.addEventListener('packet', e => safe(JSON.parse((e as MessageEvent).data) as PacketEntry, onPacket))
+    sse.addEventListener('state', e => safe(JSON.parse((e as MessageEvent).data) as StateEvent, onState))
+    // onerror：浏览器自动重连，这里静默（M4 完善：断线补拉 /api/v1/logs/recent）。
+    sse.onerror = () => {}
+    // 立即拉一次 + 周期轮询。
+    void loadInstances()
+    void loadRtdata()
+    void loadSysstatus()
+    rtdataTimer = setInterval(loadRtdata, 2000)
+    sysstatusTimer = setInterval(loadSysstatus, 5000)
+    document.addEventListener('visibilitychange', onVisibility)
+  }
+
+  /** SSE 帧 parse/handle 容错：畸形帧 warn 并跳过，不冒泡到 EventSource。 */
+  function safe<T>(v: T, handle: (v: T) => void) {
+    try { handle(v) } catch (e) { console.warn('monitor: drop malformed SSE frame', e) }
+  }
+
+  /** 停止 SSE + 清理定时器（登出 / 路由切走时调用）。 */
+  function stop() {
+    sse?.close()
+    sse = null
+    if (rtdataTimer) { clearInterval(rtdataTimer); rtdataTimer = null }
+    if (sysstatusTimer) { clearInterval(sysstatusTimer); sysstatusTimer = null }
+    document.removeEventListener('visibilitychange', onVisibility)
+  }
+
+  /** 选中实例（组件联动）。 */
+  function selectInstance(id: string) {
+    selectedInstance.value = id
+  }
+
+  return {
+    instances,
+    logs,
+    packets,
+    rtdata,
+    sysstatus,
+    selectedInstance,
+    onLog,
+    onPacket,
+    onState,
+    loadInstances,
+    loadRtdata,
+    loadSysstatus,
+    start,
+    stop,
+    selectInstance,
+  }
+})
