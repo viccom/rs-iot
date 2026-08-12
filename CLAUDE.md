@@ -6,6 +6,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 轻量跨平台工业 IoT 边缘框架（Rust），Go 项目 [Lite_IOT](D:\Go_Codes\Lite_IOT) 的 Rust 重写与增强。内嵌 [lux](E:\github.com\lux) 作为进程内 Redis 兼容数据库（RESP :6390 + Tiered WAL 持久化）。
 
+**Cargo workspace 结构**（2026-08 起，AI Agent 集成项目引入）：根 `rs-iot` crate（主程序，工业数采核心）+ `crates/rsiot-mcp`（reasonix `[[plugins]]` 子进程，MCP 工具→rs-iot REST 翻译层，照 dbx-mcp 范本）+ `crates/rsiot-gateway`（v3 独立 API Gateway，纯反代 rs-iot+reasonix serve，见 `docs/plan-ai-agent-integration-v3.md`）。**三 crate 解耦**：核心数据流（pipeline/lux/采集）只在主 crate，AI 集成全部在子 crate——改子 crate 零影响主 crate（194 单测验证）。改子 crate：`cargo build -p rsiot-mcp` / `-p rsiot-gateway`。
+
 **数据流（hub 模式 + 双总线）**——这是理解全项目的关键。**两条总线**：数据上行（采集→入库）+ 控制下行（写命令→设备）：
 
 ```
@@ -43,6 +45,15 @@ POST /api/v1/command/send ─┼─► CtlRegistry.try_send(64) ──► 实例
 | `service/` | Windows Service（`windows-service` dispatch）/ systemd unit 生成 |
 | `hwid.rs` | `eiot` 前缀 + sha256(CPU brand + ARCH) 取 8 位，每机稳定 |
 
+**workspace 子 crate**（`crates/`，AI Agent 集成，与主 crate 解耦）：
+
+| crate | 职责 | 现状 |
+|---|---|---|
+| `crates/rsiot-mcp` | reasonix `[[plugins]]` spawn 的 stdio 子进程，把 MCP 工具调用翻译成 rs-iot loopback REST（照 dbx-mcp 范本：rmcp 2.2 + `#[tool]` 宏 + WebBackend JWT）。`server.rs` 声明工具，`backend.rs` 调 REST | P0-A 骨架完成（`rsiot_list_devices` 工具跑通，4 单测）；剩余：扩 read_tags/write_tags/get_logs/send_command 等工具 + risk 三档校验 + 端到端集成测 |
+| `crates/rsiot-gateway` | v3 独立 API Gateway，纯反代 rs-iot:8790 + reasonix serve:8787（`docs/plan-gateway-tech-selection.md`：axum 0.8 + reqwest 手写）。`proxy.rs` `forward()` 裸字节流透传（**不用** axum Sse/Event），`auth.rs` 层1 JWT（复用主 crate jwt_secret） | P0-B 骨架完成（forward + health + auth，3 单测）；剩余：B1-1 SSE 裸透传 demo（决定性验证）+ OS 服务化 |
+
+子 crate 与主 crate 的耦合边界：gateway 只透传主 crate REST（零改动）；rsiot-mcp 调主 crate REST，主 crate 有 2 个待补端点（`POST /lua/script/save` + `GET /config`，属主 crate 自身能力补全，见选型报告 §八）。
+
 **lux Hash 布局**（对标 Lite_IOT `bRedka`，清单见 `src/db/identity.rs:3-11`）：
 `users` / `passwords`(bcrypt) / `groups` / `instances` / `devices` / `children` / `accesskey` / `ext_tokens`(外部插件 token: field=instId, value=JSON{token_hash,created_at,enabled}) / `rtdata:<devId>`（field=`<devid>.<tag>`，value=`[ts, localTime, value]` JSON）。
 
@@ -67,24 +78,36 @@ rs-iot 是**工业协议网关**：南向 N 种设备协议 × 北向 M 种对�
 | 写入口 | 新代码调 `CtlRegistry::send` / `InstanceManager::send_ctl`（MQTT/REST/服务器回调） | 南向 `cmd_rx` 逻辑、其他写入口 |
 | Processor | `transform/xxx.rs` 实现 Processor trait | 南向/北向 |
 | REST 端点 | `routes_xxx.rs` + `build_router` 注册一行 | 数据面/控制面 |
+| MCP 工具（给 AI agent） | `crates/rsiot-mcp/src/server.rs` 加 `#[tool]` 方法 + 映射主 crate REST | 主 crate 核心数据流/其他工具 |
+| gateway 路由 | `crates/rsiot-gateway` 加路由（不动主 crate） | 主 crate（gateway 视角零改动）|
 
 **低耦合五机制**：① trait 契约（Source/Sink/Processor，框架依赖抽象）② channel 解耦（hub 256 / cmd 64，异步边界 + 背压）③ lux 作进程内数据总线（RESP 契约，上下游无直接引用）④ `inventory` 静态注册（编译期发现，无注册顺序依赖）⑤ `CancellationToken` + `try_send`（独立启停 + 控制面不阻塞数据面）。
 
 ## 常用命令
 
+> ⚠️ **本机禁页面文件**：所有 cargo 命令务必加 `-j 2` 限并行，防 rustc 编译大型 crate 撑爆内存（曾致 Everything 服务被挤崩溃）。详见 `docs/lux-upstream-sync-strategy.md` §八。CI 环境不限。
+
 ```bash
-cargo build                       # debug
-cargo build --release             # release（lto=thin + strip）
-cargo test                        # 全量（CI 用 --all-targets）
-cargo test <name>                 # 单个测试（如 cargo test hwid）
-cargo clippy --all-targets -- -D warnings   # CI 门槛，零警告
-cargo fmt --all --check           # 格式检查
-cargo doc --no-deps               # 文档（RUSTFLAGS=-D warnings 下零警告）
-cargo audit                       # 依赖安全（CI 中 continue-on-error：传递依赖 rustls advisory 已知）
+cargo build -j 2                       # debug（主 crate）
+cargo build -j 2 -p rsiot-mcp          # 只编 MCP 子 crate（AI Agent 集成）
+cargo build -j 2 -p rsiot-gateway      # 只编 gateway 子 crate
+cargo build -j 2 --release             # release（lto=thin + strip）
+cargo test -j 2                        # 全量（CI 用 --all-targets）
+cargo test -j 2 <name>                 # 单个测试（如 cargo test hwid）
+cargo clippy -j 2 --workspace --all-targets -- -D warnings   # CI 门槛，全 workspace 零警告
+cargo fmt --all --check                # 格式检查
+cargo doc -j 2 --no-deps               # 文档（RUSTFLAGS=-D warnings 下零警告）
+cargo audit                            # 依赖安全（CI 中 continue-on-error：传递依赖 rustls advisory 已知）
 
 ./target/debug/rs-iot --config config.toml   # 前台运行
 RUST_LOG=debug ./target/debug/rs-iot         # 日志级别（缺省 info）
 rs-iot install / uninstall        # 服务化（Windows: sc create / Linux: systemd）
+
+./target/debug/rsiot-mcp          # MCP server（stdio，被 reasonix spawn）
+RSIOT_BASE=http://127.0.0.1:8790 RSIOT_JWT=<token> ./target/debug/rsiot-mcp   # MCP 带配置
+
+./target/debug/rsiot-gateway gateway.toml      # gateway 前台运行
+RSIOT_GW_CONFIG=gateway.toml ./target/debug/rsiot-gateway   # gateway 配置走环境变量
 ```
 
 ### Feature 裁剪（内置协议可选）
