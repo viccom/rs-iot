@@ -74,10 +74,26 @@ export interface ServeEvent {
   text?: string
   /** turn_phase kind 的阶段标识。 */
   phase?: string
-  /** tool_dispatch / tool_result 的工具调度元信息。 */
-  tool?: { id: string; name: string; readOnly?: boolean; partial?: boolean }
-  /** approval_request 的审批载荷（写操作触发）。 */
-  approval_request?: { id: string; tool: string; args?: unknown }
+  /** tool_dispatch / tool_result 的工具调度元信息（serve eventwire.Tool）。 */
+  tool?: {
+    id: string
+    name: string
+    /** dispatch 携带的调用参数（字符串，常为 JSON 编码）。 */
+    args?: string
+    /** result 携带的工具输出（字符串，常为 JSON 或文本）。 */
+    output?: string
+    /** result 携带的错误信息（非空串表示工具失败——对标 serve `tool.err`）。 */
+    err?: string
+    /** dispatch 是否只读（不触发审批）。 */
+    readOnly?: boolean
+    /** partial 流式分片标记（serve tool.partial）。 */
+    partial?: boolean
+    /** 工具运行耗时（毫秒，result 携带）。 */
+    durationMs?: number
+    [k: string]: unknown
+  }
+  /** approval_request 的审批载荷（serve `eventwire.Approval`：写操作触发）。 */
+  approval?: { id: string; tool: string; subject?: string; reason?: string; kind?: string }
   [k: string]: unknown
 }
 
@@ -92,5 +108,23 @@ export interface ChatMessage {
   /** 推理过程（reasoning 事件累积，可选）。 */
   reasoning?: string
   /** 本轮调用的工具列表（tool_dispatch 建立、tool_result 填充结果）。 */
-  toolCalls?: { id: string; name: string; args?: unknown; result?: unknown; error?: boolean }[]
+  toolCalls?: ToolCallEntry[]
+}
+
+/** ChatMessage.toolCalls 元素类型（对标 serve eventwire.Tool 的前端投影）。 */
+export interface ToolCallEntry {
+  /** 工具调度 ID（serve tool.id，跨 dispatch/result 配对）。 */
+  id: string
+  /** 工具名（serve tool.name，如 rsiot_read_tags）。 */
+  name: string
+  /** 调用参数（dispatch 携带，字符串原样——常为 JSON 编码）。 */
+  args?: string
+  /** 工具输出（result 携带，字符串原样——常为 JSON 或文本）。 */
+  result?: string
+  /** 工具失败标记（result.err 非空时为 true）。 */
+  error?: boolean
+  /** 工具失败原因（result.err 原文，error=true 时展示）。 */
+  errorMsg?: string
+  /** 工具调用耗时（毫秒，result 携带）。 */
+  durationMs?: number
 }

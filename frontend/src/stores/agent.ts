@@ -14,6 +14,10 @@ import { api } from '../api/client'
  * `addEventListener(kind)`（那样一帧都收不到，因为没有 `event:` 头），而是
  * `onmessage` 收全部帧 → `JSON.parse` → 按 body 内 `kind` 分发。
  *
+ * 字段路径对标 serve eventwire 契约（`DeepSeek-Reasonix/internal/eventwire/wire.go`）：
+ * `tool_dispatch` / `tool_result` 的工具信息在 `e.tool`（含 id/name/args/output/err）；
+ * `approval_request` 的审批载荷在 `e.approval`（含 id/tool/subject/reason）。
+ *
  * 事件路径走 gateway `/api/agent/*`（**不带** `/api/v1/`，serve 端点本身无该
  * 前缀；这与 monitor 的 `/api/rsiot/api/v1/*` 不同——rs-iot 端点带 /api/v1/）。
  */
@@ -23,7 +27,7 @@ export const useAgentStore = defineStore('agent', () => {
   /** 当前 turn 是否进行中（turn_started → turn_done）。 */
   const running = ref(false)
   /** 待审批请求（写操作触发，由 UI 决策 approve/deny）。 */
-  const approval = ref<{ id: string; tool: string; args?: unknown } | null>(null)
+  const approval = ref<{ id: string; tool: string; subject?: string; reason?: string } | null>(null)
 
   let nextId = 1
   let sse: EventSource | null = null
@@ -32,7 +36,8 @@ export const useAgentStore = defineStore('agent', () => {
    * 处理 serve SSE 事件（无 `event:` 头，kind 在 JSON body）。
    *
    * 一条 assistant 消息聚合一个 turn：turn_started 建空消息，text/reasoning
-   * 增量拼接，tool_dispatch 建立工具槽位由 tool_result 填充结果。
+   * 增量拼接，tool_dispatch 建立工具槽位（携带 args）由 tool_result 填充
+   * output/err。
    */
   function onEvent(e: ServeEvent) {
     const cur = () => messages.value.at(-1)
@@ -48,20 +53,33 @@ export const useAgentStore = defineStore('agent', () => {
         if (cur()?.role === 'assistant') cur()!.reasoning = (cur()!.reasoning || '') + (e.text || '')
         break
       case 'tool_dispatch':
-        if (e.tool) cur()?.toolCalls?.push({ id: e.tool.id, name: e.tool.name })
+        // 携带 args（serve tool.args 字符串）；readOnly 标记只读工具（不审批）。
+        if (e.tool) {
+          cur()?.toolCalls?.push({ id: e.tool.id, name: e.tool.name, args: e.tool.args })
+        }
         break
       case 'tool_result': {
-        // serve 把工具元信息放 body 的 tool 字段（含 id），与 dispatch 对齐。
-        const tid = (e.tool as { id?: string } | undefined)?.id
+        // serve 把工具结果放 body 的 tool 字段（含 id）：output=正常输出串、
+        // err=失败原因串（非空表示失败，对标 T9 follow-up I1）。
+        const tid = e.tool?.id
         const tc = cur()?.toolCalls?.find(t => t.id === tid)
-        if (tc) { tc.result = e; tc.error = false }
+        if (tc && e.tool) {
+          tc.result = e.tool.output
+          tc.error = !!e.tool.err
+          tc.errorMsg = e.tool.err || undefined
+          tc.durationMs = e.tool.durationMs
+        }
         break
       }
       case 'approval_request':
-        approval.value = {
-          id: (e.approval_request as { id: string }).id,
-          tool: (e.approval_request as { tool: string }).tool,
-          args: (e.approval_request as { args?: unknown }).args,
+        // 审批载荷在 e.approval（对标 serve eventwire.Approval）。
+        if (e.approval) {
+          approval.value = {
+            id: e.approval.id,
+            tool: e.approval.tool,
+            subject: e.approval.subject,
+            reason: e.approval.reason,
+          }
         }
         break
       case 'turn_done':
@@ -70,14 +88,16 @@ export const useAgentStore = defineStore('agent', () => {
     }
   }
 
-  /** 发任务。附当前监控选中实例上下文（页面感知：让 agent 知道用户在看哪个采集器）。 */
+  /** 发任务。附当前监控选中实例上下文（页面感知：让 agent 知道用户在看哪个采集器）。
+   *  非 2xx 响应抛错（M2：submit 失败给 UI 反馈，由调用方 catch 提示用户）。 */
   async function submit(input: string) {
     messages.value.push({ id: nextId++, role: 'user', text: input })
     const monitor = useMonitorStore()
     const ctx = monitor.selectedInstance
       ? `\n[上下文: 当前查看实例 ${monitor.selectedInstance}]`
       : ''
-    await api('/api/agent/submit', { method: 'POST', body: JSON.stringify({ input: input + ctx }) })
+    const r = await api('/api/agent/submit', { method: 'POST', body: JSON.stringify({ input: input + ctx }) })
+    if (!r.ok) throw new Error(`submit failed: ${r.status}`)
   }
 
   /** 提交审批决策（写操作）：true 放行 / false 拒绝。 */

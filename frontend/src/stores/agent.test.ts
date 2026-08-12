@@ -25,9 +25,33 @@ describe('agent store', () => {
   it('tool_dispatch then tool_result populates toolCalls', () => {
     const s = useAgentStore()
     s.onEvent({ kind: 'turn_started' })
-    s.onEvent({ kind: 'tool_dispatch', tool: { id: 'c1', name: 'rsiot_read_tags' } })
-    s.onEvent({ kind: 'tool_result', name: 'rsiot_read_tags', tool: { id: 'c1', name: 'rsiot_read_tags' } })
-    expect(s.messages.at(-1)?.toolCalls?.[0].name).toBe('rsiot_read_tags')
+    s.onEvent({ kind: 'tool_dispatch', tool: { id: 'c1', name: 'rsiot_read_tags', args: '{"dev":"devA"}' } })
+    s.onEvent({ kind: 'tool_result', tool: { id: 'c1', name: 'rsiot_read_tags', output: '{"v":1}', durationMs: 12 } })
+    const tc = s.messages.at(-1)?.toolCalls?.[0]
+    expect(tc?.name).toBe('rsiot_read_tags')
+    expect(tc?.args).toBe('{"dev":"devA"}')
+    expect(tc?.result).toBe('{"v":1}')
+    expect(tc?.error).toBe(false)
+    expect(tc?.durationMs).toBe(12)
+  })
+
+  it('tool_result with err marks the call failed (T9 I1)', () => {
+    const s = useAgentStore()
+    s.onEvent({ kind: 'turn_started' })
+    s.onEvent({ kind: 'tool_dispatch', tool: { id: 'c2', name: 'rsiot_write_tag' } })
+    s.onEvent({ kind: 'tool_result', tool: { id: 'c2', name: 'rsiot_write_tag', err: 'device offline' } })
+    const tc = s.messages.at(-1)?.toolCalls?.[0]
+    expect(tc?.error).toBe(true)
+    expect(tc?.errorMsg).toBe('device offline')
+  })
+
+  it('approval_request sets the approval state (e.approval wire path)', () => {
+    const s = useAgentStore()
+    s.onEvent({ kind: 'turn_started' })
+    s.onEvent({ kind: 'approval_request', approval: { id: 'a1', tool: 'rsiot_write_tag', subject: '写入 devA.tag1=1', reason: '写操作' } })
+    expect(s.approval?.id).toBe('a1')
+    expect(s.approval?.tool).toBe('rsiot_write_tag')
+    expect(s.approval?.subject).toBe('写入 devA.tag1=1')
   })
 
   it('reasoning event appends to reasoning buffer', () => {
