@@ -1,11 +1,25 @@
+[workspace]
+resolver = "2"
+# rs-iot 主 crate（root）+ AI Agent 集成新增的独立 crate。
+# - rsiot-mcp：reasonix 的 [[plugins]] 子进程，把 MCP 工具调用翻译成 rs-iot REST（照 dbx-mcp 范本）。
+# - rsiot-gateway：v3 独立 API Gateway，纯反代 rs-iot + reasonix serve（照 plan-gateway-tech-selection.md）。
+# 两个子 crate 与主 crate 解耦：核心数据流（pipeline/lux/采集）零改动是硬约束。
+members = [".", "crates/rsiot-mcp", "crates/rsiot-gateway"]
+
+[workspace.package]
+edition = "2021"
+rust-version = "1.81"
+license = "MIT"
+repository = "https://github.com/viccom/rs-iot"
+
 [package]
 name = "rs-iot"
 version = "0.1.0"
-edition = "2021"
-rust-version = "1.81"
+edition = { workspace = true }
+rust-version = { workspace = true }
 description = "Lightweight cross-platform industrial IoT edge framework (Rust), with embedded lux as an in-process Redis-compatible database."
-license = "MIT"
-repository = "https://github.com/viccom/rs-iot"
+license = { workspace = true }
+repository = { workspace = true }
 
 [dependencies]
 # 嵌入式内存数据库：对外 RESP + Tiered 持久化
@@ -116,6 +130,7 @@ s7 = ["dep:tokio-s7"]
 # windows-svc = ["dep:windows-service"]
 
 [profile.release]
+# workspace 层共享（rs-iot + rsiot-mcp + rsiot-gateway 复用同一 release 配置）。
 opt-level = 3
 lto = "thin"
 codegen-units = 1
