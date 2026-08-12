@@ -27,7 +27,10 @@ pub struct Claims {
 }
 
 /// 免鉴权路径（gateway 自有端点）。
-const PUBLIC_PATHS: &[&str] = &["/api/gw/health"];
+///
+/// `/api/gw/health`：健康探针（无需凭证即可探活）。
+/// `/api/gw/login`：登录端点（前端登录页提交凭证换 JWT，登录前无 JWT 可用）。
+const PUBLIC_PATHS: &[&str] = &["/api/gw/health", "/api/gw/login"];
 
 /// 路径是否免鉴权。
 ///

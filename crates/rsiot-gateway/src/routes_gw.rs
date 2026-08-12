@@ -7,9 +7,12 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use axum::body::Body;
 use axum::extract::State;
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
 use axum::Json;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::proxy::GwState;
 
@@ -51,4 +54,36 @@ async fn probe(client: &reqwest::Client, url: &str) -> bool {
         .send()
         .await
         .is_ok()
+}
+
+/// 登录请求体（与 rs-iot `/api/v1/user/login` 契约对齐）。
+///
+/// 同时实现 Serialize/Deserialize：axum 提取需 Deserialize，转发 rs-iot 时 reqwest
+/// `.json(&req)` 需 Serialize。
+#[derive(Deserialize, Serialize)]
+pub struct LoginReq {
+    /// 用户 ID（对应 rs-iot lux `users` Hash 的 field）。
+    pub user_id: String,
+    /// 明文密码（rs-iot 验 bcrypt）。
+    pub pass: String,
+}
+
+/// `POST /api/gw/login`：转发 rs-iot `/api/v1/user/login`，透传返的 JWT。
+///
+/// gateway 不验密码（rs-iot 验 bcrypt），纯转发。jwt_secret 与 rs-iot 同值，
+/// 故 rs-iot 颁的 JWT gateway 也认（层1 复用，见 plan-gateway-tech-selection.md §四层1）。
+pub async fn login(State(st): State<Arc<GwState>>, Json(req): Json<LoginReq>) -> Response {
+    let url = format!("{}/api/v1/user/login", st.rsiot_base);
+    let resp = match st.client.post(&url).json(&req).send().await {
+        Ok(r) => r,
+        Err(_) => return (StatusCode::BAD_GATEWAY, "rs-iot unreachable").into_response(),
+    };
+    let status = resp.status();
+    let text = resp.text().await.unwrap_or_default();
+    // 透传 rs-iot 响应（含 {token, user} 或错误）。
+    Response::builder()
+        .status(status)
+        .header("content-type", "application/json")
+        .body(Body::from(text))
+        .unwrap()
 }
