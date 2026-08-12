@@ -35,5 +35,5 @@ async function login() {
 <style scoped>
 .login { max-width: 300px; margin: 80px auto; display: flex; flex-direction: column; gap: 8px; }
 input, button { padding: 8px; font-size: 14px; }
-.err { color: #dc2626; font-size: 13px; }
+.err { color: var(--color-danger); font-size: 13px; }
 </style>

@@ -113,8 +113,23 @@ RSIOT_GW_CONFIG=gateway.toml ./target/debug/rsiot-gateway   # gateway 配置走�
 
 cd frontend && npm run dev       # 前端 dev（Vite :5173 HMR，proxy /api → gateway :8080）
 cd frontend && npm run build     # 前端 build（产 dist/，需重编 gateway -p rsiot-gateway 才嵌入新前端）
-cd frontend && npm run test      # 前端单测（vitest）
+cd frontend && npm run test      # 前端单测（vitest，加 -- --run 单次跑完退出）
 ```
+
+### 前端开发流程（frontend/）
+
+两种开发模式，按场景选：
+
+- **dev 模式（改前端代码调试）**：`cd frontend && npm run dev` 起 Vite :5173（HMR 热替换）；另起 gateway（:8080）+ rs-iot + reasonix serve 三件套。浏览器访问 `http://localhost:5173`，`/api` 经 vite proxy 到 gateway（同源无 CORS）。改 Vue/TS 代码即时热替换，无需重编 gateway。**注意**：dev 走 vite proxy，prod 走 gateway rust-embed 直连——两者代理路径不同，SSE 行为可能有差异（prod 已验证实时，dev 若缓冲见 `vite.config.ts` 注释）。
+- **prod 模式（验真实嵌入）**：`cd frontend && npm run build` 产 `dist/` → `cargo build -j 2 -p rsiot-gateway` 重编嵌入 → 起三件套，浏览器访问 gateway :8080。**验前端改动必须走此模式**（dev 模式验不到 rust-embed 嵌入 + SPA fallback）。
+
+**rust-embed 重建陷阱**（必读）：`crates/rsiot-gateway/src/static_assets.rs` 用 `rust-embed` 在编译期把 `frontend/dist/` 嵌入二进制。改 `frontend/dist/` 后 **rust-embed 不会自动感知**（它按 cargo 的 crate 重编触发，不监听 dist 文件变化）——必须 `touch crates/rsiot-gateway/src/static_assets.rs`（或改任意 gateway .rs 文件）强制重编 gateway，否则跑的是旧前端。症状：`npm run build` 成功但浏览器看不到改动。一行修复：`touch crates/rsiot-gateway/src/static_assets.rs && cargo build -j 2 -p rsiot-gateway`。
+
+**前端验证规则**（改 frontend/ 后）：
+- `cd frontend && npm run build`（vue-tsc 类型检查 + vite 构建，TS 类型错误会 fail）
+- `cd frontend && npm run test -- --run`（vitest store 单测，monitor 10 + agent 7 共 17 测）
+- 验嵌入：`touch crates/rsiot-gateway/src/static_assets.rs && cargo build -j 2 -p rsiot-gateway`（强制重嵌入）+ 起三件套浏览器验
+- 前端改动**不碰**主 crate / rsiot-mcp（硬约束：gateway 是唯一对接点，经 REST 反代 + rust-embed 静态资源）
 
 ### Feature 裁剪（内置协议可选）
 
