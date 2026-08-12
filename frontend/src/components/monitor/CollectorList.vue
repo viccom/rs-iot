@@ -24,7 +24,7 @@ const monitor = useMonitorStore()
 .dot { width: 8px; height: 8px; border-radius: 50%; }
 .running .dot { background: var(--color-success); }
 .failed .dot { background: var(--color-danger); }
-.stopped .dot, .starting .dot { background: var(--color-ink-muted); }
+.stopped .dot, .starting .dot, .stopping .dot { background: var(--color-ink-muted); }
 .id { flex: 1; font-family: monospace; }
 .code { color: var(--color-ink-muted); font-size: 11px; }
 .empty { color: var(--color-ink-muted); }

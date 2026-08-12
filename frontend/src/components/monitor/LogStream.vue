@@ -1,3 +1,46 @@
-<!-- frontend/src/components/monitor/LogStream.vue（占位，Task 8 实现） -->
-<template><div class="placeholder">日志流（Task 8 实现）</div></template>
-<style scoped>.placeholder { padding: 20px; color: var(--color-ink-muted); }</style>
+<!-- frontend/src/components/monitor/LogStream.vue -->
+<script setup lang="ts">
+import { ref, computed } from 'vue'
+import { useMonitorStore } from '../../stores/monitor'
+const monitor = useMonitorStore()
+const level = ref('')
+const target = ref('')
+const filtered = computed(() => {
+  // level 用 >= 语义（如选 warn → 含 error+warn），trace/debug 用户显式选。
+  const lvRank: Record<string, number> = { error: 4, warn: 3, info: 2, debug: 1, trace: 0 }
+  // 后端 tracing level 大写（"INFO"/"WARN"），比较前 lower()（对标 scada.html levelRank）。
+  const want = lvRank[level.value] ?? undefined
+  return monitor.logs.filter(l => {
+    const lv = (l.level || '').toLowerCase()
+    if (want !== undefined && (lvRank[lv] ?? 0) < want) return false
+    if (target.value && l.target !== target.value) return false
+    return true
+  })
+})
+</script>
+<template>
+  <div class="log-stream">
+    <div class="filter">
+      <select v-model="level"><option value="">全部级别</option><option>error</option><option>warn</option><option>info</option><option>debug</option></select>
+      <input v-model="target" placeholder="target 过滤（如 io_trace）">
+    </div>
+    <div class="list">
+      <div v-for="(l, i) in filtered" :key="i" class="entry" :class="(l.level || '').toLowerCase()">
+        <span class="ts">{{ new Date(l.ts).toLocaleTimeString() }}</span>
+        <span class="lv">{{ l.level.toUpperCase() }}</span>
+        <span class="tg">{{ l.target }}</span>
+        <span class="msg">{{ l.message }}</span>
+      </div>
+      <p v-if="!filtered.length" class="empty">无日志</p>
+    </div>
+  </div>
+</template>
+<style scoped>
+.log-stream { display: flex; flex-direction: column; height: 100%; }
+.filter { display: flex; gap: 8px; padding: 8px; border-bottom: 1px solid var(--color-divider); }
+.list { flex: 1; overflow-y: auto; padding: 4px; }
+.entry { display: grid; grid-template-columns: 80px 50px 120px 1fr; gap: 8px; padding: 3px 6px; font-size: 12px; border-bottom: 1px solid var(--color-divider); font-family: monospace; }
+.entry.error { color: var(--color-danger); } .entry.warn { color: var(--color-warning); }
+.ts, .tg { color: var(--color-ink-muted); }
+.empty { color: var(--color-ink-muted); padding: 20px; text-align: center; }
+</style>
