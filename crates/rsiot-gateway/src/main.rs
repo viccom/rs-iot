@@ -3,21 +3,15 @@
 //! v3 独立 API Gateway（plan-gateway-tech-selection.md §二架构）：
 //! 前端唯一入口，纯反代 rs-iot(:8790) + reasonix serve(:8787)。
 //!
+//! main 只做 IO 编排（读配置 + 起服务），路由逻辑在 `lib::build_router` 便于集成测试。
+//!
 //! 配置：`-c <config.toml>` 或环境变量 `RSIOT_GW_CONFIG` 指向配置文件路径。
 
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use axum::extract::{Request, State};
-use axum::routing::any;
-use axum::Router;
 
-use rsiot_gateway::{
-    auth::auth_middleware,
-    config::GwConfig,
-    proxy::{forward, GwState, Upstream},
-    routes_gw::health,
-};
+use rsiot_gateway::{build_router, GwConfig, GwState};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -42,36 +36,4 @@ async fn main() -> Result<()> {
     tracing::info!(addr = %cfg.listen, "rsiot-gateway listening");
     axum::serve(listener, app).await.context("serve")?;
     Ok(())
-}
-
-/// 构造 Router（抽出便于集成测试）。
-///
-/// 路由三类（plan-gateway-tech-selection.md §三）：
-/// - `/api/rsiot/*` → forward(Rsiot)，层2 Authorization 自动透传。
-/// - `/api/agent/*` → forward(Serve)，层3 注入 cookie。
-/// - `/api/gw/health` → health（PUBLIC，免 JWT）。
-pub fn build_router(st: Arc<GwState>) -> Router {
-    let rsiot_st = st.clone();
-    let serve_st = st.clone();
-    Router::new()
-        .route("/api/gw/health", any(health))
-        .nest_service(
-            "/api/rsiot",
-            any(move |req: Request| {
-                let st = rsiot_st.clone();
-                async move { forward(State(st), req, Upstream::Rsiot, "/api/rsiot").await }
-            }),
-        )
-        .nest_service(
-            "/api/agent",
-            any(move |req: Request| {
-                let st = serve_st.clone();
-                async move { forward(State(st), req, Upstream::Serve, "/api/agent").await }
-            }),
-        )
-        .with_state(st.clone())
-        .layer(axum::middleware::from_fn_with_state(
-            st,
-            auth_middleware,
-        ))
 }

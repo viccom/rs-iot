@@ -79,33 +79,31 @@ impl Upstream {
     }
 }
 
-/// 通用透传：剥 `strip_prefix` 后拼 `upstream_base + 剩余 path + query`，转发。
+/// 通用透传：拼 `upstream_base + path + query`，转发。
 ///
 /// REST 与 SSE 走同一路径——上游返 `text/event-stream` 时，headers clone 保留 Content-Type，
 /// `Body::from_stream(bytes_stream())` 原样吐字节，前端 EventSource 自解 `\n\n`。
 ///
-/// `upstream` 决定基址 + cookie 注入。`strip_prefix` 是 axum `nest` 挂载的前缀（如 `/api/rsiot`）。
+/// **路径前缀由 axum `nest_service` 已剥离**（见 axum nest 语义：nested route handler 收到的
+/// path 不含前缀），forward 直接用剥后的 path 拼 base，不再二次剥离。
+///
+/// `upstream` 决定基址 + cookie 注入。
 pub async fn forward(
     State(st): State<Arc<GwState>>,
     req: Request,
     upstream: Upstream,
-    strip_prefix: &str,
 ) -> Response {
     let base = upstream.base(&st);
     let cookie = upstream.cookie(&st);
 
-    // 1. 拼上游 URL：剥 nest 前缀，保 query。
+    // 1. 拼上游 URL：path 已被 nest_service 剥前缀，直接用（保 query）。
     let (parts, body) = req.into_parts();
     let path_and_query = parts
         .uri
         .path_and_query()
         .map(|p| p.as_str())
         .unwrap_or("/");
-    let remaining = path_and_query
-        .strip_prefix(strip_prefix)
-        .filter(|s| !s.is_empty())
-        .unwrap_or("/");
-    let upstream_url = format!("{base}{remaining}");
+    let upstream_url = format!("{base}{path_and_query}");
 
     // 2. 构造出站请求：保 method，透传原 headers（Authorization 层2 自动满足），按需注入 cookie。
     let mut req_builder = st.client.request(parts.method.clone(), &upstream_url);
