@@ -6,6 +6,7 @@
 //! - 对标 rs-iot `src/api/auth.rs`，但 gateway 不签发（登录端点 P0-B2 后置），只验证。
 //!
 //! PUBLIC_PATHS：gateway 自有的 `/api/gw/health` 免鉴权（健康探针用）。
+//! 此外，**所有非 `/api/` 开头的路径**（静态前端 SPA）一律免鉴权——见 `is_public`。
 
 use std::sync::Arc;
 
@@ -28,8 +29,13 @@ pub struct Claims {
 /// 免鉴权路径（gateway 自有端点）。
 const PUBLIC_PATHS: &[&str] = &["/api/gw/health"];
 
+/// 路径是否免鉴权。
+///
+/// 鉴权边界是 `/api/*`：API 调用必须带 JWT；非 `/api/` 开头的路径（静态前端 SPA
+/// 经 `static_assets::serve` fallback 提供，含登录页）一律公开——前端登录页本身要先加载
+/// 才能提交凭证。`/api/gw/health` 等已在 PUBLIC_PATHS 内，保留显式清单便于扩展。
 fn is_public(path: &str) -> bool {
-    PUBLIC_PATHS.iter().any(|p| path.starts_with(p))
+    PUBLIC_PATHS.iter().any(|p| path.starts_with(p)) || !path.starts_with("/api/")
 }
 
 /// 验证 JWT，返回 sub（userId）。失败返 None。

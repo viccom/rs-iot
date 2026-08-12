@@ -31,6 +31,10 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 anyhow = "1"
 bytes = "1"
 futures-util = "0.3"
+# 静态前端嵌入（与 rs-iot 主 crate 同栈，对标 src/api/frontend.rs）。
+# rust-embed 编译时把 frontend/dist 嵌入二进制，gateway 独立部署不需随附静态文件。
+rust-embed = { version = "8", features = ["mime-guess"] }
+mime_guess = "2"
 
 [dev-dependencies]
 # 集成测试签 JWT exp 时间戳（B1-1 SSE 透传端到端测）。

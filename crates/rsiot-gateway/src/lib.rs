@@ -8,6 +8,7 @@ pub mod auth;
 pub mod config;
 pub mod proxy;
 pub mod routes_gw;
+pub mod static_assets;
 
 pub use app::build_router;
 pub use config::GwConfig;
