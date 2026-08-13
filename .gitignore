@@ -8,3 +8,4 @@
 .bak/
 .playwright-mcp/
 gateway.toml
+__pycache__/

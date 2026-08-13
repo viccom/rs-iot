@@ -9,7 +9,7 @@ use axum::routing::{any, post};
 use axum::Router;
 
 use crate::auth::auth_middleware;
-use crate::proxy::{forward, GwState, Upstream};
+use crate::proxy::{forward, forward_agent_submit, GwState, Upstream};
 use crate::routes_gw::{health, login};
 use crate::static_assets;
 
@@ -22,21 +22,24 @@ use crate::static_assets;
 pub fn build_router(st: Arc<GwState>) -> Router {
     let rsiot_st = st.clone();
     let serve_st = st.clone();
+    // agent 子路由用 `nest`（剥 /api/agent 前缀）而非裸显式 route——
+    // 显式 route 收到完整 path，forward 会拼出带前缀的上游 URL（404 bug）。
+    // `/submit` 走注入 handler（工具提示，冷启动盲区缓解），其余 fallback 裸透传。
+    let agent_routes = Router::new()
+        .route("/submit", post(forward_agent_submit))
+        .fallback(any(move |req: Request| {
+            let st = serve_st.clone();
+            async move { forward(State(st), req, Upstream::Serve).await }
+        }));
     Router::new()
         .route("/api/gw/health", any(health))
         .route("/api/gw/login", post(login))
+        .nest("/api/agent", agent_routes)
         .nest_service(
             "/api/rsiot",
             any(move |req: Request| {
                 let st = rsiot_st.clone();
                 async move { forward(State(st), req, Upstream::Rsiot).await }
-            }),
-        )
-        .nest_service(
-            "/api/agent",
-            any(move |req: Request| {
-                let st = serve_st.clone();
-                async move { forward(State(st), req, Upstream::Serve).await }
             }),
         )
         .fallback(static_assets::serve)
