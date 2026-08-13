@@ -9,9 +9,9 @@
 
 use std::sync::Arc;
 
-use axum::Router;
 use axum::routing::any;
-use rsiot_gateway::{GwConfig, GwState, build_router};
+use axum::Router;
+use rsiot_gateway::{build_router, GwConfig, GwState};
 
 /// 起一个 axum 服务在 :0（OS 分配端口），返回监听 URL。
 async fn spawn(router: Router) -> String {

@@ -49,10 +49,10 @@ POST /api/v1/command/send ─┼─► CtlRegistry.try_send(64) ──► 实例
 
 | crate | 职责 | 现状 |
 |---|---|---|
-| `crates/rsiot-mcp` | reasonix `[[plugins]]` spawn 的 stdio 子进程，把 MCP 工具调用翻译成 rs-iot loopback REST（照 dbx-mcp 范本：rmcp 2.2 + `#[tool]` 宏 + WebBackend JWT）。`server.rs` 声明工具，`backend.rs` 调 REST | P0-A 骨架完成（`rsiot_list_devices` 工具跑通，4 单测）；剩余：扩 read_tags/write_tags/get_logs/send_command 等工具 + risk 三档校验 + 端到端集成测 |
-| `crates/rsiot-gateway` | v3 独立 API Gateway，纯反代 rs-iot:8790 + reasonix serve:8787（`docs/plan-gateway-tech-selection.md`：axum 0.8 + reqwest 手写）。`proxy.rs` `forward()` 裸字节流透传（**不用** axum Sse/Event），`auth.rs` 层1 JWT（复用主 crate jwt_secret） | P0-B 骨架完成（forward + health + auth，3 单测）；剩余：B1-1 SSE 裸透传 demo（决定性验证）+ OS 服务化 |
+| `crates/rsiot-mcp` | reasonix `[[plugins]]` spawn 的 stdio 子进程，把 MCP 工具调用翻译成 rs-iot loopback REST（照 dbx-mcp 范本：rmcp 2.2 + `#[tool]` 宏 + WebBackend JWT）。`server.rs` 声明 10 工具（含 query percent-encode 输入边界防护），`backend.rs` 调 REST | 10 工具完成（list_devices/read_tags/get_status/list_instances/get_recent_logs/send_device_command/start_instance/stop_instance/save_lua_script/get_config）+ risk 三档框架（CriticalWrite 关键设备禁写 P1 后置）+ query encode 单测；24 单测全绿 |
+| `crates/rsiot-gateway` | v3 独立 API Gateway，纯反代 rs-iot:8790 + reasonix serve:8787（`docs/plan-gateway-tech-selection.md`：axum 0.8 + reqwest 手写）。`proxy.rs` `forward()` 裸字节流透传（**不用** axum Sse/Event）+ rsiot 凭证转换（query token→Authorization）+ token 防泄漏，`auth.rs` 层1 JWT（复用主 crate jwt_secret） | B1 全完成（SSE 裸透传 + serve cookie 注入 + health 聚合 + rsiot 鉴权转发）；rust-embed 静态前端嵌入 + SPA fallback；25 单测全绿。剩余：OS 服务化 |
 
-子 crate 与主 crate 的耦合边界：gateway 只透传主 crate REST（零改动）；rsiot-mcp 调主 crate REST，主 crate 有 2 个待补端点（`POST /lua/script/save` + `GET /config`，属主 crate 自身能力补全，见选型报告 §八）。
+子 crate 与主 crate 的耦合边界：gateway 只透传主 crate REST（零改动）；rsiot-mcp 调主 crate REST，主 crate 已补 2 端点（`POST /api/v1/lua/script/save` 路径白名单 + `GET /api/v1/config` 脱敏，属主 crate 自身能力补全，已实现）。
 
 **前端工程**（`frontend/`，M1 起）：Vue3 + Vite + TypeScript SPA（工业监控界面 + AI 面板）。`src/views/Login.vue` 登录、`src/views/Monitor.vue` 占位监控（M2 实装）、`src/api/client.ts` fetch 封装（自动带 JWT、401 区分已登录态 token 失效 vs 登录中业务 401）、`src/stores/auth.ts`（Pinia token 状态）、`src/router.ts`（history 模式 + 守卫）。**构建产物 `dist/` 经 rust-embed 嵌入 `crates/rsiot-gateway`**（gateway `static_assets.rs` 服务静态资源 + SPA fallback），`dist/` 不入库（`.gitignore`）。dev：`cd frontend && npm run dev`（Vite :5173，proxy `/api` → gateway :8080 同源无 CORS）；build：`npm run build`（产 `dist/` 后重编 gateway 才嵌入新前端）。
 

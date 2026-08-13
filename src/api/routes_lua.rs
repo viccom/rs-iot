@@ -72,18 +72,21 @@ pub async fn list_scripts(State(_st): State<AppState>) -> Json<serde_json::Value
 /// **路径白名单**：`name` 仅允许 `[A-Za-z0-9_-]`，拒路径分隔符/`..`/绝对路径
 /// （对标 v1 §六安全边界 + zacp `resolveInWorkspace`）。写后**不自动 reload**——
 /// 调用方按需 `POST /lua/reload?inst_id=` 或靠 notify 热加载（luaClient 监听 scripts/）。
-pub async fn save_script(
-    State(_st): State<AppState>,
-    Json(req): Json<SaveScriptReq>,
-) -> Response {
+pub async fn save_script(State(_st): State<AppState>, Json(req): Json<SaveScriptReq>) -> Response {
     match resolve_script_path(&req.name) {
         Ok(dir) => {
             if let Err(e) = std::fs::create_dir_all(&dir) {
-                return err(StatusCode::INTERNAL_SERVER_ERROR, &format!("create dir: {e}"));
+                return err(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("create dir: {e}"),
+                );
             }
             let main_lua = dir.join("main.lua");
             if let Err(e) = std::fs::write(&main_lua, &req.content) {
-                return err(StatusCode::INTERNAL_SERVER_ERROR, &format!("write main.lua: {e}"));
+                return err(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("write main.lua: {e}"),
+                );
             }
             Json(serde_json::json!({
                 "status": "ok",
@@ -184,7 +187,10 @@ mod tests {
 
     #[test]
     fn resolve_rejects_empty() {
-        assert_eq!(resolve_script_path("").unwrap_err(), "script name must not be empty");
+        assert_eq!(
+            resolve_script_path("").unwrap_err(),
+            "script name must not be empty"
+        );
     }
 
     /// 验证意图（规则7）：路径逃逸必须拒绝——AI 误操作或恶意输入不得写出 scripts/ 外。

@@ -14,10 +14,11 @@ use rsiot_mcp::{RsiotMcpServer, WebBackend};
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let base = std::env::var("RSIOT_BASE").unwrap_or_else(|_| "http://127.0.0.1:8790".into());
     let jwt = std::env::var("RSIOT_JWT").unwrap_or_default();
-    let backend = Arc::new(
-        WebBackend::new(base, jwt).map_err(|e| std::io::Error::other(e.to_string()))?,
-    );
-    let service = RsiotMcpServer::new(backend).serve(rmcp::transport::stdio()).await?;
+    let backend =
+        Arc::new(WebBackend::new(base, jwt).map_err(|e| std::io::Error::other(e.to_string()))?);
+    let service = RsiotMcpServer::new(backend)
+        .serve(rmcp::transport::stdio())
+        .await?;
     service.waiting().await?;
     Ok(())
 }

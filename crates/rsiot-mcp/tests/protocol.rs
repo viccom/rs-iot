@@ -95,8 +95,7 @@ async fn handshake_lists_all_ten_tools() {
 /// call_tool 经 JSON-RPC 往返：只读工具（read_tags）无参调用成功。
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn call_tool_round_trip_read_tags() {
-    let (client, server_task) =
-        spawn_handshake(json!({"devA": {"v1": [1, 2, 3.5]}})).await;
+    let (client, server_task) = spawn_handshake(json!({"devA": {"v1": [1, 2, 3.5]}})).await;
     let result = client
         .peer()
         .call_tool(CallToolRequestParams::new("rsiot_read_tags"))
@@ -104,7 +103,10 @@ async fn call_tool_round_trip_read_tags() {
         .expect("call_tool");
     assert_ne!(result.is_error, Some(true), "should succeed");
     let text = result.content[0].as_text().expect("text").text.clone();
-    assert!(text.contains("devA"), "result should contain devA; got {text}");
+    assert!(
+        text.contains("devA"),
+        "result should contain devA; got {text}"
+    );
 
     let _ = client.cancel().await;
     server_task.abort();
@@ -128,7 +130,10 @@ async fn call_tool_with_arguments_round_trip() {
         .expect("call_tool");
     assert_ne!(result.is_error, Some(true));
     let text = result.content[0].as_text().expect("text").text.clone();
-    assert!(text.contains("devX"), "argument reached backend; got {text}");
+    assert!(
+        text.contains("devX"),
+        "argument reached backend; got {text}"
+    );
 
     let _ = client.cancel().await;
     server_task.abort();

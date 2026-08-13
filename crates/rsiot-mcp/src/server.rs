@@ -12,8 +12,7 @@ use std::sync::Arc;
 use rmcp::{
     handler::server::wrapper::Parameters,
     model::{CallToolResult, ContentBlock},
-    schemars,
-    tool, tool_handler, tool_router,
+    schemars, tool, tool_handler, tool_router,
 };
 use serde::Deserialize;
 
@@ -62,7 +61,9 @@ pub struct SendCommandRequest {
     pub devid: String,
     #[schemars(description = "Command type, e.g. \"write\". Plugin dispatches on this.")]
     pub cmd: String,
-    #[schemars(description = "Command payload as JSON text, e.g. {\"address\":\"holding:0:f32:ABCD\",\"value\":12.34}")]
+    #[schemars(
+        description = "Command payload as JSON text, e.g. {\"address\":\"holding:0:f32:ABCD\",\"value\":12.34}"
+    )]
     pub data: String,
 }
 
@@ -76,10 +77,32 @@ pub struct InstanceRequest {
 /// `rsiot_save_lua_script`：写 lua 脚本。映射 `POST /api/v1/lua/script/save`。
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct SaveScriptRequest {
-    #[schemars(description = "Script directory name (e.g. \"devA\"), written to scripts/<name>/main.lua. Only [A-Za-z0-9_-].")]
+    #[schemars(
+        description = "Script directory name (e.g. \"devA\"), written to scripts/<name>/main.lua. Only [A-Za-z0-9_-]."
+    )]
     pub name: String,
     #[schemars(description = "Content of main.lua")]
     pub content: String,
+}
+
+// ============ query 拼接辅助 ============
+
+/// percent-encode query 参数值（输入边界防护，对标规则5「系统边界处验证输入」）。
+///
+/// `dev_id`/`level`/`target` 来自 agent（自由文本），直接 `format!` 拼 query 会因 `&`/`=`/`+`/
+/// 空格/`#`/非 ASCII 等字符破坏 URL 或注入额外参数。本 helper 把这些字符转 `%XX`。
+///
+/// 保留 unreserved（`A-Za-z0-9-_.~`，RFC 3986）原样，其余一律 `%XX` 编码（保守，宁可多编）。
+fn encode_query_value(s: &str) -> String {
+    s.bytes()
+        .map(|b| {
+            if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') {
+                (b as char).to_string()
+            } else {
+                format!("%{b:02X}")
+            }
+        })
+        .collect()
 }
 
 // ============ risk 框架 ============
@@ -142,62 +165,78 @@ impl RsiotMcpServer {
     // ---- 只读工具（agent 自动放行，对标 readOnlyHint）----
 
     /// `rsiot_list_devices`：列设备（含子采集点 children）。映射 `GET /api/v1/devices`。
-    #[tool(description = "List devices registered in the rs-iot gateway, optionally filtered by dev_id. Returns device list with collection points (children). Read-only.")]
+    #[tool(
+        description = "List devices registered in the rs-iot gateway, optionally filtered by dev_id. Returns device list with collection points (children). Read-only."
+    )]
     async fn rsiot_list_devices(
         &self,
         Parameters(req): Parameters<ListDevicesRequest>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         let path = match &req.dev_id {
-            Some(id) => format!("/api/v1/device/get?dev_id={id}"),
+            Some(id) => format!("/api/v1/device/get?dev_id={}", encode_query_value(id)),
             None => "/api/v1/devices".to_string(),
         };
         backend_to_result(self.backend.get(&path).await, "rsiot_list_devices")
     }
 
     /// `rsiot_read_tags`：读设备实时数据。映射 `GET /api/v1/rtdatas?dev_id=`。
-    #[tool(description = "Read latest values of device tags from the gateway. Pass dev_id for a single device, or omit for all devices. Read-only.")]
+    #[tool(
+        description = "Read latest values of device tags from the gateway. Pass dev_id for a single device, or omit for all devices. Read-only."
+    )]
     async fn rsiot_read_tags(
         &self,
         Parameters(req): Parameters<ReadTagsRequest>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         let path = match &req.dev_id {
-            Some(id) => format!("/api/v1/rtdatas?dev_id={id}"),
+            Some(id) => format!("/api/v1/rtdatas?dev_id={}", encode_query_value(id)),
             None => "/api/v1/rtdatas".to_string(),
         };
         backend_to_result(self.backend.get(&path).await, "rsiot_read_tags")
     }
 
     /// `rsiot_get_status`：网关综合状态（实例/计数器/CPU/mem）。映射 `GET /api/v1/sysstatus`。
-    #[tool(description = "Get gateway overall status: running instances, pipeline/hub/mqtt counters, process CPU/memory. Read-only.")]
+    #[tool(
+        description = "Get gateway overall status: running instances, pipeline/hub/mqtt counters, process CPU/memory. Read-only."
+    )]
     async fn rsiot_get_status(
         &self,
         Parameters(_): Parameters<NoParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        backend_to_result(self.backend.get("/api/v1/sysstatus").await, "rsiot_get_status")
+        backend_to_result(
+            self.backend.get("/api/v1/sysstatus").await,
+            "rsiot_get_status",
+        )
     }
 
     /// `rsiot_list_instances`：列实例状态。映射 `GET /api/v1/inststatus`。
-    #[tool(description = "List all gateway plugin instances with their running state (Running/Stopped/Failed etc). Read-only.")]
+    #[tool(
+        description = "List all gateway plugin instances with their running state (Running/Stopped/Failed etc). Read-only."
+    )]
     async fn rsiot_list_instances(
         &self,
         Parameters(_): Parameters<NoParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        backend_to_result(self.backend.get("/api/v1/inststatus").await, "rsiot_list_instances")
+        backend_to_result(
+            self.backend.get("/api/v1/inststatus").await,
+            "rsiot_list_instances",
+        )
     }
 
     /// `rsiot_get_recent_logs`：取最近日志。映射 `GET /api/v1/logs/recent`。
-    #[tool(description = "Get recent structured log entries from the gateway ring buffer. Filter by level (e.g. \"warn\" = error+warn), tracing target (e.g. \"io_trace\" for packet trace), and limit. Read-only.")]
+    #[tool(
+        description = "Get recent structured log entries from the gateway ring buffer. Filter by level (e.g. \"warn\" = error+warn), tracing target (e.g. \"io_trace\" for packet trace), and limit. Read-only."
+    )]
     async fn rsiot_get_recent_logs(
         &self,
         Parameters(req): Parameters<GetRecentLogsRequest>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        // 拼 query：只拼非空参数，避免尾随 &。
+        // 拼 query：只拼非空参数，避免尾随 &；level/target 经 percent-encode 防注入。
         let mut qs: Vec<String> = Vec::new();
         if let Some(l) = &req.level {
-            qs.push(format!("level={l}"));
+            qs.push(format!("level={}", encode_query_value(l)));
         }
         if let Some(t) = &req.target {
-            qs.push(format!("target={t}"));
+            qs.push(format!("target={}", encode_query_value(t)));
         }
         if let Some(n) = req.limit {
             qs.push(format!("limit={n}"));
@@ -218,7 +257,9 @@ impl RsiotMcpServer {
     ///
     /// **高危**：直接写设备寄存器/节点。data 由插件解析（modbus `{address,value}` / opcua
     /// `{node_id,value,opc_type}`）。实例未运行返回 404。
-    #[tool(description = "Send a write command to a device via its running instance (e.g. write a Modbus register or OPC UA node). HIGH RISK: modifies device state. The `data` field is plugin-specific JSON (e.g. {\"address\":\"holding:0:f32\",\"value\":12.5}). Requires approval.")]
+    #[tool(
+        description = "Send a write command to a device via its running instance (e.g. write a Modbus register or OPC UA node). HIGH RISK: modifies device state. The `data` field is plugin-specific JSON (e.g. {\"address\":\"holding:0:f32\",\"value\":12.5}). Requires approval."
+    )]
     async fn rsiot_send_device_command(
         &self,
         Parameters(req): Parameters<SendCommandRequest>,
@@ -230,34 +271,49 @@ impl RsiotMcpServer {
             "cmd": req.cmd,
             "data": req.data,
         });
-        backend_to_result(self.backend.post("/api/v1/command/send", &body).await, "rsiot_send_device_command")
+        backend_to_result(
+            self.backend.post("/api/v1/command/send", &body).await,
+            "rsiot_send_device_command",
+        )
     }
 
     /// `rsiot_start_instance`：启动实例。映射 `POST /api/v1/startinst`。
-    #[tool(description = "Start a south (source) instance by inst_id. The instance begins collecting from its configured devices. Requires approval.")]
+    #[tool(
+        description = "Start a south (source) instance by inst_id. The instance begins collecting from its configured devices. Requires approval."
+    )]
     async fn rsiot_start_instance(
         &self,
         Parameters(req): Parameters<InstanceRequest>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         let body = serde_json::json!({ "inst_id": req.inst_id });
-        backend_to_result(self.backend.post("/api/v1/startinst", &body).await, "rsiot_start_instance")
+        backend_to_result(
+            self.backend.post("/api/v1/startinst", &body).await,
+            "rsiot_start_instance",
+        )
     }
 
     /// `rsiot_stop_instance`：停止实例。映射 `POST /api/v1/stopinst`。
-    #[tool(description = "Stop a running instance by inst_id. Its collection tasks are cancelled. Requires approval.")]
+    #[tool(
+        description = "Stop a running instance by inst_id. Its collection tasks are cancelled. Requires approval."
+    )]
     async fn rsiot_stop_instance(
         &self,
         Parameters(req): Parameters<InstanceRequest>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         let body = serde_json::json!({ "inst_id": req.inst_id });
-        backend_to_result(self.backend.post("/api/v1/stopinst", &body).await, "rsiot_stop_instance")
+        backend_to_result(
+            self.backend.post("/api/v1/stopinst", &body).await,
+            "rsiot_stop_instance",
+        )
     }
 
     /// `rsiot_save_lua_script`：写 lua 脚本。映射 `POST /api/v1/lua/script/save`。
     ///
     /// **写操作**：修改 scripts/ 文件树（路径白名单由 rs-iot 主进程强制）。
     /// 写后如需生效，调 `rsiot_start_instance` 或靠 luaClient notify 热加载。
-    #[tool(description = "Write a lua collection script to scripts/<name>/main.lua. After saving, start/reload the luaClient instance to apply. Requires approval.")]
+    #[tool(
+        description = "Write a lua collection script to scripts/<name>/main.lua. After saving, start/reload the luaClient instance to apply. Requires approval."
+    )]
     async fn rsiot_save_lua_script(
         &self,
         Parameters(req): Parameters<SaveScriptRequest>,
@@ -272,7 +328,9 @@ impl RsiotMcpServer {
     /// `rsiot_get_config`：读脱敏配置。映射 `GET /api/v1/config`。
     ///
     /// 返回的配置已脱敏（jwt_secret/mqtt 凭据遮蔽为 "***"），agent 可安全读取做诊断。
-    #[tool(description = "Read the gateway configuration with secrets masked (jwt_secret and mqtt credentials shown as \"***\"). Read-only.")]
+    #[tool(
+        description = "Read the gateway configuration with secrets masked (jwt_secret and mqtt credentials shown as \"***\"). Read-only."
+    )]
     async fn rsiot_get_config(
         &self,
         Parameters(_): Parameters<NoParams>,
@@ -321,12 +379,21 @@ mod tests {
     #[async_trait]
     impl RsiotBackend for FakeBackend {
         async fn get(&self, path: &str) -> Result<Value, BackendError> {
-            self.paths.lock().expect("paths lock").push(path.to_string());
+            self.paths
+                .lock()
+                .expect("paths lock")
+                .push(path.to_string());
             Ok(self.get_value.clone())
         }
         async fn post(&self, path: &str, body: &Value) -> Result<Value, BackendError> {
-            self.paths.lock().expect("paths lock").push(path.to_string());
-            self.posts.lock().expect("posts lock").push((path.to_string(), body.clone()));
+            self.paths
+                .lock()
+                .expect("paths lock")
+                .push(path.to_string());
+            self.posts
+                .lock()
+                .expect("posts lock")
+                .push((path.to_string(), body.clone()));
             Ok(self.post_value.clone())
         }
     }
@@ -349,6 +416,52 @@ mod tests {
             ContentBlock::Text(t) => &t.text,
             other => panic!("expected Text, got {other:?}"),
         }
+    }
+
+    // ---- encode_query_value（输入边界防护，规则5）----
+
+    #[test]
+    fn encode_keeps_unreserved_as_is() {
+        // RFC 3986 unreserved 原样。
+        assert_eq!(encode_query_value("devA_1-2.~"), "devA_1-2.~");
+    }
+
+    #[test]
+    fn encode_escapes_special_chars() {
+        // 空格 → %20，& → %26，= → %3D，+ → %2B，# → %23。
+        assert_eq!(encode_query_value("a b"), "a%20b");
+        assert_eq!(encode_query_value("a&b=c"), "a%26b%3Dc");
+        assert_eq!(encode_query_value("a+b"), "a%2Bb");
+        assert_eq!(encode_query_value("a#b"), "a%23b");
+    }
+
+    #[test]
+    fn encode_escapes_non_ascii() {
+        // 中文每字节 %XX（UTF-8 三字节）。
+        assert_eq!(encode_query_value("设备"), "%E8%AE%BE%E5%A4%87");
+    }
+
+    /// 注入防护：dev_id 含 `&cmd=write` 不能注入额外 query 参数。
+    #[tokio::test]
+    async fn read_tags_dev_id_with_ampersand_does_not_inject_param() {
+        let backend = Arc::new(FakeBackend::new(json!({"v1": 1})));
+        let server = RsiotMcpServer::new(backend.clone() as Arc<dyn RsiotBackend>);
+        server
+            .rsiot_read_tags(Parameters(ReadTagsRequest {
+                dev_id: Some("devA&cmd=write".into()),
+            }))
+            .await
+            .unwrap();
+        let path = &backend.recorded_paths()[0];
+        // 验证意图（规则7）：& 被 encode 成 %26，不会拆出第二个 query 参数。
+        assert!(
+            path.contains("dev_id=devA%26cmd%3Dwrite"),
+            "ampersand/equals must be encoded, not injected; got {path}"
+        );
+        assert!(
+            !path.contains("&cmd=write"),
+            "raw injection must not survive; got {path}"
+        );
     }
 
     // ---- list_devices（原工具，重构后用 helper，回归测试）----
@@ -379,7 +492,9 @@ mod tests {
         // 测试侧保留 Arc<FakeBackend>（server 持 trait object 看不到具体方法）。
         let paths = backend.recorded_paths();
         assert!(
-            paths.iter().any(|p| p.contains("/api/v1/device/get?dev_id=devA")),
+            paths
+                .iter()
+                .any(|p| p.contains("/api/v1/device/get?dev_id=devA")),
             "dev_id filter should hit device/get; got {paths:?}"
         );
     }
@@ -396,7 +511,11 @@ mod tests {
             .unwrap();
         assert!(text_of(&result).contains("devA"));
         // 验证意图：无 dev_id 时不带 query（避免尾随 ?）。
-        assert_eq!(backend.recorded_paths()[0], "/api/v1/rtdatas", "no trailing ? when no params");
+        assert_eq!(
+            backend.recorded_paths()[0],
+            "/api/v1/rtdatas",
+            "no trailing ? when no params"
+        );
     }
 
     #[tokio::test]
@@ -504,8 +623,7 @@ mod tests {
         assert_eq!(body["devid"], "devA");
         assert_eq!(body["cmd"], "write");
         assert_eq!(
-            body["data"],
-            r#"{"address":"holding:0:f32:ABCD","value":12.5}"#,
+            body["data"], r#"{"address":"holding:0:f32:ABCD","value":12.5}"#,
             "data must stay as JSON text string, not parsed object"
         );
     }

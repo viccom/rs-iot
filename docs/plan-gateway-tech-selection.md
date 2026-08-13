@@ -16,7 +16,7 @@
 
 | # | 硬需求 | 来源 | 验收 |
 |---|---|---|---|
-| H1 | **REST 反代**：`/api/rsiot/*` → rs-iot:8790 `/api/v1/*`（路径前缀重写） | v3 §3.1 | 前端 `GET /api/rsiot/sysstatus` 命中 rs-iot `/api/v1/sysstatus` |
+| H1 | **REST 反代**：`/api/rsiot/*` → rs-iot:8790 `/api/v1/*`（gateway `nest_service` 剥 `/api/rsiot` 前缀，前端写完整 `/api/rsiot/api/v1/...`） | v3 §3.1 | 前端 `GET /api/rsiot/api/v1/sysstatus` 命中 rs-iot `/api/v1/sysstatus` |
 | H2 | **REST 反代**：`/api/agent/*` → serve:8787（POST submit/approve/cancel/answer/inbox） | v3 §3.2 | 前端 POST 经 gateway 到达 serve |
 | H3 | **SSE 透传 ×2**：`/api/rsiot/events`（rs-iot，有 `event:` 头）+ `/api/agent/events`（serve，**无 `event:` 头**，kind 在 JSON body 内） | v3 §3.4 + §七坑② | 两条独立流，前端两个 EventSource 各收完整帧 |
 | H4 | **层1 鉴权**：gateway 自有 `POST /api/gw/login`（复用 rs-iot `jwt_secret`）+ 中间件验 JWT | v3 §4 层1 | 前端登录 gateway 拿 JWT，无 JWT 调 `/api/*` 返 401 |

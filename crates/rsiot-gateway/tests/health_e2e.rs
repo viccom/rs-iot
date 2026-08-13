@@ -11,7 +11,9 @@ use rsiot_gateway::{build_router, GwConfig, GwState};
 
 /// 起一个 axum 服务在 :0，返回实际监听 URL。
 async fn spawn_axum(router: Router) -> String {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
     let addr = listener.local_addr().expect("addr");
     let url = format!("http://{addr}");
     tokio::spawn(async move {
@@ -63,11 +65,7 @@ async fn health_mixed_when_one_upstream_down() {
     let serve_up = spawn_axum(ok_router()).await;
     // rsiot 指向一个未监听的端口（OS 分配一个空闲端口但不 bind → 连接拒绝）。
     let rsiot_down = "http://127.0.0.1:1";
-    let gw = spawn_axum(build_router(test_state(
-        rsiot_down.into(),
-        serve_up,
-    )))
-    .await;
+    let gw = spawn_axum(build_router(test_state(rsiot_down.into(), serve_up))).await;
 
     let body: serde_json::Value = reqwest::Client::new()
         .get(format!("{gw}/api/gw/health"))

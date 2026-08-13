@@ -88,24 +88,36 @@ impl Upstream {
 /// path 不含前缀），forward 直接用剥后的 path 拼 base，不再二次剥离。
 ///
 /// `upstream` 决定基址 + cookie 注入。
-pub async fn forward(
-    State(st): State<Arc<GwState>>,
-    req: Request,
-    upstream: Upstream,
-) -> Response {
+///
+/// **rsiot 凭证转换**（C1 修复）：前端 EventSource 不能设 header，只能 `?token=<jwt>`。
+/// gateway `auth_middleware` 验 query token 通过，但 rs-iot `auth_middleware` 只认
+/// `Authorization`/`Cookie` 不认 query token。故转发 rsiot 时，forward 从入站请求取 JWT
+/// 注入 `Authorization: Bearer <jwt>`，并从 upstream URL 摘掉 `token=`（防泄漏到上游日志）。
+pub async fn forward(State(st): State<Arc<GwState>>, req: Request, upstream: Upstream) -> Response {
     let base = upstream.base(&st);
     let cookie = upstream.cookie(&st);
 
-    // 1. 拼上游 URL：path 已被 nest_service 剥前缀，直接用（保 query）。
+    // 1. 拼上游 URL：path 已被 nest_service 剥前缀，直接用。
+    //    rsiot 路径：从 query 摘 token=（防泄漏）+ 独立提取 JWT 注入 Authorization（C1）。
     let (parts, body) = req.into_parts();
-    let path_and_query = parts
-        .uri
-        .path_and_query()
-        .map(|p| p.as_str())
-        .unwrap_or("/");
-    let upstream_url = format!("{base}{path_and_query}");
+    let raw_path = parts.uri.path();
+    let raw_query = parts.uri.query().unwrap_or("");
 
-    // 2. 构造出站请求：保 method，透传原 headers（Authorization 层2 自动满足），按需注入 cookie。
+    // 提取入站 JWT（query 优先——EventSource 场景；退回 Authorization header——REST 场景）。
+    // 注：auth_middleware 已验过有效性，此处仅取值不做密码学校验。
+    let inbound_jwt = extract_query_token(raw_query)
+        .or_else(|| extract_bearer(&parts.headers))
+        .filter(|_| matches!(upstream, Upstream::Rsiot));
+
+    // 摘掉 query 里的 token=（rsiot 路径防泄漏；serve 路径 token 对 serve 零价值同样摘）。
+    let clean_query = strip_token_from_query(raw_query);
+    let upstream_url = if clean_query.is_empty() {
+        format!("{base}{raw_path}")
+    } else {
+        format!("{base}{raw_path}?{clean_query}")
+    };
+
+    // 2. 构造出站请求：保 method，透传原 headers（Authorization 层2 自动满足），按需注入凭证。
     let mut req_builder = st.client.request(parts.method.clone(), &upstream_url);
     // hop-by-hop 头不透传（标准反代约定，Host 由 reqwest 按上游 URL 重设）。
     for (name, value) in parts.headers.iter() {
@@ -113,6 +125,12 @@ pub async fn forward(
             continue;
         }
         req_builder = req_builder.header(name, value);
+    }
+    // rsiot 凭证注入（C1）：query token → Authorization: Bearer。
+    if let Some(jwt) = inbound_jwt {
+        let hv =
+            HeaderValue::from_str(&format!("Bearer {jwt}")).expect("jwt contains invalid chars");
+        req_builder = req_builder.header(axum::http::header::AUTHORIZATION, hv);
     }
     // 层3：serve cookie 注入。
     if let Some(tok) = cookie {
@@ -170,9 +188,44 @@ pub async fn forward(
 fn is_hop_by_hop(name: &HeaderName) -> bool {
     matches!(
         name.as_str(),
-        "host" | "connection" | "proxy-authorization" | "proxy-authenticate"
-            | "te" | "trailers" | "transfer-encoding" | "upgrade"
+        "host"
+            | "connection"
+            | "proxy-authorization"
+            | "proxy-authenticate"
+            | "te"
+            | "trailers"
+            | "transfer-encoding"
+            | "upgrade"
     )
+}
+
+/// 从 query 串提取 `token=<jwt>` 的值（不含 `token=` 前缀）。
+///
+/// EventSource 不能设 header，前端 JWT 经 `?token=<jwt>` 传入。auth_middleware 已校验；
+/// 此处仅取值供 forward 注入 `Authorization: Bearer` 转发 rsiot（C1）。
+fn extract_query_token(query: &str) -> Option<String> {
+    query
+        .split('&')
+        .find_map(|kv| kv.strip_prefix("token=").map(|s| s.to_string()))
+}
+
+/// 从 `Authorization: Bearer <jwt>` header 提取 JWT（REST 场景退路）。
+fn extract_bearer(headers: &axum::http::HeaderMap) -> Option<String> {
+    headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.strip_prefix("Bearer ").map(|t| t.to_string()))
+}
+
+/// 从 query 串摘除 `token=<...>`（防 JWT 泄漏到上游 URL/日志），保留其余业务 query。
+///
+/// 例如 `types=log&token=<jwt>&limit=200` → `types=log&limit=200`。
+fn strip_token_from_query(query: &str) -> String {
+    query
+        .split('&')
+        .filter(|kv| !kv.is_empty() && !kv.starts_with("token="))
+        .collect::<Vec<_>>()
+        .join("&")
 }
 
 #[cfg(test)]
@@ -186,5 +239,28 @@ mod tests {
         assert!(is_hop_by_hop(&HeaderName::from_static("connection")));
         assert!(!is_hop_by_hop(&HeaderName::from_static("authorization")));
         assert!(!is_hop_by_hop(&HeaderName::from_static("content-type")));
+    }
+
+    /// query token 提取（C1）：EventSource 的 `?token=<jwt>` 能取出 JWT。
+    #[test]
+    fn extract_query_token_picks_token_param() {
+        assert_eq!(
+            extract_query_token("types=log&token=abc.def.ghi"),
+            Some("abc.def.ghi".into())
+        );
+        assert_eq!(extract_query_token("types=log"), None);
+        assert_eq!(extract_query_token(""), None);
+    }
+
+    /// query token 摘除（C1 token-leak）：保留业务 query，去掉 token=。
+    #[test]
+    fn strip_token_keeps_business_query() {
+        assert_eq!(
+            strip_token_from_query("types=log&token=secret&limit=200"),
+            "types=log&limit=200"
+        );
+        assert_eq!(strip_token_from_query("token=secret"), "");
+        assert_eq!(strip_token_from_query("types=log"), "types=log");
+        assert_eq!(strip_token_from_query(""), "");
     }
 }

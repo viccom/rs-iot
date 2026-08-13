@@ -112,10 +112,7 @@ async fn serve_style_naked_ndjson() -> Response {
 /// 收到的字节应含 `event: log` + `data:`（rs-iot 风格本就有 data:，透传不破坏）。
 #[tokio::test]
 async fn rsiot_sse_event_header_preserved() {
-    let mock = spawn_axum(
-        Router::new().route("/api/v1/events", any(rsiot_style_sse)),
-    )
-    .await;
+    let mock = spawn_axum(Router::new().route("/api/v1/events", any(rsiot_style_sse))).await;
     let gw = spawn_axum(build_router(test_state(mock.clone(), mock.clone()))).await;
     let client = reqwest::Client::new();
 
@@ -133,7 +130,11 @@ async fn rsiot_sse_event_header_preserved() {
 
     let body = resp.text().await.expect("read body");
     // 3 帧都应保留 event: log + data:（rs-iot 风格特征）。
-    assert_eq!(body.matches("event: log").count(), 3, "event header preserved");
+    assert_eq!(
+        body.matches("event: log").count(),
+        3,
+        "event header preserved"
+    );
     assert_eq!(body.matches("frame1").count(), 1);
     assert_eq!(body.matches("frame3").count(), 1);
 }
@@ -145,10 +146,7 @@ async fn rsiot_sse_event_header_preserved() {
 /// `{...}\n\n` 原样。这是 forward() 实现正确性的核心判据。
 #[tokio::test]
 async fn serve_naked_ndjson_not_wrapped_with_data_prefix() {
-    let mock = spawn_axum(
-        Router::new().route("/events", any(serve_style_naked_ndjson)),
-    )
-    .await;
+    let mock = spawn_axum(Router::new().route("/events", any(serve_style_naked_ndjson))).await;
     let gw = spawn_axum(build_router(test_state(mock.clone(), mock.clone()))).await;
     let client = reqwest::Client::new();
 
@@ -186,10 +184,7 @@ async fn serve_naked_ndjson_not_wrapped_with_data_prefix() {
 /// 自解 `\n\n`。多帧串行透传后，按 `\n\n` split 应得预期的非空帧数。
 #[tokio::test]
 async fn multi_frame_boundaries_intact() {
-    let mock = spawn_axum(
-        Router::new().route("/events", any(serve_style_naked_ndjson)),
-    )
-    .await;
+    let mock = spawn_axum(Router::new().route("/events", any(serve_style_naked_ndjson))).await;
     let gw = spawn_axum(build_router(test_state(mock.clone(), mock.clone()))).await;
     let client = reqwest::Client::new();
 
@@ -230,29 +225,23 @@ async fn serve_cookie_injected_on_forward() {
     let received_cookie = Arc::new(tokio::sync::Mutex::new(None::<String>));
     let captured = received_cookie.clone();
 
-    let mock_serve = spawn_axum(
-        Router::new().route(
-            "/status",
-            any(move |req: axum::extract::Request| {
-                let captured = captured.clone();
-                async move {
-                    let ck = req
-                        .headers()
-                        .get(axum::http::header::COOKIE)
-                        .and_then(|v| v.to_str().ok())
-                        .map(|s| s.to_string());
-                    *captured.lock().await = ck;
-                    "ok"
-                }
-            }),
-        ),
-    )
+    let mock_serve = spawn_axum(Router::new().route(
+        "/status",
+        any(move |req: axum::extract::Request| {
+            let captured = captured.clone();
+            async move {
+                let ck = req
+                    .headers()
+                    .get(axum::http::header::COOKIE)
+                    .and_then(|v| v.to_str().ok())
+                    .map(|s| s.to_string());
+                *captured.lock().await = ck;
+                "ok"
+            }
+        }),
+    ))
     .await;
-    let gw = spawn_axum(build_router(test_state(
-        mock_serve.clone(),
-        mock_serve,
-    )))
-    .await;
+    let gw = spawn_axum(build_router(test_state(mock_serve.clone(), mock_serve))).await;
 
     // 经 gateway 调 serve，客户端只带 JWT（不带 serve cookie）。
     reqwest::Client::new()

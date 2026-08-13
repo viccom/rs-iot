@@ -24,8 +24,8 @@ async fn main() -> Result<()> {
         .filter(|a| a != "-h" && a != "--help")
         .or_else(|| std::env::var("RSIOT_GW_CONFIG").ok())
         .context("missing config path; pass <config.toml> as first arg or set RSIOT_GW_CONFIG")?;
-    let cfg_str = std::fs::read_to_string(&cfg_path)
-        .with_context(|| format!("read config {cfg_path}"))?;
+    let cfg_str =
+        std::fs::read_to_string(&cfg_path).with_context(|| format!("read config {cfg_path}"))?;
     let cfg = GwConfig::parse(&cfg_str).context("parse config")?;
     let st = Arc::new(GwState::from_config(&cfg).context("build gateway state")?);
 

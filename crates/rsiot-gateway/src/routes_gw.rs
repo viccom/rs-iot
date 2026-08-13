@@ -35,10 +35,8 @@ pub async fn health(State(st): State<Arc<GwState>>) -> Json<HealthResp> {
     // URL 先存 let 绑定，避免 tokio::join! 宏内 format! 临时值在 probe 借用期间释放。
     let rsiot_url = format!("{}/api/v1/sysstatus", st.rsiot_base);
     let serve_url = format!("{}/status", st.serve_base);
-    let (rsiot, serve) = tokio::join!(
-        probe(&st.client, &rsiot_url),
-        probe(&st.client, &serve_url),
-    );
+    let (rsiot, serve) =
+        tokio::join!(probe(&st.client, &rsiot_url), probe(&st.client, &serve_url),);
     Json(HealthResp {
         rsiot: if rsiot { "online" } else { "offline" },
         serve: if serve { "online" } else { "offline" },

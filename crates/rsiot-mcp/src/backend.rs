@@ -121,8 +121,7 @@ impl WebBackend {
         if text.trim().is_empty() {
             return Ok(Value::Null);
         }
-        serde_json::from_str(&text)
-            .map_err(|e| BackendError::Json(format!("parse body: {e}")))
+        serde_json::from_str(&text).map_err(|e| BackendError::Json(format!("parse body: {e}")))
     }
 }
 

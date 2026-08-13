@@ -60,8 +60,8 @@ rs-iot 是**工业协议网关**（南向设备协议 modbus/opcua/s7 ↔ 北向
 
 ### 3.1 rs-iot 透传（`/api/rsiot/*` → rs-iot:8790）
 把 rs-iot 现有全功能 REST + SSE 透传。前端所有工业操作经此。
-- `GET /api/rsiot/sysstatus` `GET /api/rsiot/rtdatas` `POST /api/rsiot/command/send` ... → rs-iot `/api/v1/*`
-- `GET /api/rsiot/events`（SSE）→ rs-iot `/api/v1/events`（log/packet/state 三类）
+- `GET /api/rsiot/api/v1/sysstatus` `GET /api/rsiot/api/v1/rtdatas` `POST /api/rsiot/api/v1/command/send` ... → rs-iot `/api/v1/*`（gateway `nest_service("/api/rsiot")` 剥前缀后剩 `/api/v1/...`）
+- `GET /api/rsiot/api/v1/events`（SSE）→ rs-iot `/api/v1/events`（log/packet/state 三类）
 
 ### 3.2 reasonix 透传（`/api/agent/*` → serve:8787）
 透传 reasonix serve 的对话/审批/inbox，gateway 注入 serve cookie 鉴权（见 §4）。
@@ -106,9 +106,9 @@ v3 下 rs-iot 的改动清单——**全部为零**（对比 v1 的反代路由 
 | AppState 加 `serve_base/serve_token/serve_client` | ❌ 移到 gateway |
 | lib.rs 起 serve 子进程 | ❌ serve 归 OS 服务 |
 | reqwest 加 stream feature | ❌ 移到 gateway |
-| `lua/script/save` + config 脱敏端点 | △ 仍在 rs-iot（如果 AI 要写脚本/读配置，是 rs-iot 的能力，gateway 只透传） |
+| `lua/script/save` + config 脱敏端点 | ✅ 已在 rs-iot 实现（`POST /api/v1/lua/script/save` + `GET /api/v1/config`，gateway 只透传） |
 
-**唯一可能仍需 rs-iot 改的**：`POST /api/v1/lua/script/save`（AI 写脚本，当前只读）+ `GET /api/v1/config`（脱敏）。这两个是**rs-iot 自身能力的补全**（属于工业网关职责），不是 AI 集成专属——gateway 只是透传。是否补由 rs-iot 自己的产品决定，与 gateway 无关。
+**rs-iot 已补的两个端点**：`POST /api/v1/lua/script/save`（AI 写脚本，路径白名单 `scripts/<name>`）+ `GET /api/v1/config`（脱敏配置，jwt_secret/mqtt 凭据遮蔽）。这两个是**rs-iot 自身能力的补全**（属于工业网关职责），不是 AI 集成专属——gateway 只是透传。已在本分支实现（见 `src/api/routes_lua.rs` + `routes_sys.rs`）。
 
 **核心数据流（pipeline/lux/采集）零改动**——完全符合"少破坏"原则的极致。
 
@@ -129,7 +129,7 @@ v1 复核的 3 个 P0 坑在 v3 下搬到 gateway 处理，规避方案不变：
 | 坑 | v3 位置 | 规避方案 |
 |---|---|---|
 | **① serve 生命周期** | **OS 服务管（决策2）**，gateway 只健康检查显示状态 | systemd/Windows service 自动重启；gateway `GET /api/agent/status` 探测，离线时前端提示。**P0 坑①从代码职责降为运维职责，最稳** |
-| **② SSE 帧边界切割** | gateway 两条 SSE 反代各处理一次 | reqwest bytes_stream + 按 `\n\n` 累积分帧（tokio_util::codec 或手写状态机）；丢弃 `: ping` 注释帧；gateway 自加 KeepAlive。**两条流各一份帧边界代码**（rs-iot 的有 event: 头，serve 的无 event: 头，处理略有不同） |
+| **② SSE 帧边界切割** | gateway **不做帧切割，裸字节流透传** | `Body::from_stream(reqwest.bytes_stream())` 原样吐字节，前端 EventSource 自解 `\n\n`。**不用** axum `Sse`/`Event`（`Event::data` 按 `\n` 拆行插 `data:` 前缀，破坏 serve 无 `event:` 头的裸 NDJSON）。两条上游自带心跳（rs-iot KeepAlive + serve `: ping`），gateway 不自加 KeepAlive。详见 `plan-gateway-tech-selection.md §四悬念2` + gateway `proxy.rs` |
 | **③ 鉴权兼容** | gateway 注入 serve cookie | gateway 转发 serve 请求时加 `Cookie: reasonix_token=<token>` |
 
 **额外坑（gateway 特有）**：

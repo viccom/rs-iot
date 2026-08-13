@@ -162,7 +162,10 @@ port = 1883
         assert_eq!(v["mqtt"]["password"], "***", "mqtt password must be masked");
         // 非敏感字段保留（agent 诊断需看端口/周期）。
         assert_eq!(v["mqtt"]["port"], 1883, "mqtt port preserved");
-        assert_eq!(v["mqtt"]["host"], "broker.example.com", "mqtt host preserved");
+        assert_eq!(
+            v["mqtt"]["host"], "broker.example.com",
+            "mqtt host preserved"
+        );
     }
 
     /// 无密码的 broker（匿名）也不应泄露 username 结构。
