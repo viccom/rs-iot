@@ -163,7 +163,33 @@ export interface ServeEvent {
   }
   /** approval_request 的审批载荷（serve `eventwire.Approval`：写操作触发）。 */
   approval?: { id: string; tool: string; subject?: string; reason?: string; kind?: string }
+  /** ask_request 的结构化提问载荷（serve `eventwire.Ask`：AI 主动向用户提问，需回答才能继续）。 */
+  ask?: {
+    id: string
+    questions: AskQuestion[]
+  }
   [k: string]: unknown
+}
+
+/** serve `eventwire.AskOption`：一个选项（label/description）。 */
+export interface AskOption {
+  label: string
+  description?: string
+}
+
+/** serve `eventwire.AskQuestion`：一个问题（多选/单选）。 */
+export interface AskQuestion {
+  id: string
+  header?: string
+  prompt: string
+  options: AskOption[]
+  multi?: boolean
+}
+
+/** serve `eventwire.AskAnswer`：对单个问题的回答（selected = 选中的 label 列表）。 */
+export interface AskAnswer {
+  question_id: string
+  selected: string[]
 }
 
 /** 单条聊天消息（对标 zacp ChatMessage，简化）。一条 assistant 消息聚合一个 turn。 */

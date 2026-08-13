@@ -1,7 +1,7 @@
 // frontend/src/stores/agent.ts
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
-import type { ChatMessage, ServeEvent } from '../types'
+import type { AskAnswer, AskQuestion, ChatMessage, ServeEvent } from '../types'
 import { useAuthStore } from './auth'
 import { useMonitorStore } from './monitor'
 import { api } from '../api/client'
@@ -30,6 +30,8 @@ export const useAgentStore = defineStore('agent', () => {
   const running = ref(false)
   /** 待审批请求（写操作触发，由 UI 决策 approve/deny）。 */
   const approval = ref<{ id: string; tool: string; subject?: string; reason?: string } | null>(null)
+  /** 待回答的结构化提问（ask_request 事件：AI 主动向用户提问，回答前 turn 挂起）。 */
+  const ask = ref<{ id: string; questions: AskQuestion[] } | null>(null)
 
   let nextId = 1
   let sse: EventSource | null = null
@@ -93,8 +95,16 @@ export const useAgentStore = defineStore('agent', () => {
           }
         }
         break
+      case 'ask_request':
+        // AI 主动向用户提问（eventwire.Ask：id + questions[header/prompt/options/multi]）。
+        // 回答前 serve 挂起 turn（前端 AskModal 决策后调 answer() 解除）。
+        if (e.ask) {
+          ask.value = { id: e.ask.id, questions: e.ask.questions }
+        }
+        break
       case 'turn_done':
         running.value = false
+        ask.value = null  // turn 结束清残留提问（防御：未答即结束的 turn）
         break
     }
   }
@@ -144,6 +154,18 @@ export const useAgentStore = defineStore('agent', () => {
     await api('/api/agent/cancel', { method: 'POST', body: '{}' })
   }
 
+  /** 回答 ask_request（POST /api/agent/answer，body {id, answers:[{question_id, selected}]}）。
+   *  2xx 后清 ask（serve 继续 turn）；失败不抛（ask 保持，用户可重选）。 */
+  async function answer(answers: AskAnswer[]) {
+    if (!ask.value) return
+    const r = await api('/api/agent/answer', {
+      method: 'POST',
+      body: JSON.stringify({ id: ask.value.id, answers }),
+    })
+    if (!r.ok) throw new Error(`answer failed: ${r.status} ${await r.text().catch(() => '')}`.trim())
+    ask.value = null
+  }
+
   /** 启动 SSE 订阅。登录后调用一次。token 走 query（EventSource 不能设 header）。 */
   function start() {
     if (sse) stop() // 重入守卫（如重连场景）
@@ -177,5 +199,5 @@ export const useAgentStore = defineStore('agent', () => {
     }
   }
 
-  return { messages, running, approval, onEvent, submit, approve, cancel, start, stop }
+  return { messages, running, approval, ask, onEvent, submit, approve, cancel, answer, start, stop }
 })

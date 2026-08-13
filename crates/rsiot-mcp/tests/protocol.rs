@@ -45,10 +45,31 @@ async fn spawn_handshake(
     rmcp::service::RunningService<rmcp::RoleClient, ()>,
     tokio::task::JoinHandle<()>,
 ) {
+    spawn_handshake_with_policy(get_value, rsiot_mcp::RiskPolicy::default()).await
+}
+
+/// 同 spawn_handshake，但注入硬闸策略（RSIOT_MCP_DENY_CRITICAL_WRITES=1 场景）。
+async fn spawn_handshake_deny(
+    get_value: Value,
+) -> (
+    rmcp::service::RunningService<rmcp::RoleClient, ()>,
+    tokio::task::JoinHandle<()>,
+) {
+    spawn_handshake_with_policy(get_value, rsiot_mcp::RiskPolicy::deny_all()).await
+}
+
+/// 握手公共实现（默认/deny 两种策略共用）。
+async fn spawn_handshake_with_policy(
+    get_value: Value,
+    policy: rsiot_mcp::RiskPolicy,
+) -> (
+    rmcp::service::RunningService<rmcp::RoleClient, ()>,
+    tokio::task::JoinHandle<()>,
+) {
     let (server_transport, client_transport) = tokio::io::duplex(16 * 1024);
     let server = RsiotMcpServer::new(
         Arc::new(FakeBackend { get_value }) as Arc<dyn RsiotBackend>,
-        rsiot_mcp::RiskPolicy::default(),
+        policy,
     );
     let server_task = tokio::spawn(async move {
         // serve().await 建立 server 返回 RunningService；必须接着 .waiting().await
@@ -191,12 +212,12 @@ async fn call_tool_write_command_round_trip() {
 
 /// risk 拦截经 JSON-RPC 往返生效：默认 RiskPolicy 下 CriticalWrite（set_instance）被拦。
 ///
-/// 验证意图（规则7）：拦截必须在协议层生效——只验 `check()` 纯函数不够，reasonix 实际走
-/// `call_tool` 往返路径。默认策略（allow_critical_writes=false）下 set_instance 应返
+/// 验证意图（规则7）：硬闸必须在协议层生效——只验 `check()` 纯函数不够，reasonix 实际走
+/// `call_tool` 往返路径。默认策略**放行**（serve 审批兜底），设 deny 后 set_instance 应返
 /// error CallToolResult（is_error=true + text 含 blocked），且不触达 backend。
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn call_tool_criticalwrite_blocked_over_wire() {
-    let (client, server_task) = spawn_handshake(json!(null)).await;
+async fn call_tool_criticalwrite_blocked_over_wire_when_deny_set() {
+    let (client, server_task) = spawn_handshake_deny(json!(null)).await;
     let result = client
         .peer()
         .call_tool(
@@ -215,12 +236,42 @@ async fn call_tool_criticalwrite_blocked_over_wire() {
     assert_eq!(
         result.is_error,
         Some(true),
-        "CriticalWrite must be blocked by default policy"
+        "CriticalWrite must be blocked when deny policy set"
     );
     let text = result.content[0].as_text().expect("text").text.clone();
     assert!(
         text.contains("blocked"),
         "blocked message must be readable; got {text}"
+    );
+
+    let _ = client.cancel().await;
+    server_task.abort();
+}
+
+/// call_tool 往返：默认策略放行 CriticalWrite（serve 审批兜底），set_instance 正常触达
+/// backend 返回结果。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn call_tool_criticalwrite_passes_over_wire_by_default() {
+    let (client, server_task) = spawn_handshake(json!({"status": "ok"})).await;
+    let result = client
+        .peer()
+        .call_tool(
+            CallToolRequestParams::new("rsiot_set_instance").with_arguments(
+                json!({
+                    "inst_id": "i1",
+                    "object": { "app_code": "dataSim", "app_type": "south" }
+                })
+                .as_object()
+                .cloned()
+                .unwrap_or_default(),
+            ),
+        )
+        .await
+        .expect("call_tool");
+    assert_ne!(
+        result.is_error,
+        Some(true),
+        "default policy passes CriticalWrite to serve approval"
     );
 
     let _ = client.cancel().await;

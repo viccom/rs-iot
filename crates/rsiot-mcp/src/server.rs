@@ -140,21 +140,26 @@ pub struct DeleteInstanceRequest {
     pub inst_id: String,
 }
 
-/// `rsiot_set_device`：建设备点表。对标 `routes_device::SetReq`（dev_id + 原样配置对象）。
+/// `rsiot_set_device`：单点 upsert 设备到指定实例点表。对标 `routes_device::SetReq`
+/// （inst_id + dev_id + DeviceSpec object——设备挂在实例下，无实例不成设备）。
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct SetDeviceRequest {
-    #[schemars(description = "Device ID")]
+    #[schemars(description = "Owning instance ID (device belongs to an instance)")]
+    pub inst_id: String,
+    #[schemars(description = "Device ID (becomes DeviceSpec.value)")]
     pub dev_id: String,
     #[schemars(
-        description = "Full DeviceSpec JSON: label/value(device id)/children[{label,value(tag),type}]]/slave_id(optional, modbusClient only)"
+        description = "DeviceSpec JSON: label/children[{label,value(tag),type}]/slave_id(optional, modbusClient only); value is overridden by dev_id"
     )]
     pub object: serde_json::Value,
 }
 
-/// `rsiot_delete_device`：删设备。对标 `routes_device::DelReq`。
+/// `rsiot_delete_device`：从指定实例点表移除设备。对标 `routes_device::DelReq`。
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct DeleteDeviceRequest {
-    #[schemars(description = "Device ID to delete")]
+    #[schemars(description = "Owning instance ID")]
+    pub inst_id: String,
+    #[schemars(description = "Device ID to remove from the instance's device list")]
     pub dev_id: String,
 }
 
@@ -240,8 +245,10 @@ fn tool_risk(name: &str) -> ToolRisk {
 /// `set/delete_device` 的 dev_id 命中即拒（即使总开关放开）——在 `check_risk` 内读参数实现。
 #[derive(Debug, Clone)]
 pub struct RiskPolicy {
-    /// 总开关：`false`=所有 CriticalWrite 被拦截（默认）；`true`=放行。
-    allow_critical_writes: bool,
+    /// 硬闸开关：`true`=所有 CriticalWrite 被拦截（生产双保险）；`false`=放行给
+    /// serve 审批层（默认——写工具带 destructive annotation，serve Ask 模式触发
+    /// approval_request，用户在 UI 决策）。
+    deny_critical_writes: bool,
 }
 
 impl Default for RiskPolicy {
@@ -251,16 +258,29 @@ impl Default for RiskPolicy {
 }
 
 impl RiskPolicy {
-    /// 默认最严：CriticalWrite 全拦。
+    /// 默认放行 CriticalWrite 到 serve 审批层。
+    ///
+    /// 历史设计默认最严（全拦）——现场实测暴露误伤：AI 建实例是常规需求（用户明确
+    /// 要求），被 MCP 层硬闸拦在 serve 审批**之前**，审批弹窗永不出现、用户无决策
+    /// 入口（AI 卡"思考中"）。serve 的 Ask 审批已是用户可见的决策机制，MCP 层硬闸
+    /// 是重复防线且误伤——改为默认放行，`RSIOT_MCP_DENY_CRITICAL_WRITES=1` 时硬拦。
     pub fn new() -> Self {
         Self {
-            allow_critical_writes: false,
+            deny_critical_writes: false,
         }
     }
 
-    /// 从环境变量构造：`RSIOT_MCP_ALLOW_CRITICAL_WRITES=1|true|yes|on` 放行（大小写不敏感，部署时注入）。
+    /// 硬拦全部 CriticalWrite（生产双保险 / 集成测试用）。
+    pub fn deny_all() -> Self {
+        Self {
+            deny_critical_writes: true,
+        }
+    }
+
+    /// 从环境变量构造：`RSIOT_MCP_DENY_CRITICAL_WRITES=1|true|yes|on` 硬拦
+    /// CriticalWrite（大小写不敏感，生产部署可设此双保险；默认不设 = 放行给审批）。
     pub fn from_env() -> Self {
-        let allow = std::env::var("RSIOT_MCP_ALLOW_CRITICAL_WRITES")
+        let deny = std::env::var("RSIOT_MCP_DENY_CRITICAL_WRITES")
             .map(|v| {
                 let v = v.trim();
                 v == "1"
@@ -270,7 +290,7 @@ impl RiskPolicy {
             })
             .unwrap_or(false);
         Self {
-            allow_critical_writes: allow,
+            deny_critical_writes: deny,
         }
     }
 
@@ -279,12 +299,12 @@ impl RiskPolicy {
     /// 拦截返 `CallToolResult::error`（非协议 Err）——工具级失败，agent 看可读文本自行决策，
     /// 与 `backend_to_result` 既有错误约定一致。
     fn check(&self, name: &str) -> Option<CallToolResult> {
-        if matches!(tool_risk(name), ToolRisk::CriticalWrite) && !self.allow_critical_writes {
+        if matches!(tool_risk(name), ToolRisk::CriticalWrite) && self.deny_critical_writes {
             // P1 扩展点：此处可读 request.arguments 取 dev_id/inst_id，
             // 命中 critical_device_ids 即拒（即使总开关放开）。
             Some(CallToolResult::error(vec![ContentBlock::text(format!(
                 "{name} blocked: CriticalWrite tool (creates/deletes instance or device). \
-                 Set RSIOT_MCP_ALLOW_CRITICAL_WRITES=1 to enable; \
+                 Set RSIOT_MCP_DENY_CRITICAL_WRITES=1 to enforce; \
                  production: prefer explicit per-device policy."
             ))]))
         } else {
@@ -302,7 +322,7 @@ impl RiskPolicy {
 /// `call_tool`/`list_tools`/`get_tool`/`get_info`（rmcp 官方模式，见 docs.rs/rmcp）。
 pub struct RsiotMcpServer {
     backend: Arc<dyn RsiotBackend>,
-    /// CriticalWrite 拦截策略（默认最严；main 从 `RSIOT_MCP_ALLOW_CRITICAL_WRITES` 构造）。
+    /// CriticalWrite 硬闸（默认放行给 serve 审批；main 从 `RSIOT_MCP_DENY_CRITICAL_WRITES` 构造）。
     risk_policy: RiskPolicy,
 }
 
@@ -336,152 +356,28 @@ fn backend_to_result(
     }
 }
 
-/// 聚合设备条目（`rsiot_list_devices` 输出元素，从实例配置聚合）。
-#[derive(Debug, serde::Serialize)]
-struct AggDevice {
-    /// 设备 ID（DevSpec.value）。
-    dev_id: String,
-    /// 设备标签（DevSpec.label，可空）。
-    #[serde(skip_serializing_if = "String::is_empty")]
-    label: String,
-    /// 引用该设备的实例 ID 列表（同一 dev 可被多实例引用）。
-    instances: Vec<String>,
-    /// 采集点（ChildSpec：value=tag、type=数据类型）。
-    children: Vec<AggChild>,
-}
-
-/// 聚合采集点（`rsiot_list_devices` children 元素）。
-#[derive(Debug, serde::Serialize)]
-struct AggChild {
-    /// 变量名/tag（ChildSpec.value）。
-    tag: String,
-    /// 数据类型（ChildSpec.type，如 "float"/"int"/"bool"）。
-    #[serde(rename = "type")]
-    typ: String,
-    /// 采集点标签（ChildSpec.label，可空）。
-    #[serde(skip_serializing_if = "String::is_empty")]
-    label: String,
-}
-
-/// 从 `GET /api/v1/insts` 返回的实例配置表聚合设备列表。
-///
-/// 输入 `{inst_id: InstConfig, ...}`（InstConfig.devices: Vec<DeviceSpec>）；
-/// 输出 `{devices: [...]}`。同一 dev 被多实例引用时合并 instances；children 按
-/// tag 去重（同 dev 多实例配同 tag 只列一次）。`dev_id` 过滤可选（None 全部）。
-///
-/// **为何不读 `/api/v1/devices`**：那是独立设备注册表（lux `devices` Hash），
-/// 仅在显式 `POST /api/v1/device/set` 写入——建实例不同步写，常为空表。
-/// 实例设备权威在 `InstConfig.devices`（与前端采集器页/rtdata 类型映射同源）。
-fn aggregate_devices(
-    insts: &serde_json::Value,
-    dev_id_filter: Option<&str>,
-) -> Result<serde_json::Value, String> {
-    let obj = insts.as_object().ok_or("insts 返回非对象")?;
-    // BTreeMap 保证输出顺序稳定（dev_id 字典序）。
-    let mut agg: std::collections::BTreeMap<String, (String, Vec<String>, Vec<AggChild>)> =
-        std::collections::BTreeMap::new();
-    let mut seen_children: std::collections::BTreeMap<String, std::collections::BTreeSet<String>> =
-        std::collections::BTreeMap::new();
-
-    for (inst_id, cfg) in obj {
-        let Some(devices) = cfg.get("devices").and_then(|d| d.as_array()) else {
-            continue;
-        };
-        for dev in devices {
-            let Some(dev_id) = dev.get("value").and_then(|v| v.as_str()) else {
-                continue;
-            };
-            if dev_id.is_empty() || dev_id_filter.is_some_and(|f| f != dev_id) {
-                continue;
-            }
-            let label = dev
-                .get("label")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            let entry = agg
-                .entry(dev_id.to_string())
-                .or_insert_with(|| (label.clone(), Vec::new(), Vec::new()));
-            entry.1.push(inst_id.clone());
-            // children 按 tag 去重（同 dev 多实例配同 tag 只列一次，首个实例优先）。
-            let seen = seen_children.entry(dev_id.to_string()).or_default();
-            if let Some(children) = dev.get("children").and_then(|c| c.as_array()) {
-                for ch in children {
-                    let Some(tag) = ch.get("value").and_then(|v| v.as_str()) else {
-                        continue;
-                    };
-                    if !seen.insert(tag.to_string()) {
-                        continue;
-                    }
-                    entry.2.push(AggChild {
-                        tag: tag.to_string(),
-                        typ: ch
-                            .get("type")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("")
-                            .to_string(),
-                        label: ch
-                            .get("label")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("")
-                            .to_string(),
-                    });
-                }
-            }
-        }
-    }
-
-    let devices: Vec<AggDevice> = agg
-        .into_iter()
-        .map(|(dev_id, (label, mut instances, children))| {
-            instances.sort();
-            AggDevice {
-                dev_id,
-                label,
-                instances,
-                children,
-            }
-        })
-        .collect();
-    Ok(serde_json::json!({ "devices": devices }))
-}
-
 #[tool_router]
 impl RsiotMcpServer {
     // ---- 只读工具（agent 自动放行，对标 readOnlyHint）----
 
-    /// `rsiot_list_devices`：列设备（从实例配置聚合，与前端采集器页同源）。
+    /// `rsiot_list_devices`：列设备。映射 `GET /api/v1/devices`。
     ///
-    /// 后端 `/api/v1/devices` 读独立设备注册表（lux `devices` Hash），仅在显式
-    /// `POST /api/v1/device/set` 时写入——建实例**不同步写**该表，故常为空，查不到
-    /// 实例实际采集的设备（现场反馈 bug）。实例设备在 `InstConfig.devices`
-    /// （经 `/api/v1/insts`），本工具从该源聚合，保证与 rtdata 实际采集设备一致。
+    /// 后端该端点已从实例配置聚合（单一数据源 = InstConfig.devices）——历史独立
+    /// 设备注册表（lux `devices` Hash）是孤立死表，建实例不同步写、REST 客户端
+    /// 读到空表（现场 bug 根因），已废弃。MCP 保持薄翻译层，不复制业务逻辑。
     #[tool(
-        description = "List devices from instance configs (aggregated), optionally filtered by dev_id. Each device includes collection points (children) and owning instances. Read-only.",
+        description = "List devices aggregated from instance configs, optionally filtered by dev_id. Each device includes collection points (children). Read-only.",
         annotations(read_only_hint = true)
     )]
     async fn rsiot_list_devices(
         &self,
         Parameters(req): Parameters<ListDevicesRequest>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        let raw = match self.backend.get("/api/v1/insts").await {
-            Ok(v) => v,
-            Err(e) => {
-                return Ok(CallToolResult::error(vec![ContentBlock::text(format!(
-                    "rsiot_list_devices failed: {e}"
-                ))]));
-            }
+        let path = match &req.dev_id {
+            Some(id) => format!("/api/v1/device/get?dev_id={}", encode_query_value(id)),
+            None => "/api/v1/devices".to_string(),
         };
-        let devices = match aggregate_devices(&raw, req.dev_id.as_deref()) {
-            Ok(d) => d,
-            Err(msg) => {
-                return Ok(CallToolResult::error(vec![ContentBlock::text(format!(
-                    "rsiot_list_devices failed: {msg}"
-                ))]));
-            }
-        };
-        let text = serde_json::to_string_pretty(&devices).unwrap_or_else(|_| devices.to_string());
-        Ok(CallToolResult::success(vec![ContentBlock::text(text)]))
+        backend_to_result(self.backend.get(&path).await, "rsiot_list_devices")
     }
 
     /// `rsiot_read_tags`：读设备实时数据。映射 `GET /api/v1/rtdatas?dev_id=`。
@@ -788,9 +684,9 @@ impl RsiotMcpServer {
     /// `rsiot_set_instance`：建/改实例配置。映射 `POST /api/v1/inst/set`。
     ///
     /// **CriticalWrite**：建采集实例的写入口，错配可致采集失败。默认被 risk 策略拦截
-    /// （`RSIOT_MCP_ALLOW_CRITICAL_WRITES=1` 放行）。External 实例返回一次性 plugin_token。
+    /// （审批放行（RSIOT_MCP_DENY_CRITICAL_WRITES=1 可硬拦））。External 实例返回一次性 plugin_token。
     #[tool(
-        description = "Create/update an instance config (full InstConfig JSON). HIGH RISK: CRITICAL WRITE — blocked unless RSIOT_MCP_ALLOW_CRITICAL_WRITES=1. For External host_kind, returns a one-time plugin_token.",
+        description = "Create/update an instance config (full InstConfig JSON). HIGH RISK: CRITICAL WRITE — approval-gated (serve Ask); set RSIOT_MCP_DENY_CRITICAL_WRITES=1 to hard-block. For External host_kind, returns a one-time plugin_token.",
         annotations(destructive_hint = true)
     )]
     async fn rsiot_set_instance(
@@ -808,7 +704,7 @@ impl RsiotMcpServer {
     ///
     /// **CriticalWrite**：连带清 ext_token + luakv。默认被 risk 策略拦截。
     #[tool(
-        description = "Delete an instance and its External token + lua kv state. HIGH RISK: CRITICAL WRITE — blocked unless RSIOT_MCP_ALLOW_CRITICAL_WRITES=1.",
+        description = "Delete an instance and its External token + lua kv state. HIGH RISK: CRITICAL WRITE — approval-gated (serve Ask); set RSIOT_MCP_DENY_CRITICAL_WRITES=1 to hard-block.",
         annotations(destructive_hint = true)
     )]
     async fn rsiot_delete_instance(
@@ -826,14 +722,14 @@ impl RsiotMcpServer {
     ///
     /// **CriticalWrite**：建设备点表写入口。默认被 risk 策略拦截。
     #[tool(
-        description = "Create/update a device spec (full DeviceSpec JSON: label/value/children/slave_id). HIGH RISK: CRITICAL WRITE — blocked unless RSIOT_MCP_ALLOW_CRITICAL_WRITES=1.",
+        description = "Create/update a device spec (full DeviceSpec JSON: label/value/children/slave_id). HIGH RISK: CRITICAL WRITE — approval-gated (serve Ask); set RSIOT_MCP_DENY_CRITICAL_WRITES=1 to hard-block.",
         annotations(destructive_hint = true)
     )]
     async fn rsiot_set_device(
         &self,
         Parameters(req): Parameters<SetDeviceRequest>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        let body = serde_json::json!({ "dev_id": req.dev_id, "object": req.object });
+        let body = serde_json::json!({ "inst_id": req.inst_id, "dev_id": req.dev_id, "object": req.object });
         backend_to_result(
             self.backend.post("/api/v1/device/set", &body).await,
             "rsiot_set_device",
@@ -844,14 +740,14 @@ impl RsiotMcpServer {
     ///
     /// **CriticalWrite**：默认被 risk 策略拦截。
     #[tool(
-        description = "Delete a device spec. HIGH RISK: CRITICAL WRITE — blocked unless RSIOT_MCP_ALLOW_CRITICAL_WRITES=1.",
+        description = "Delete a device spec. HIGH RISK: CRITICAL WRITE — approval-gated (serve Ask); set RSIOT_MCP_DENY_CRITICAL_WRITES=1 to hard-block.",
         annotations(destructive_hint = true)
     )]
     async fn rsiot_delete_device(
         &self,
         Parameters(req): Parameters<DeleteDeviceRequest>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        let body = serde_json::json!({ "dev_id": req.dev_id });
+        let body = serde_json::json!({ "inst_id": req.inst_id, "dev_id": req.dev_id });
         backend_to_result(
             self.backend.post("/api/v1/device/delete", &body).await,
             "rsiot_delete_device",
@@ -1063,41 +959,11 @@ mod tests {
         );
     }
 
-    // ---- list_devices（从实例配置聚合，现场 bug 修复后语义）----
+    // ---- list_devices（薄翻译层：后端 /api/v1/devices 已从实例配置聚合）----
 
-    /// 构造一个 fake `/api/v1/insts` 返回（两实例，devA 被两实例共享、devB 单实例）。
-    fn fake_insts() -> Value {
-        json!({
-            "mb-1": {
-                "inst_id": "mb-1", "app_code": "modbusClient", "app_type": "south",
-                "app_config": {}, "auto_start": true, "host_kind": "builtin",
-                "devices": [
-                    {"label": "设备A", "value": "devA", "children": [
-                        {"label": "温度", "value": "temp", "type": "float"},
-                        {"label": "湿度", "value": "humidity", "type": "float"}
-                    ]},
-                    {"label": "设备B", "value": "devB", "children": [
-                        {"label": "转速", "value": "speed", "type": "i16"}
-                    ]}
-                ]
-            },
-            "mb-2": {
-                "inst_id": "mb-2", "app_code": "modbusClient", "app_type": "south",
-                "app_config": {}, "auto_start": true, "host_kind": "builtin",
-                "devices": [
-                    {"label": "", "value": "devA", "children": [
-                        {"label": "温度2", "value": "temp", "type": "float"}
-                    ]}
-                ]
-            }
-        })
-    }
-
-    /// 验证意图（规则7）：工具必须从实例配置聚合设备——后端 /api/v1/devices 是独立
-    /// 注册表，建实例不写它（常为空），从它读 = 查不到实例实际采集的设备（现场 bug）。
     #[tokio::test]
-    async fn list_devices_reads_insts_and_aggregates() {
-        let backend = Arc::new(FakeBackend::new(fake_insts()));
+    async fn list_devices_hits_devices_endpoint() {
+        let backend = Arc::new(FakeBackend::new(json!({"devA": {"value": "devA"}})));
         let server = RsiotMcpServer::new(
             backend.clone() as Arc<dyn RsiotBackend>,
             RiskPolicy::default(),
@@ -1107,50 +973,32 @@ mod tests {
             .await
             .unwrap();
         assert_ne!(result.is_error, Some(true));
-        // 数据源是 insts（不是空注册表 devices）。
-        assert!(
-            backend.recorded_paths()[0].contains("/api/v1/insts"),
-            "list_devices 应读实例配置表"
-        );
-        // 聚合输出含两个设备。
-        let text = text_of(&result);
-        assert!(text.contains("devA"), "got {text}");
-        assert!(text.contains("devB"), "got {text}");
-        // devA 被两实例共享 → instances 合并为 [mb-1, mb-2]。
-        let parsed: Value = serde_json::from_str(text).unwrap();
-        let dev_a = parsed["devices"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|d| d["dev_id"] == "devA")
-            .unwrap();
-        assert_eq!(dev_a["instances"], json!(["mb-1", "mb-2"]));
-        // children 去重：temp 在两实例重复配置，只列一次（含 type）。
-        assert_eq!(dev_a["children"].as_array().unwrap().len(), 2);
-        assert!(dev_a["children"].as_array().unwrap()[0]["type"] == "float");
+        assert!(text_of(&result).contains("devA"));
+        // 验证意图：MCP 是薄翻译层——数据源是后端 /api/v1/devices
+        // （后端已从实例配置聚合，单一数据源在主 crate，MCP 不复制业务逻辑）。
+        assert_eq!(backend.recorded_paths()[0], "/api/v1/devices");
     }
 
     #[tokio::test]
-    async fn list_devices_filters_by_dev_id() {
-        let backend = Arc::new(FakeBackend::new(fake_insts()));
-        let server = RsiotMcpServer::new(backend, RiskPolicy::default());
-        let result = server
+    async fn list_devices_with_dev_id_hits_device_get() {
+        let backend = Arc::new(FakeBackend::new(json!({"dev_id": "devA"})));
+        let server = RsiotMcpServer::new(
+            backend.clone() as Arc<dyn RsiotBackend>,
+            RiskPolicy::default(),
+        );
+        server
             .rsiot_list_devices(Parameters(ListDevicesRequest {
-                dev_id: Some("devB".into()),
+                dev_id: Some("devA".into()),
             }))
             .await
             .unwrap();
-        let text = text_of(&result);
-        let parsed: Value = serde_json::from_str(text).unwrap();
-        let devices = parsed["devices"].as_array().unwrap();
-        assert_eq!(devices.len(), 1, "dev_id 过滤只留 devB; got {text}");
-        assert_eq!(devices[0]["dev_id"], "devB");
-    }
-
-    /// 纯函数测试：insts 非对象 → 明确错误而非 panic。
-    #[test]
-    fn aggregate_devices_rejects_non_object() {
-        assert!(aggregate_devices(&json!([1, 2]), None).is_err());
+        let paths = backend.recorded_paths();
+        assert!(
+            paths
+                .iter()
+                .any(|p| p.contains("/api/v1/device/get?dev_id=devA")),
+            "dev_id filter should hit device/get; got {paths:?}"
+        );
     }
 
     // ---- read_tags ----
@@ -1572,7 +1420,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn set_device_posts_dev_id_and_object() {
+    async fn set_device_posts_inst_dev_and_object() {
         let backend = Arc::new(FakeBackend::new(json!(null)));
         let server = RsiotMcpServer::new(
             backend.clone() as Arc<dyn RsiotBackend>,
@@ -1580,6 +1428,7 @@ mod tests {
         );
         server
             .rsiot_set_device(Parameters(SetDeviceRequest {
+                inst_id: "mb-1".into(),
                 dev_id: "devA".into(),
                 object: json!({"label": "devA", "value": "devA"}),
             }))
@@ -1587,6 +1436,8 @@ mod tests {
             .unwrap();
         let (path, body) = &backend.recorded_posts()[0];
         assert_eq!(path, "/api/v1/device/set");
+        // 验证意图：设备单点操作必须携带 inst_id（设备挂在实例下，无实例不成设备）。
+        assert_eq!(body["inst_id"], "mb-1");
         assert_eq!(body["dev_id"], "devA");
         assert_eq!(body["object"]["label"], "devA");
     }
@@ -1600,12 +1451,14 @@ mod tests {
         );
         server
             .rsiot_delete_device(Parameters(DeleteDeviceRequest {
+                inst_id: "mb-1".into(),
                 dev_id: "devA".into(),
             }))
             .await
             .unwrap();
         let (path, body) = &backend.recorded_posts()[0];
         assert_eq!(path, "/api/v1/device/delete");
+        assert_eq!(body["inst_id"], "mb-1");
         assert_eq!(body["dev_id"], "devA");
     }
 
@@ -1637,23 +1490,22 @@ mod tests {
         assert_eq!(backend.recorded_paths()[0], "/api/v1/sysinfo");
     }
 
-    // ---- risk 拦截（RiskPolicy::check 纯函数路径）----
+    // ---- risk 硬闸（RiskPolicy::check 纯函数路径）----
 
     #[test]
-    fn check_blocks_criticalwrite_by_default() {
+    fn check_passes_criticalwrite_by_default() {
         let policy = RiskPolicy::new();
-        // 验证意图：默认策略下 4 个 CriticalWrite 全拦，Write/ReadOnly 放行。
+        // 验证意图：默认放行 CriticalWrite 到 serve 审批层（审批是用户可见的决策
+        // 机制；MCP 层硬闸默认拦会误伤——AI 建实例被拦在审批之前，用户无决策入口）。
         for name in [
             "rsiot_set_instance",
             "rsiot_delete_instance",
             "rsiot_set_device",
             "rsiot_delete_device",
         ] {
-            let blocked = policy.check(name);
-            assert!(blocked.is_some(), "{name} must be blocked by default");
             assert!(
-                blocked.unwrap().is_error == Some(true),
-                "{name} block must be error result"
+                policy.check(name).is_none(),
+                "{name} must pass by default (serve approval gates it)"
             );
         }
         assert!(policy.check("rsiot_send_device_command").is_none());
@@ -1661,12 +1513,27 @@ mod tests {
     }
 
     #[test]
-    fn check_passes_criticalwrite_when_allowed() {
+    fn check_blocks_criticalwrite_when_deny_set() {
         let policy = RiskPolicy {
-            allow_critical_writes: true,
+            deny_critical_writes: true,
         };
-        assert!(policy.check("rsiot_set_instance").is_none());
-        assert!(policy.check("rsiot_delete_device").is_none());
+        // 验证意图：RSIOT_MCP_DENY_CRITICAL_WRITES=1 时 4 个 CriticalWrite 硬拦
+        // （生产双保险），Write/ReadOnly 仍放行。
+        for name in [
+            "rsiot_set_instance",
+            "rsiot_delete_instance",
+            "rsiot_set_device",
+            "rsiot_delete_device",
+        ] {
+            let blocked = policy.check(name);
+            assert!(blocked.is_some(), "{name} must be blocked when deny set");
+            assert!(
+                blocked.unwrap().is_error == Some(true),
+                "{name} block must be error result"
+            );
+        }
+        assert!(policy.check("rsiot_send_device_command").is_none());
+        assert!(policy.check("rsiot_read_tags").is_none());
     }
 
     #[test]

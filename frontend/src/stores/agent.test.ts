@@ -130,6 +130,37 @@ describe('agent store', () => {
     expect(vi.mocked(api)).toHaveBeenCalledWith('/api/agent/cancel', expect.objectContaining({ method: 'POST' }))
   })
 
+  it('ask_request 设置 ask 载荷，answer 调 /api/agent/answer 后清除（解卡死修复）', async () => {
+    // 锁的不变量：AI 主动提问（ask_request）必须落到 store 供 UI 决策；
+    // answer() 带 {id, answers} 提交，2xx 后清 ask（serve 继续 turn）。
+    const s = useAgentStore()
+    s.onEvent({
+      kind: 'ask_request',
+      ask: {
+        id: 'ask-1',
+        questions: [
+          { id: 'q1', header: 'CriticalWrite 处理', prompt: '如何继续?', options: [{ label: 'A', description: '甲' }, { label: 'B' }] },
+        ],
+      },
+    })
+    expect(s.ask?.id).toBe('ask-1')
+    expect(s.ask?.questions[0].options.length).toBe(2)
+    await s.answer([{ question_id: 'q1', selected: ['A'] }])
+    const [path, options] = vi.mocked(api).mock.calls.at(-1) ?? []
+    expect(path).toBe('/api/agent/answer')
+    const body = options?.body ? JSON.parse(String(options.body)) : {}
+    expect(body).toEqual({ id: 'ask-1', answers: [{ question_id: 'q1', selected: ['A'] }] })
+    expect(s.ask).toBeNull()
+  })
+
+  it('turn_done 清残留 ask（防御：未答即结束的 turn）', () => {
+    const s = useAgentStore()
+    s.onEvent({ kind: 'ask_request', ask: { id: 'ask-x', questions: [] } })
+    expect(s.ask).not.toBeNull()
+    s.onEvent({ kind: 'turn_done' })
+    expect(s.ask).toBeNull()
+  })
+
   it('stop 在非 running 时不发 cancel（正常关闭无副作用）', async () => {
     const s = useAgentStore()
     vi.mocked(api).mockClear()  // 清跨测试累积的调用历史

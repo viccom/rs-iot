@@ -15,6 +15,7 @@ import { useAgentStore } from '../../stores/agent'
 import { useChatScroll } from './composables/useChatScroll'
 import MessageItem, { runningKey } from './MessageItem.vue'
 import PermissionModal from './PermissionModal.vue'
+import AskModal from './AskModal.vue'
 
 const agent = useAgentStore()
 const input = ref('')
@@ -81,6 +82,15 @@ async function onApprove(decision: boolean) {
     errorMsg.value = e instanceof Error ? e.message : '审批提交失败'
   }
 }
+
+/** 回答 ask_request（转发给 store，失败不静默——AI 在等回答才能继续）。 */
+async function onAskAnswer(answers: { question_id: string; selected: string[] }[]) {
+  try {
+    await agent.answer(answers)
+  } catch (e) {
+    errorMsg.value = e instanceof Error ? e.message : '回答提交失败'
+  }
+}
 </script>
 
 <template>
@@ -129,6 +139,12 @@ async function onApprove(decision: boolean) {
     </div>
 
     <PermissionModal v-if="agent.approval" :approval="agent.approval" @approve="onApprove" />
+    <AskModal
+      v-else-if="agent.ask"
+      :ask="agent.ask"
+      @answer="onAskAnswer"
+      @close="agent.ask = null"
+    />
   </aside>
 </template>
 

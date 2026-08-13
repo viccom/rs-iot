@@ -16,7 +16,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let jwt = std::env::var("RSIOT_JWT").unwrap_or_default();
     let backend =
         Arc::new(WebBackend::new(base, jwt).map_err(|e| std::io::Error::other(e.to_string()))?);
-    // CriticalWrite 拦截策略从环境变量构造（缺省最严：RSIOT_MCP_ALLOW_CRITICAL_WRITES=1 放行）。
+    // CriticalWrite 硬闸从环境变量构造（缺省放行给 serve 审批；RSIOT_MCP_DENY_CRITICAL_WRITES=1 硬拦）。
     let service = RsiotMcpServer::new(backend, RiskPolicy::from_env())
         .serve(rmcp::transport::stdio())
         .await?;
