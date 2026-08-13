@@ -19,6 +19,34 @@ import { useWorkspaceStore } from './workspace'
 import { buildAgentContextBlock } from '../lib/agentContext'
 
 /**
+ * effort 档位映射（来源：Reasonix internal/config/effort.go:48 EffortCapabilityForEntry
+ * 及其分支函数——词汇表随版本演进，改动需同步官方源码）。
+ *
+ * serve 的 HTTP 契约不暴露 effort 词汇表（/status /models 均无该字段）：官方 desktop
+ * 是进程内直接调 config 层函数渲染下拉（.effortsw__menu），serve 自带前端也只有
+ * `/effort <level>` 命令面板。但词汇表输入只有 provider + model（/models 正好返回），
+ * 故在此维护同款映射供前端下拉；未知 provider/model 返回空数组 → UI 退化为自由文本
+ * （serve 非法值 500 提示合法档位）。
+ */
+export function effortLevelsFor(provider: string, model: string): string[] {
+  const p = provider.toLowerCase()
+  const m = model.toLowerCase()
+  // deepseek-v4-flash 独有 low 档（effortCapabilityFromModel）；其余 deepseek 无 low/medium。
+  if (m.includes('deepseek-v4-flash')) return ['auto', 'disabled', 'low', 'high', 'max']
+  if (m.includes('deepseek')) return ['auto', 'disabled', 'high', 'max']
+  // MiniMax-M3 只有二进制思考旋钮 adaptive|disabled。
+  if (p.includes('minimax') || m.includes('minimax') || m.includes('-m3')) return ['auto', 'adaptive', 'disabled']
+  // Zhipu GLM / LongCat：二进制思考旋钮。
+  if (p.includes('zhipu') || m.includes('glm') || m.includes('longcat')) return ['auto', 'enabled', 'disabled']
+  // Ollama Cloud：low|medium|high|max + none 省略字段。
+  if (p.includes('ollama') || m.includes('ollama')) return ['auto', 'none', 'low', 'medium', 'high', 'max']
+  // Anthropic：深度档位 + xhigh。
+  if (p.includes('anthropic') || m.includes('claude')) return ['auto', 'low', 'medium', 'high', 'xhigh', 'max']
+  // 通用 OpenAI 兼容端点（openAIEffortCapability）。
+  return ['auto', 'low', 'medium', 'high']
+}
+
+/**
  * agent store：serve SSE kind 分发 + submit / approve / cancel。
  *
  * 与 monitor store 的关键差异——serve SSE 是**无 `event:` 头的裸 NDJSON**，
@@ -352,9 +380,10 @@ export const useAgentStore = defineStore('agent', () => {
   /**
    * 设置思考深度（submit 发 `/effort <level>`，serve 拦截 → 204）。
    *
-   * level 是 **provider 相关枚举**（serve config/effort.go，无统一清单，serve 也不暴露）。
-   * 故 effort 控件用自由文本输入而非下拉。非法值 serve 返 500 + 合法值文案，前端
-   * 抛错给调用方 toast 展示。**turn 运行中拒绝**（serve switchEffort serve.go:402）。
+   * level 是 **provider 相关枚举**，合法档位由 effortLevelsFor(provider, model)
+   * 映射（来源官方 config/effort.go）；下拉优先、自由输入兜底（未知 provider）。
+   * **turn 运行中拒绝**（serve switchEffort serve.go:402）。非法值 serve 返 500 +
+   * 合法值文案，前端抛错给调用方 toast 展示。
    * 成功后**不 loadStatus**（/status 无 effort 字段，无法回读）。
    */
   async function setEffort(level: string) {
@@ -379,6 +408,39 @@ export const useAgentStore = defineStore('agent', () => {
     try {
       const r = await api('/api/agent/plan', { method: 'POST', body: JSON.stringify({ on }) })
       if (!r.ok) throw new Error(`set plan mode failed: ${r.status} ${await r.text().catch(() => '')}`.trim())
+      await loadStatus()
+    } finally {
+      controlBusy.value = false
+    }
+  }
+
+  /**
+   * 设置目标（POST /goal {goal}）——「目标·持续推进」执行方式。
+   *
+   * serve 契约（serve.go:1096）：非空 goal 设置时**自动关闭 plan**（镜像 desktop），
+   * 之后 AI 持续工作直到 complete/blocked/stopped；goalStatus 只在 /status 暴露
+   * （SSE 无 goal 事件），由 UI 轮询 loadStatus 刷新。
+   */
+  async function setGoal(goal: string) {
+    const text = goal.trim()
+    if (!text || controlBusy.value) return
+    controlBusy.value = true
+    try {
+      const r = await api('/api/agent/goal', { method: 'POST', body: JSON.stringify({ goal: text }) })
+      if (!r.ok) throw new Error(`set goal failed: ${r.status} ${await r.text().catch(() => '')}`.trim())
+      await loadStatus()
+    } finally {
+      controlBusy.value = false
+    }
+  }
+
+  /** 清除目标（POST /goal {goal:""}）——AI 停止持续工作。 */
+  async function clearGoal() {
+    if (controlBusy.value) return
+    controlBusy.value = true
+    try {
+      const r = await api('/api/agent/goal', { method: 'POST', body: JSON.stringify({ goal: '' }) })
+      if (!r.ok) throw new Error(`clear goal failed: ${r.status} ${await r.text().catch(() => '')}`.trim())
       await loadStatus()
     } finally {
       controlBusy.value = false
@@ -452,7 +514,7 @@ export const useAgentStore = defineStore('agent', () => {
     onEvent, submit, approve, cancel, answer,
     loadSessions, loadHistory, loadModels, loadStatus,
     newSession, switchSession, deleteSession,
-    setModel, setEffort, setPlanMode, setApprovalMode,
+    setModel, setEffort, setPlanMode, setGoal, clearGoal, setApprovalMode,
     start, stop,
   }
 })

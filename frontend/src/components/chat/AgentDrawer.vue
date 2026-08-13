@@ -11,7 +11,7 @@
 -->
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, provide, ref, watch } from 'vue'
-import { useAgentStore } from '../../stores/agent'
+import { useAgentStore, effortLevelsFor } from '../../stores/agent'
 import { useChatScroll } from './composables/useChatScroll'
 import MessageItem, { runningKey } from './MessageItem.vue'
 import PermissionModal from './PermissionModal.vue'
@@ -20,8 +20,18 @@ import type { ToolApprovalMode } from '../../types'
 
 const agent = useAgentStore()
 const input = ref('')
-/** effort 自由文本输入值（serve 不暴露当前 effort，控件无法回读，故用 input 非 select）。 */
+/** effort 输入值（serve 不暴露当前 effort，控件无法回读；datalist 下拉 + 自由输入兜底）。 */
 const effortInput = ref('')
+/** 当前模型的 effort 档位（datalist 候选项，来源官方 effort.go 映射；未知模型为空 → 自由输入）。 */
+const effortOptions = computed(() => {
+  const active = agent.models.find((m) => m.active) ?? agent.models.find((m) => m.ref === agent.activeModelRef)
+  return active ? effortLevelsFor(active.provider, active.model) : []
+})
+/** 目标输入态（执行方式=目标 且尚未提交目标时，输入框内容将作为目标提交——
+ *  对齐 desktop goalDraftMode：切到 goal 清空旧目标进入 draft，提交后回归补充指令）。 */
+const goalDraftMode = ref(false)
+/** 目标状态轮询定时器（SSE 无 goal 事件，goalStatus 只在 /status 暴露，goal 运行期间轮询刷新）。 */
+let goalPollTimer: ReturnType<typeof setInterval> | null = null
 /** 本地错误提示（submit/会话/控件 失败等，非 agent 消息流的一部分——单独显示在输入区上方）。 */
 const errorMsg = ref('')
 const listRef = ref<HTMLElement | null>(null)
@@ -43,6 +53,31 @@ const currentSessionLabel = computed(
   () => agent.currentSession?.title || agent.currentSession?.name || '新会话',
 )
 
+/** 执行方式三态（对齐 desktop collaborationMode）：常规/计划(plan)/目标(goal)。 */
+const execMode = computed<'normal' | 'plan' | 'goal'>(() => {
+  if (agent.status?.plan) return 'plan'
+  if (agent.status?.goal || goalDraftMode.value) return 'goal'
+  return 'normal'
+})
+
+/** goalStatus 中文文案（serve goal.go statusForDisplay：running/complete/blocked/stopped）。 */
+const goalStatusLabel = computed(() => {
+  switch (agent.status?.goalStatus) {
+    case 'running': return '运行中'
+    case 'complete': return '已完成'
+    case 'blocked': return '阻塞中'
+    case 'stopped': return '已停止'
+    default: return '未启动'
+  }
+})
+
+/** 输入框 placeholder 随执行方式分流（目标 draft 态提示输入目标）。 */
+const inputPlaceholder = computed(() => {
+  if (goalDraftMode.value && !agent.status?.goal) return '输入目标，AI 将持续工作直到完成或阻塞…'
+  if (agent.status?.goal) return '目标执行中，可补充指令…'
+  return '问 AI…（如：读 devA 实时数据）'
+})
+
 /** 点击外部关闭会话下拉。 */
 function onDocClick(e: MouseEvent) {
   if (sessionMenuRef.value && !sessionMenuRef.value.contains(e.target as Node)) {
@@ -57,8 +92,20 @@ onMounted(async () => {
 })
 onUnmounted(() => {
   document.removeEventListener('click', onDocClick)
+  if (goalPollTimer) clearInterval(goalPollTimer)
   agent.stop()
 })
+
+/** goal 非空期间轮询 /status 刷新 goalStatus（SSE 无 goal 事件；desktop 进程内 1s 轮询，HTTP 3s 够）。 */
+watch(
+  () => agent.status?.goal,
+  (goal) => {
+    if (goalPollTimer) { clearInterval(goalPollTimer); goalPollTimer = null }
+    if (goal) {
+      goalPollTimer = setInterval(() => { agent.loadStatus().catch(() => {}) }, 3000)
+    }
+  },
+)
 
 /**
  * 消息列表变化时贴底跟随（流式 token 追加、新 user 消息、工具结果到达均触发）。
@@ -74,13 +121,18 @@ watch(
   () => followIfAtBottom(),
 )
 
-/** 发送：submit 失败给 UI 反馈（T9 M2）。 */
+/** 发送：目标 draft 态提交为目标（POST /goal），否则普通 submit。失败给 UI 反馈（T9 M2）。 */
 async function send() {
   const text = input.value.trim()
   if (!text || agent.running) return
   errorMsg.value = ''
   try {
-    await agent.submit(text)
+    if (goalDraftMode.value && !agent.status?.goal) {
+      await agent.setGoal(text)
+      goalDraftMode.value = false  // 目标已提交，输入框回归补充指令
+    } else {
+      await agent.submit(text)
+    }
     input.value = ''
     snapToBottom()
   } catch (e) {
@@ -162,7 +214,7 @@ async function onModelChange(e: Event) {
   }
 }
 
-/** 设思考深度（submit 发 /effort，level provider 相关故自由文本）。 */
+/** 设思考深度（submit 发 /effort；下拉候选项来自 effortLevelsFor 映射，未知 provider 仍可手输）。 */
 async function onEffortSubmit() {
   const lvl = effortInput.value.trim()
   if (!lvl) return
@@ -177,13 +229,33 @@ async function onEffortSubmit() {
   }
 }
 
-/** 切 Plan Mode（"执行方式"，独立端点 turn 中可切）。 */
-async function onTogglePlan() {
+/** 切执行方式（常规/计划/目标）。对齐 desktop：切走 goal 模式先清目标；切到 goal
+ *  清旧目标进入目标输入态（draft）；计划开/关走 /plan，目标提交时 serve 自动关 plan。 */
+async function onExecMode(mode: 'normal' | 'plan' | 'goal') {
+  if (agent.controlBusy || mode === execMode.value) return
   errorMsg.value = ''
   try {
-    await agent.setPlanMode(!agent.status?.plan)
+    if (mode === 'goal') {
+      if (agent.status?.goal) await agent.clearGoal()
+      goalDraftMode.value = true
+      return
+    }
+    goalDraftMode.value = false
+    if (agent.status?.goal) await agent.clearGoal()
+    await agent.setPlanMode(mode === 'plan')
   } catch (err) {
-    errorMsg.value = err instanceof Error ? err.message : '切换 Plan 模式失败'
+    errorMsg.value = err instanceof Error ? err.message : '切换执行方式失败'
+  }
+}
+
+/** 清除目标（POST /goal {goal:""}，AI 停止持续工作；清后回到目标输入态可重设）。 */
+async function onClearGoal() {
+  errorMsg.value = ''
+  try {
+    await agent.clearGoal()
+    goalDraftMode.value = true
+  } catch (err) {
+    errorMsg.value = err instanceof Error ? err.message : '清除目标失败'
   }
 }
 
@@ -268,9 +340,9 @@ async function onApprovalModeChange(e: Event) {
         <span>{{ errorMsg }}</span>
         <button class="btn-text" aria-label="关闭错误提示" @click="errorMsg = ''">✕</button>
       </div>
-      <!-- 4 控件工具栏：模型 / 思考深度 / 执行方式(Plan) / 权限模式。
+      <!-- 控件工具栏：模型 / 思考深度 / 执行方式(常规·计划·目标) / 权限模式。
            对接 serve 真实端点（见 agent store 注释）。模型/effort turn 中禁用
-           （serve switchModel/switchEffort running 拒绝）；plan/approval 独立端点可切。 -->
+           （serve switchModel/switchEffort running 拒绝）；plan/goal 独立端点可切。 -->
       <div class="control-bar">
         <select
           class="ctrl ctrl-model"
@@ -288,18 +360,38 @@ async function onApprovalModeChange(e: Event) {
           v-model="effortInput"
           class="ctrl ctrl-effort"
           type="text"
-          placeholder="effort"
+          list="effort-levels"
+          :placeholder="effortOptions.length ? 'effort(' + effortOptions.join('/') + ')' : 'effort(自由输入)'"
           :disabled="agent.controlBusy || agent.running"
-          title="思考深度（provider 相关，如 high/medium/auto；回车提交，非法值 serve 会提示合法档位）"
+          :title="'思考深度（当前模型档位：' + (effortOptions.join(' / ') || '未知，可手输') + '；回车提交，非法值 serve 会提示合法档位）'"
           @keydown.enter.exact.prevent="onEffortSubmit"
         />
-        <button
-          class="ctrl ctrl-toggle"
-          :class="{ on: agent.status?.plan }"
-          :disabled="agent.controlBusy"
-          :title="'执行方式 · Plan Mode（' + (agent.status?.plan ? '开' : '关') + '）'"
-          @click="onTogglePlan"
-        >Plan</button>
+        <datalist id="effort-levels">
+          <option v-for="lvl in effortOptions" :key="lvl" :value="lvl" />
+        </datalist>
+        <div class="ctrl ctrl-mode" role="group" aria-label="执行方式">
+          <button
+            class="mode-btn"
+            :class="{ on: execMode === 'normal' }"
+            :disabled="agent.controlBusy"
+            :title="'常规：边做边推进'"
+            @click="onExecMode('normal')"
+          >常规</button>
+          <button
+            class="mode-btn"
+            :class="{ on: execMode === 'plan' }"
+            :disabled="agent.controlBusy"
+            :title="'计划：确认后执行'"
+            @click="onExecMode('plan')"
+          >计划</button>
+          <button
+            class="mode-btn"
+            :class="{ on: execMode === 'goal' }"
+            :disabled="agent.controlBusy"
+            :title="'目标：输入目标后持续推进，直到完成或阻塞'"
+            @click="onExecMode('goal')"
+          >目标</button>
+        </div>
         <select
           class="ctrl ctrl-approval"
           :value="agent.status?.toolApprovalMode ?? 'ask'"
@@ -312,16 +404,32 @@ async function onApprovalModeChange(e: Event) {
           <option value="yolo">权限:放行</option>
         </select>
       </div>
+      <!-- 目标执行中条：目标文本 + goalStatus 状态徽标 + 清除。 -->
+      <div v-if="agent.status?.goal" class="goal-bar">
+        <span class="goal-text" :title="agent.status.goal">{{ agent.status.goal }}</span>
+        <span class="goal-status" :class="agent.status.goalStatus">{{ goalStatusLabel }}</span>
+        <button
+          class="goal-clear"
+          :disabled="agent.controlBusy"
+          title="清除目标（AI 停止持续推进）"
+          aria-label="清除目标"
+          @click="onClearGoal"
+        >✕</button>
+      </div>
       <div class="input-row">
         <textarea
           v-model="input"
           class="textarea"
           rows="2"
-          placeholder="问 AI…（如：读 devA 实时数据）"
+          :placeholder="inputPlaceholder"
           :disabled="agent.running || agent.sessionBusy"
           @keydown.enter.exact.prevent="send"
         />
-        <button class="btn-send" :disabled="!input.trim() || agent.running || agent.sessionBusy" @click="send">发送</button>
+        <button
+          class="btn-send"
+          :disabled="!input.trim() || agent.running || agent.sessionBusy"
+          @click="send"
+        >{{ goalDraftMode && !agent.status?.goal ? '设目标' : '发送' }}</button>
       </div>
     </div>
 
@@ -514,13 +622,13 @@ async function onApprovalModeChange(e: Event) {
 .session-item:hover .session-del { opacity: 1; }
 .session-del:hover { background: rgba(220,38,38,0.12); color: var(--color-danger); }
 
-/* 4 控件工具栏 */
+/* 5 控件工具栏：flex 换行而非横向滚动——控件多（模型/effort/三态/权限）窄窗下
+   换行保持全部可见，横向滚动条会显得面板"乱"（旧版 overflow-x:auto）。 */
 .control-bar {
-  display: flex; align-items: center; gap: 6px;
+  display: flex; flex-wrap: wrap; align-items: center; gap: 6px;
   padding: 8px 10px;
   border-bottom: 1px solid var(--color-divider);
   background: var(--panel-bg);
-  overflow-x: auto;
 }
 .ctrl {
   font-size: 12px; font-family: inherit;
@@ -533,12 +641,60 @@ async function onApprovalModeChange(e: Event) {
 }
 .ctrl:focus { outline: none; border-color: var(--color-primary); }
 .ctrl:disabled { opacity: 0.5; cursor: not-allowed; }
-.ctrl-model { min-width: 110px; max-width: 160px; }
-.ctrl-effort { width: 84px; }
-.ctrl-toggle { white-space: nowrap; }
-.ctrl-toggle.on {
-  color: var(--chip-ink); background: var(--chip-bg);
-  border-color: transparent;
-}
+.ctrl-model { min-width: 110px; max-width: 170px; flex: 0 1 auto; }
+.ctrl-effort { width: 88px; flex: 0 1 auto; }
 .ctrl-approval { min-width: 96px; }
+/* 执行方式三态分段（常规/计划/目标） */
+.ctrl-mode {
+  display: flex; padding: 2px; gap: 2px;
+  background: var(--card-bg);
+  border: 1px solid var(--card-border);
+  border-radius: 6px;
+}
+.mode-btn {
+  font-size: 12px; font-family: inherit;
+  padding: 2px 8px;
+  background: transparent;
+  border: none; border-radius: 4px;
+  color: var(--color-ink-secondary);
+  cursor: pointer; white-space: nowrap;
+}
+.mode-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.mode-btn.on {
+  color: var(--chip-ink); background: var(--chip-bg);
+}
+/* 目标执行中条 */
+.goal-bar {
+  display: flex; align-items: center; gap: 8px;
+  padding: 6px 10px;
+  font-size: 12px;
+  border-bottom: 1px solid var(--color-divider);
+  background: var(--panel-bg);
+}
+.goal-text {
+  flex: 1; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: var(--color-ink-primary);
+}
+.goal-status {
+  flex: none;
+  padding: 1px 8px;
+  border-radius: 10px;
+  font-size: 11px;
+  background: var(--card-bg);
+  color: var(--color-ink-secondary);
+}
+.goal-status.running { background: rgba(34,197,94,0.15); color: #16a34a; }
+.goal-status.complete { background: rgba(59,130,246,0.15); color: #2563eb; }
+.goal-status.blocked { background: rgba(234,179,8,0.15); color: #ca8a04; }
+.goal-status.stopped { background: var(--card-bg); color: var(--color-ink-secondary); }
+.goal-clear {
+  flex: none;
+  border: none; background: transparent;
+  color: var(--color-ink-tertiary);
+  cursor: pointer; font-size: 12px;
+  padding: 0 2px;
+}
+.goal-clear:hover { color: var(--color-danger); }
+.goal-clear:disabled { opacity: 0.5; cursor: not-allowed; }
 </style>

@@ -9,7 +9,7 @@ import { setActivePinia, createPinia } from 'pinia'
 vi.mock('../api/client', () => ({ api: vi.fn(async () => new Response('{}')) }))
 
 import { api } from '../api/client'
-import { useAgentStore } from './agent'
+import { useAgentStore, effortLevelsFor } from './agent'
 import { useMonitorStore } from './monitor'
 import { useWorkspaceStore } from './workspace'
 
@@ -212,9 +212,9 @@ describe('agent store', () => {
     expect(body.input).toBe('/model anthropic/claude')
   })
 
-  it('setEffort 发 /effort 命令（provider 相关 level，自由文本输入）', async () => {
-    // 锁的不变量：effort level 是 provider 相关枚举（serve config/effort.go），
-    // 前端自由文本输入（非下拉），submit 发 `/effort <level>`。trim 处理。
+  it('setEffort 发 /effort 命令（datalist 下拉候选 + 自由输入兜底）', async () => {
+    // 锁的不变量：effort level 是 provider 相关枚举，下拉候选项由 effortLevelsFor
+    // 映射（来源官方 config/effort.go），仍可手输；submit 发 `/effort <level>`。trim 处理。
     const s = useAgentStore()
     vi.mocked(api).mockClear()  // 清前序 setModel 测试遗留的 submit 调用
     await s.setEffort('  high  ')
@@ -238,6 +238,32 @@ describe('agent store', () => {
     expect(planCall).toBeTruthy()
     const body = planCall?.[1]?.body ? JSON.parse(String(planCall[1].body)) : {}
     expect(body).toEqual({ on: true })
+  })
+
+  it('setGoal 发 POST /goal {goal}（目标·持续推进；非空去空格）', async () => {
+    const s = useAgentStore()
+    await s.setGoal('  持续采集所有设备数据  ')
+    const goalCall = vi.mocked(api).mock.calls.find(([p]) => p === '/api/agent/goal')
+    expect(goalCall).toBeTruthy()
+    const body = goalCall?.[1]?.body ? JSON.parse(String(goalCall[1].body)) : {}
+    expect(body).toEqual({ goal: '持续采集所有设备数据' })
+  })
+
+  it('clearGoal 发 POST /goal {goal:""}（空串=清除，serve.go:1105）', async () => {
+    const s = useAgentStore()
+    vi.mocked(api).mockClear()  // 清前序 setGoal 测试的同路径调用
+    await s.clearGoal()
+    const goalCall = vi.mocked(api).mock.calls.find(([p]) => p === '/api/agent/goal')
+    expect(goalCall).toBeTruthy()
+    const body = goalCall?.[1]?.body ? JSON.parse(String(goalCall[1].body)) : {}
+    expect(body).toEqual({ goal: '' })
+  })
+
+  it('setGoal 空值不发请求（防御）', async () => {
+    const s = useAgentStore()
+    vi.mocked(api).mockClear()
+    await s.setGoal('   ')
+    expect(vi.mocked(api)).not.toHaveBeenCalled()
   })
 
   it('setApprovalMode 发 POST /tool-approval-mode {mode}（ask/auto/yolo 三档）', async () => {
@@ -292,5 +318,48 @@ describe('agent store', () => {
     await s.setModel('x/y')
     await s.setEffort('high')
     expect(vi.mocked(api)).not.toHaveBeenCalled()
+  })
+})
+
+describe('effortLevelsFor（映射来源 Reasonix config/effort.go EffortCapabilityForEntry）', () => {
+  it('deepseek-v4-flash 独有 low 档', () => {
+    expect(effortLevelsFor('deepseek-flash', 'deepseek-v4-flash')).toEqual([
+      'auto', 'disabled', 'low', 'high', 'max',
+    ])
+  })
+
+  it('deepseek 其他模型无 low/medium（deepSeekEffortCapability）', () => {
+    expect(effortLevelsFor('deepseek-pro', 'deepseek-v4-pro')).toEqual([
+      'auto', 'disabled', 'high', 'max',
+    ])
+  })
+
+  it('MiniMax-M3 二进制旋钮 adaptive|disabled（isMiniMaxEntry 分支）', () => {
+    expect(effortLevelsFor('Minimax', 'MiniMax-M3')).toEqual([
+      'auto', 'adaptive', 'disabled',
+    ])
+  })
+
+  it('Anthropic 深度档位含 xhigh', () => {
+    expect(effortLevelsFor('anthropic', 'claude-sonnet')).toEqual([
+      'auto', 'low', 'medium', 'high', 'xhigh', 'max',
+    ])
+  })
+
+  it('Ollama Cloud 含 none', () => {
+    expect(effortLevelsFor('ollama', 'llama3-cloud')).toEqual([
+      'auto', 'none', 'low', 'medium', 'high', 'max',
+    ])
+  })
+
+  it('未知 provider 回落通用 OpenAI 档位（openAIEffortCapability）', () => {
+    expect(effortLevelsFor('some-vendor', 'mystery-model')).toEqual([
+      'auto', 'low', 'medium', 'high',
+    ])
+  })
+
+  it('大小写不敏感', () => {
+    expect(effortLevelsFor('DEEPSEEK-FLASH', 'DeepSeek-V4-Flash')).toContain('low')
+    expect(effortLevelsFor('deepseek-flash', 'DEEPSEEK-V4-FLASH')).toContain('low')
   })
 })
