@@ -115,4 +115,26 @@ describe('agent store', () => {
     expect(body.input).toContain('当前设备: devA')
     expect(body.input).toContain('可见点位 12 个')
   })
+
+  it('stop 在 running 时本地复位 + fire-and-forget cancel（审查 Important 修复）', async () => {
+    // 锁的不变量：关抽屉断 SSE 后 turn_done 可能永久丢失（纯字节管道无 replay），
+    // stop() 必须本地兜底复位 running（不再等 turn_done）+ 尽力 cancel 服务端 turn。
+    const s = useAgentStore()
+    s.onEvent({ kind: 'turn_started' })
+    expect(s.running).toBe(true)
+    s.stop()
+    // running 立即复位（不等异步 cancel 完成）。
+    expect(s.running).toBe(false)
+    // cancel 被调（fire-and-forget，flush 微任务后断言）。
+    await new Promise(r => setTimeout(r, 0))
+    expect(vi.mocked(api)).toHaveBeenCalledWith('/api/agent/cancel', expect.objectContaining({ method: 'POST' }))
+  })
+
+  it('stop 在非 running 时不发 cancel（正常关闭无副作用）', async () => {
+    const s = useAgentStore()
+    vi.mocked(api).mockClear()  // 清跨测试累积的调用历史
+    s.stop()
+    await new Promise(r => setTimeout(r, 0))
+    expect(vi.mocked(api)).not.toHaveBeenCalled()
+  })
 })

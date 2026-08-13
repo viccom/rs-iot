@@ -18,6 +18,7 @@ import { computed, nextTick, ref, watch } from 'vue'
 import { IncremarkContent } from '@incremark/vue'
 import type { ChatMessage } from '../../types'
 import ToolCallCard from './ToolCallCard.vue'
+import { sanitizeMarkdown } from '../../lib/sanitizeMarkdown'
 
 const props = defineProps<{ message: ChatMessage }>()
 
@@ -47,6 +48,19 @@ const showLoading = computed(() =>
   !(props.message.toolCalls && props.message.toolCalls.length > 0),
 )
 
+/**
+ * AI 回复文本消毒（XSS 防护，审查 Critical 修复）。
+ *
+ * incremark 对 markdown 里的 raw HTML 节点走 innerHTML 直插（零过滤）——审查实测
+ * `<iframe srcdoc="<script>…">` 同源执行，可窃 localStorage 明文 JWT、代调
+ * /api/agent/approve 放行写操作。进入 IncremarkContent 前用 DOMPurify 剥掉
+ * 注入载荷（禁 iframe/script/style/srcdoc 等，默认白名单已剥 on* 与 javascript: URI）。
+ *
+ * 流式期间每次 text append 都消毒全文（消息级几 KB，成本可接受）。副作用：markdown
+ * 源码里的 `<` 被转义为 `&lt;`——经 incremark 渲染后显示不变（代码块/对比符号均如此）。
+ */
+const sanitizedText = computed(() => sanitizeMarkdown(props.message.text))
+
 /** 流式期间 reasoning 持续追加：若用户已展开面板，滚动容器跟随到底。 */
 watch(
   () => props.message.reasoning?.length ?? 0,
@@ -75,13 +89,14 @@ watch(
     <div v-if="isUser" class="bubble-user">{{ message.text }}</div>
 
     <!-- assistant 文本：markdown 渲染（IncremarkContent，流式增量 + 代码高亮 + 复制按钮）。
-         is-finished=!running 让 incremark 区分流式未完成块（渐入动画/loading）与完成块。 -->
+         is-finished=!running 让 incremark 区分流式未完成块（渐入动画/loading）与完成块。
+         content 走 sanitizedText（DOMPurify 消毒，防 raw HTML XSS）——htmlTree 选项已
+         移除：审查确认无 htmlTree 时 raw html 同样走 innerHTML 分支，消毒才是正解。 -->
     <IncremarkContent
       v-else-if="message.text"
       class="bubble-assistant"
-      :content="message.text"
+      :content="sanitizedText"
       :is-finished="!running"
-      :incremark-options="{ htmlTree: true }"
     />
 
     <!-- 工具调用卡片（每条独立卡，紧跟文本之后） -->

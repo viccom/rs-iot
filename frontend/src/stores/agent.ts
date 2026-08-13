@@ -162,10 +162,19 @@ export const useAgentStore = defineStore('agent', () => {
     try { fn() } catch (e) { console.warn('agent: drop malformed SSE frame', e) }
   }
 
-  /** 停止 SSE（登出 / 路由切走时调用）。 */
+  /** 停止 SSE（登出 / 路由切走 / 关抽屉时调用）。
+   *
+   * 审查 Important 修复：running 时关抽屉（AgentDrawer onUnmounted → 本函数）断 SSE，
+   * 断线期间 serve 发出的 turn_done 永久丢失（纯字节管道无 replay）——重开抽屉后
+   * running 会永远卡 true、输入框禁用。此处语义收敛为「stop = 放弃当前 turn」：
+   * fire-and-forget cancel（fetch 不依赖 SSE）+ 本地兜底复位，不再等 turn_done。 */
   function stop() {
     sse?.close()
     sse = null
+    if (running.value) {
+      running.value = false
+      void cancel().catch(() => { /* cancel 失败静默：本地已复位，服务端 turn 自行结束 */ })
+    }
   }
 
   return { messages, running, approval, onEvent, submit, approve, cancel, start, stop }

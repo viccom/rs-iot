@@ -51,7 +51,9 @@ pub trait RsiotBackend: Send + Sync {
 ///
 /// - `base`：rs-iot 基址，如 `"http://127.0.0.1:8790"`（loopback，MCP 子进程与主进程同机）。
 /// - `jwt`：预签发 JWT token（`Authorization: Bearer`）。rs-iot `auth_middleware` 验证。
-/// - `client`：reqwest 连接池（复用，工具调用短促，无 timeout——rs-iot loopback 不会卡）。
+/// - `client`：reqwest 连接池（复用）。connect_timeout 只覆盖 TCP 握手；**总请求
+///   timeout 30s** 兜底进程级 stall（rs-iot 事件循环被 lua 脚本阻塞 / RSIOT_BASE
+///   误配为 accept 后不响应的黑洞）——否则工具调用 future 永久挂起、agent 会话卡死。
 ///
 /// 对标 dbx-mcp `WebBackend`，但鉴权从 cookie 改 JWT（更简单，rs-iot 原生支持）。
 #[derive(Clone)]
@@ -60,6 +62,10 @@ pub struct WebBackend {
     jwt: Arc<String>,
     client: reqwest::Client,
 }
+
+/// 总请求超时（秒）。覆盖「连接成功但响应永不到来」的 stall 场景
+/// （rs-iot runtime 阻塞 / 中间设备黑洞），超时后返 `Unreachable` 而非挂死。
+const REQUEST_TIMEOUT_SECS: u64 = 30;
 
 impl WebBackend {
     /// 构造 WebBackend。
@@ -70,8 +76,9 @@ impl WebBackend {
         let base = base.into();
         let jwt = jwt.into();
         let client = reqwest::Client::builder()
-            // loopback 同机，连接超时短即可；不设全局请求 timeout（rs-iot 各端点自管响应时长）。
+            // loopback 同机，连接超时短即可；总 timeout 兜底 stall（见 WebBackend doc）。
             .connect_timeout(Duration::from_secs(2))
+            .timeout(Duration::from_secs(REQUEST_TIMEOUT_SECS))
             .build()
             .map_err(|e| BackendError::Unreachable(format!("build reqwest client: {e}")))?;
         Ok(Self {
