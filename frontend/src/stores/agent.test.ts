@@ -87,6 +87,23 @@ describe('agent store', () => {
     expect(s.approval).toBeNull()
   })
 
+  it('approve body 契约匹配 serve {id, allow}（非 approval_id/decision，现场 bug）', async () => {
+    // 锁的不变量：approve 字段名必须对齐 serve POST /approve（id/allow）。
+    // 历史发 approval_id+decision 全错，serve 返 400 missing id，用户无法批准
+    // 任何写操作（包括建实例/写脚本）。单测此前 mock 掩盖了契约错误。
+    const s = useAgentStore()
+    s.onEvent({ kind: 'turn_started' })
+    s.onEvent({ kind: 'approval_request', approval: { id: 'ap1', tool: 'write_file' } })
+    await s.approve(true)
+    const [path, options] = vi.mocked(api).mock.calls.at(-1) ?? []
+    expect(path).toBe('/api/agent/approve')
+    const body = options?.body ? JSON.parse(String(options.body)) : {}
+    expect(body).toEqual({ id: 'ap1', allow: true })
+    // 确保旧错误字段不再出现。
+    expect(body.approval_id).toBeUndefined()
+    expect(body.decision).toBeUndefined()
+  })
+
   it('submit injects current page context and visible data summary', async () => {
     const monitor = useMonitorStore()
     monitor.selectInstance('mb-power')

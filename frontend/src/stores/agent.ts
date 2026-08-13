@@ -135,6 +135,12 @@ export const useAgentStore = defineStore('agent', () => {
   }
 
   /** 提交审批决策（写操作）：true 放行 / false 拒绝。
+   *
+   *  body 契约对标 serve `POST /approve`（serve.go）：`{id, allow, session?,,
+   *  persist?}`——注意是 `id`/`allow`（非 approval_id/decision）。历史代码字段名
+   *  全错（approval_id+decision），单测 mock 掩盖致现场 approval 从未真实往返
+   *  （approve 返 400 missing id，用户无法批准任何写操作）。
+   *
    *  非 2xx 响应抛错（review I1：approve 失败死锁——若 gateway/serve 返错且不
    *  检查就清 approval，agent 仍在等决策但 UI 已无弹窗 → 用户无法重发 → 死锁），
    *  错误带响应体（M5）。仅 2xx 才清 approval。 */
@@ -142,7 +148,7 @@ export const useAgentStore = defineStore('agent', () => {
     if (!approval.value) return
     const r = await api('/api/agent/approve', {
       method: 'POST',
-      body: JSON.stringify({ approval_id: approval.value.id, decision }),
+      body: JSON.stringify({ id: approval.value.id, allow: decision }),
     })
     if (!r.ok) throw new Error(`approve failed: ${r.status} ${await r.text().catch(() => '')}`.trim())
     approval.value = null
