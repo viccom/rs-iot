@@ -152,3 +152,31 @@ async fn submit_without_input_passes_through() {
         .expect("request");
     assert_eq!(resp.status(), 200, "malformed body must pass through");
 }
+
+/// 超限（>1MB）body → 413 快速失败（审查 finding：stale Content-Length 透传会让
+/// 上游收截断 body 报 502；to_bytes 已消费原 body 无法透传，413 是唯一诚实路径）。
+#[tokio::test]
+async fn submit_over_1mb_returns_413() {
+    let recorded = Arc::new(tokio::sync::Mutex::new(None::<String>));
+    let mock = spawn_axum(mock_serve_submit(recorded.clone())).await;
+    let gw = spawn_axum(build_router(test_state(mock))).await;
+
+    let big = "x".repeat(1024 * 1024 + 1000); // 1MB + 1KB
+    let resp = reqwest::Client::new()
+        .post(format!("{gw}/api/agent/submit"))
+        .bearer_auth(test_jwt())
+        .body(big)
+        .send()
+        .await
+        .expect("request");
+    assert_eq!(
+        resp.status(),
+        reqwest::StatusCode::PAYLOAD_TOO_LARGE,
+        "over-1MB submit must fail fast with 413, not 502"
+    );
+    // 上游不得收到任何请求（截断/空 body 都不该到达）。
+    assert!(
+        recorded.lock().await.is_none(),
+        "upstream must not receive oversized body"
+    );
+}

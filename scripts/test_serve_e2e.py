@@ -83,7 +83,7 @@ def stream_events(task_id, max_wait=60):
         with opener.open(req, timeout=max_wait) as r:
             buf = b""
             while time.time() - t0 < max_wait:
-                chunk = r.read(1)
+                chunk = r.read(4096)
                 if not chunk:
                     break
                 buf += chunk
@@ -128,23 +128,29 @@ def warmup_mcp_connect(server_name="rsiot", max_wait=20):
     (slash.go:518),同步 spawn + 握手 + 注册真实工具 + UpsertServer 更新 catalog,
     并触发 schema 缓存落盘(下次冷启动 catalog 从 boot 就带条目——根治)。
 
-    要点:
-    - 409 是预期(管理动词不发 turn,副作用已执行)——忽略,改从 /events SSE
-      等 `connected <name>` Notice 确认。
-    - 必须趁 serve 空闲(启动后、首条真实消息前)发,会话忙时 409 且不执行。
+    409 双语义(审查 finding):serve 对管理动词与 busy 都返 409,但**只有管理动词的
+    409 是"副作用已执行"**;busy 的 409 是不执行(sessionInUseError)。这里区分:
+    - 200/202/409 → 视为已提交(409 继续等 Notice 确认)
+    - 400/401/500 → FATAL 退出(真错误,不误判"已执行")
+    busy 与否靠 Notice 轮询结果判定,捕获不到 Notice 返 False(由 main 裁决)。
     """
     print(f'[warmup] POST /submit {{"input": "/mcp connect {server_name}"}} (零 token 触发握手)')
     s, _, txt = post("/submit", {"input": f"/mcp connect {server_name}"})
-    print(f"[warmup] submit → {s} (409=预期,副作用已执行); body={txt[:120]}")
+    if s not in (200, 202, 409):
+        print(f"[warmup] FATAL: submit 返 {s}(非 200/202/409,握手未发起); body={txt[:200]}")
+        raise SystemExit(1)
+    # 409 可能是 busy(未执行)或管理动词(已执行)——不在这里断言,靠 Notice 确认。
+    print(f"[warmup] submit → {s} (200/202/409=已提交;是否执行靠 Notice 确认); body={txt[:120]}")
 
     # 轮询 SSE 等 Notice `connected rsiot — N tools`(serve.go:1939 notice → sink.Emit)。
+    # chunk 读(4KB)替代逐字节读——逐字节 O(n²) 缓冲(审查 Minor)。
     req = urllib.request.Request(f"{SERVE}/events")
     t0 = time.time()
     try:
         with opener.open(req, timeout=max_wait) as r:
             buf = b""
             while time.time() - t0 < max_wait:
-                chunk = r.read(1)
+                chunk = r.read(4096)
                 if not chunk:
                     break
                 buf += chunk
@@ -164,9 +170,9 @@ def warmup_mcp_connect(server_name="rsiot", max_wait=20):
                         print(f"[warmup] ✓ Notice: {text[:200]}")
                         return True
     except Exception as e:
-        print(f"[warmup] SSE 结束(未确认 Notice,可能已连): {e}")
-    # 退路:握手是同步的,409 返回时副作用通常已完成;未捕获 Notice 也不代表失败。
-    print("[warmup] 未在 SSE 捕获确认 Notice(握手或已完成,继续)")
+        print(f"[warmup] SSE 结束(未确认 Notice): {e}")
+    # 未捕获 Notice:可能 busy(未执行)或握手已完成但 Notice 错过——返 False 由 main 裁决。
+    print("[warmup] 未捕获确认 Notice(可能 busy 未执行,或握手完成但 Notice 错过)")
     return False
 
 
@@ -180,10 +186,18 @@ def main():
     print(f"[yolo] /tool-approval-mode → {s} (204=已切全局自动放行)")
     # 启动预热:零 token 触发 MCP plugin spawn+握手,当前 session catalog 立即有 rsiot 工具
     # + schema 缓存落盘(下次冷启动根治)。须在 /new 之前(session 空闲时)。
-    warmup_mcp_connect("rsiot", max_wait=20)
+    # False = 未确认(可能 busy 未执行)——打醒目警告,本次结果不可信(但继续跑,
+    # 因为预热只是提高首轮 MCP 命中率,不是硬依赖)。
+    warmup_ok = warmup_mcp_connect("rsiot", max_wait=20)
+    if not warmup_ok:
+        print("[WARN] 预热未确认——首轮工具选择结果不可信(可能走 bash 而非 MCP)")
     # 冷启动:开新 session,避免上一轮上下文干扰工具首选项观测。
-    s2, _, _ = post("/new", {})
-    print(f"[new] /new → {s2} (开全新 session)")
+    s2, _, txt2 = post("/new", {})
+    if s2 not in (200, 202, 204):
+        # busy 等异常时 /new 失败——本次观测受旧上下文污染,如实警告(审查 Minor)。
+        print(f"[WARN] /new → {s2}(非 2xx,新 session 未开,结果可能受旧上下文污染); body={txt2[:100]}")
+    else:
+        print(f"[new] /new → {s2} (开全新 session)")
     tid, _ = submit(prompt)
     if tid is None:
         print("[FATAL] submit 失败")

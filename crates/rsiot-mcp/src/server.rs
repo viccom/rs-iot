@@ -194,7 +194,9 @@ pub enum ToolRisk {
 
 /// 工具名 → risk 档静态查表（纯函数，零运行时分配；漏登名字会在拦截测试暴露）。
 ///
-/// 未知名字按 `Write` 保守对待（实际 `tool_router` 已校验 name 合法性，不会走到 default）。
+/// 未知名字按 `CriticalWrite` 保守对待（**fail-closed**：新增工具漏登记进表时，
+/// 默认被 risk 拦截而非静默放行——"默认最严"对表外名字同样成立）。完整性由
+/// `all_tools_registered_in_risk_table` 测试锁定（23 工具逐一断言非 default）。
 fn tool_risk(name: &str) -> ToolRisk {
     use ToolRisk::*;
     match name {
@@ -224,7 +226,8 @@ fn tool_risk(name: &str) -> ToolRisk {
         | "rsiot_delete_instance"
         | "rsiot_set_device"
         | "rsiot_delete_device" => CriticalWrite,
-        _ => Write,
+        // fail-closed：未登记（含未来新增漏登记）按最严拦，不放行。
+        _ => CriticalWrite,
     }
 }
 
@@ -255,10 +258,16 @@ impl RiskPolicy {
         }
     }
 
-    /// 从环境变量构造：`RSIOT_MCP_ALLOW_CRITICAL_WRITES=1|true` 放行（部署时注入）。
+    /// 从环境变量构造：`RSIOT_MCP_ALLOW_CRITICAL_WRITES=1|true|yes|on` 放行（大小写不敏感，部署时注入）。
     pub fn from_env() -> Self {
         let allow = std::env::var("RSIOT_MCP_ALLOW_CRITICAL_WRITES")
-            .map(|v| matches!(v.trim(), "1" | "true" | "TRUE"))
+            .map(|v| {
+                let v = v.trim();
+                v == "1"
+                    || v.eq_ignore_ascii_case("true")
+                    || v.eq_ignore_ascii_case("yes")
+                    || v.eq_ignore_ascii_case("on")
+            })
             .unwrap_or(false);
         Self {
             allow_critical_writes: allow,
@@ -430,7 +439,8 @@ impl RsiotMcpServer {
     /// **高危**：直接写设备寄存器/节点。data 由插件解析（modbus `{address,value}` / opcua
     /// `{node_id,value,opc_type}`）。实例未运行返回 404。
     #[tool(
-        description = "Send a write command to a device via its running instance (e.g. write a Modbus register or OPC UA node). HIGH RISK: modifies device state. The `data` field is plugin-specific JSON (e.g. {\"address\":\"holding:0:f32\",\"value\":12.5}). Requires approval."
+        description = "Send a write command to a device via its running instance (e.g. write a Modbus register or OPC UA node). HIGH RISK: modifies device state. The `data` field is plugin-specific JSON (e.g. {\"address\":\"holding:0:f32\",\"value\":12.5}). Requires approval.",
+        annotations(destructive_hint = true)
     )]
     async fn rsiot_send_device_command(
         &self,
@@ -525,9 +535,12 @@ impl RsiotMcpServer {
         &self,
         Parameters(req): Parameters<StartPacketTraceRequest>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
+        // duration_secs 上界 86400(1 天):rs-iot 侧 `(x as i64)*1000` 在 debug 构建
+        // 对超大 u64 溢出 panic(审查 finding)。1 天已是超长调试窗口。
+        let dur = req.duration_secs.unwrap_or(60).min(86400);
         let body = serde_json::json!({
             "inst_id": req.inst_id,
-            "duration_secs": req.duration_secs.unwrap_or(60),
+            "duration_secs": dur,
         });
         backend_to_result(
             self.backend.post("/api/v1/inst/trace", &body).await,
@@ -759,6 +772,10 @@ impl rmcp::ServerHandler for RsiotMcpServer {
     /// `#[tool_handler]` 宏检测到 `call_tool` 已手写即跳过生成（rmcp tool_handler.rs:44
     /// `has_method` 检测），`list_tools`/`get_tool`/`get_info` 仍由宏生成。
     /// CriticalWrite 被策略拦时返 error CallToolResult（agent 看可读文本，非协议 Err）。
+    ///
+    /// **注意**：risk 闸门只在 call_tool 这一层——工具方法与 `tool_router()` 当前均为
+    /// 私有，无现实绕过路径；若未来 library 化公开这些入口，须把 risk 闸门一并前置，
+    /// 否则绕过陷阱（审查 Minor）。
     async fn call_tool(
         &self,
         request: rmcp::model::CallToolRequestParams,
@@ -799,7 +816,7 @@ mod tests {
                 deletes: Mutex::new(Vec::new()),
             }
         }
-        /// 取出收到的所有 path（get + post）。
+        /// 取出收到的所有 path（get + post + delete）。
         fn recorded_paths(&self) -> Vec<String> {
             self.paths.lock().expect("paths lock").clone()
         }
@@ -1481,8 +1498,52 @@ mod tests {
         assert_eq!(tool_risk("rsiot_send_device_command"), Write);
         assert_eq!(tool_risk("rsiot_set_instance"), CriticalWrite);
         assert_eq!(tool_risk("rsiot_delete_device"), CriticalWrite);
-        // 未知名字保守按 Write（防御 router 校验缺口）。
-        assert_eq!(tool_risk("rsiot_unknown_tool"), Write);
+        // 未知名字 fail-closed 按最严（新增工具漏登记时被拦，而非静默放行）。
+        assert_eq!(tool_risk("rsiot_unknown_tool"), CriticalWrite);
+    }
+
+    /// 完整性测试（fail-closed 保障）：23 个工具逐一断言登记档位与期望一致。
+    ///
+    /// 验证意图（规则7）：`_ => CriticalWrite` 的 fail-closed 默认只在"漏登记"时生效，
+    /// 而本测试把 23 个名字的期望档位全枚举——新增工具若漏登记进 risk 表，
+    /// 这里会因档位不符而失败（而非靠 default 静默放行）。与 protocol.rs 的
+    /// `handshake_lists_all_tools`(list_tools 注册完整性)互补:那边锁"注册",这边锁"risk 登记"。
+    #[test]
+    fn all_tools_registered_in_risk_table() {
+        use ToolRisk::*;
+        // (工具名, 期望档位) 全量 23 个。
+        let expected: &[(&str, ToolRisk)] = &[
+            ("rsiot_list_devices", ReadOnly),
+            ("rsiot_read_tags", ReadOnly),
+            ("rsiot_get_status", ReadOnly),
+            ("rsiot_list_instances", ReadOnly),
+            ("rsiot_get_recent_logs", ReadOnly),
+            ("rsiot_get_config", ReadOnly),
+            ("rsiot_list_packet_trace", ReadOnly),
+            ("rsiot_get_instance_stats", ReadOnly),
+            ("rsiot_list_lua_scripts", ReadOnly),
+            ("rsiot_get_instance_config", ReadOnly),
+            ("rsiot_list_plugins", ReadOnly),
+            ("rsiot_get_sysinfo", ReadOnly),
+            ("rsiot_send_device_command", Write),
+            ("rsiot_start_instance", Write),
+            ("rsiot_stop_instance", Write),
+            ("rsiot_save_lua_script", Write),
+            ("rsiot_start_packet_trace", Write),
+            ("rsiot_stop_packet_trace", Write),
+            ("rsiot_reload_lua_instance", Write),
+            ("rsiot_set_instance", CriticalWrite),
+            ("rsiot_delete_instance", CriticalWrite),
+            ("rsiot_set_device", CriticalWrite),
+            ("rsiot_delete_device", CriticalWrite),
+        ];
+        for (name, want) in expected {
+            assert_eq!(
+                tool_risk(name),
+                *want,
+                "tool {name} must be registered in risk table as {want:?}"
+            );
+        }
     }
 
     // ---- 错误路径（所有工具共用 backend_to_result）----

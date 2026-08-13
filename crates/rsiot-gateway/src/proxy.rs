@@ -188,6 +188,9 @@ pub async fn forward(State(st): State<Arc<GwState>>, req: Request, upstream: Ups
 /// （capability list 284KB 被截断），退回 bash 直连 redis-cli。本提示注入在
 /// `POST /api/agent/submit` 的 `input` 前缀——模型每轮被告知 rsiot 工具存在与
 /// 用途，把"查数据走 MCP"变成默认路径。克制、只列最常用工具映射。
+///
+/// "经 use_capability 调用"经真实链路实测确认（SSE 流 notice：
+/// `capability proxy: use_capability → mcp__rsiot__rsiot_read_tags`），非假设。
 pub const AGENT_TOOL_HINT: &str = "\
 【网关工具提示】本网关提供 rsiot MCP 工具(经 use_capability 调用):\
 查设备实时数据用 rsiot_read_tags(传 dev_id)、列设备 rsiot_list_devices、\
@@ -198,22 +201,30 @@ pub const AGENT_TOOL_HINT: &str = "\
 
 /// agent submit 专用转发：`input` 字段前缀注入 `AGENT_TOOL_HINT`，其余原样透传。
 ///
-/// 只挂在 `POST /api/agent/submit`（app.rs 显式路由，优先于 nest_service 的 any）。
-/// body 解析失败/无 `input` 字段 → 原样透传（降级不破坏）。注入后重构 Request
-/// 复用 `forward`（Serve cookie 注入 + SSE 透传逻辑零重复）。
+/// 只挂在 `POST /api/agent/submit`（app.rs 的 /api/agent `nest` 子路由显式 `/submit`，
+/// 剥前缀后其余 fallback 裸透传）。body 非 JSON/无 `input` 字段 → 原样透传（降级
+/// 不破坏）；**超 1MB → 413 快速失败**（to_bytes 已消费原 body 无法透传）。
+/// 注入后重构 Request 复用 `forward`（Serve cookie 注入 + SSE 透传逻辑零重复）。
 pub async fn forward_agent_submit(State(st): State<Arc<GwState>>, req: Request) -> Response {
     let (mut parts, body) = req.into_parts();
     // submit body 是 JSON 文本（前端 agent.ts `{input: <text>}`），1MB 上限绰绰有余。
     let bytes = match axum::body::to_bytes(body, 1024 * 1024).await {
         Ok(b) => b,
         Err(e) => {
-            tracing::warn!(%e, "agent submit body collect failed; pass through empty");
-            let new_req = Request::from_parts(parts, Body::empty());
-            return forward(State(st), new_req, Upstream::Serve).await;
+            // 超限（>1MB）或流错误：to_bytes 已消费原 body 无法原样透传，
+            // 若带 stale Content-Length 转发会让上游收截断 body（502 + 误导日志）。
+            // 直接 413 快速失败——语义清晰，前端 agent.ts 把状态码带给用户。
+            tracing::warn!(%e, "agent submit body too large or stream error");
+            return (
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "submit body too large (max 1MB)",
+            )
+                .into_response();
         }
     };
 
     // 注入：仅当 body 是 JSON object 且 input 是字符串。
+    let mut injected = false;
     let out_bytes = match serde_json::from_slice::<serde_json::Value>(&bytes) {
         Ok(mut v) => {
             let input = v
@@ -222,15 +233,22 @@ pub async fn forward_agent_submit(State(st): State<Arc<GwState>>, req: Request) 
                 .map(|s| s.to_string());
             if let Some(original) = input {
                 v["input"] = serde_json::Value::String(format!("{AGENT_TOOL_HINT}\n\n{original}"));
-                serde_json::to_vec(&v).unwrap_or_else(|_| bytes.to_vec())
+                injected = true;
+                serde_json::to_vec(&v).unwrap_or_else(|_| {
+                    injected = false;
+                    bytes.to_vec()
+                })
             } else {
                 bytes.to_vec() // 无 input 字段 → 原样
             }
         }
         Err(_) => bytes.to_vec(), // 非 JSON → 原样
     };
-    // 注入后 body 长度已变，原 Content-Length 失效——删掉让 reqwest 重算（否则上游收截断 body）。
-    parts.headers.remove(axum::http::header::CONTENT_LENGTH);
+    // 仅注入发生（body 长度变化）才删 Content-Length；未注入时保留原头（reqwest 对
+    // 已知大小 Vec body 会重算，语义无差，但删头是多余写）。
+    if injected {
+        parts.headers.remove(axum::http::header::CONTENT_LENGTH);
+    }
     let new_req = Request::from_parts(parts, Body::from(out_bytes));
     forward(State(st), new_req, Upstream::Serve).await
 }
