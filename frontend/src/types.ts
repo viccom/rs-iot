@@ -59,6 +59,75 @@ export interface StateEvent {
 /** rtdata cell：`[ts, localTime, value]`（经 lux JSON 序列化，数值可能是字符串）。 */
 export type RtdataCell = [number, string, string | number]
 
+/** rtdata 变更通知事件（SSE `rtdata` kind，pipeline flush_batch 批次级聚合）。
+ *  dev_ids 去重 + 截断 50；count 是本批真实点数（未截断）。不含 value——前端收到后
+ *  用现有 2s 轮询 /rtdatas 拉最新值，推送只作刷新触发（防 50万点/秒爆 SSE）。 */
+export interface RtdataEvent {
+  dev_ids: string[]
+  count: number
+  ts: string
+}
+
+/** 插件实例方向（对标 AppType serde：PascalCase "South"/"North"）。 */
+export type AppType = 'South' | 'North'
+
+/** 宿主形态（对标 HostKind serde：lowercase "builtin"/"external"）。 */
+export type HostKind = 'builtin' | 'external'
+
+/** 变量规格（对标 ChildSpec：label/value/type）。type 为 "float"/"int"/"bool" 等。 */
+export interface ChildSpec {
+  label: string
+  value: string
+  type: string
+}
+
+/** 设备规格（对标 DeviceSpec：label/value(=devId)/children/slave_id）。 */
+export interface DeviceSpec {
+  label: string
+  value: string
+  children: ChildSpec[]
+  slave_id?: number | null
+}
+
+/**
+ * 插件实例配置（对标 InstConfig）。app_config 为任意 JSON（各插件自行解析：
+ * modbus/lua/opcua/s7 各自字段）。经 `GET /insts` 拉取、`POST /inst/set` 整包写。
+ */
+export interface InstConfig {
+  inst_id: string
+  inst_name: string
+  app_code: string
+  app_type: AppType
+  auto_start: boolean
+  app_config: Record<string, unknown>
+  devices: DeviceSpec[]
+  host_kind: HostKind
+}
+
+/** 实例配置表（GET /insts 返回：inst_id → InstConfig）。 */
+export type InstanceConfigs = Record<string, InstConfig>
+
+/** lua 脚本内容回读（GET /lua/script?name=）。 */
+export interface LuaScript {
+  name: string
+  content: string
+  size: number
+  mtime?: number | null
+}
+
+/** lua 脚本历史版本（GET /lua/script/versions，按 ts 降序）。 */
+export interface LuaVersion {
+  ts: number
+  size: number
+}
+
+/** lua 脚本清单项（含前端反查的关联实例数）。 */
+export interface LuaScriptListItem {
+  name: string
+  /** 关联该脚本的 lua 实例数（前端从 instances 按 app_config.script==name 反查）。 */
+  instanceCount: number
+}
+
 /**
  * serve 事件流帧（无 `event:` 头，kind 在 JSON body 内）。
  *

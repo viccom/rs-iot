@@ -13,6 +13,7 @@
 //! SAVE 期间全 worker 变慢会触发全局背压(端到端背压特性，非 bug)。
 
 use crate::db;
+use crate::event_bus::{now_iso8601, EventPayload};
 use crate::host::HostContext;
 use crate::plugin::ticker::fnv1a_64;
 use crate::plugin::traits::Processor;
@@ -212,6 +213,11 @@ async fn flush_batch(
                     &format!("write_batch {n_failed} devid 写失败(其余成功)"),
                 );
             }
+            // rtdata 变更通知（批次级聚合，模块 M2b）：一批一次 publish，不含 value。
+            // 50万点/秒下每点 publish 会爆 SSE——此处仅发"哪些 dev 变了"，前端轮询拉值。
+            // dev_ids 去重 + 截断 RTDATA_NOTIFY_MAX_DEVS（现场极端多设备时防 payload 过大，
+            // count 仍标真实点数总量）。无 SSE 消费者时 publish 静默零开销（broadcast 特性）。
+            publish_rtdata_notify(ctx, buf);
         }
         Err(e) => {
             // prep 错(serde_json cell 编码等),整批未写。
@@ -220,6 +226,30 @@ async fn flush_batch(
         }
     }
     buf.clear();
+}
+
+/// rtdata 变更通知 payload 的 devid 列表截断上限（现场极端多设备时防 payload 过大）。
+/// 超出的 dev 不进 dev_ids，但 count 仍记录真实点数总量（前端据此判断是否回退全量拉取）。
+const RTDATA_NOTIFY_MAX_DEVS: usize = 50;
+
+/// 发一批 rtdata 变更通知（去重 + 截断 dev_ids，不带 value）。
+///
+/// 从 `buf` 聚合唯一 devid（同批多点同设备只列一次），截断到 RTDATA_NOTIFY_MAX_DEVS，
+/// 经 `ctx.event_tx.publish` 投递。`count` 始终是 buf 真实点数（未截断），前端据此
+/// 估算变更规模。无 SSE 消费者时 publish 静默（broadcast::send 无 receiver 返 Err 被忽略）。
+fn publish_rtdata_notify(ctx: &HostContext, buf: &[Sample]) {
+    let mut seen = std::collections::HashSet::new();
+    let dev_ids: Vec<String> = buf
+        .iter()
+        .map(|s| s.devid.clone())
+        .filter(|d| seen.insert(d.clone()))
+        .take(RTDATA_NOTIFY_MAX_DEVS)
+        .collect();
+    ctx.event_tx.publish(EventPayload::Rtdata {
+        dev_ids,
+        count: buf.len(),
+        ts: now_iso8601(),
+    });
 }
 
 /// 限流 warn:首次或距上次 ≥1s 才记(防 lux 挂时 N×20 warn/s 洪水)。

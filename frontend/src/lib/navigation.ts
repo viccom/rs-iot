@@ -4,6 +4,7 @@ export type WorkspaceRouteKey =
   | 'collectors'
   | 'diagnostics'
   | 'control'
+  | 'lua'
 
 export interface PrimaryRouteDefinition {
   key: WorkspaceRouteKey
@@ -48,5 +49,12 @@ export const PRIMARY_ROUTES: PrimaryRouteDefinition[] = [
     title: '控制台',
     shortTitle: '控制',
     summary: '结合 AI 助手与人工操作执行巡检和处置',
+  },
+  {
+    key: 'lua',
+    path: '/lua',
+    title: 'Lua 脚本',
+    shortTitle: '脚本',
+    summary: '编辑/版本管理 lua 脚本，重载关联采集实例',
   },
 ]

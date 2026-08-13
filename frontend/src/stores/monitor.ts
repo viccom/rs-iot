@@ -1,7 +1,16 @@
 // frontend/src/stores/monitor.ts
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
-import type { InstanceStat, LogEntry, PacketEntry, StateEvent, RtdataCell } from '../types'
+import type {
+  InstanceStat,
+  LogEntry,
+  PacketEntry,
+  StateEvent,
+  RtdataCell,
+  RtdataEvent,
+  InstConfig,
+  InstanceConfigs,
+} from '../types'
 import { useAuthStore } from './auth'
 import { createPreviewSnapshot, isPreviewAuthToken } from '../lib/previewSession'
 
@@ -9,17 +18,26 @@ import { createPreviewSnapshot, isPreviewAuthToken } from '../lib/previewSession
 const MAX_LOGS = 500
 /** 报文环形缓冲容量（最新在前）。 */
 const MAX_PACKETS = 200
+/** rtdata 通知触发轮询的去抖窗口（ms）——连续通知风暴只拉一次最新值。 */
+const RTDATA_NOTIFY_DEBOUNCE_MS = 200
 
 /**
- * 监控 store：rs-iot SSE 事件分发（log/packet/state）+ rtdata/sysstatus 周期轮询。
+ * 监控 store：rs-iot SSE 事件分发 + rtdata/sysstatus 轮询 + 实例 CRUD。
  *
- * 事件来源 `GET /api/v1/events?types=log,packet,state`（经 gateway
- * `/api/rsiot/api/v1/events`），每帧带 `event:` 头，前端 `addEventListener(kind)` 分发。
- * rtdata/sysstatus 走普通 fetch（轮询），EventSource 无法设 header 故 token 走 query。
+ * **订阅模型（M3 改动）**：
+ * - rtdata：登录即起 2s 轮询 + rtdata SSE 通知（通知仅触发立即补拉，不含 value）。
+ * - log/packet：**默认不订阅**，由诊断 Tab 手动 `subscribeLog()`/`subscribePacket()`
+ *   激活（用户要求"默认不激活推送，手动选实例激活后才推送"）。
+ *
+ * 事件来源 `GET /api/v1/events?types=...`（经 gateway `/api/rsiot/api/v1/events`），
+ * 每帧带 `event:` 头，前端 `addEventListener(kind)` 分发。
+ * token 走 query（EventSource 不能设 header，gateway auth 支持 ?token=<jwt>）。
  */
 export const useMonitorStore = defineStore('monitor', () => {
-  /** 实例列表（进程级 state + health）。 */
+  /** 实例列表（进程级 state + health，来自 /inst/stats）。 */
   const instances = ref<InstanceStat[]>([])
+  /** 实例完整配置表（inst_id → InstConfig，来自 GET /insts；用于实例管理 + 点表类型映射）。 */
+  const instanceConfigs = ref<InstanceConfigs>({})
   /** 日志环形缓冲（最新在前，上限 MAX_LOGS）。 */
   const logs = ref<LogEntry[]>([])
   /** 报文环形缓冲（最新在前，上限 MAX_PACKETS）。 */
@@ -32,12 +50,37 @@ export const useMonitorStore = defineStore('monitor', () => {
   const selectedInstance = ref<string>('')
   /** 当前选中设备 ID（页面感知 AI / rtdata 联动）。 */
   const selectedDevice = ref<string>('')
-  /** SSE 连接是否断开（onerror 置 true / onopen + 补拉成功复位 false）。 */
+  /** SSE(rtdata 通知) 连接是否断开。 */
   const offline = ref(false)
+  /** 日志 Tab 是否已激活订阅。 */
+  const logSubscribed = ref(false)
+  /** 报文 Tab 是否已激活订阅。 */
+  const packetSubscribed = ref(false)
 
-  let sse: EventSource | null = null
+  let sse: EventSource | null = null  // rtdata 通知 SSE（登录即起）
+  let logSse: EventSource | null = null  // 日志 SSE（诊断 Tab 手动激活）
+  let packetSse: EventSource | null = null  // 报文 SSE（诊断 Tab 手动激活）
   let rtdataTimer: ReturnType<typeof setInterval> | null = null
   let sysstatusTimer: ReturnType<typeof setInterval> | null = null
+  /** rtdata 通知去抖句柄（风暴期间只触发一次 loadRtdata）。 */
+  let rtdataDebounce: ReturnType<typeof setTimeout> | null = null
+
+  /**
+   * 401 会话失效处理（审查 Important 修复）。
+   *
+   * 本 store 刻意绕过 client.ts（其 import router 链破坏 vitest），故 client.ts 的
+   * 401 清 token+跳登录分支对本 store 失效——token 失效后轮询/SSE 会无限 401 空转。
+   * 此处统一兜底：清 token + 硬跳转 /login（整页刷新顺带清掉所有 SSE 僵尸连接）。
+   * 不 import router（测试环境无 window/createWebHistory），用 location.href。
+   * 仅在有 token 时跳转（防登录页自身 401 触发循环）。
+   */
+  function handleUnauthorized() {
+    const auth = useAuthStore()
+    if (!auth.token) return
+    auth.clear()
+    stop()
+    if (typeof window !== 'undefined') window.location.href = '/login'
+  }
 
   /** 收到一条日志：prepend 并截断到 MAX_LOGS。 */
   function onLog(e: LogEntry) {
@@ -67,6 +110,15 @@ export const useMonitorStore = defineStore('monitor', () => {
     }
   }
 
+  /** 收到 rtdata 变更通知：去抖触发 loadRtdata 补拉最新值（不含 value，只作刷新触发）。 */
+  function onRtdataNotify(_e: RtdataEvent) {
+    if (rtdataDebounce) clearTimeout(rtdataDebounce)
+    rtdataDebounce = setTimeout(() => {
+      rtdataDebounce = null
+      void loadRtdata()
+    }, RTDATA_NOTIFY_DEBOUNCE_MS)
+  }
+
   /** 拉取实例列表（进程级 state + health）。 */
   async function loadInstances() {
     if (isPreviewAuthToken(useAuthStore().token)) {
@@ -77,8 +129,20 @@ export const useMonitorStore = defineStore('monitor', () => {
       const r = await fetch('/api/rsiot/api/v1/inst/stats', {
         headers: { Authorization: `Bearer ${useAuthStore().token}` },
       })
+      if (r.status === 401) { handleUnauthorized(); return }
       if (r.ok) instances.value = (await r.json()) as InstanceStat[]
     } catch { /* 轮询失败静默，下周期重试 */ }
+  }
+
+  /** 拉取实例完整配置表（GET /insts，含 app_config/devices；实例管理 + 类型映射用）。 */
+  async function loadInstanceConfigs() {
+    try {
+      const r = await fetch('/api/rsiot/api/v1/insts', {
+        headers: { Authorization: `Bearer ${useAuthStore().token}` },
+      })
+      if (r.status === 401) { handleUnauthorized(); return }
+      if (r.ok) instanceConfigs.value = (await r.json()) as InstanceConfigs
+    } catch { /* 静默，CRUD 后会重拉 */ }
   }
 
   /** 拉取 rtdata 全量快照。 */
@@ -91,6 +155,7 @@ export const useMonitorStore = defineStore('monitor', () => {
       const r = await fetch('/api/rsiot/api/v1/rtdatas', {
         headers: { Authorization: `Bearer ${useAuthStore().token}` },
       })
+      if (r.status === 401) { handleUnauthorized(); return }
       if (r.ok) rtdata.value = await r.json()
     } catch { /* 轮询失败静默，下周期重试 */ }
   }
@@ -105,6 +170,7 @@ export const useMonitorStore = defineStore('monitor', () => {
       const r = await fetch('/api/rsiot/api/v1/sysstatus', {
         headers: { Authorization: `Bearer ${useAuthStore().token}` },
       })
+      if (r.status === 401) { handleUnauthorized(); return }
       if (r.ok) sysstatus.value = await r.json()
     } catch { /* 轮询失败静默，下周期重试 */ }
   }
@@ -112,9 +178,7 @@ export const useMonitorStore = defineStore('monitor', () => {
   /**
    * 补拉最近日志（SSE 断线兜底，对标 scada.html:945）。
    *
-   * SSE 断线期间丢的帧经 `GET /api/v1/logs/recent` 补回——返回数组最新在前，
-   * 与 `logs` 形态一致；按 `ts|message` 去重，新条目 prepend 后截断到 MAX_LOGS。
-   * 补拉成功（r.ok）复位 offline（说明网络恢复）；失败保持 offline，下轮重连再补。
+   * 返回数组最新在前，与 `logs` 形态一致；按 `ts|message` 去重，新条目 prepend 后截断到 MAX_LOGS。
    */
   async function loadLogsRecent() {
     if (isPreviewAuthToken(useAuthStore().token)) {
@@ -125,18 +189,120 @@ export const useMonitorStore = defineStore('monitor', () => {
       const r = await fetch('/api/rsiot/api/v1/logs/recent?limit=200', {
         headers: { Authorization: `Bearer ${useAuthStore().token}` },
       })
+      if (r.status === 401) { handleUnauthorized(); return }
       if (r.ok) {
         const entries: LogEntry[] = await r.json()
         const seen = new Set(logs.value.map(l => `${l.ts}|${l.message}`))
-        // entries 最新在前；逐条 prepend 前反转，保持时间顺序（旧→新 unshift）。
         for (const e of [...entries].reverse()) {
           const k = `${e.ts}|${e.message}`
           if (!seen.has(k)) { logs.value.unshift(e); seen.add(k) }
         }
         if (logs.value.length > MAX_LOGS) logs.value.length = MAX_LOGS
-        offline.value = false  // 补拉成功说明在线
       }
-    } catch { /* 补拉失败保持 offline，下轮重连再补 */ }
+    } catch { /* 补拉失败静默 */ }
+  }
+
+  // ---- 实例 CRUD（模块 M1）----
+
+  /**
+   * POST JSON（带 JWT）。store 内部 helper——不复用 api/client.ts 的 `api()`
+   * （后者 import router，测试环境 createWebHistory 需 window，会破坏 vitest）。
+   * 返回 Response 或 null（fetch 抛错）。
+   */
+  async function postJson(path: string, body: unknown): Promise<Response | null> {
+    try {
+      const r = await fetch(path, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${useAuthStore().token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(body),
+      })
+      if (r.status === 401) { handleUnauthorized(); return null }
+      return r
+    } catch {
+      return null
+    }
+  }
+
+  /** 新建/修改实例（POST /inst/set 整包写，后端无单点端点）。写后重拉配置 + 状态。 */
+  async function saveInstance(cfg: InstConfig): Promise<boolean> {
+    const r = await postJson('/api/rsiot/api/v1/inst/set', { inst_id: cfg.inst_id, object: cfg })
+    if (!r || !r.ok) return false
+    await loadInstanceConfigs()
+    await loadInstances()
+    return true
+  }
+
+  /** 删除实例（POST /inst/delete）。删后重拉。 */
+  async function deleteInstance(id: string): Promise<boolean> {
+    const r = await postJson('/api/rsiot/api/v1/inst/delete', { inst_id: id })
+    if (!r || !r.ok) return false
+    await loadInstanceConfigs()
+    await loadInstances()
+    return true
+  }
+
+  /** 启动实例（POST /startinst）。 */
+  async function startInstance(id: string): Promise<boolean> {
+    const r = await postJson('/api/rsiot/api/v1/startinst', { inst_id: id })
+    if (r?.ok) await loadInstances()
+    return !!r && r.ok
+  }
+
+  /** 停止实例（POST /stopinst）。 */
+  async function stopInstance(id: string): Promise<boolean> {
+    const r = await postJson('/api/rsiot/api/v1/stopinst', { inst_id: id })
+    if (r?.ok) await loadInstances()
+    return !!r && r.ok
+  }
+
+  // ---- 诊断 SSE 按需订阅（模块 M3）----
+
+  /** 激活日志 SSE 订阅（诊断 Tab 手动）。订阅 log+state kind，并补拉最近日志。 */
+  function subscribeLog() {
+    if (logSse) return
+    const tok = useAuthStore().token
+    if (isPreviewAuthToken(tok)) { logSubscribed.value = true; return }
+    logSse = new EventSource(
+      `/api/rsiot/api/v1/events?types=log,state&token=${encodeURIComponent(tok)}`,
+    )
+    logSse.addEventListener('log', e => safe(() => onLog(JSON.parse((e as MessageEvent).data) as LogEntry)))
+    logSse.addEventListener('state', e => safe(() => onState(JSON.parse((e as MessageEvent).data) as StateEvent)))
+    logSse.onopen = () => { logSubscribed.value = true }
+    logSse.onerror = () => { void loadLogsRecent() }
+    void loadLogsRecent()  // 首次补拉历史
+  }
+
+  /** 关闭日志 SSE 订阅（离开诊断 Tab）。 */
+  function unsubscribeLog() {
+    logSse?.close()
+    logSse = null
+    logSubscribed.value = false
+  }
+
+  /** 激活报文 SSE 订阅（诊断 Tab 手动）。先 POST /inst/trace 激活当前实例抓样，再订 packet kind。 */
+  async function subscribePacket() {
+    if (packetSse) { packetSubscribed.value = true; return }
+    // 先激活当前实例报文 trace（60s deadline），否则无 packet 事件。
+    if (selectedInstance.value) await startPacketTrace(60)
+    const tok = useAuthStore().token
+    if (isPreviewAuthToken(tok)) { packetSubscribed.value = true; return }
+    packetSse = new EventSource(
+      `/api/rsiot/api/v1/events?types=packet&token=${encodeURIComponent(tok)}`,
+    )
+    packetSse.addEventListener('packet', e => safe(() => onPacket(JSON.parse((e as MessageEvent).data) as PacketEntry)))
+    packetSse.onopen = () => { packetSubscribed.value = true }
+    packetSse.onerror = () => { /* 浏览器自动重连 */ }
+    packetSubscribed.value = true
+  }
+
+  /** 关闭报文 SSE 订阅。 */
+  function unsubscribePacket() {
+    packetSse?.close()
+    packetSse = null
+    packetSubscribed.value = false
   }
 
   /** 标签页隐藏时暂停轮询，恢复时继续（省资源 + 防后台节流）。 */
@@ -150,9 +316,13 @@ export const useMonitorStore = defineStore('monitor', () => {
     }
   }
 
-  /** 启动 SSE 订阅 + 周期轮询。登录后调用一次。 */
+  /**
+   * 启动：rtdata 轮询 + rtdata SSE 通知 + sysstatus 轮询。
+   *
+   * **M3 改动**：不再自动订阅 log/packet（移到诊断 Tab 手动 subscribe*）。
+   * rtdata SSE 通知（dev_ids 不含 value）仅触发 loadRtdata 去抖补拉，加速刷新感知。
+   */
   function start() {
-    // 重入守卫：避免 start() 二次调用泄漏上一组 SSE/timer（如登录→登出→再登录）。
     if (sse) stop()
     const tok = useAuthStore().token
     if (isPreviewAuthToken(tok)) {
@@ -160,29 +330,25 @@ export const useMonitorStore = defineStore('monitor', () => {
       offline.value = false
       return
     }
-    // token 走 query（EventSource 不能设 header，gateway auth 支持 ?token=<jwt>）。
+    // rtdata 变更通知 SSE（订阅 state 用于实例状态联动；log/packet 不在此订阅）。
     sse = new EventSource(
-      `/api/rsiot/api/v1/events?types=log,packet,state&token=${encodeURIComponent(tok)}`,
+      `/api/rsiot/api/v1/events?types=rtdata,state&token=${encodeURIComponent(tok)}`,
     )
-    // JSON.parse 容错：畸形帧不应让 EventSource listener 抛错（抛错后该 kind 不再分发）。
-    // parse 须在 safe 内执行（thunk）——若作为 safe 实参先求值，parse 抛错会绕过 try。
-    sse.addEventListener('log', e => safe(() => onLog(JSON.parse((e as MessageEvent).data) as LogEntry)))
-    sse.addEventListener('packet', e => safe(() => onPacket(JSON.parse((e as MessageEvent).data) as PacketEntry)))
+    sse.addEventListener('rtdata', e => safe(() => onRtdataNotify(JSON.parse((e as MessageEvent).data) as RtdataEvent)))
     sse.addEventListener('state', e => safe(() => onState(JSON.parse((e as MessageEvent).data) as StateEvent)))
-    // SSE 连接成功 → 复位离线状态。
     sse.onopen = () => { offline.value = false }
-    // onerror：置离线，浏览器自动重连；补拉 logs/recent 兜底断线期间丢帧
-    // （对标 scada.html:945）。
     sse.onerror = () => {
       offline.value = true
-      void loadLogsRecent()
+      // 浏览器自动重连；rtdata 轮询兜底数据正确性。
+      // 立即探活一次：loadRtdata 带 401 检测——token 失效时尽快跳登录
+      // （SSE 读不到状态码，EventSource 会携失效 token 无限重连，靠轮询打破死循环）；
+      // 纯网络断则 fetch 抛错静默，offline 保持等浏览器重连。
+      void loadRtdata()
     }
-    // 立即拉一次 + 周期轮询。loadLogsRecent 必须初始拉：SSE 只推实时新帧，
-    // 稳定运行（无新日志）时 LogStream 若只靠 SSE 会永远空白。
     void loadInstances()
+    void loadInstanceConfigs()
     void loadRtdata()
     void loadSysstatus()
-    void loadLogsRecent()
     rtdataTimer = setInterval(loadRtdata, 2000)
     sysstatusTimer = setInterval(loadSysstatus, 5000)
     document.addEventListener('visibilitychange', onVisibility)
@@ -193,7 +359,6 @@ export const useMonitorStore = defineStore('monitor', () => {
    *
    * 激活后该实例收发字节经 io_trace dump → EventBus Packet 帧 → SSE 推给本 store
    * （onPacket 填充 packets）。duration_secs 缺省 60（rs-iot 缺省同值）。
-   * 未选实例时 no-op（组件层按钮已禁用，此处防御直调）。
    */
   async function startPacketTrace(durationSecs = 60) {
     if (!selectedInstance.value) return
@@ -206,8 +371,9 @@ export const useMonitorStore = defineStore('monitor', () => {
         },
         body: JSON.stringify({ inst_id: selectedInstance.value, duration_secs: durationSecs }),
       })
+      if (r.status === 401) { handleUnauthorized(); return }
       if (!r.ok) console.warn('monitor: activate packet trace failed', r.status)
-    } catch { /* 激活失败静默，报文区显示空提示 */ }
+    } catch { /* 激活失败静默 */ }
   }
 
   /** SSE 帧 parse/handle 容错：畸形帧 warn 并跳过，不冒泡到 EventSource。 */
@@ -231,12 +397,15 @@ export const useMonitorStore = defineStore('monitor', () => {
     }
   }
 
-  /** 停止 SSE + 清理定时器（登出 / 路由切走时调用）。 */
+  /** 停止所有 SSE + 清理定时器（登出 / 路由切走时调用）。 */
   function stop() {
     sse?.close()
     sse = null
+    unsubscribeLog()
+    unsubscribePacket()
     if (rtdataTimer) { clearInterval(rtdataTimer); rtdataTimer = null }
     if (sysstatusTimer) { clearInterval(sysstatusTimer); sysstatusTimer = null }
+    if (rtdataDebounce) { clearTimeout(rtdataDebounce); rtdataDebounce = null }
     document.removeEventListener('visibilitychange', onVisibility)
   }
 
@@ -252,6 +421,7 @@ export const useMonitorStore = defineStore('monitor', () => {
 
   return {
     instances,
+    instanceConfigs,
     logs,
     packets,
     rtdata,
@@ -259,13 +429,25 @@ export const useMonitorStore = defineStore('monitor', () => {
     selectedInstance,
     selectedDevice,
     offline,
+    logSubscribed,
+    packetSubscribed,
     onLog,
     onPacket,
     onState,
+    onRtdataNotify,
     loadInstances,
+    loadInstanceConfigs,
     loadRtdata,
     loadSysstatus,
     loadLogsRecent,
+    saveInstance,
+    deleteInstance,
+    startInstance,
+    stopInstance,
+    subscribeLog,
+    unsubscribeLog,
+    subscribePacket,
+    unsubscribePacket,
     start,
     stop,
     startPacketTrace,

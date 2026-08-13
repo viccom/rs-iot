@@ -1,27 +1,91 @@
 <script setup lang="ts">
-import { computed } from 'vue'
-import CollectorList from '../components/monitor/CollectorList.vue'
+// frontend/src/views/Collectors.vue
+// 采集器管理：左实例名册（三类型分组 + 新建）+ 右运行详情（编辑/启停/删除）。
+// M1：从只读卡片 → 可编辑实例（InstanceForm 整包读-改-写 POST /inst/set）。
+import { computed, ref } from 'vue'
 import { useWorkspacePage } from '../composables/useWorkspacePage'
 import { useMonitorStore } from '../stores/monitor'
+import type { InstConfig, InstanceStat } from '../types'
+import InstanceForm from '../components/monitor/InstanceForm.vue'
 
 const monitor = useMonitorStore()
 
-const selectedCollector = computed(() =>
-  monitor.instances.find(instance => instance.inst_id === monitor.selectedInstance) ?? null,
+/** 实例类型分类（无独立 lua host_kind：app_code=="luaClient" → lua）。 */
+function kindOf(inst: InstanceStat): 'builtin' | 'lua' | 'external' {
+  if (inst.host_kind === 'external') return 'external'
+  if (inst.app_code === 'luaClient') return 'lua'
+  return 'builtin'
+}
+
+const builtinList = computed(() => monitor.instances.filter(i => kindOf(i) === 'builtin'))
+const luaList = computed(() => monitor.instances.filter(i => kindOf(i) === 'lua'))
+const externalList = computed(() => monitor.instances.filter(i => kindOf(i) === 'external'))
+
+/** 当前选中实例的完整配置（编辑用）。 */
+const selectedConfig = computed<InstConfig | null>(() => {
+  if (!monitor.selectedInstance) return null
+  return monitor.instanceConfigs[monitor.selectedInstance] ?? null
+})
+const selectedStat = computed(() =>
+  monitor.instances.find(i => i.inst_id === monitor.selectedInstance) ?? null,
 )
-const builtinCount = computed(() =>
-  monitor.instances.filter(instance => instance.host_kind === 'builtin').length,
-)
+
+/** 实例编辑弹窗显隐 + 编辑目标。 */
+const showForm = ref(false)
+const editing = ref<InstConfig | null>(null)
+const saving = ref(false)
+const opError = ref('')
+
+/** 打开新建表单。 */
+function onNew() {
+  editing.value = null
+  showForm.value = true
+}
+/** 打开编辑表单（用选中实例的完整配置）。 */
+function onEdit() {
+  if (!selectedConfig.value) return
+  editing.value = selectedConfig.value
+  showForm.value = true
+}
+/** 保存（来自 InstanceForm）→ store.saveInstance 整包写。 */
+async function onSave(cfg: InstConfig) {
+  saving.value = true
+  opError.value = ''
+  const ok = await monitor.saveInstance(cfg)
+  saving.value = false
+  if (ok) {
+    showForm.value = false
+  } else {
+    opError.value = '保存失败（检查 inst_id 是否冲突或字段是否合法）'
+  }
+}
+/** 删除选中实例（二次确认）。 */
+async function onDelete() {
+  if (!monitor.selectedInstance) return
+  if (!confirm(`确定删除实例 ${monitor.selectedInstance}？此操作不可撤销。`)) return
+  opError.value = ''
+  const ok = await monitor.deleteInstance(monitor.selectedInstance)
+  if (!ok) opError.value = '删除失败'
+}
+/** 启动/停止。 */
+async function onStart() {
+  if (!monitor.selectedInstance) return
+  opError.value = (await monitor.startInstance(monitor.selectedInstance)) ? '' : '启动失败'
+}
+async function onStop() {
+  if (!monitor.selectedInstance) return
+  opError.value = (await monitor.stopInstance(monitor.selectedInstance)) ? '' : '停止失败'
+}
 
 useWorkspacePage(() => ({
   pageSummary: monitor.selectedInstance
-    ? `正在查看采集器 ${monitor.selectedInstance} 的运行信息`
-    : '正在浏览所有采集器的运行分布',
+    ? `正在管理采集器 ${monitor.selectedInstance}（可编辑参数/点表）`
+    : '正在浏览所有采集器（内置/lua/外部）',
   facts: [
     `实例总数 ${monitor.instances.length}`,
-    `内建实例 ${builtinCount.value}`,
+    `内建 ${builtinList.value.length} / lua ${luaList.value.length} / 外部 ${externalList.value.length}`,
     `当前实例 ${monitor.selectedInstance || '未选中'}`,
-    `当前实例状态 ${selectedCollector.value?.state || '未知'}`,
+    `当前实例状态 ${selectedStat.value?.state || '未知'}`,
   ],
 }))
 </script>
@@ -34,41 +98,102 @@ useWorkspacePage(() => ({
           <p class="panel-label">实例名册</p>
           <h3>采集器列表</h3>
         </div>
-        <span>{{ monitor.instances.length }} 个实例</span>
+        <div class="head-actions">
+          <span class="count">{{ monitor.instances.length }} 个</span>
+          <button class="btn-new" @click="onNew">+ 新建实例</button>
+        </div>
       </div>
-      <CollectorList />
+
+      <!-- 三类型分组列表 -->
+      <div class="kind-list">
+        <div v-if="builtinList.length" class="kind-group">
+          <p class="kind-label">内置协议（{{ builtinList.length }}）</p>
+          <div class="items">
+            <button
+              v-for="inst in builtinList" :key="inst.inst_id"
+              class="item" :class="{ active: monitor.selectedInstance === inst.inst_id, [inst.state]: true }"
+              @click="monitor.selectInstance(inst.inst_id)"
+            >
+              <span class="dot" />
+              <span class="id">{{ inst.inst_id }}</span>
+              <span class="code">{{ inst.app_code }}</span>
+              <span class="state">{{ inst.state }}</span>
+            </button>
+          </div>
+        </div>
+        <div v-if="luaList.length" class="kind-group">
+          <p class="kind-label">Lua 脚本（{{ luaList.length }}）</p>
+          <div class="items">
+            <button
+              v-for="inst in luaList" :key="inst.inst_id"
+              class="item lua" :class="{ active: monitor.selectedInstance === inst.inst_id, [inst.state]: true }"
+              @click="monitor.selectInstance(inst.inst_id)"
+            >
+              <span class="dot" />
+              <span class="id">{{ inst.inst_id }}</span>
+              <span class="code">luaClient</span>
+              <span class="state">{{ inst.state }}</span>
+            </button>
+          </div>
+        </div>
+        <div v-if="externalList.length" class="kind-group">
+          <p class="kind-label">外部插件（{{ externalList.length }}）</p>
+          <div class="items">
+            <button
+              v-for="inst in externalList" :key="inst.inst_id"
+              class="item ext" :class="{ active: monitor.selectedInstance === inst.inst_id, [inst.state]: true }"
+              @click="monitor.selectInstance(inst.inst_id)"
+            >
+              <span class="dot" />
+              <span class="id">{{ inst.inst_id }}</span>
+              <span class="code">{{ inst.app_code }}</span>
+              <span class="state">{{ inst.state }}</span>
+            </button>
+          </div>
+        </div>
+        <p v-if="!monitor.instances.length" class="empty">暂无实例，点「+ 新建实例」创建</p>
+      </div>
     </article>
 
     <article class="page-panel detail-panel">
       <div class="panel-head">
         <div>
           <p class="panel-label">运行详情</p>
-          <h3>{{ selectedCollector?.inst_id || '请选择一个采集器' }}</h3>
+          <h3>{{ selectedStat?.inst_id || '请选择一个采集器' }}</h3>
         </div>
-        <span>{{ selectedCollector?.app_code || '等待选择' }}</span>
+        <span class="state-badge" :class="selectedStat?.state">
+          {{ selectedStat?.state || '—' }}
+        </span>
       </div>
 
-      <div v-if="selectedCollector" class="detail-grid">
-        <div class="detail-card">
-          <span>进程状态</span>
-          <strong>{{ selectedCollector.state }}</strong>
+      <div v-if="selectedStat" class="detail-body">
+        <div class="detail-grid">
+          <div class="detail-card"><span>插件</span><strong>{{ selectedStat.app_code }}</strong></div>
+          <div class="detail-card"><span>宿主类型</span><strong>{{ selectedStat.host_kind }}</strong></div>
+          <div class="detail-card"><span>健康</span><strong>{{ selectedStat.health?.status || 'unknown' }}</strong></div>
+          <div class="detail-card"><span>最近失败</span><strong class="err">{{ selectedStat.health?.last_err || '无' }}</strong></div>
         </div>
-        <div class="detail-card">
-          <span>宿主类型</span>
-          <strong>{{ selectedCollector.host_kind }}</strong>
+
+        <!-- 运行参数预览（app_config 关键字段）-->
+        <div v-if="selectedConfig" class="cfg-preview">
+          <p class="preview-label">运行参数</p>
+          <pre class="preview-json">{{ JSON.stringify(selectedConfig.app_config, null, 2) }}</pre>
         </div>
-        <div class="detail-card">
-          <span>健康状态</span>
-          <strong>{{ selectedCollector.health?.status || 'unknown' }}</strong>
+
+        <!-- 操作按钮 -->
+        <div class="ops">
+          <button class="op op-start" :disabled="selectedStat.state === 'running'" @click="onStart">启动</button>
+          <button class="op op-stop" :disabled="selectedStat.state === 'stopped'" @click="onStop">停止</button>
+          <button class="op op-edit" @click="onEdit">编辑</button>
+          <button class="op op-del" @click="onDelete">删除</button>
         </div>
-        <div class="detail-card">
-          <span>最近失败</span>
-          <strong>{{ selectedCollector.health?.last_err || '无' }}</strong>
-        </div>
+        <p v-if="opError" class="op-error">{{ opError }}</p>
       </div>
 
-      <p v-else class="empty">左侧选择一个采集器后，这里会展示它的状态详情。</p>
+      <p v-else class="empty">左侧选择一个采集器后，这里会展示它的运行详情和操作入口。</p>
     </article>
+
+    <InstanceForm v-if="showForm" :model-value="editing" @close="showForm = false" @save="onSave" />
   </section>
 </template>
 
@@ -76,7 +201,7 @@ useWorkspacePage(() => ({
 .collectors-page {
   display: grid;
   gap: 18px;
-  grid-template-columns: minmax(260px, 320px) minmax(0, 1fr);
+  grid-template-columns: minmax(260px, 340px) minmax(0, 1fr);
 }
 
 .page-panel {
@@ -107,45 +232,95 @@ useWorkspacePage(() => ({
   z-index: 1;
 }
 
-.panel-head h3,
-.detail-card strong {
-  margin: 0;
-  font-family: "Bahnschrift", sans-serif;
+.panel-head h3 { margin: 0; font-family: "Bahnschrift", sans-serif; }
+
+.head-actions { display: flex; align-items: center; gap: 10px; }
+.count { font-size: 12px; color: var(--color-ink-dim); }
+.btn-new {
+  padding: 6px 14px; border-radius: 10px;
+  border: 1px solid var(--color-primary); background: var(--color-primary);
+  color: white; font-size: 12px; cursor: pointer; white-space: nowrap;
 }
+.btn-new:hover { background: var(--color-primary-hover); }
 
 .panel-label {
   margin: 0 0 10px;
-  font-size: 11px;
-  letter-spacing: 0.18em;
-  text-transform: uppercase;
+  font-size: 11px; letter-spacing: 0.18em; text-transform: uppercase;
   color: var(--color-ink-dim);
 }
 
-.detail-grid {
-  display: grid;
-  gap: 14px;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+.kind-list { position: relative; z-index: 1; max-height: 60vh; overflow-y: auto; }
+.kind-group { margin-bottom: 14px; }
+.kind-label {
+  margin: 0 0 8px; font-size: 11px; letter-spacing: 0.1em;
+  color: var(--color-ink-muted); text-transform: uppercase;
 }
+.items { display: flex; flex-direction: column; gap: 8px; }
+.item {
+  display: grid; grid-template-columns: auto 1fr auto auto; gap: 8px; align-items: center;
+  padding: 10px 12px; border-radius: 12px; cursor: pointer; font-size: 13px;
+  border: 1px solid var(--card-border); background: var(--card-bg);
+  text-align: left;
+}
+.item:hover { background: var(--color-surface-hover); border-color: var(--color-divider); }
+.item.active {
+  background: linear-gradient(135deg, color-mix(in srgb, var(--color-primary) 18%, white), var(--card-bg));
+  border-color: var(--color-divider-strong);
+}
+.item.lua .code { color: #7c3aed; }
+.item.ext .code { color: #0891b2; }
+.dot { width: 8px; height: 8px; border-radius: 50%; }
+.running .dot { background: var(--color-success); }
+.failed .dot { background: var(--color-danger); }
+.stopped .dot, .starting .dot, .stopping .dot { background: var(--color-ink-muted); }
+.id { font-family: Consolas, monospace; }
+.code { color: var(--color-ink-muted); font-size: 11px; }
+.state {
+  padding: 3px 8px; border-radius: 999px;
+  background: var(--soft-overlay); color: var(--color-ink-dim);
+  font-size: 10px; letter-spacing: 0.06em; text-transform: uppercase;
+}
+.empty { color: var(--color-ink-dim); padding: 16px 0; font-size: 13px; }
 
+.state-badge {
+  padding: 5px 12px; border-radius: 999px; font-size: 12px;
+  background: var(--soft-overlay); color: var(--color-ink-dim);
+}
+.state-badge.running { background: color-mix(in srgb, var(--color-success) 20%, transparent); color: var(--color-success); }
+.state-badge.failed { background: color-mix(in srgb, var(--color-danger) 20%, transparent); color: var(--color-danger); }
+
+.detail-body { position: relative; z-index: 1; display: flex; flex-direction: column; gap: 16px; }
+.detail-grid { display: grid; gap: 12px; grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .detail-card {
-  display: grid;
-  gap: 8px;
-  padding: 18px;
-  border-radius: var(--radius-card);
-  background: var(--card-bg);
-  border: 1px solid var(--card-border);
-  box-shadow: inset 0 1px 0 var(--panel-inner-border);
+  display: grid; gap: 6px; padding: 14px; border-radius: var(--radius-card);
+  background: var(--card-bg); border: 1px solid var(--card-border);
+}
+.detail-card span { color: var(--color-ink-dim); font-size: 11px; }
+.detail-card strong { font-family: Consolas, monospace; font-size: 13px; }
+.detail-card .err { color: var(--color-danger); font-size: 12px; word-break: break-all; }
+
+.cfg-preview { display: flex; flex-direction: column; gap: 6px; }
+.preview-label { margin: 0; font-size: 11px; color: var(--color-ink-muted); }
+.preview-json {
+  margin: 0; padding: 12px; border-radius: 10px;
+  background: var(--card-bg); border: 1px solid var(--card-border);
+  font-family: Consolas, monospace; font-size: 12px; color: var(--color-ink-secondary);
+  max-height: 200px; overflow: auto; white-space: pre-wrap;
 }
 
-.detail-card span,
-.empty {
-  color: var(--color-ink-dim);
+.ops { display: flex; gap: 8px; flex-wrap: wrap; }
+.op {
+  padding: 8px 18px; border-radius: 8px; font-size: 13px; font-weight: 500;
+  border: 1px solid transparent; cursor: pointer;
 }
+.op:disabled { opacity: 0.4; cursor: not-allowed; }
+.op-start { background: var(--color-success); color: white; }
+.op-stop { background: var(--color-surface-hover); color: var(--color-ink-secondary); border-color: var(--color-divider); }
+.op-edit { background: var(--color-primary); color: white; }
+.op-del { background: transparent; color: var(--color-danger); border-color: var(--color-danger); }
+.op-error { color: var(--color-danger); font-size: 12px; margin: 4px 0 0; }
 
 @media (max-width: 960px) {
-  .collectors-page,
-  .detail-grid {
-    grid-template-columns: 1fr;
-  }
+  .collectors-page, .detail-grid { grid-template-columns: 1fr; }
 }
 </style>

@@ -3,7 +3,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { setActivePinia, createPinia } from 'pinia'
 import { useMonitorStore } from './monitor'
 import { useAuthStore } from './auth'
-import type { LogEntry, PacketEntry, StateEvent } from '../types'
+import type { LogEntry, PacketEntry, StateEvent, RtdataEvent } from '../types'
 import { PREVIEW_AUTH_TOKEN } from '../lib/previewSession'
 
 // jsdom 不实现 EventSource，store.start() 内会 new EventSource，测试需提供桩。
@@ -86,16 +86,13 @@ describe('monitor store', () => {
     expect(s.instances[0]).toMatchObject({ inst_id: 'i2', state: 'running', health: null })
   })
 
-  it('start wires SSE listeners for log/packet/state and surfaces URL with query token', () => {
+  it('start wires SSE listeners for rtdata/state (M3: log/packet 改按需订阅)', () => {
     const auth = useAuthStore()
     auth.setAuth('tok-abc', 'admin')
-    // 桩 fetch：start() 会立即调 loadInstances/loadRtdata/loadSysstatus（相对 URL，
-    // Node undici 不接受相对 URL，且本测只验 SSE 连线，不验轮询）。每次调返回新
-    // Response（Response body 只能读一次，三处 load 共享同一实例会报 Body unusable）。
+    // 桩 fetch：start() 会立即调 loadInstances/loadInstanceConfigs/loadRtdata/loadSysstatus。
     const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async () =>
       new Response('{}', { status: 200 }),
     )
-    // 桩 document：start/stop 用 visibilitychange 监听 + document.hidden 读，jsdom 未装。
     const docStub = {
       hidden: false,
       addEventListener: () => {},
@@ -107,22 +104,22 @@ describe('monitor store', () => {
     expect(FakeEventSource.last).not.toBeNull()
     expect(FakeEventSource.last!.url).toContain('/api/rsiot/api/v1/events')
     expect(FakeEventSource.last!.url).toContain('token=tok-abc')
-    expect(FakeEventSource.last!.url).toContain('types=log,packet,state')
-    // 事件分发到 ring buffer
-    FakeEventSource.last!.emit('log', { ts: 't', level: 'info', target: 't', message: 'hello' })
-    FakeEventSource.last!.emit('packet', { ts: 't', dir: 'rx', hex: '01', inst_id: 'i1' })
+    // M3 改动：start() 只订 rtdata,state（log/packet 移到诊断 Tab 手动订阅）。
+    expect(FakeEventSource.last!.url).toContain('types=rtdata,state')
+    expect(FakeEventSource.last!.url).not.toContain('log')
+    // rtdata 通知分发（去抖触发 loadRtdata，不含 value）；state 仍联动实例状态。
+    const evt: RtdataEvent = { dev_ids: ['devA'], count: 3, ts: 't' }
+    expect(() => FakeEventSource.last!.emit('rtdata', evt)).not.toThrow()
     FakeEventSource.last!.emit('state', { inst_id: 'i1', app_code: 'a', host_kind: 'b', state: 'running', ts: 't' })
-    expect(s.logs.length).toBe(1)
-    expect(s.logs[0].message).toBe('hello')
-    expect(s.packets.length).toBe(1)
     expect(s.instances[0]).toMatchObject({ inst_id: 'i1', state: 'running' })
+    // start() 不订 log/packet，emit 这两类到 rtdata SSE 不应填充 ring buffer。
     s.stop()
     fetchSpy.mockRestore()
   })
 
-  it('start 初始拉取 logs/recent（SSE 正常时日志列表不空）', async () => {
-    // 锁的不变量：SSE 连接正常期间没有"断线补拉"，若 start() 不初始拉 logs/recent，
-    // 稳定运行（无新日志产生）时 LogStream 永远空白。start() 必须主动拉一次。
+  it('subscribeLog 激活日志 SSE + 初始拉取 logs/recent（M3 按需订阅）', async () => {
+    // 锁的不变量：诊断 Tab 调 subscribeLog 后才建日志 SSE + 拉 logs/recent 历史。
+    // start() 不再自动订日志——日志 Tab 不激活时 LogStream 永远空（用户要求"默认不激活"）。
     const auth = useAuthStore()
     auth.setAuth('tok', 'admin')
     const fresh: LogEntry[] = [
@@ -139,14 +136,23 @@ describe('monitor store', () => {
     }
     const s = useMonitorStore()
     s.start()
+    // start 不订日志：此时 FakeEventSource.last 是 rtdata SSE，logs 应为空。
+    const rtdataSse = FakeEventSource.last
+    expect(s.logs.length).toBe(0)
+    s.subscribeLog()
+    // subscribeLog 建独立日志 SSE（FakeEventSource.last 现在指向它）。
+    const logSse = FakeEventSource.last
+    expect(logSse).not.toBe(rtdataSse)
+    expect(logSse!.url).toContain('types=log,state')
     await new Promise(r => setTimeout(r, 0))
-    // 未触发 onerror（SSE 正常）时日志也要有初始内容。
+    // logs/recent 被调（subscribeLog 内初始拉历史）。
     expect(s.logs.length).toBe(2)
-    expect(s.logs[0].message).toBe('m2')  // 最新在前（loadLogsRecent 反转后 unshift）
-    expect(s.logs[1].message).toBe('m1')
-    // logs/recent 确实被调过（而非只靠 SSE 帧）。
-    const called = fetchSpy.mock.calls.some(c => String(c[0]).includes('/logs/recent'))
-    expect(called).toBe(true)
+    expect(s.logs[0].message).toBe('m2')
+    // 实时 log 帧分发到 ring buffer。
+    logSse!.emit('log', { ts: 't', level: 'info', target: 't', message: 'live' })
+    expect(s.logs[0].message).toBe('live')
+    s.unsubscribeLog()
+    expect(s.logSubscribed).toBe(false)
     s.stop()
     fetchSpy.mockRestore()
   })
@@ -183,20 +189,36 @@ describe('monitor store', () => {
     fetchSpy.mockRestore()
   })
 
-  it('SSE onerror sets offline + loadLogsRecent补拉合并去重 + 复位 offline', async () => {
-    // 锁的不变量：SSE 断线 → offline=true + 补拉 logs/recent 把断线期间丢的帧
-    // 补回 logs（去重，不重复已有条目）→ 补拉成功后 offline=false。
-    // 对标 scada.html:945 的断线兜底模式。
+  it('rtdata SSE onerror sets offline（M3: rtdata 断线置离线，轮询兜底数据正确性）', async () => {
+    // 锁的不变量：rtdata 通知 SSE 断线 → offline=true（提示用户实时性降级）。
+    // 数据正确性靠 2s 轮询兜底，无需断线补拉日志（M3 改动：log 补拉移到 subscribeLog）。
     const auth = useAuthStore()
     auth.setAuth('tok', 'admin')
-    // 桩 fetch：start() 的 load* + loadLogsRecent 都走 fetch；后者 URL 含 logs/recent。
-    // 对非 logs/recent 请求返空对象（loadInstances/loadRtdata/loadSysstatus）；
-    // 对 logs/recent 返 3 条（1 条与现有重复，2 条新）——验去重 + 合并。
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async () =>
+      new Response('{}', { status: 200 }),
+    )
+    ;(globalThis as unknown as { document: unknown }).document = {
+      hidden: false, addEventListener: () => {}, removeEventListener: () => {},
+    }
+    const s = useMonitorStore()
+    s.start()
+    expect(s.offline).toBe(false)
+    FakeEventSource.last!.onerror!()
+    expect(s.offline).toBe(true)
+    s.stop()
+    fetchSpy.mockRestore()
+  })
+
+  it('subscribeLog 的 SSE onerror 触发 loadLogsRecent 补拉合并去重', async () => {
+    // 锁的不变量：日志 SSE（subscribeLog 建的独立连接）断线 → 补拉 logs/recent 把
+    // 断线期间丢的帧补回 logs（去重）。对标 scada.html:945 的断线兜底（现在只在日志订阅激活时）。
+    const auth = useAuthStore()
+    auth.setAuth('tok', 'admin')
     const existing: LogEntry = { ts: 't1', level: 'info', target: 't', message: 'old' }
     const fresh: LogEntry[] = [
-      { ts: 't3', level: 'warn', target: 't', message: 'new2' },  // 最新
+      { ts: 't3', level: 'warn', target: 't', message: 'new2' },
       { ts: 't2', level: 'info', target: 't', message: 'new1' },
-      { ts: 't1', level: 'info', target: 't', message: 'old' },   // 与 existing 重复
+      { ts: 't1', level: 'info', target: 't', message: 'old' },  // 重复
     ]
     const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
       const url = String(input)
@@ -207,46 +229,20 @@ describe('monitor store', () => {
       hidden: false, addEventListener: () => {}, removeEventListener: () => {},
     }
     const s = useMonitorStore()
-    s.onLog(existing)  // 预置一条已有日志（验去重）
-    expect(s.offline).toBe(false)
     s.start()
-    // 模拟 SSE 断线：触发 onerror。
-    expect(FakeEventSource.last).not.toBeNull()
-    FakeEventSource.last!.onerror!()
-    expect(s.offline).toBe(true)
-    // onerror 内 void loadLogsRecent() 异步；loadLogsRecent 多层 await（fetch + r.json）
-    // 需排空微任务队列——用 setTimeout(0) 兜底（比 Promise.resolve 嵌套稳）。
+    s.onLog(existing)  // 预置已有日志（验去重）
+    s.subscribeLog()
     await new Promise(r => setTimeout(r, 0))
-    // 补拉成功复位 offline；新增 2 条（new2/new1）合并，old 不重复。
-    expect(s.offline).toBe(false)
+    // subscribeLog 首次拉已合并 fresh（existing 重复不增）。length=3 (old/new1/new2)
     expect(s.logs.length).toBe(3)
-    // 最新在前：new2（补拉数组首项，最新）应在顶部。
-    expect(s.logs[0].message).toBe('new2')
-    expect(s.logs.map(l => l.message)).toEqual(['new2', 'new1', 'old'])
-    s.stop()
-    fetchSpy.mockRestore()
-  })
-
-  it('SSE onerror 补拉失败保持 offline（网络未恢复）', async () => {
-    // 补拉失败（fetch reject / 网络）时 offline 不复位——下轮重连再补。
-    const auth = useAuthStore()
-    auth.setAuth('tok', 'admin')
-    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
-      const url = String(input)
-      if (url.includes('/logs/recent')) throw new Error('network down')
-      return new Response('{}', { status: 200 })
-    })
-    ;(globalThis as unknown as { document: unknown }).document = {
-      hidden: false, addEventListener: () => {}, removeEventListener: () => {},
-    }
-    const s = useMonitorStore()
-    s.start()
-    expect(s.offline).toBe(false)
-    FakeEventSource.last!.onerror!()
-    expect(s.offline).toBe(true)
+    // 模拟日志 SSE 断线：触发 onerror 补拉。
+    const logSse = FakeEventSource.last
+    logSse!.onerror!()
     await new Promise(r => setTimeout(r, 0))
-    // 补拉失败 → offline 保持 true（等浏览器自动重连下轮再补）。
-    expect(s.offline).toBe(true)
+    // 补拉去重：无新增（fresh 已全合并），仍 3 条。
+    expect(s.logs.length).toBe(3)
+    expect(s.logs[0].message).toBe('new2')
+    s.unsubscribeLog()
     s.stop()
     fetchSpy.mockRestore()
   })
@@ -317,5 +313,118 @@ describe('monitor store', () => {
     expect(s.packets.length).toBeGreaterThan(0)
     expect(Object.keys(s.rtdata).length).toBeGreaterThan(0)
     expect(s.offline).toBe(false)
+  })
+
+  it('saveInstance POST /inst/set 整包写（后端无单点端点）', async () => {
+    // 锁的不变量：保存实例走 POST /inst/set {inst_id, object: <完整 InstConfig>}，
+    // 写后重拉配置 + 状态表。
+    const auth = useAuthStore()
+    auth.setAuth('tok', 'admin')
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async () =>
+      new Response('{"status":"ok"}', { status: 200 }),
+    )
+    const s = useMonitorStore()
+    const cfg = {
+      inst_id: 'mb-1', inst_name: '', app_code: 'modbusClient', app_type: 'South' as const,
+      auto_start: true, app_config: { kind: 'tcp' }, devices: [], host_kind: 'builtin' as const,
+    }
+    const ok = await s.saveInstance(cfg)
+    expect(ok).toBe(true)
+    const call = fetchSpy.mock.calls.find(c => String(c[0]).includes('/inst/set'))
+    expect(call).toBeTruthy()
+    const init = call![1] as RequestInit
+    expect(init.method).toBe('POST')
+    const body = JSON.parse(String(init.body))
+    expect(body.inst_id).toBe('mb-1')
+    expect(body.object.app_code).toBe('modbusClient')
+    fetchSpy.mockRestore()
+  })
+
+  it('deleteInstance POST /inst/delete + 重拉', async () => {
+    const auth = useAuthStore()
+    auth.setAuth('tok', 'admin')
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async () =>
+      new Response('{"status":"ok"}', { status: 200 }),
+    )
+    const s = useMonitorStore()
+    const ok = await s.deleteInstance('mb-1')
+    expect(ok).toBe(true)
+    const call = fetchSpy.mock.calls.find(c => String(c[0]).includes('/inst/delete'))
+    expect(call).toBeTruthy()
+    expect(JSON.parse(String((call![1] as RequestInit).body))).toEqual({ inst_id: 'mb-1' })
+    fetchSpy.mockRestore()
+  })
+
+  it('startInstance/stopInstance 调对应端点', async () => {
+    const auth = useAuthStore()
+    auth.setAuth('tok', 'admin')
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async () =>
+      new Response('{"status":"ok"}', { status: 200 }),
+    )
+    const s = useMonitorStore()
+    await s.startInstance('mb-1')
+    await s.stopInstance('mb-1')
+    const startCall = fetchSpy.mock.calls.find(c => String(c[0]).includes('/startinst'))
+    const stopCall = fetchSpy.mock.calls.find(c => String(c[0]).includes('/stopinst'))
+    expect(startCall).toBeTruthy()
+    expect(stopCall).toBeTruthy()
+    expect((startCall![1] as RequestInit).method).toBe('POST')
+    fetchSpy.mockRestore()
+  })
+
+  it('loadRtdata 收到 401 清 token 跳登录（审查 Important 修复：打破无限 401 空转）', async () => {
+    // 锁的不变量：token 失效后轮询不再静默 401 空转——handleUnauthorized 清 token
+    // 并触发跳转（测试环境无 window，跳转被 typeof 守卫跳过，但 token 清除必须发生）。
+    const auth = useAuthStore()
+    auth.setAuth('tok-expired', 'admin')
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async () =>
+      new Response('unauthorized', { status: 401 }),
+    )
+    ;(globalThis as unknown as { document: unknown }).document = {
+      hidden: false, addEventListener: () => {}, removeEventListener: () => {},
+    }
+    const s = useMonitorStore()
+    await s.loadRtdata()
+    // 401 → token 被清（auth.clear），不再持有失效凭据空转。
+    expect(auth.token).toBe('')
+    // rtdata 不更新（401 响应不写入）。
+    expect(Object.keys(s.rtdata).length).toBe(0)
+    s.stop()
+    fetchSpy.mockRestore()
+  })
+
+  it('loadRtdata 非 401 错误静默（网络抖动不误清 token）', async () => {
+    // 边界：只有 401 触发会话失效处理，网络错误/500 保持静默重试语义。
+    const auth = useAuthStore()
+    auth.setAuth('tok-ok', 'admin')
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async () =>
+      new Response('oops', { status: 500 }),
+    )
+    const s = useMonitorStore()
+    await s.loadRtdata()
+    expect(auth.token).toBe('tok-ok')  // 非 401 不清 token
+    fetchSpy.mockRestore()
+  })
+
+  it('subscribePacket 激活报文 trace + 建 packet SSE（M3 按需）', async () => {
+    const auth = useAuthStore()
+    auth.setAuth('tok', 'admin')
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async () =>
+      new Response('{"status":"ok","deadline_ms":123}', { status: 200 }),
+    )
+    ;(globalThis as unknown as { document: unknown }).document = {
+      hidden: false, addEventListener: () => {}, removeEventListener: () => {},
+    }
+    const s = useMonitorStore()
+    s.selectInstance('mb-tcp-2002')
+    await s.subscribePacket()
+    // 先 POST /inst/trace 激活，再建 packet SSE。
+    expect(s.packetSubscribed).toBe(true)
+    expect(FakeEventSource.last!.url).toContain('types=packet')
+    const traceCall = fetchSpy.mock.calls.find(c => String(c[0]).includes('/inst/trace'))
+    expect(traceCall).toBeTruthy()
+    s.unsubscribePacket()
+    expect(s.packetSubscribed).toBe(false)
+    fetchSpy.mockRestore()
   })
 })

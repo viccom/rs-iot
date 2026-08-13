@@ -9,6 +9,7 @@ describe('PRIMARY_ROUTES', () => {
       'collectors',
       'diagnostics',
       'control',
+      'lua',
     ])
     expect(PRIMARY_ROUTES.map(route => route.path)).toEqual([
       '/overview',
@@ -16,6 +17,7 @@ describe('PRIMARY_ROUTES', () => {
       '/collectors',
       '/diagnostics',
       '/control',
+      '/lua',
     ])
   })
 

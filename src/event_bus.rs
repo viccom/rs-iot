@@ -55,6 +55,20 @@ pub enum EventPayload {
         /// 时间戳（ISO8601/RFC3339）。
         ts: String,
     },
+    /// 一批 rtdata 变更通知（pipeline flush_batch 写入成功后发）。
+    ///
+    /// **批次级聚合**：一批（50ms 攒批窗口）一次事件，**不是每点一次**——50万点/秒下
+    /// 每点 publish 会爆 SSE（broadcast 256 容量 Lagged 雪崩 + 50万次 JSON 序列化）。
+    /// payload 只带"哪些 dev 变了 + 本批点数"，**不含 value**——前端收到后用现有 2s
+    /// 轮询 `GET /rtdatas` 拉最新值。推送只作"刷新触发"，数据正确性靠轮询兜底。
+    Rtdata {
+        /// 本批变更的 devid 列表（去重；现场极端多设备时截断，count 仍标真实总量）。
+        dev_ids: Vec<String>,
+        /// 本批点数（供前端估算变更量级，未截断的真实值）。
+        count: usize,
+        /// 时间戳（ISO8601/RFC3339）。
+        ts: String,
+    },
 }
 
 impl EventPayload {
@@ -64,6 +78,7 @@ impl EventPayload {
             Self::Log { .. } => "log",
             Self::Packet { .. } => "packet",
             Self::State { .. } => "state",
+            Self::Rtdata { .. } => "rtdata",
         }
     }
 }

@@ -135,6 +135,16 @@ pub fn build_router(state: AppState) -> axum::Router {
         .route("/api/v1/lua/scripts", get(routes_lua::list_scripts))
         // Lua 脚本写入（AI 写脚本入口：MCP save_script 工具 / 浮动面板；路径白名单 scripts/<name>）
         .route("/api/v1/lua/script/save", post(routes_lua::save_script))
+        // Lua 脚本回读 / 版本管理（前端脚本编辑器：读内容 / 列历史版本 / 回滚）
+        .route("/api/v1/lua/script", get(routes_lua::get_script))
+        .route(
+            "/api/v1/lua/script/versions",
+            get(routes_lua::list_versions),
+        )
+        .route(
+            "/api/v1/lua/script/rollback",
+            post(routes_lua::rollback_script),
+        )
         // 命令下发（写命令经 CtlRegistry 路由到实例 cmd_rx；默认 JWT 保护）
         .route("/api/v1/command/send", post(routes_command::send))
         // 报文 trace 开关（per-instance 运行时激活/查询/关闭；默认 JWT 保护）
