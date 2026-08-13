@@ -2,10 +2,10 @@
   单条消息渲染。user 右对齐气泡；assistant 左对齐含思考折叠面板 + 流式文本 + 工具卡。
   对标 zacp MessageItem 的视觉结构与交互（角色布局、思考折叠、流式占位动画、工具卡），
   适配本项目简化的 ChatMessage（text/reasoning/toolCalls 为直接字段，无 events JSON）。
-  与 zacp 的关键差异：
-  - 无 IncremarkContent（markdown 渲染库），文本走 whitespace-pre-wrap 纯文本；
-  - 无 sessionStore / vue-i18n / 按需加载 thoughts，reasoning 直接来自 message.reasoning（流式实时累加）；
-  - 无 events 时间线分块（本项目 message 已扁平化，文本与工具调用分别渲染，不交错）。
+  assistant 文本经 IncremarkContent 渲染 markdown（与 zacp 同款库：流式增量渲染 +
+  代码块高亮/复制按钮/表格/任务列表），is-finished 由注入的 running 态取反驱动。
+  与 zacp 的差异：无 sessionStore / vue-i18n / events 时间线分块（本项目 message
+  已扁平化，文本与工具调用分别渲染，不交错）。
 -->
 <script lang="ts">
 import { inject, type InjectionKey, type Ref } from 'vue'
@@ -15,6 +15,7 @@ export const runningKey: InjectionKey<Ref<boolean>> = Symbol('agent-running')
 
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from 'vue'
+import { IncremarkContent } from '@incremark/vue'
 import type { ChatMessage } from '../../types'
 import ToolCallCard from './ToolCallCard.vue'
 
@@ -73,8 +74,15 @@ watch(
     <!-- user：右对齐气泡 -->
     <div v-if="isUser" class="bubble-user">{{ message.text }}</div>
 
-    <!-- assistant 文本 -->
-    <div v-else-if="message.text" class="bubble-assistant">{{ message.text }}</div>
+    <!-- assistant 文本：markdown 渲染（IncremarkContent，流式增量 + 代码高亮 + 复制按钮）。
+         is-finished=!running 让 incremark 区分流式未完成块（渐入动画/loading）与完成块。 -->
+    <IncremarkContent
+      v-else-if="message.text"
+      class="bubble-assistant"
+      :content="message.text"
+      :is-finished="!running"
+      :incremark-options="{ htmlTree: true }"
+    />
 
     <!-- 工具调用卡片（每条独立卡，紧跟文本之后） -->
     <ToolCallCard
@@ -108,16 +116,46 @@ watch(
   border-bottom-right-radius: 6px;
 }
 
-/* assistant 文本：白底卡片，占整宽（对标 zacp AI 内容框） */
+/* assistant 文本：白底卡片，占整宽（对标 zacp AI 内容框）。
+   内容为 markdown 渲染的 HTML——不能用 pre-wrap（会保留 markdown 源换行破坏排版），
+   逐行词级断行即可（word-break），段落/列表/代码块间距由 incremark 主题提供。 */
 .bubble-assistant {
   width: 100%; min-width: 0;
-  white-space: pre-wrap; word-break: break-word;
+  word-break: break-word;
   padding: 12px 16px;
   font-size: 13px; line-height: 1.6; color: var(--color-ink);
   background: var(--color-surface-raised);
   border: 1px solid var(--color-divider);
   border-radius: 12px;
   box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+}
+
+/* markdown 内容与 rs-iot 主题色对齐（incremark 默认蓝/绿与我们的深青蓝不一致，
+   仅收敛链接/标题/行内代码/引用这四类最常出现于 AI 回复的元素）。 */
+.bubble-assistant :deep(a) {
+  color: var(--color-primary);
+  text-decoration: none;
+}
+.bubble-assistant :deep(a:hover) {
+  text-decoration: underline;
+}
+.bubble-assistant :deep(h1),
+.bubble-assistant :deep(h2),
+.bubble-assistant :deep(h3) {
+  color: var(--color-ink);
+}
+.bubble-assistant :deep(code.incremark-inline-code),
+.bubble-assistant :deep(code:not(pre code)) {
+  padding: 2px 6px;
+  font-size: 12px;
+  background: var(--chip-bg);
+  color: var(--chip-ink);
+  border: 1px solid var(--chip-border);
+  border-radius: 6px;
+}
+.bubble-assistant :deep(blockquote) {
+  color: var(--color-ink-muted);
+  border-left-color: var(--color-divider-strong);
 }
 
 /* 思考折叠面板：琥珀色高亮（对标 zacp amber-50）。 */

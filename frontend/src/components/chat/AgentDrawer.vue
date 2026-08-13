@@ -1,5 +1,6 @@
 <!-- frontend/src/components/chat/AgentDrawer.vue
-  AI 面板容器（右侧抽屉 380px）。对标 zacp 浅色风：
+  AI 面板容器（右侧抽屉 570px，2026-08-13 自 380px 加宽 150%——AI 回复为 markdown
+  排版，窄面板下表格/代码块换行严重）。对标 zacp 浅色风：
   - 头部：标题 + 状态（思考中/就绪） + 关闭按钮
   - 消息流：MessageItem 列表（user 右对齐 / assistant 含思考折叠 + 流式文本 + 工具卡）
   - 输入框：textarea + 发送（Enter 发送）
@@ -134,7 +135,7 @@ async function onApprove(decision: boolean) {
 <style scoped>
 .drawer {
   position: fixed; right: 0; top: 0; bottom: 0;
-  width: 380px; max-width: 100vw;
+  width: 570px; max-width: 100vw;
   background: var(--panel-bg);
   border-left: 1px solid var(--panel-border);
   display: grid;
