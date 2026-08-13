@@ -177,13 +177,37 @@ export const useMonitorStore = defineStore('monitor', () => {
       offline.value = true
       void loadLogsRecent()
     }
-    // 立即拉一次 + 周期轮询。
+    // 立即拉一次 + 周期轮询。loadLogsRecent 必须初始拉：SSE 只推实时新帧，
+    // 稳定运行（无新日志）时 LogStream 若只靠 SSE 会永远空白。
     void loadInstances()
     void loadRtdata()
     void loadSysstatus()
+    void loadLogsRecent()
     rtdataTimer = setInterval(loadRtdata, 2000)
     sysstatusTimer = setInterval(loadSysstatus, 5000)
     document.addEventListener('visibilitychange', onVisibility)
+  }
+
+  /**
+   * 激活当前实例的报文 trace（POST /api/v1/inst/trace，对标 routes_trace::TraceReq）。
+   *
+   * 激活后该实例收发字节经 io_trace dump → EventBus Packet 帧 → SSE 推给本 store
+   * （onPacket 填充 packets）。duration_secs 缺省 60（rs-iot 缺省同值）。
+   * 未选实例时 no-op（组件层按钮已禁用，此处防御直调）。
+   */
+  async function startPacketTrace(durationSecs = 60) {
+    if (!selectedInstance.value) return
+    try {
+      const r = await fetch('/api/rsiot/api/v1/inst/trace', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${useAuthStore().token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ inst_id: selectedInstance.value, duration_secs: durationSecs }),
+      })
+      if (!r.ok) console.warn('monitor: activate packet trace failed', r.status)
+    } catch { /* 激活失败静默，报文区显示空提示 */ }
   }
 
   /** SSE 帧 parse/handle 容错：畸形帧 warn 并跳过，不冒泡到 EventSource。 */
@@ -244,6 +268,7 @@ export const useMonitorStore = defineStore('monitor', () => {
     loadLogsRecent,
     start,
     stop,
+    startPacketTrace,
     selectInstance,
     selectDevice,
   }

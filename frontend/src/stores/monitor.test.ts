@@ -120,6 +120,69 @@ describe('monitor store', () => {
     fetchSpy.mockRestore()
   })
 
+  it('start 初始拉取 logs/recent（SSE 正常时日志列表不空）', async () => {
+    // 锁的不变量：SSE 连接正常期间没有"断线补拉"，若 start() 不初始拉 logs/recent，
+    // 稳定运行（无新日志产生）时 LogStream 永远空白。start() 必须主动拉一次。
+    const auth = useAuthStore()
+    auth.setAuth('tok', 'admin')
+    const fresh: LogEntry[] = [
+      { ts: 't2', level: 'info', target: 't', message: 'm2' },
+      { ts: 't1', level: 'warn', target: 't', message: 'm1' },
+    ]
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      const url = String(input)
+      if (url.includes('/logs/recent')) return new Response(JSON.stringify(fresh), { status: 200 })
+      return new Response('{}', { status: 200 })
+    })
+    ;(globalThis as unknown as { document: unknown }).document = {
+      hidden: false, addEventListener: () => {}, removeEventListener: () => {},
+    }
+    const s = useMonitorStore()
+    s.start()
+    await new Promise(r => setTimeout(r, 0))
+    // 未触发 onerror（SSE 正常）时日志也要有初始内容。
+    expect(s.logs.length).toBe(2)
+    expect(s.logs[0].message).toBe('m2')  // 最新在前（loadLogsRecent 反转后 unshift）
+    expect(s.logs[1].message).toBe('m1')
+    // logs/recent 确实被调过（而非只靠 SSE 帧）。
+    const called = fetchSpy.mock.calls.some(c => String(c[0]).includes('/logs/recent'))
+    expect(called).toBe(true)
+    s.stop()
+    fetchSpy.mockRestore()
+  })
+
+  it('startPacketTrace POST inst/trace 激活当前实例报文采集', async () => {
+    const auth = useAuthStore()
+    auth.setAuth('tok', 'admin')
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async () =>
+      new Response('{"status":"ok","deadline_ms":123}', { status: 200 }),
+    )
+    const s = useMonitorStore()
+    s.selectInstance('mb-tcp-2002')
+    await s.startPacketTrace(60)
+    // 验证意图：激活请求带正确 method/path/body（对标 routes_trace TraceReq）。
+    const call = fetchSpy.mock.calls[0]
+    expect(String(call[0])).toBe('/api/rsiot/api/v1/inst/trace')
+    const init = call[1] as RequestInit
+    expect(init.method).toBe('POST')
+    expect(init.headers).toMatchObject({ Authorization: 'Bearer tok', 'Content-Type': 'application/json' })
+    const body = JSON.parse(String(init.body))
+    expect(body).toEqual({ inst_id: 'mb-tcp-2002', duration_secs: 60 })
+    fetchSpy.mockRestore()
+  })
+
+  it('startPacketTrace 未选实例时不发请求', async () => {
+    const auth = useAuthStore()
+    auth.setAuth('tok', 'admin')
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async () =>
+      new Response('{}', { status: 200 }),
+    )
+    const s = useMonitorStore()
+    await s.startPacketTrace(60)
+    expect(fetchSpy).not.toHaveBeenCalled()
+    fetchSpy.mockRestore()
+  })
+
   it('SSE onerror sets offline + loadLogsRecent补拉合并去重 + 复位 offline', async () => {
     // 锁的不变量：SSE 断线 → offline=true + 补拉 logs/recent 把断线期间丢的帧
     // 补回 logs（去重，不重复已有条目）→ 补拉成功后 offline=false。
