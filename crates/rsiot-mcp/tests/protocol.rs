@@ -133,14 +133,14 @@ async fn call_tool_round_trip_read_tags() {
     server_task.abort();
 }
 
-/// call_tool 带参数往返：list_devices 带 dev_id 参数正确反序列化（验证 schema 路径）。
+/// call_tool 带参数往返：read_tags 带 dev_id 参数正确反序列化（验证 schema 路径）。
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn call_tool_with_arguments_round_trip() {
-    let (client, server_task) = spawn_handshake(json!({"dev_id": "devX"})).await;
+    let (client, server_task) = spawn_handshake(json!({"devX": {"temp": 1}})).await;
     let result = client
         .peer()
         .call_tool(
-            CallToolRequestParams::new("rsiot_list_devices").with_arguments(
+            CallToolRequestParams::new("rsiot_read_tags").with_arguments(
                 json!({ "dev_id": "devX" })
                     .as_object()
                     .cloned()

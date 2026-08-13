@@ -336,24 +336,152 @@ fn backend_to_result(
     }
 }
 
+/// 聚合设备条目（`rsiot_list_devices` 输出元素，从实例配置聚合）。
+#[derive(Debug, serde::Serialize)]
+struct AggDevice {
+    /// 设备 ID（DevSpec.value）。
+    dev_id: String,
+    /// 设备标签（DevSpec.label，可空）。
+    #[serde(skip_serializing_if = "String::is_empty")]
+    label: String,
+    /// 引用该设备的实例 ID 列表（同一 dev 可被多实例引用）。
+    instances: Vec<String>,
+    /// 采集点（ChildSpec：value=tag、type=数据类型）。
+    children: Vec<AggChild>,
+}
+
+/// 聚合采集点（`rsiot_list_devices` children 元素）。
+#[derive(Debug, serde::Serialize)]
+struct AggChild {
+    /// 变量名/tag（ChildSpec.value）。
+    tag: String,
+    /// 数据类型（ChildSpec.type，如 "float"/"int"/"bool"）。
+    #[serde(rename = "type")]
+    typ: String,
+    /// 采集点标签（ChildSpec.label，可空）。
+    #[serde(skip_serializing_if = "String::is_empty")]
+    label: String,
+}
+
+/// 从 `GET /api/v1/insts` 返回的实例配置表聚合设备列表。
+///
+/// 输入 `{inst_id: InstConfig, ...}`（InstConfig.devices: Vec<DeviceSpec>）；
+/// 输出 `{devices: [...]}`。同一 dev 被多实例引用时合并 instances；children 按
+/// tag 去重（同 dev 多实例配同 tag 只列一次）。`dev_id` 过滤可选（None 全部）。
+///
+/// **为何不读 `/api/v1/devices`**：那是独立设备注册表（lux `devices` Hash），
+/// 仅在显式 `POST /api/v1/device/set` 写入——建实例不同步写，常为空表。
+/// 实例设备权威在 `InstConfig.devices`（与前端采集器页/rtdata 类型映射同源）。
+fn aggregate_devices(
+    insts: &serde_json::Value,
+    dev_id_filter: Option<&str>,
+) -> Result<serde_json::Value, String> {
+    let obj = insts.as_object().ok_or("insts 返回非对象")?;
+    // BTreeMap 保证输出顺序稳定（dev_id 字典序）。
+    let mut agg: std::collections::BTreeMap<String, (String, Vec<String>, Vec<AggChild>)> =
+        std::collections::BTreeMap::new();
+    let mut seen_children: std::collections::BTreeMap<String, std::collections::BTreeSet<String>> =
+        std::collections::BTreeMap::new();
+
+    for (inst_id, cfg) in obj {
+        let Some(devices) = cfg.get("devices").and_then(|d| d.as_array()) else {
+            continue;
+        };
+        for dev in devices {
+            let Some(dev_id) = dev.get("value").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            if dev_id.is_empty() || dev_id_filter.is_some_and(|f| f != dev_id) {
+                continue;
+            }
+            let label = dev
+                .get("label")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let entry = agg
+                .entry(dev_id.to_string())
+                .or_insert_with(|| (label.clone(), Vec::new(), Vec::new()));
+            entry.1.push(inst_id.clone());
+            // children 按 tag 去重（同 dev 多实例配同 tag 只列一次，首个实例优先）。
+            let seen = seen_children.entry(dev_id.to_string()).or_default();
+            if let Some(children) = dev.get("children").and_then(|c| c.as_array()) {
+                for ch in children {
+                    let Some(tag) = ch.get("value").and_then(|v| v.as_str()) else {
+                        continue;
+                    };
+                    if !seen.insert(tag.to_string()) {
+                        continue;
+                    }
+                    entry.2.push(AggChild {
+                        tag: tag.to_string(),
+                        typ: ch
+                            .get("type")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                        label: ch
+                            .get("label")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                    });
+                }
+            }
+        }
+    }
+
+    let devices: Vec<AggDevice> = agg
+        .into_iter()
+        .map(|(dev_id, (label, mut instances, children))| {
+            instances.sort();
+            AggDevice {
+                dev_id,
+                label,
+                instances,
+                children,
+            }
+        })
+        .collect();
+    Ok(serde_json::json!({ "devices": devices }))
+}
+
 #[tool_router]
 impl RsiotMcpServer {
     // ---- 只读工具（agent 自动放行，对标 readOnlyHint）----
 
-    /// `rsiot_list_devices`：列设备（含子采集点 children）。映射 `GET /api/v1/devices`。
+    /// `rsiot_list_devices`：列设备（从实例配置聚合，与前端采集器页同源）。
+    ///
+    /// 后端 `/api/v1/devices` 读独立设备注册表（lux `devices` Hash），仅在显式
+    /// `POST /api/v1/device/set` 时写入——建实例**不同步写**该表，故常为空，查不到
+    /// 实例实际采集的设备（现场反馈 bug）。实例设备在 `InstConfig.devices`
+    /// （经 `/api/v1/insts`），本工具从该源聚合，保证与 rtdata 实际采集设备一致。
     #[tool(
-        description = "List devices registered in the rs-iot gateway, optionally filtered by dev_id. Returns device list with collection points (children). Read-only.",
+        description = "List devices from instance configs (aggregated), optionally filtered by dev_id. Each device includes collection points (children) and owning instances. Read-only.",
         annotations(read_only_hint = true)
     )]
     async fn rsiot_list_devices(
         &self,
         Parameters(req): Parameters<ListDevicesRequest>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        let path = match &req.dev_id {
-            Some(id) => format!("/api/v1/device/get?dev_id={}", encode_query_value(id)),
-            None => "/api/v1/devices".to_string(),
+        let raw = match self.backend.get("/api/v1/insts").await {
+            Ok(v) => v,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![ContentBlock::text(format!(
+                    "rsiot_list_devices failed: {e}"
+                ))]));
+            }
         };
-        backend_to_result(self.backend.get(&path).await, "rsiot_list_devices")
+        let devices = match aggregate_devices(&raw, req.dev_id.as_deref()) {
+            Ok(d) => d,
+            Err(msg) => {
+                return Ok(CallToolResult::error(vec![ContentBlock::text(format!(
+                    "rsiot_list_devices failed: {msg}"
+                ))]));
+            }
+        };
+        let text = serde_json::to_string_pretty(&devices).unwrap_or_else(|_| devices.to_string());
+        Ok(CallToolResult::success(vec![ContentBlock::text(text)]))
     }
 
     /// `rsiot_read_tags`：读设备实时数据。映射 `GET /api/v1/rtdatas?dev_id=`。
@@ -935,42 +1063,94 @@ mod tests {
         );
     }
 
-    // ---- list_devices（原工具，重构后用 helper，回归测试）----
+    // ---- list_devices（从实例配置聚合，现场 bug 修复后语义）----
 
+    /// 构造一个 fake `/api/v1/insts` 返回（两实例，devA 被两实例共享、devB 单实例）。
+    fn fake_insts() -> Value {
+        json!({
+            "mb-1": {
+                "inst_id": "mb-1", "app_code": "modbusClient", "app_type": "south",
+                "app_config": {}, "auto_start": true, "host_kind": "builtin",
+                "devices": [
+                    {"label": "设备A", "value": "devA", "children": [
+                        {"label": "温度", "value": "temp", "type": "float"},
+                        {"label": "湿度", "value": "humidity", "type": "float"}
+                    ]},
+                    {"label": "设备B", "value": "devB", "children": [
+                        {"label": "转速", "value": "speed", "type": "i16"}
+                    ]}
+                ]
+            },
+            "mb-2": {
+                "inst_id": "mb-2", "app_code": "modbusClient", "app_type": "south",
+                "app_config": {}, "auto_start": true, "host_kind": "builtin",
+                "devices": [
+                    {"label": "", "value": "devA", "children": [
+                        {"label": "温度2", "value": "temp", "type": "float"}
+                    ]}
+                ]
+            }
+        })
+    }
+
+    /// 验证意图（规则7）：工具必须从实例配置聚合设备——后端 /api/v1/devices 是独立
+    /// 注册表，建实例不写它（常为空），从它读 = 查不到实例实际采集的设备（现场 bug）。
     #[tokio::test]
-    async fn list_devices_returns_backend_json_as_text() {
-        let backend = Arc::new(FakeBackend::new(json!([{ "dev_id": "devA" }])));
-        let server = RsiotMcpServer::new(backend, RiskPolicy::default());
+    async fn list_devices_reads_insts_and_aggregates() {
+        let backend = Arc::new(FakeBackend::new(fake_insts()));
+        let server = RsiotMcpServer::new(
+            backend.clone() as Arc<dyn RsiotBackend>,
+            RiskPolicy::default(),
+        );
         let result = server
             .rsiot_list_devices(Parameters(ListDevicesRequest { dev_id: None }))
             .await
             .unwrap();
         assert_ne!(result.is_error, Some(true));
-        assert!(text_of(&result).contains("devA"));
+        // 数据源是 insts（不是空注册表 devices）。
+        assert!(
+            backend.recorded_paths()[0].contains("/api/v1/insts"),
+            "list_devices 应读实例配置表"
+        );
+        // 聚合输出含两个设备。
+        let text = text_of(&result);
+        assert!(text.contains("devA"), "got {text}");
+        assert!(text.contains("devB"), "got {text}");
+        // devA 被两实例共享 → instances 合并为 [mb-1, mb-2]。
+        let parsed: Value = serde_json::from_str(text).unwrap();
+        let dev_a = parsed["devices"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|d| d["dev_id"] == "devA")
+            .unwrap();
+        assert_eq!(dev_a["instances"], json!(["mb-1", "mb-2"]));
+        // children 去重：temp 在两实例重复配置，只列一次（含 type）。
+        assert_eq!(dev_a["children"].as_array().unwrap().len(), 2);
+        assert!(dev_a["children"].as_array().unwrap()[0]["type"] == "float");
     }
 
     #[tokio::test]
-    async fn list_devices_with_dev_id_hits_device_get() {
-        let backend = Arc::new(FakeBackend::new(json!({"dev_id": "devA"})));
-        let server = RsiotMcpServer::new(
-            backend.clone() as Arc<dyn RsiotBackend>,
-            RiskPolicy::default(),
-        );
-        server
+    async fn list_devices_filters_by_dev_id() {
+        let backend = Arc::new(FakeBackend::new(fake_insts()));
+        let server = RsiotMcpServer::new(backend, RiskPolicy::default());
+        let result = server
             .rsiot_list_devices(Parameters(ListDevicesRequest {
-                dev_id: Some("devA".into()),
+                dev_id: Some("devB".into()),
             }))
             .await
             .unwrap();
-        // 验证意图：带 dev_id 走单设备端点 device/get，不带走列表端点 devices。
-        // 测试侧保留 Arc<FakeBackend>（server 持 trait object 看不到具体方法）。
-        let paths = backend.recorded_paths();
-        assert!(
-            paths
-                .iter()
-                .any(|p| p.contains("/api/v1/device/get?dev_id=devA")),
-            "dev_id filter should hit device/get; got {paths:?}"
-        );
+        let text = text_of(&result);
+        let parsed: Value = serde_json::from_str(text).unwrap();
+        let devices = parsed["devices"].as_array().unwrap();
+        assert_eq!(devices.len(), 1, "dev_id 过滤只留 devB; got {text}");
+        assert_eq!(devices[0]["dev_id"], "devB");
+    }
+
+    /// 纯函数测试：insts 非对象 → 明确错误而非 panic。
+    #[test]
+    fn aggregate_devices_rejects_non_object() {
+        assert!(aggregate_devices(&json!([1, 2]), None).is_err());
     }
 
     // ---- read_tags ----
