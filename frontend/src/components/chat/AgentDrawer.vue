@@ -135,11 +135,12 @@ async function onApprove(decision: boolean) {
 .drawer {
   position: fixed; right: 0; top: 0; bottom: 0;
   width: 380px; max-width: 100vw;
-  background: var(--color-surface-raised);
-  border-left: 1px solid var(--color-divider);
+  background: var(--panel-bg);
+  border-left: 1px solid var(--panel-border);
   display: grid;
   grid-template-rows: 44px 1fr auto;
   z-index: 100;
+  box-shadow: -20px 0 60px color-mix(in srgb, var(--color-surface) 70%, black 30%);
 }
 
 /* 头部 */
@@ -147,11 +148,20 @@ async function onApprove(decision: boolean) {
   display: flex; align-items: center; gap: 8px;
   padding: 0 12px;
   border-bottom: 1px solid var(--color-divider);
-  background: var(--color-surface-raised);
+  background: var(--card-bg);
 }
 .title { margin: 0; flex: 1; font-size: 14px; font-weight: 600; color: var(--color-ink); }
-.status { font-size: 12px; color: var(--color-ink-muted); }
-.status.on { color: var(--color-primary); }
+.status {
+  font-size: 12px;
+  color: var(--color-ink-muted);
+  padding: 5px 10px;
+  border-radius: 999px;
+  background: var(--soft-overlay);
+}
+.status.on {
+  color: var(--chip-ink);
+  background: var(--chip-bg);
+}
 .btn-text {
   background: transparent; border: none;
   font-size: 12px; color: var(--color-ink-muted);
@@ -170,7 +180,9 @@ async function onApprove(decision: boolean) {
 .messages {
   overflow-y: auto;
   padding: 12px;
-  background: var(--color-surface);
+  background:
+    radial-gradient(circle at top left, var(--panel-highlight), transparent 22%),
+    var(--page-bg);
   scrollbar-width: thin;
   scrollbar-color: rgba(148, 163, 184, 0.6) transparent;
 }
@@ -185,12 +197,12 @@ async function onApprove(decision: boolean) {
 .back-to-bottom {
   position: absolute;
   bottom: 130px; right: 16px;
-  padding: 6px 12px;
+  padding: 7px 12px;
   font-size: 12px;
-  background: var(--color-surface-raised);
-  border: 1px solid var(--color-divider);
-  border-radius: 16px;
-  box-shadow: 0 2px 8px rgba(15, 23, 42, 0.12);
+  background: var(--card-bg);
+  border: 1px solid var(--card-border);
+  border-radius: 999px;
+  box-shadow: var(--shadow-soft);
   color: var(--color-ink-secondary);
   cursor: pointer;
   z-index: 10;
@@ -198,7 +210,10 @@ async function onApprove(decision: boolean) {
 .back-to-bottom:hover { background: var(--color-surface-hover); }
 
 /* 输入区 */
-.input-area { border-top: 1px solid var(--color-divider); background: var(--color-surface-raised); }
+.input-area {
+  border-top: 1px solid var(--color-divider);
+  background: var(--card-bg);
+}
 .error-banner {
   display: flex; align-items: center; justify-content: space-between; gap: 8px;
   padding: 6px 12px;
@@ -209,13 +224,10 @@ async function onApprove(decision: boolean) {
 .input-row { display: flex; gap: 8px; padding: 10px; }
 .textarea {
   flex: 1; resize: none;
-  padding: 8px 10px;
+  padding: 12px 14px;
   font-size: 13px; line-height: 1.5;
   font-family: inherit;
-  border: 1px solid var(--color-divider);
-  border-radius: 8px;
-  background: var(--color-surface-raised);
-  color: var(--color-ink);
+  border-radius: 14px;
 }
 .textarea:focus { outline: none; border-color: var(--color-primary); }
 .textarea:disabled { background: var(--color-surface-hover); cursor: not-allowed; }
@@ -223,11 +235,12 @@ async function onApprove(decision: boolean) {
   align-self: stretch;
   padding: 0 16px;
   font-size: 13px; font-weight: 500;
-  background: var(--color-primary);
-  color: white;
+  background: linear-gradient(135deg, var(--color-primary), var(--color-primary-strong));
+  color: var(--shell-theme-active-ink);
   border: none; border-radius: 8px;
   cursor: pointer;
   transition: background-color 0.15s;
+  box-shadow: var(--shadow-soft);
 }
 .btn-send:hover:not(:disabled) { background: var(--color-primary-hover); }
 .btn-send:disabled { opacity: 0.5; cursor: not-allowed; }

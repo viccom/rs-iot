@@ -6,8 +6,19 @@ export const router = createRouter({
   history: createWebHistory(),
   routes: [
     { path: '/login', component: () => import('./views/Login.vue') },
-    { path: '/', redirect: '/scada' },
-    { path: '/scada', component: () => import('./views/Monitor.vue'), meta: { auth: true } },
+    { path: '/', redirect: '/overview' },
+    {
+      path: '/',
+      component: () => import('./components/layout/AppShell.vue'),
+      meta: { auth: true },
+      children: [
+        { path: 'overview', name: 'overview', component: () => import('./views/Overview.vue'), meta: { auth: true } },
+        { path: 'telemetry', name: 'telemetry', component: () => import('./views/Telemetry.vue'), meta: { auth: true } },
+        { path: 'collectors', name: 'collectors', component: () => import('./views/Collectors.vue'), meta: { auth: true } },
+        { path: 'diagnostics', name: 'diagnostics', component: () => import('./views/Diagnostics.vue'), meta: { auth: true } },
+        { path: 'control', name: 'control', component: () => import('./views/Control.vue'), meta: { auth: true } },
+      ],
+    },
   ],
 })
 

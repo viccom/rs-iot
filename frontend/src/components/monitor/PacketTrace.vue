@@ -25,9 +25,27 @@ const filtered = computed(() => {
 </template>
 <style scoped>
 .packet-trace { display: flex; flex-direction: column; height: 100%; }
-.hint { padding: 8px; color: var(--color-ink-muted); font-size: 12px; margin: 0; }
-.list { flex: 1; overflow-y: auto; padding: 4px; }
-.pkt { display: grid; grid-template-columns: 40px 120px 1fr 80px; gap: 8px; padding: 3px 6px; font-size: 12px; font-family: monospace; border-bottom: 1px solid var(--color-divider); }
+.hint {
+  padding: 10px 12px;
+  color: var(--color-ink-muted);
+  font-size: 12px;
+  margin: 0 0 10px;
+  border-radius: 14px;
+  background: var(--chip-bg);
+  border: 1px solid var(--chip-border);
+}
+.list { flex: 1; overflow-y: auto; padding: 0; }
+.pkt {
+  display: grid;
+  grid-template-columns: 48px 130px 1fr 84px;
+  gap: 10px;
+  padding: 12px 10px;
+  font-size: 12px;
+  font-family: Consolas, monospace;
+  border-bottom: 1px solid var(--card-border);
+  border-radius: 14px;
+}
+.pkt:hover { background: var(--table-row-hover); }
 .pkt.tx .dir { color: var(--color-primary); } .pkt.rx .dir { color: var(--color-success); }
 .inst, .ts { color: var(--color-ink-muted); }
 .hex { word-break: break-all; }

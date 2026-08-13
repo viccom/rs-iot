@@ -5,6 +5,8 @@ import type { ChatMessage, ServeEvent } from '../types'
 import { useAuthStore } from './auth'
 import { useMonitorStore } from './monitor'
 import { api } from '../api/client'
+import { useWorkspaceStore } from './workspace'
+import { buildAgentContextBlock } from '../lib/agentContext'
 
 /**
  * agent store：serve SSE kind 分发 + submit / approve / cancel。
@@ -103,10 +105,22 @@ export const useAgentStore = defineStore('agent', () => {
   async function submit(input: string) {
     messages.value.push({ id: nextId++, role: 'user', text: input })
     const monitor = useMonitorStore()
-    const ctx = monitor.selectedInstance
-      ? `\n[上下文: 当前查看实例 ${monitor.selectedInstance}]`
-      : ''
-    const r = await api('/api/agent/submit', { method: 'POST', body: JSON.stringify({ input: input + ctx }) })
+    const workspace = useWorkspaceStore()
+    const contextBlock = buildAgentContextBlock({
+      routeTitle: workspace.routeContext.routeTitle,
+      routePath: workspace.routeContext.routePath,
+      pageSummary: workspace.pageContext.pageSummary,
+      selectedInstanceId: monitor.selectedInstance,
+      selectedDeviceId: monitor.selectedDevice,
+      facts: workspace.pageContext.facts,
+    })
+    const requestInput = contextBlock
+      ? `${input}\n\n[页面上下文]\n${contextBlock}`
+      : input
+    const r = await api('/api/agent/submit', {
+      method: 'POST',
+      body: JSON.stringify({ input: requestInput }),
+    })
     if (!r.ok) throw new Error(`submit failed: ${r.status} ${await r.text().catch(() => '')}`.trim())
   }
 

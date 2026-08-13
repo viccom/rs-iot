@@ -10,6 +10,8 @@ vi.mock('../api/client', () => ({ api: vi.fn(async () => new Response('{}')) }))
 
 import { api } from '../api/client'
 import { useAgentStore } from './agent'
+import { useMonitorStore } from './monitor'
+import { useWorkspaceStore } from './workspace'
 
 describe('agent store', () => {
   beforeEach(() => setActivePinia(createPinia()))
@@ -83,5 +85,34 @@ describe('agent store', () => {
     // 默认 mock 返回 200
     await s.approve(false)
     expect(s.approval).toBeNull()
+  })
+
+  it('submit injects current page context and visible data summary', async () => {
+    const monitor = useMonitorStore()
+    monitor.selectInstance('mb-power')
+    monitor.selectDevice('devA')
+
+    const workspace = useWorkspaceStore()
+    workspace.setRouteContext({
+      routeKey: 'telemetry',
+      routeTitle: '实时数据',
+      routePath: '/telemetry',
+    })
+    workspace.setPageContext({
+      pageSummary: '正在查看 devA 的关键点位变化',
+      facts: ['筛选关键字: temp', '可见点位 12 个'],
+    })
+
+    const s = useAgentStore()
+    await s.submit('帮我看看当前是不是有异常')
+
+    const [, options] = vi.mocked(api).mock.calls.at(-1) ?? []
+    const body = options?.body ? JSON.parse(String(options.body)) : {}
+    expect(body.input).toContain('帮我看看当前是不是有异常')
+    expect(body.input).toContain('当前页面: 实时数据')
+    expect(body.input).toContain('页面路径: /telemetry')
+    expect(body.input).toContain('当前实例: mb-power')
+    expect(body.input).toContain('当前设备: devA')
+    expect(body.input).toContain('可见点位 12 个')
   })
 })

@@ -29,7 +29,34 @@ const metrics = (): MetricsInfo => (monitor.sysstatus.metrics as MetricsInfo) ||
   </div>
 </template>
 <style scoped>
-.sys { padding: 12px; display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; }
-.row { display: flex; justify-content: space-between; padding: 6px 8px; background: var(--color-surface-raised); border-radius: 4px; font-size: 13px; }
-.row b { font-family: monospace; }
+.sys {
+  padding: 2px 0 0;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.row {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 16px 18px;
+  background: var(--card-bg);
+  border-radius: 18px;
+  border: 1px solid var(--card-border);
+  font-size: 13px;
+  box-shadow: inset 0 1px 0 var(--panel-inner-border);
+}
+
+.row span {
+  color: var(--color-ink-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-size: 11px;
+}
+
+.row b {
+  font-family: Consolas, monospace;
+  color: var(--chip-ink);
+}
 </style>

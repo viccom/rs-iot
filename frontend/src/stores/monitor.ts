@@ -3,6 +3,7 @@ import { defineStore } from 'pinia'
 import { ref } from 'vue'
 import type { InstanceStat, LogEntry, PacketEntry, StateEvent, RtdataCell } from '../types'
 import { useAuthStore } from './auth'
+import { createPreviewSnapshot, isPreviewAuthToken } from '../lib/previewSession'
 
 /** 日志环形缓冲容量（最新在前）。 */
 const MAX_LOGS = 500
@@ -29,6 +30,8 @@ export const useMonitorStore = defineStore('monitor', () => {
   const sysstatus = ref<Record<string, unknown>>({})
   /** 当前选中实例 ID（组件联动）。 */
   const selectedInstance = ref<string>('')
+  /** 当前选中设备 ID（页面感知 AI / rtdata 联动）。 */
+  const selectedDevice = ref<string>('')
   /** SSE 连接是否断开（onerror 置 true / onopen + 补拉成功复位 false）。 */
   const offline = ref(false)
 
@@ -66,6 +69,10 @@ export const useMonitorStore = defineStore('monitor', () => {
 
   /** 拉取实例列表（进程级 state + health）。 */
   async function loadInstances() {
+    if (isPreviewAuthToken(useAuthStore().token)) {
+      applyPreviewSnapshot()
+      return
+    }
     try {
       const r = await fetch('/api/rsiot/api/v1/inst/stats', {
         headers: { Authorization: `Bearer ${useAuthStore().token}` },
@@ -76,6 +83,10 @@ export const useMonitorStore = defineStore('monitor', () => {
 
   /** 拉取 rtdata 全量快照。 */
   async function loadRtdata() {
+    if (isPreviewAuthToken(useAuthStore().token)) {
+      applyPreviewSnapshot()
+      return
+    }
     try {
       const r = await fetch('/api/rsiot/api/v1/rtdatas', {
         headers: { Authorization: `Bearer ${useAuthStore().token}` },
@@ -86,6 +97,10 @@ export const useMonitorStore = defineStore('monitor', () => {
 
   /** 拉取进程级 sysstatus。 */
   async function loadSysstatus() {
+    if (isPreviewAuthToken(useAuthStore().token)) {
+      applyPreviewSnapshot()
+      return
+    }
     try {
       const r = await fetch('/api/rsiot/api/v1/sysstatus', {
         headers: { Authorization: `Bearer ${useAuthStore().token}` },
@@ -102,6 +117,10 @@ export const useMonitorStore = defineStore('monitor', () => {
    * 补拉成功（r.ok）复位 offline（说明网络恢复）；失败保持 offline，下轮重连再补。
    */
   async function loadLogsRecent() {
+    if (isPreviewAuthToken(useAuthStore().token)) {
+      applyPreviewSnapshot()
+      return
+    }
     try {
       const r = await fetch('/api/rsiot/api/v1/logs/recent?limit=200', {
         headers: { Authorization: `Bearer ${useAuthStore().token}` },
@@ -136,6 +155,11 @@ export const useMonitorStore = defineStore('monitor', () => {
     // 重入守卫：避免 start() 二次调用泄漏上一组 SSE/timer（如登录→登出→再登录）。
     if (sse) stop()
     const tok = useAuthStore().token
+    if (isPreviewAuthToken(tok)) {
+      applyPreviewSnapshot()
+      offline.value = false
+      return
+    }
     // token 走 query（EventSource 不能设 header，gateway auth 支持 ?token=<jwt>）。
     sse = new EventSource(
       `/api/rsiot/api/v1/events?types=log,packet,state&token=${encodeURIComponent(tok)}`,
@@ -167,6 +191,22 @@ export const useMonitorStore = defineStore('monitor', () => {
     try { fn() } catch (e) { console.warn('monitor: drop malformed SSE frame', e) }
   }
 
+  /** 注入本地演示数据，供 UI/UX 评审使用。 */
+  function applyPreviewSnapshot() {
+    const previewSnapshot = createPreviewSnapshot()
+    instances.value = previewSnapshot.instances
+    logs.value = previewSnapshot.logs
+    packets.value = previewSnapshot.packets
+    rtdata.value = previewSnapshot.rtdata
+    sysstatus.value = previewSnapshot.sysstatus
+    if (!selectedInstance.value) {
+      selectedInstance.value = previewSnapshot.selectedInstance
+    }
+    if (!selectedDevice.value) {
+      selectedDevice.value = previewSnapshot.selectedDevice
+    }
+  }
+
   /** 停止 SSE + 清理定时器（登出 / 路由切走时调用）。 */
   function stop() {
     sse?.close()
@@ -181,6 +221,11 @@ export const useMonitorStore = defineStore('monitor', () => {
     selectedInstance.value = id
   }
 
+  /** 选中设备（rtdata / AI 上下文联动）。 */
+  function selectDevice(id: string) {
+    selectedDevice.value = id
+  }
+
   return {
     instances,
     logs,
@@ -188,6 +233,7 @@ export const useMonitorStore = defineStore('monitor', () => {
     rtdata,
     sysstatus,
     selectedInstance,
+    selectedDevice,
     offline,
     onLog,
     onPacket,
@@ -199,5 +245,6 @@ export const useMonitorStore = defineStore('monitor', () => {
     start,
     stop,
     selectInstance,
+    selectDevice,
   }
 })

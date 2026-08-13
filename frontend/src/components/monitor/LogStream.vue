@@ -37,9 +37,24 @@ const filtered = computed(() => {
 </template>
 <style scoped>
 .log-stream { display: flex; flex-direction: column; height: 100%; }
-.filter { display: flex; gap: 8px; padding: 8px; border-bottom: 1px solid var(--color-divider); }
-.list { flex: 1; overflow-y: auto; padding: 4px; }
-.entry { display: grid; grid-template-columns: 80px 50px 120px 1fr; gap: 8px; padding: 3px 6px; font-size: 12px; border-bottom: 1px solid var(--color-divider); font-family: monospace; }
+.filter { display: flex; gap: 8px; padding: 10px 0 14px; border-bottom: 1px solid var(--color-divider); }
+.filter select,
+.filter input {
+  padding: 12px 14px;
+  border-radius: 14px;
+}
+.list { flex: 1; overflow-y: auto; padding: 10px 0 0; }
+.entry {
+  display: grid;
+  grid-template-columns: 84px 56px 140px 1fr;
+  gap: 10px;
+  padding: 12px 10px;
+  font-size: 12px;
+  border-bottom: 1px solid var(--card-border);
+  font-family: Consolas, monospace;
+  border-radius: 14px;
+}
+.entry:hover { background: var(--table-row-hover); }
 .entry.error { color: var(--color-danger); } .entry.warn { color: var(--color-warning); }
 .ts, .tg { color: var(--color-ink-muted); }
 .empty { color: var(--color-ink-muted); padding: 20px; text-align: center; }

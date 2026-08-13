@@ -4,6 +4,7 @@ import { setActivePinia, createPinia } from 'pinia'
 import { useMonitorStore } from './monitor'
 import { useAuthStore } from './auth'
 import type { LogEntry, PacketEntry, StateEvent } from '../types'
+import { PREVIEW_AUTH_TOKEN } from '../lib/previewSession'
 
 // jsdom 不实现 EventSource，store.start() 内会 new EventSource，测试需提供桩。
 class FakeEventSource {
@@ -231,5 +232,27 @@ describe('monitor store', () => {
     expect(s.logs.length).toBe(0)
     s.stop()
     fetchSpy.mockRestore()
+  })
+
+  it('start seeds preview snapshot and skips live connections for preview auth', () => {
+    const auth = useAuthStore()
+    auth.setAuth(PREVIEW_AUTH_TOKEN, 'preview')
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async () =>
+      new Response('{}', { status: 200 }),
+    )
+    ;(globalThis as unknown as { document: unknown }).document = {
+      hidden: false, addEventListener: () => {}, removeEventListener: () => {},
+    }
+
+    const s = useMonitorStore()
+    s.start()
+
+    expect(FakeEventSource.last).toBeNull()
+    expect(fetchSpy).not.toHaveBeenCalled()
+    expect(s.instances.length).toBeGreaterThan(0)
+    expect(s.logs.length).toBeGreaterThan(0)
+    expect(s.packets.length).toBeGreaterThan(0)
+    expect(Object.keys(s.rtdata).length).toBeGreaterThan(0)
+    expect(s.offline).toBe(false)
   })
 })
