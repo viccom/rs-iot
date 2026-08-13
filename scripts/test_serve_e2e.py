@@ -120,6 +120,56 @@ def stream_events(task_id, max_wait=60):
     return seen_tools, dispatched, approval_payload, False
 
 
+def warmup_mcp_connect(server_name="rsiot", max_wait=20):
+    """启动预热:POST /submit 发管理动词 `/mcp connect <name>`,零 LLM token 触发 MCP 握手。
+
+    根因(serve 冷启动盲区):MCP plugin 是 lazy spawn,首轮任务时 capability catalog
+    还没 rsiot 工具条目,模型看不到 MCP 工具退回 bash。`/mcp connect` 走管理动词路径
+    (slash.go:518),同步 spawn + 握手 + 注册真实工具 + UpsertServer 更新 catalog,
+    并触发 schema 缓存落盘(下次冷启动 catalog 从 boot 就带条目——根治)。
+
+    要点:
+    - 409 是预期(管理动词不发 turn,副作用已执行)——忽略,改从 /events SSE
+      等 `connected <name>` Notice 确认。
+    - 必须趁 serve 空闲(启动后、首条真实消息前)发,会话忙时 409 且不执行。
+    """
+    print(f'[warmup] POST /submit {{"input": "/mcp connect {server_name}"}} (零 token 触发握手)')
+    s, _, txt = post("/submit", {"input": f"/mcp connect {server_name}"})
+    print(f"[warmup] submit → {s} (409=预期,副作用已执行); body={txt[:120]}")
+
+    # 轮询 SSE 等 Notice `connected rsiot — N tools`(serve.go:1939 notice → sink.Emit)。
+    req = urllib.request.Request(f"{SERVE}/events")
+    t0 = time.time()
+    try:
+        with opener.open(req, timeout=max_wait) as r:
+            buf = b""
+            while time.time() - t0 < max_wait:
+                chunk = r.read(1)
+                if not chunk:
+                    break
+                buf += chunk
+                while b"\n" in buf:
+                    line, buf = buf.split(b"\n", 1)
+                    line = line.decode("utf-8", "replace").strip()
+                    if not line or line.startswith(":"):
+                        continue
+                    if line.startswith("data:"):
+                        line = line[5:].strip()
+                    try:
+                        ev = json.loads(line)
+                    except Exception:
+                        continue
+                    text = (ev.get("text") or "") if isinstance(ev, dict) else ""
+                    if f"connected {server_name}" in text:
+                        print(f"[warmup] ✓ Notice: {text[:200]}")
+                        return True
+    except Exception as e:
+        print(f"[warmup] SSE 结束(未确认 Notice,可能已连): {e}")
+    # 退路:握手是同步的,409 返回时副作用通常已完成;未捕获 Notice 也不代表失败。
+    print("[warmup] 未在 SSE 捕获确认 Notice(握手或已完成,继续)")
+    return False
+
+
 def main():
     prompt = sys.argv[1] if len(sys.argv) > 1 else "用 rsiot_read_tags 工具读取 devA 的 temp。不要用 bash,不要用 redis-cli。"
     print(f"\n========== 任务: {prompt}\n")
@@ -128,6 +178,9 @@ def main():
     # serve 无启动 flag 可 yolo,这是运行时唯一干净路径(源码 serve.go:1082)。
     s, _, _ = post("/tool-approval-mode", {"mode": "yolo"})
     print(f"[yolo] /tool-approval-mode → {s} (204=已切全局自动放行)")
+    # 启动预热:零 token 触发 MCP plugin spawn+握手,当前 session catalog 立即有 rsiot 工具
+    # + schema 缓存落盘(下次冷启动根治)。须在 /new 之前(session 空闲时)。
+    warmup_mcp_connect("rsiot", max_wait=20)
     # 冷启动:开新 session,避免上一轮上下文干扰工具首选项观测。
     s2, _, _ = post("/new", {})
     print(f"[new] /new → {s2} (开全新 session)")
