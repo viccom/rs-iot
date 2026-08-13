@@ -325,7 +325,7 @@ describe('monitor store', () => {
     )
     const s = useMonitorStore()
     const cfg = {
-      inst_id: 'mb-1', inst_name: '', app_code: 'modbusClient', app_type: 'South' as const,
+      inst_id: 'mb-1', inst_name: '', app_code: 'modbusClient', app_type: 'south' as const,
       auto_start: true, app_config: { kind: 'tcp' }, devices: [], host_kind: 'builtin' as const,
     }
     const ok = await s.saveInstance(cfg)

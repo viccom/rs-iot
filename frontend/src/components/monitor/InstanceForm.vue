@@ -31,7 +31,7 @@ function cloneOrEmpty(src: InstConfig | null): InstConfig {
     inst_id: '',
     inst_name: '',
     app_code: 'modbusClient',
-    app_type: 'South',
+    app_type: 'south',
     auto_start: true,
     app_config: defaultAppConfig('modbusClient'),
     devices: [],
@@ -131,8 +131,8 @@ function submit() {
             <label class="field">
               <span>方向</span>
               <select v-model="form.app_type">
-                <option value="South">南向采集</option>
-                <option value="North">北向发布</option>
+                <option value="south">南向采集</option>
+                <option value="north">北向发布</option>
               </select>
             </label>
             <label class="field">

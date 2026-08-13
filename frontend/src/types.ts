@@ -68,8 +68,8 @@ export interface RtdataEvent {
   ts: string
 }
 
-/** 插件实例方向（对标 AppType serde：PascalCase "South"/"North"）。 */
-export type AppType = 'South' | 'North'
+/** 插件实例方向（对标 AppType serde：lowercase "south"/"north"，实测后端 reject "South"）。 */
+export type AppType = 'south' | 'north'
 
 /** 宿主形态（对标 HostKind serde：lowercase "builtin"/"external"）。 */
 export type HostKind = 'builtin' | 'external'
