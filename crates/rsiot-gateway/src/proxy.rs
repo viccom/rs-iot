@@ -182,6 +182,25 @@ pub async fn forward(State(st): State<Arc<GwState>>, req: Request, upstream: Ups
         })
 }
 
+/// serve 内联斜杠命令前缀清单——这些命令走 submit handler 的前缀拦截分支
+/// （serve.go: `/model ` / `/effort `，返回 204 不进 turn）。gateway 的 HINT 若
+/// 注入到这些 input 前面，会破坏 serve 的前缀匹配（HINT 后 input 不再以 `/model ` 开头），
+/// 导致模型/思考深度切换静默失效。故这些 input 必须原样透传、跳过 HINT 注入。
+///
+/// 带尾随空格（`/model ` 非 `/model`）对标 serve 的 `HasPrefix(trimmed, "/model ")`，
+/// 避免误伤普通查询 `/models`（GET 端点，不会进 submit，但防御性区分）。
+const SLASH_COMMAND_PREFIXES: &[&str] = &["/model ", "/effort "];
+
+/// 判断 submit input 是否应注入 AGENT_TOOL_HINT。
+///
+/// 注入条件：input 存在且（去前导空白后）**不以** serve 内联斜杠命令前缀开头。
+/// 斜杠命令（`/model X`、`/effort X`）原样透传，保持 serve 前缀拦截可识别。
+/// 纯函数便于单测（input_should_get_hint / slash_command_skips_hint）。
+fn input_should_get_hint(input: &str) -> bool {
+    let trimmed = input.trim_start();
+    !SLASH_COMMAND_PREFIXES.iter().any(|p| trimmed.starts_with(p))
+}
+
 /// agent submit 工具提示（冷启动盲区缓解）。
 ///
 /// 根因（记忆 serve-coldstart-blindspot）：模型首轮看不到/不愿查 MCP 工具
@@ -232,12 +251,18 @@ pub async fn forward_agent_submit(State(st): State<Arc<GwState>>, req: Request) 
                 .and_then(|i| i.as_str())
                 .map(|s| s.to_string());
             if let Some(original) = input {
-                v["input"] = serde_json::Value::String(format!("{AGENT_TOOL_HINT}\n\n{original}"));
-                injected = true;
-                serde_json::to_vec(&v).unwrap_or_else(|_| {
-                    injected = false;
+                // 斜杠命令（/model /effort）跳过 HINT 注入：serve 用 input 前缀拦截
+                // 这两条命令（serve.go），HINT 前置会破坏前缀匹配致命令失效。
+                if !input_should_get_hint(&original) {
                     bytes.to_vec()
-                })
+                } else {
+                    v["input"] = serde_json::Value::String(format!("{AGENT_TOOL_HINT}\n\n{original}"));
+                    injected = true;
+                    serde_json::to_vec(&v).unwrap_or_else(|_| {
+                        injected = false;
+                        bytes.to_vec()
+                    })
+                }
             } else {
                 bytes.to_vec() // 无 input 字段 → 原样
             }
@@ -333,5 +358,32 @@ mod tests {
         assert_eq!(strip_token_from_query("token=secret"), "");
         assert_eq!(strip_token_from_query("types=log"), "types=log");
         assert_eq!(strip_token_from_query(""), "");
+    }
+
+    /// submit HINT 注入判断：serve 内联斜杠命令（/model /effort）跳过 HINT，
+    /// 普通输入注入。对标 serve.go 的 `HasPrefix(trimmed, "/model ")` 前缀拦截——
+    /// HINT 前置会破坏前缀匹配致模型/effort 切换失效。
+    #[test]
+    fn slash_command_input_skips_hint() {
+        // 斜杠命令（带尾随空格，对标 serve 前缀）→ 不注入
+        assert!(!input_should_get_hint("/model anthropic/claude"));
+        assert!(!input_should_get_hint("/effort high"));
+        // 前导空白不影响判定（trim_start）
+        assert!(!input_should_get_hint("  /model x"));
+        assert!(!input_should_get_hint("\t/effort max"));
+    }
+
+    /// submit HINT 注入判断回归：普通用户输入仍注入（回归保护，防误伤）。
+    #[test]
+    fn normal_input_still_gets_hint() {
+        // 普通自然语言 → 注入
+        assert!(input_should_get_hint("读 devA 的实时数据"));
+        assert!(input_should_get_hint("帮我建一个 modbus 实例"));
+        // /models 是 GET 端点查询（无尾随空格），不进 submit 命令拦截 → 仍注入
+        assert!(input_should_get_hint("/models"));
+        // 裸 /model 无参数（无尾随空格）serve 不拦截 → 仍注入（罕见，无害）
+        assert!(input_should_get_hint("/model"));
+        // 空 input → 注入分支不触发（caller 已判 Some），此处仅判定无前缀
+        assert!(input_should_get_hint(""));
     }
 }

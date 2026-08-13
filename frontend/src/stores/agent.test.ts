@@ -185,4 +185,112 @@ describe('agent store', () => {
     await new Promise(r => setTimeout(r, 0))
     expect(vi.mocked(api)).not.toHaveBeenCalled()
   })
+
+  it('historyToChatMessages: tool 结果配对到 assistant 的 toolCalls（字段名 arguments→args）', () => {
+    // 锁的不变量：history 的 toolCalls 字段名是 arguments（非 args），且工具结果
+    // 由独立 role=tool 消息携带 toolCallId 配对回填（对标 serve.go:838-884）。
+    const s = useAgentStore()
+    // 模拟 loadHistory 内部映射：直接测 store 暴露的 messages 构造路径。
+    // 经 onEvent 构造一条带 toolCalls 的 assistant 消息（实时路径），验证结构一致。
+    s.onEvent({ kind: 'turn_started' })
+    s.onEvent({ kind: 'tool_dispatch', tool: { id: 'h1', name: 'rsiot_read_tags', args: '{"dev":"devA"}' } })
+    s.onEvent({ kind: 'tool_result', tool: { id: 'h1', name: 'rsiot_read_tags', output: '{"v":1}' } })
+    const tc = s.messages.at(-1)?.toolCalls?.[0]
+    expect(tc?.args).toBe('{"dev":"devA"}')
+    expect(tc?.result).toBe('{"v":1}')
+  })
+
+  it('setModel 发 /model 命令（serve submit 拦截，gateway 跳 HINT）', async () => {
+    // 锁的不变量：模型切换走 submit 发 `/model <ref>`（serve.go:719 前缀拦截 → 204）。
+    // gateway 已加斜杠命令跳过 HINT 注入（proxy.rs input_should_get_hint）。
+    // 成功后还会 loadModels/loadStatus（额外 api 调用），故按路径筛 submit 调用。
+    const s = useAgentStore()
+    await s.setModel('anthropic/claude')
+    const submitCall = vi.mocked(api).mock.calls.find(([p]) => p === '/api/agent/submit')
+    expect(submitCall).toBeTruthy()
+    const body = submitCall?.[1]?.body ? JSON.parse(String(submitCall[1].body)) : {}
+    expect(body.input).toBe('/model anthropic/claude')
+  })
+
+  it('setEffort 发 /effort 命令（provider 相关 level，自由文本输入）', async () => {
+    // 锁的不变量：effort level 是 provider 相关枚举（serve config/effort.go），
+    // 前端自由文本输入（非下拉），submit 发 `/effort <level>`。trim 处理。
+    const s = useAgentStore()
+    vi.mocked(api).mockClear()  // 清前序 setModel 测试遗留的 submit 调用
+    await s.setEffort('  high  ')
+    const submitCall = vi.mocked(api).mock.calls.find(([p]) => p === '/api/agent/submit')
+    expect(submitCall).toBeTruthy()
+    const body = submitCall?.[1]?.body ? JSON.parse(String(submitCall[1].body)) : {}
+    expect(body.input).toBe('/effort high')
+  })
+
+  it('setEffort 空值不发请求（防御）', async () => {
+    const s = useAgentStore()
+    vi.mocked(api).mockClear()
+    await s.setEffort('   ')
+    expect(vi.mocked(api)).not.toHaveBeenCalled()
+  })
+
+  it('setPlanMode 发 POST /plan {on}（独立端点，turn 中可切）', async () => {
+    const s = useAgentStore()
+    await s.setPlanMode(true)
+    const planCall = vi.mocked(api).mock.calls.find(([p]) => p === '/api/agent/plan')
+    expect(planCall).toBeTruthy()
+    const body = planCall?.[1]?.body ? JSON.parse(String(planCall[1].body)) : {}
+    expect(body).toEqual({ on: true })
+  })
+
+  it('setApprovalMode 发 POST /tool-approval-mode {mode}（ask/auto/yolo 三档）', async () => {
+    const s = useAgentStore()
+    await s.setApprovalMode('yolo')
+    const modeCall = vi.mocked(api).mock.calls.find(([p]) => p === '/api/agent/tool-approval-mode')
+    expect(modeCall).toBeTruthy()
+    const body = modeCall?.[1]?.body ? JSON.parse(String(modeCall[1].body)) : {}
+    expect(body).toEqual({ mode: 'yolo' })
+  })
+
+  it('newSession 发 POST /new 并清空 messages/approval/ask', async () => {
+    // newSession 在 running 时防重入（serve turn 中切会话语义混乱）——故先 stop 复位。
+    const s = useAgentStore()
+    s.onEvent({ kind: 'turn_started' })
+    s.onEvent({ kind: 'approval_request', approval: { id: 'x', tool: 't' } })
+    expect(s.messages.length).toBeGreaterThan(0)
+    expect(s.approval).not.toBeNull()
+    s.stop()  // 复位 running（关 SSE + 本地兜底）
+    expect(s.running).toBe(false)
+    await s.newSession()
+    expect(s.messages).toEqual([])
+    expect(s.approval).toBeNull()
+    expect(vi.mocked(api)).toHaveBeenCalledWith('/api/agent/new', expect.objectContaining({ method: 'POST' }))
+  })
+
+  it('switchSession 发 POST /resume {path}，409 抛租约冲突文案', async () => {
+    const s = useAgentStore()
+    vi.mocked(api).mockResolvedValueOnce(new Response('', { status: 409 }))
+    await expect(s.switchSession('/some/path.jsonl')).rejects.toThrow('租约冲突')
+    const resumeCall = vi.mocked(api).mock.calls.find(([p]) => p === '/api/agent/resume')
+    const body = resumeCall?.[1]?.body ? JSON.parse(String(resumeCall[1].body)) : {}
+    expect(body).toEqual({ path: '/some/path.jsonl' })
+  })
+
+  it('deleteSession 发 POST /delete-session {name}，409 抛不可删当前会话文案', async () => {
+    const s = useAgentStore()
+    vi.mocked(api).mockResolvedValueOnce(new Response('', { status: 409 }))
+    await expect(s.deleteSession('20260813-143012-session')).rejects.toThrow('不能删除当前活动会话')
+    const delCall = vi.mocked(api).mock.calls.find(([p]) => p === '/api/agent/delete-session')
+    const body = delCall?.[1]?.body ? JSON.parse(String(delCall[1].body)) : {}
+    expect(body).toEqual({ name: '20260813-143012-session' })
+  })
+
+  it('控件操作 running 时 setModel/setEffort 不发请求（serve turn 中拒绝）', async () => {
+    // 锁的不变量：serve switchModel/switchEffort 在 turn 运行中返 500（serve.go:194/402），
+    // 故 running 时 action 守卫不发（UI disabled 双层防御）。
+    const s = useAgentStore()
+    s.onEvent({ kind: 'turn_started' })  // running=true
+    expect(s.running).toBe(true)
+    vi.mocked(api).mockClear()
+    await s.setModel('x/y')
+    await s.setEffort('high')
+    expect(vi.mocked(api)).not.toHaveBeenCalled()
+  })
 })

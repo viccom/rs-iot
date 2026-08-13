@@ -1,7 +1,17 @@
 // frontend/src/stores/agent.ts
 import { defineStore } from 'pinia'
-import { ref } from 'vue'
-import type { AskAnswer, AskQuestion, ChatMessage, ServeEvent } from '../types'
+import { computed, ref } from 'vue'
+import type {
+  AskAnswer,
+  AskQuestion,
+  ChatMessage,
+  ServeEvent,
+  ServeHistoryMessage,
+  ServeModel,
+  ServeSession,
+  ServeStatus,
+  ToolApprovalMode,
+} from '../types'
 import { useAuthStore } from './auth'
 import { useMonitorStore } from './monitor'
 import { api } from '../api/client'
@@ -32,6 +42,19 @@ export const useAgentStore = defineStore('agent', () => {
   const approval = ref<{ id: string; tool: string; subject?: string; reason?: string } | null>(null)
   /** 待回答的结构化提问（ask_request 事件：AI 主动向用户提问，回答前 turn 挂起）。 */
   const ask = ref<{ id: string; questions: AskQuestion[] } | null>(null)
+
+  /** 历史会话列表（GET /sessions）。serve 单会话进程：current 标记当前活动会话。 */
+  const sessions = ref<ServeSession[]>([])
+  /** 当前活动会话（sessions 里 current==true 的条目；启动恢复据此定位）。 */
+  const currentSession = ref<ServeSession | null>(null)
+  /** 可选模型列表（GET /models，控件下拉数据源；active 标记当前模型）。 */
+  const models = ref<ServeModel[]>([])
+  /** 当前会话状态（GET /status，控件初始态来源：plan/toolApprovalMode）。 */
+  const status = ref<ServeStatus | null>(null)
+  /** 会话切换/新建/删除进行中（UI 全 disable）。 */
+  const sessionBusy = ref(false)
+  /** 控件操作进行中（4 控件 disable）。 */
+  const controlBusy = ref(false)
 
   let nextId = 1
   let sse: EventSource | null = null
@@ -172,8 +195,216 @@ export const useAgentStore = defineStore('agent', () => {
     ask.value = null
   }
 
-  /** 启动 SSE 订阅。登录后调用一次。token 走 query（EventSource 不能设 header）。 */
-  function start() {
+  /**
+   * serve 历史消息 → ChatMessage 映射（loadHistory 用）。
+   *
+   * 规则（对标 serve.go:838-884 historyMessage）：
+   * - user → 新建 user 消息；assistant → 新建 assistant 消息（toolCalls 字段名
+   *   arguments→args 映射，无 result）。
+   * - tool（工具结果）→ 不新建消息，回溯配对到上一条 assistant 的 toolCalls
+   *   （id===toolCallId）填 result。
+   * - notice（steer 文本）→ 跳过（保持消息流干净，对标 serve 前端行为）。
+   */
+  function historyToChatMessages(hist: ServeHistoryMessage[]): ChatMessage[] {
+    const out: ChatMessage[] = []
+    for (const m of hist) {
+      if (m.role === 'notice') continue
+      if (m.role === 'tool') {
+        // 工具结果：回溯配对到上一条 assistant 的 toolCalls（id===toolCallId）。
+        const last = out.at(-1)
+        const tc = last?.role === 'assistant' ? last.toolCalls?.find(t => t.id === m.toolCallId) : undefined
+        if (tc) {
+          tc.result = m.content
+          tc.error = false
+        }
+        continue
+      }
+      out.push({
+        id: nextId++,
+        role: m.role === 'user' ? 'user' : 'assistant',
+        text: m.content || '',
+        reasoning: m.reasoning,
+        toolCalls: m.toolCalls?.map(t => ({ id: t.id, name: t.name, args: t.arguments })),
+      })
+    }
+    return out
+  }
+
+  /** 读历史会话列表（GET /sessions）。serve 单会话：current 标记活动会话，
+   *  启动恢复据此定位"serve 在后台跑的会话"。失败不抛（容错：serve 暂不可达
+   *  不阻塞 SSE），仅 warn。 */
+  async function loadSessions() {
+    try {
+      const r = await api('/api/agent/sessions')
+      if (!r.ok) return
+      sessions.value = await r.json()
+      currentSession.value = sessions.value.find(s => s.current) ?? null
+    } catch (e) {
+      console.warn('agent: loadSessions failed', e)
+    }
+  }
+
+  /** 读当前会话历史消息（GET /history）回填 messages。ETag 304 可选优化（本期不做）。
+   *  nextId 取 max+1 防与后续实时 SSE 帧 id 冲突。失败不抛。 */
+  async function loadHistory() {
+    try {
+      const r = await api('/api/agent/history')
+      if (!r.ok) return
+      const hist = (await r.json()) as ServeHistoryMessage[]
+      messages.value = historyToChatMessages(hist)
+      nextId = messages.value.reduce((mx, m) => Math.max(mx, m.id), 0) + 1
+    } catch (e) {
+      console.warn('agent: loadHistory failed', e)
+    }
+  }
+
+  /** 读控件态：模型列表（GET /models）+ 状态（GET /status）。失败不抛（控件降级）。 */
+  async function loadModels() {
+    try {
+      const r = await api('/api/agent/models')
+      if (!r.ok) return
+      // /models 包一层 object：{current, default, label, models:[...]}（serve.go:1258）。
+      // 取 .models 数组填充控件下拉数据源。
+      const data = await r.json()
+      models.value = Array.isArray(data) ? data : (data?.models ?? [])
+    } catch (e) {
+      console.warn('agent: loadModels failed', e)
+    }
+  }
+  async function loadStatus() {
+    try {
+      const r = await api('/api/agent/status')
+      if (r.ok) status.value = await r.json()
+    } catch (e) {
+      console.warn('agent: loadStatus failed', e)
+    }
+  }
+
+  /** 会话切换后并行重拉四件套（sessions/status/models 并行 + history 串行依赖 nextId）。 */
+  async function reloadSessionState() {
+    await Promise.all([loadSessions(), loadStatus(), loadModels()])
+    await loadHistory()
+  }
+
+  /** 新建会话（POST /new）。serve 单会话：旧会话 Snapshot 存盘，active 换成新空会话。
+   *  防重入（sessionBusy/running）。成功后清 messages/approval/ask + 重拉四件套。 */
+  async function newSession() {
+    if (sessionBusy.value || running.value) return
+    sessionBusy.value = true
+    try {
+      const r = await api('/api/agent/new', { method: 'POST', body: '{}' })
+      if (!r.ok) throw new Error(`new session failed: ${r.status} ${await r.text().catch(() => '')}`.trim())
+      messages.value = []
+      approval.value = null
+      ask.value = null
+      nextId = 1
+      await reloadSessionState()
+    } finally {
+      sessionBusy.value = false
+    }
+  }
+
+  /** 切换到历史会话（POST /resume {path}）。409=租约冲突（会话被其他进程持有）。
+   *  防重入。成功后清 approval/ask + 重拉四件套（messages 由 loadHistory 替换）。 */
+  async function switchSession(path: string) {
+    if (sessionBusy.value) return
+    sessionBusy.value = true
+    try {
+      const r = await api('/api/agent/resume', { method: 'POST', body: JSON.stringify({ path }) })
+      if (r.status === 409) throw new Error('该会话正被其他窗口使用（租约冲突），请稍后再试')
+      if (!r.ok) throw new Error(`switch session failed: ${r.status} ${await r.text().catch(() => '')}`.trim())
+      approval.value = null
+      ask.value = null
+      await reloadSessionState()
+    } finally {
+      sessionBusy.value = false
+    }
+  }
+
+  /** 删除历史会话（POST /delete-session {name}）。409=不能删当前活动会话。
+   *  成功后仅 loadSessions（当前活动会话未变，无需 loadHistory）。 */
+  async function deleteSession(name: string) {
+    if (sessionBusy.value) return
+    const r = await api('/api/agent/delete-session', { method: 'POST', body: JSON.stringify({ name }) })
+    if (r.status === 409) throw new Error('不能删除当前活动会话，请先切换到其他会话')
+    if (!r.ok) throw new Error(`delete session failed: ${r.status} ${await r.text().catch(() => '')}`.trim())
+    await loadSessions()
+  }
+
+  /**
+   * 设置模型（submit 发 `/model <ref>`，gateway 跳 HINT 透传给 serve 拦截 → 204）。
+   *
+   * **turn 运行中拒绝**：serve switchModel 返 500（serve.go:194），故 running 时
+   * 不发（action 守卫 + UI disabled 双层防御）。成功后重拉 models/status 确认 active 切换。
+   */
+  async function setModel(ref: string) {
+    if (controlBusy.value || running.value) return
+    controlBusy.value = true
+    try {
+      const r = await api('/api/agent/submit', { method: 'POST', body: JSON.stringify({ input: `/model ${ref}` }) })
+      if (!r.ok) throw new Error(`set model failed: ${r.status} ${await r.text().catch(() => '')}`.trim())
+      await Promise.all([loadModels(), loadStatus()])
+    } finally {
+      controlBusy.value = false
+    }
+  }
+
+  /**
+   * 设置思考深度（submit 发 `/effort <level>`，serve 拦截 → 204）。
+   *
+   * level 是 **provider 相关枚举**（serve config/effort.go，无统一清单，serve 也不暴露）。
+   * 故 effort 控件用自由文本输入而非下拉。非法值 serve 返 500 + 合法值文案，前端
+   * 抛错给调用方 toast 展示。**turn 运行中拒绝**（serve switchEffort serve.go:402）。
+   * 成功后**不 loadStatus**（/status 无 effort 字段，无法回读）。
+   */
+  async function setEffort(level: string) {
+    const lvl = level.trim()
+    if (!lvl || controlBusy.value || running.value) return
+    controlBusy.value = true
+    try {
+      const r = await api('/api/agent/submit', { method: 'POST', body: JSON.stringify({ input: `/effort ${lvl}` }) })
+      if (!r.ok) throw new Error(`set effort failed: ${r.status} ${await r.text().catch(() => '')}`.trim())
+      // effort 无状态回读（serve 不暴露）；成功仅重拉 status（更新其他控件态）。
+      await loadStatus()
+    } finally {
+      controlBusy.value = false
+    }
+  }
+
+  /** 切换 Plan Mode（POST /plan {on}）。独立端点，serve 不拒 turn 运行中切换。
+   *  成功后 loadStatus 更新 plan 字段。 */
+  async function setPlanMode(on: boolean) {
+    if (controlBusy.value) return
+    controlBusy.value = true
+    try {
+      const r = await api('/api/agent/plan', { method: 'POST', body: JSON.stringify({ on }) })
+      if (!r.ok) throw new Error(`set plan mode failed: ${r.status} ${await r.text().catch(() => '')}`.trim())
+      await loadStatus()
+    } finally {
+      controlBusy.value = false
+    }
+  }
+
+  /** 设置权限模式（POST /tool-approval-mode {mode}，ask/auto/yolo）。独立端点，
+   *  serve 不拒 turn 运行中切换。成功后 loadStatus 更新 toolApprovalMode 字段。 */
+  async function setApprovalMode(mode: ToolApprovalMode) {
+    if (controlBusy.value) return
+    controlBusy.value = true
+    try {
+      const r = await api('/api/agent/tool-approval-mode', { method: 'POST', body: JSON.stringify({ mode }) })
+      if (!r.ok) throw new Error(`set approval mode failed: ${r.status} ${await r.text().catch(() => '')}`.trim())
+      await loadStatus()
+    } finally {
+      controlBusy.value = false
+    }
+  }
+
+  /** 启动 SSE 订阅 + 拉会话/历史/控件态（启动恢复）。
+   *  登录后/打开抽屉时调用。token 走 query（EventSource 不能设 header）。
+   *  SSE 建立后并行拉 sessions/status/models + 串行 history（回填 serve 在跑的会话，
+   *  解决"重启后前端看不到"痛点）。拉取失败不阻塞 SSE（容错：serve 暂不可达时
+   *  SSE 重连自愈）。 */
+  async function start() {
     if (sse) stop() // 重入守卫（如重连场景）
     const tok = useAuthStore().token
     sse = new EventSource(`/api/agent/events?token=${encodeURIComponent(tok)}`)
@@ -183,6 +414,13 @@ export const useAgentStore = defineStore('agent', () => {
     sse.onmessage = ev => safe(() => onEvent(JSON.parse((ev as MessageEvent).data) as ServeEvent))
     // onerror：浏览器自动重连，这里静默。
     sse.onerror = () => {}
+    // 启动恢复：拉 serve 在跑的会话 + 历史 + 控件态（各自容错，互不阻塞）。
+    try {
+      await Promise.all([loadSessions(), loadStatus(), loadModels()])
+      await loadHistory()
+    } catch (e) {
+      console.warn('agent: startup recovery failed', e)
+    }
   }
 
   /** SSE 帧 parse/handle 容错：畸形帧 warn 并跳过，不冒泡到 onmessage。 */
@@ -205,5 +443,16 @@ export const useAgentStore = defineStore('agent', () => {
     }
   }
 
-  return { messages, running, approval, ask, onEvent, submit, approve, cancel, answer, start, stop }
+  /** 当前活动模型 ref（models 里 active==true 的条目，模型下拉绑它）。 */
+  const activeModelRef = computed(() => models.value.find(m => m.active)?.ref ?? '')
+
+  return {
+    messages, running, approval, ask,
+    sessions, currentSession, models, status, sessionBusy, controlBusy, activeModelRef,
+    onEvent, submit, approve, cancel, answer,
+    loadSessions, loadHistory, loadModels, loadStatus,
+    newSession, switchSession, deleteSession,
+    setModel, setEffort, setPlanMode, setApprovalMode,
+    start, stop,
+  }
 })

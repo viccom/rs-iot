@@ -16,12 +16,19 @@ import { useChatScroll } from './composables/useChatScroll'
 import MessageItem, { runningKey } from './MessageItem.vue'
 import PermissionModal from './PermissionModal.vue'
 import AskModal from './AskModal.vue'
+import type { ToolApprovalMode } from '../../types'
 
 const agent = useAgentStore()
 const input = ref('')
-/** 本地错误提示（submit 失败等，非 agent 消息流的一部分——单独显示在输入区上方）。 */
+/** effort 自由文本输入值（serve 不暴露当前 effort，控件无法回读，故用 input 非 select）。 */
+const effortInput = ref('')
+/** 本地错误提示（submit/会话/控件 失败等，非 agent 消息流的一部分——单独显示在输入区上方）。 */
 const errorMsg = ref('')
 const listRef = ref<HTMLElement | null>(null)
+/** 会话下拉展开态（点击外部关闭）。 */
+const sessionMenuOpen = ref(false)
+/** 会话下拉根元素（点击外部检测用）。 */
+const sessionMenuRef = ref<HTMLElement | null>(null)
 
 const emit = defineEmits<{ close: [] }>()
 
@@ -31,11 +38,27 @@ const { showBackToBottom, onScroll, snapToBottom, followIfAtBottom } = useChatSc
  *  保持响应式——turn_started/turn_done 改变 agent.running 时子组件自动更新。 */
 provide(runningKey, computed(() => agent.running))
 
-onMounted(() => {
-  agent.start()
+/** 当前显示的会话标题（下拉触发器文案）。 */
+const currentSessionLabel = computed(
+  () => agent.currentSession?.title || agent.currentSession?.name || '新会话',
+)
+
+/** 点击外部关闭会话下拉。 */
+function onDocClick(e: MouseEvent) {
+  if (sessionMenuRef.value && !sessionMenuRef.value.contains(e.target as Node)) {
+    sessionMenuOpen.value = false
+  }
+}
+
+onMounted(async () => {
+  document.addEventListener('click', onDocClick)
+  await agent.start().catch(() => { /* 启动恢复失败已在 store 内 warn，不阻塞 UI */ })
   snapToBottom()
 })
-onUnmounted(() => agent.stop())
+onUnmounted(() => {
+  document.removeEventListener('click', onDocClick)
+  agent.stop()
+})
 
 /**
  * 消息列表变化时贴底跟随（流式 token 追加、新 user 消息、工具结果到达均触发）。
@@ -91,12 +114,132 @@ async function onAskAnswer(answers: { question_id: string; selected: string[] }[
     errorMsg.value = e instanceof Error ? e.message : '回答提交失败'
   }
 }
+
+/** 新建会话（serve 单会话：旧的存盘，active 换新空会话）。 */
+async function onNewSession() {
+  sessionMenuOpen.value = false
+  errorMsg.value = ''
+  try {
+    await agent.newSession()
+    snapToBottom()
+  } catch (e) {
+    errorMsg.value = e instanceof Error ? e.message : '新建会话失败'
+  }
+}
+
+/** 切换到历史会话（POST /resume）。 */
+async function onSwitchSession(path: string) {
+  sessionMenuOpen.value = false
+  errorMsg.value = ''
+  try {
+    await agent.switchSession(path)
+    snapToBottom()
+  } catch (e) {
+    errorMsg.value = e instanceof Error ? e.message : '切换会话失败'
+  }
+}
+
+/** 删除历史会话（删当前活动会话 serve 返 409）。 */
+async function onDeleteSession(name: string) {
+  if (!confirm(`确定删除会话「${name}」？此操作不可恢复。`)) return
+  errorMsg.value = ''
+  try {
+    await agent.deleteSession(name)
+  } catch (e) {
+    errorMsg.value = e instanceof Error ? e.message : '删除会话失败'
+  }
+}
+
+/** 切模型（submit 发 /model，gateway 跳 HINT）。失败不静默（effort 同）。 */
+async function onModelChange(e: Event) {
+  const ref = (e.target as HTMLSelectElement).value
+  if (!ref || ref === agent.activeModelRef) return
+  errorMsg.value = ''
+  try {
+    await agent.setModel(ref)
+  } catch (err) {
+    errorMsg.value = err instanceof Error ? err.message : '切换模型失败'
+  }
+}
+
+/** 设思考深度（submit 发 /effort，level provider 相关故自由文本）。 */
+async function onEffortSubmit() {
+  const lvl = effortInput.value.trim()
+  if (!lvl) return
+  errorMsg.value = ''
+  try {
+    await agent.setEffort(lvl)
+    effortInput.value = ''
+  } catch (err) {
+    // serve 非法 level 返 500 + 合法值文案（如 "usage: /effort auto|low|high"），
+    // 直接展示让用户知道该 provider 的合法档位。
+    errorMsg.value = err instanceof Error ? err.message : '设置思考深度失败'
+  }
+}
+
+/** 切 Plan Mode（"执行方式"，独立端点 turn 中可切）。 */
+async function onTogglePlan() {
+  errorMsg.value = ''
+  try {
+    await agent.setPlanMode(!agent.status?.plan)
+  } catch (err) {
+    errorMsg.value = err instanceof Error ? err.message : '切换 Plan 模式失败'
+  }
+}
+
+/** 切权限模式（ask/auto/yolo 三档，独立端点 turn 中可切）。 */
+async function onApprovalModeChange(e: Event) {
+  const mode = (e.target as HTMLSelectElement).value as ToolApprovalMode
+  if (!mode || mode === agent.status?.toolApprovalMode) return
+  errorMsg.value = ''
+  try {
+    await agent.setApprovalMode(mode)
+  } catch (err) {
+    errorMsg.value = err instanceof Error ? err.message : '切换权限模式失败'
+  }
+}
 </script>
 
 <template>
   <aside class="drawer" aria-label="AI 助手面板">
     <header class="head">
-      <h3 class="title">AI 助手</h3>
+      <div ref="sessionMenuRef" class="session-picker">
+        <button
+          class="session-trigger"
+          :disabled="agent.sessionBusy"
+          :title="currentSessionLabel"
+          @click="sessionMenuOpen = !sessionMenuOpen"
+        >
+          <span class="session-label">{{ currentSessionLabel }}</span>
+          <span class="caret">▼</span>
+        </button>
+        <div v-if="sessionMenuOpen" class="session-menu" role="menu">
+          <button class="session-new" @click="onNewSession">+ 新建会话</button>
+          <div class="session-list">
+            <p v-if="!agent.sessions.length" class="session-empty">暂无历史会话</p>
+            <div
+              v-for="s in agent.sessions"
+              :key="s.path"
+              class="session-item"
+              :class="{ current: s.current }"
+              @click="onSwitchSession(s.path)"
+            >
+              <span class="session-item-title">{{ s.title || s.name }}</span>
+              <span class="session-item-meta">
+                <span v-if="s.turns != null">{{ s.turns }} 轮</span>
+                <span v-if="s.current" class="session-cur-badge">当前</span>
+              </span>
+              <button
+                v-if="!s.current"
+                class="session-del"
+                title="删除会话"
+                aria-label="删除会话"
+                @click.stop="onDeleteSession(s.name)"
+              >✕</button>
+            </div>
+          </div>
+        </div>
+      </div>
       <span class="status" :class="{ on: agent.running }">
         {{ agent.running ? '思考中…' : '就绪' }}
       </span>
@@ -125,16 +268,60 @@ async function onAskAnswer(answers: { question_id: string; selected: string[] }[
         <span>{{ errorMsg }}</span>
         <button class="btn-text" aria-label="关闭错误提示" @click="errorMsg = ''">✕</button>
       </div>
+      <!-- 4 控件工具栏：模型 / 思考深度 / 执行方式(Plan) / 权限模式。
+           对接 serve 真实端点（见 agent store 注释）。模型/effort turn 中禁用
+           （serve switchModel/switchEffort running 拒绝）；plan/approval 独立端点可切。 -->
+      <div class="control-bar">
+        <select
+          class="ctrl ctrl-model"
+          :value="agent.activeModelRef"
+          :disabled="agent.controlBusy || agent.running"
+          :title="'模型选择（当前: ' + (agent.activeModelRef || '未知') + '）'"
+          @change="onModelChange"
+        >
+          <option value="" disabled>模型</option>
+          <option v-for="m in agent.models" :key="m.ref" :value="m.ref">
+            {{ m.active ? '● ' : '' }}{{ m.ref }}
+          </option>
+        </select>
+        <input
+          v-model="effortInput"
+          class="ctrl ctrl-effort"
+          type="text"
+          placeholder="effort"
+          :disabled="agent.controlBusy || agent.running"
+          title="思考深度（provider 相关，如 high/medium/auto；回车提交，非法值 serve 会提示合法档位）"
+          @keydown.enter.exact.prevent="onEffortSubmit"
+        />
+        <button
+          class="ctrl ctrl-toggle"
+          :class="{ on: agent.status?.plan }"
+          :disabled="agent.controlBusy"
+          :title="'执行方式 · Plan Mode（' + (agent.status?.plan ? '开' : '关') + '）'"
+          @click="onTogglePlan"
+        >Plan</button>
+        <select
+          class="ctrl ctrl-approval"
+          :value="agent.status?.toolApprovalMode ?? 'ask'"
+          :disabled="agent.controlBusy"
+          title="权限模式（ask 逐项审批 / auto 自动 / yolo 全放行）"
+          @change="onApprovalModeChange"
+        >
+          <option value="ask">权限:审批</option>
+          <option value="auto">权限:自动</option>
+          <option value="yolo">权限:放行</option>
+        </select>
+      </div>
       <div class="input-row">
         <textarea
           v-model="input"
           class="textarea"
           rows="2"
           placeholder="问 AI…（如：读 devA 实时数据）"
-          :disabled="agent.running"
+          :disabled="agent.running || agent.sessionBusy"
           @keydown.enter.exact.prevent="send"
         />
-        <button class="btn-send" :disabled="!input.trim() || agent.running" @click="send">发送</button>
+        <button class="btn-send" :disabled="!input.trim() || agent.running || agent.sessionBusy" @click="send">发送</button>
       </div>
     </div>
 
@@ -261,4 +448,97 @@ async function onAskAnswer(answers: { question_id: string; selected: string[] }[
 }
 .btn-send:hover:not(:disabled) { background: var(--color-primary-hover); }
 .btn-send:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* 头部会话下拉 */
+.session-picker { position: relative; flex: 1; min-width: 0; }
+.session-trigger {
+  display: flex; align-items: center; gap: 6px;
+  max-width: 100%;
+  background: transparent; border: 1px solid transparent;
+  padding: 4px 8px; border-radius: 6px;
+  font-size: 13px; font-weight: 600; color: var(--color-ink);
+  cursor: pointer; white-space: nowrap;
+}
+.session-trigger:hover:not(:disabled) { background: var(--color-surface-hover); }
+.session-trigger:disabled { opacity: 0.5; cursor: not-allowed; }
+.session-label { overflow: hidden; text-overflow: ellipsis; }
+.caret { font-size: 9px; color: var(--color-ink-muted); }
+.session-menu {
+  position: absolute; top: 36px; left: 0;
+  min-width: 260px; max-width: 360px;
+  max-height: 360px; display: flex; flex-direction: column;
+  background: var(--card-bg);
+  border: 1px solid var(--card-border);
+  border-radius: 10px;
+  box-shadow: var(--shadow-soft), 0 8px 24px rgba(0,0,0,0.12);
+  z-index: 50; overflow: hidden;
+}
+.session-new {
+  padding: 9px 12px; text-align: left;
+  font-size: 13px; font-weight: 500; color: var(--color-primary);
+  background: transparent; border: none; border-bottom: 1px solid var(--color-divider);
+  cursor: pointer;
+}
+.session-new:hover { background: var(--color-surface-hover); }
+.session-list { overflow-y: auto; }
+.session-empty {
+  padding: 16px 12px; margin: 0;
+  font-size: 12px; color: var(--color-ink-muted); text-align: center;
+}
+.session-item {
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 12px; cursor: pointer;
+  border-bottom: 1px solid var(--color-divider);
+}
+.session-item:hover { background: var(--color-surface-hover); }
+.session-item.current { background: color-mix(in srgb, var(--color-primary) 8%, transparent); }
+.session-item-title {
+  flex: 1; min-width: 0;
+  font-size: 12px; color: var(--color-ink);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.session-item-meta {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 11px; color: var(--color-ink-muted); flex-shrink: 0;
+}
+.session-cur-badge {
+  color: var(--chip-ink); background: var(--chip-bg);
+  padding: 1px 6px; border-radius: 999px;
+}
+.session-del {
+  flex-shrink: 0; width: 20px; height: 20px;
+  background: transparent; border: none; border-radius: 4px;
+  font-size: 11px; color: var(--color-ink-muted); cursor: pointer;
+  opacity: 0;
+}
+.session-item:hover .session-del { opacity: 1; }
+.session-del:hover { background: rgba(220,38,38,0.12); color: var(--color-danger); }
+
+/* 4 控件工具栏 */
+.control-bar {
+  display: flex; align-items: center; gap: 6px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--color-divider);
+  background: var(--panel-bg);
+  overflow-x: auto;
+}
+.ctrl {
+  font-size: 12px; font-family: inherit;
+  padding: 4px 8px;
+  background: var(--card-bg);
+  border: 1px solid var(--card-border);
+  border-radius: 6px;
+  color: var(--color-ink-secondary);
+  cursor: pointer;
+}
+.ctrl:focus { outline: none; border-color: var(--color-primary); }
+.ctrl:disabled { opacity: 0.5; cursor: not-allowed; }
+.ctrl-model { min-width: 110px; max-width: 160px; }
+.ctrl-effort { width: 84px; }
+.ctrl-toggle { white-space: nowrap; }
+.ctrl-toggle.on {
+  color: var(--chip-ink); background: var(--chip-bg);
+  border-color: transparent;
+}
+.ctrl-approval { min-width: 96px; }
 </style>

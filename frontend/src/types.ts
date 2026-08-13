@@ -223,3 +223,96 @@ export interface ToolCallEntry {
   /** 工具调用耗时（毫秒，result 携带）。 */
   durationMs?: number
 }
+
+/**
+ * serve 历史会话条目（GET /sessions，对标 serve sessionEntry，serve.go:1481-1487）。
+ *
+ * serve 是单会话进程：一个进程=一个活动会话，sessions 列表是磁盘上所有会话文件
+ * 的扫描结果（含 current 标记当前活动会话）。切换会话=用 path 调 POST /resume，
+ * 把整个进程的 active session 换成目标。
+ */
+export interface ServeSession {
+  /** 会话名（文件名去 .jsonl 后缀）。 */
+  name: string
+  /** 会话文件绝对路径（POST /resume 用它定位）。 */
+  path: string
+  /** LLM 生成的短标题（可选）。 */
+  title?: string
+  /** 消息轮数（可选）。 */
+  turns?: number
+  /** 是否当前活动会话（前端据此高亮 + 启动恢复定位）。 */
+  current?: boolean
+}
+
+/** serve 可选模型条目（GET /models，对标 serve modelEntry，serve.go:1264-1271）。 */
+export interface ServeModel {
+  /** 模型引用（`provider/model` 格式，submit `/model <ref>` 用它）。 */
+  ref: string
+  /** provider 名。 */
+  provider: string
+  /** 模型名。 */
+  model: string
+  /** provider kind（如 anthropic/openai）。 */
+  kind?: string
+  /** 是否当前活动模型。 */
+  active?: boolean
+  /** 是否默认模型。 */
+  default?: boolean
+}
+
+/** serve 工具审批模式三档（POST /tool-approval-mode body {mode}，serve.go:1079）。 */
+export type ToolApprovalMode = 'ask' | 'auto' | 'yolo'
+
+/**
+ * serve 当前会话状态快照（GET /status，serve.go:1370-1384）。
+ *
+ * 4 个控件的初始态来源：plan（Plan Mode）/toolApprovalMode（权限模式）。
+ * 模型 active 态从 ServeModel.active 取；effort **不在 status 内**（serve 不暴露，
+ * 见 ServeHistoryMessage 注释）——故 effort 控件用自由文本输入，无法回读。
+ */
+export interface ServeStatus {
+  label: string
+  running: boolean
+  /** Plan Mode 开关（"执行方式"控件绑定）。 */
+  plan: boolean
+  autoApproveTools: boolean
+  bypass: boolean
+  /** 工具审批模式（"权限模式"控件绑定，三档）。 */
+  toolApprovalMode: ToolApprovalMode
+  goal?: string
+  goalStatus?: string
+  /** 会话目录（注意：serve 此字段实为 SessionDir 非工作目录）。 */
+  cwd?: string
+  used?: number
+  window?: number
+  cacheHit?: number
+  cacheMiss?: number
+  [k: string]: unknown
+}
+
+/** serve history 的工具调用项（GET /history，serve.go:838-845）。
+ *  注意字段名是 **arguments**（非 args），且**无 output**——工具结果由独立的
+ *  role=tool 消息携带 toolCallId 配对回填（historyToChatMessages 处理）。 */
+export interface ServeHistoryToolCall {
+  id: string
+  name: string
+  /** 调用参数（映射到 ToolCallEntry.args）。 */
+  arguments?: string
+}
+
+/**
+ * serve 历史消息条目（GET /history，serve.go:838-884）。
+ *
+ * role 可能是：`user`/`assistant`/`tool`/`notice`。tool 角色是工具结果（靠
+ * toolCallId 配对到 assistant 的 toolCalls）；notice 是 steer 文本（跳过）。
+ * historyToChatMessages 负责转 ChatMessage。
+ */
+export interface ServeHistoryMessage {
+  role: string
+  content: string
+  reasoning?: string
+  toolCalls?: ServeHistoryToolCall[]
+  /** tool 角色消息携带，配对到对应 toolCall.id。 */
+  toolCallId?: string
+  toolName?: string
+}
