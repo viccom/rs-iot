@@ -132,6 +132,10 @@ pub async fn delete(State(st): State<AppState>, Json(req): Json<DelReq>) -> Resp
         }
     };
     cfg.devices.retain(|d| d.value != req.dev_id);
+    // 清被删设备的实时数据（避免孤儿被 mqttPub 周期发布）。
+    if let Err(e) = crate::db::rtdata::delete_device(&st.lux, &req.dev_id).await {
+        tracing::warn!("[routes_device] delete rtdata:{} failed: {e}", req.dev_id);
+    }
     let s = match serde_json::to_string(&cfg) {
         Ok(s) => s,
         Err(e) => {
@@ -150,14 +154,16 @@ pub async fn delete(State(st): State<AppState>, Json(req): Json<DelReq>) -> Resp
 
 /// 从实例配置表聚合设备：输入 `{inst_id: InstConfig}`，输出 `{dev_id: DeviceSpec}`。
 ///
-/// 同 dev 被多实例引用时**合并**：children 按 tag（ChildSpec.value）去重（首个实例
-/// 优先），label/slave_id 取首个非空/Some。纯函数便于单测。
+/// 每个 DeviceSpec 注入 `inst_id` 字段标明归属实例（MCP/REST 客户端据此识别设备
+/// 来自哪个实例）。同 dev 被多实例引用时**合并**：children 按 tag（ChildSpec.value）
+/// 去重（首个实例优先），label/slave_id 取首个非空/Some，inst_id 同样首个胜出。
+/// 纯函数便于单测。
 fn aggregate_from_insts(insts: &serde_json::Value) -> serde_json::Map<String, serde_json::Value> {
     let mut map = serde_json::Map::new();
     let Some(cfgs) = insts.as_object() else {
         return map;
     };
-    for cfg in cfgs.values() {
+    for (inst_id, cfg) in cfgs {
         let Some(devices) = cfg.get("devices").and_then(|d| d.as_array()) else {
             continue;
         };
@@ -171,7 +177,11 @@ fn aggregate_from_insts(insts: &serde_json::Value) -> serde_json::Map<String, se
             match map.get_mut(dev_id) {
                 Some(existing) => merge_children(existing, dev),
                 None => {
-                    map.insert(dev_id.to_string(), dev.clone());
+                    let mut d = dev.clone();
+                    if let Some(m) = d.as_object_mut() {
+                        m.insert("inst_id".into(), serde_json::json!(inst_id));
+                    }
+                    map.insert(dev_id.to_string(), d);
                 }
             }
         }
@@ -272,6 +282,17 @@ mod tests {
             "合并去重+保留首个实例顺序"
         );
         assert_eq!(dev_a["label"], "设备A", "label 取首个非空");
+    }
+
+    /// 归属注入（C 修复）：聚合输出的设备带 `inst_id` 字段标明归属实例——
+    /// REST/MCP 客户端据此识别设备来自哪个实例。同 dev 多实例引用时首个胜出。
+    #[test]
+    fn aggregate_injects_inst_id_ownership() {
+        let agg = aggregate_from_insts(&insts_fixture());
+        assert_eq!(agg["devA"]["inst_id"], "mb-1", "devA 首个来源实例为 mb-1");
+        assert_eq!(agg["devB"]["inst_id"], "mb-1", "devB 归属 mb-1");
+        // 同 dev 被 mb-2 引用 → 仍保持首个 inst_id（合并语义：首个实例优先）。
+        assert_eq!(agg["devA"]["inst_id"], "mb-1", "合并后归属不漂移");
     }
 
     #[test]

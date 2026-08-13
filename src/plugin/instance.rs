@@ -163,6 +163,12 @@ impl InstanceManager {
     /// 停止指定实例：cancel 其 token 并等 join（3s 超时）。
     #[tracing::instrument(skip(self), fields(hwid = %self.ctx.hwid, inst_id = %inst_id))]
     pub async fn stop(&self, inst_id: &str) -> Result<(), RsIotError> {
+        // 防御：实例从未注册（未启动或已删除）时 stop 是无操作——**不**往 states 插入
+        // Stopping/Stopped。否则对已删除实例调 stop 会留下永久状态条目，/inst/stats
+        // 持续显示已删除实例（删除级联的次生 bug：cascade_delete 对未启动实例也调 stop）。
+        if !self.handles.contains_key(inst_id) && !self.states.contains_key(inst_id) {
+            return Ok(());
+        }
         self.states.insert(inst_id.to_string(), InstState::Stopping);
         self.emit_state(inst_id, InstState::Stopping);
         self.ctx.ctl_registry.unregister(inst_id);

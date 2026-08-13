@@ -96,6 +96,15 @@ pub async fn write_batch(
     Ok(n_failed)
 }
 
+/// 删除某设备的全部实时数据（`DEL rtdata:<dev_id>` 整个 hash）。
+///
+/// 实例/设备删除时调，清孤儿数据——否则 `mqttPub` 仍会周期 `KEYS rtdata:*`
+/// 把已移除设备的点位发布到 broker。DEL 模式对标 `luakv::remove`。
+pub async fn delete_device(c: &EmbeddedClient, dev_id: &str) -> Result<(), RsIotError> {
+    c.execute("DEL", &[&format!("rtdata:{dev_id}")]).await?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod batch_tests {
     use super::*;
@@ -217,5 +226,28 @@ mod batch_tests {
     async fn write_batch_empty_noop() {
         let (_h, c) = start_lux("empty").await;
         write_batch(&c, &[]).await.unwrap(); // 不 panic 不报错
+    }
+
+    /// 删除设备实时数据（B 修复）：写后 delete_device 应清掉整个 rtdata:<dev> hash，
+    /// 其他设备的 rtdata 不受影响。
+    #[tokio::test]
+    async fn delete_device_removes_only_target_dev() {
+        let (_h, c) = start_lux("deldev").await;
+        write_batch(&c, &[sample("d1", &[("t1", 1.0)]), sample("d2", &[("t2", 2.0)])])
+            .await
+            .unwrap();
+        delete_device(&c, "d1").await.unwrap();
+        // d1 已清空（HGETALL 返回空数组）。
+        let arr = c.execute_value("HGETALL", &["rtdata:d1"]).await.unwrap();
+        assert!(
+            matches!(&arr, lux::EmbeddedValue::Array(a) if a.is_empty()),
+            "d1 rtdata 应被删除，实际: {arr:?}"
+        );
+        // d2 保留。
+        assert!(
+            extract_fields(&c.execute_value("HGETALL", &["rtdata:d2"]).await.unwrap())
+                .contains(&"d2.t2".to_string()),
+            "d2 rtdata 不受影响"
+        );
     }
 }

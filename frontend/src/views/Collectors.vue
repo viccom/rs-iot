@@ -17,9 +17,10 @@ function kindOf(inst: InstanceStat): 'builtin' | 'lua' | 'external' {
   return 'builtin'
 }
 
-const builtinList = computed(() => monitor.instances.filter(i => kindOf(i) === 'builtin'))
-const luaList = computed(() => monitor.instances.filter(i => kindOf(i) === 'lua'))
-const externalList = computed(() => monitor.instances.filter(i => kindOf(i) === 'external'))
+// 名册 = 配置全集 ∪ 运行态（monitor.roster）——未启动实例(auto_start=false)也可管理。
+const builtinList = computed(() => monitor.roster.filter(i => kindOf(i) === 'builtin'))
+const luaList = computed(() => monitor.roster.filter(i => kindOf(i) === 'lua'))
+const externalList = computed(() => monitor.roster.filter(i => kindOf(i) === 'external'))
 
 /** 当前选中实例的完整配置（编辑用）。 */
 const selectedConfig = computed<InstConfig | null>(() => {
@@ -27,7 +28,7 @@ const selectedConfig = computed<InstConfig | null>(() => {
   return monitor.instanceConfigs[monitor.selectedInstance] ?? null
 })
 const selectedStat = computed(() =>
-  monitor.instances.find(i => i.inst_id === monitor.selectedInstance) ?? null,
+  monitor.roster.find(i => i.inst_id === monitor.selectedInstance) ?? null,
 )
 
 /** 实例编辑弹窗显隐 + 编辑目标。 */
@@ -47,16 +48,30 @@ function onEdit() {
   editing.value = selectedConfig.value
   showForm.value = true
 }
-/** 保存（来自 InstanceForm）→ store.saveInstance 整包写。 */
+/** 保存（来自 InstanceForm）→ store.saveInstance 整包写。
+ *  D 修复：period 改了且实例运行中 → 提示重启（period 无热加载，各插件 run 时一次性读取）。 */
 async function onSave(cfg: InstConfig) {
   saving.value = true
   opError.value = ''
   const ok = await monitor.saveInstance(cfg)
   saving.value = false
-  if (ok) {
-    showForm.value = false
-  } else {
+  if (!ok) {
     opError.value = '保存失败（检查 inst_id 是否冲突或字段是否合法）'
+    return
+  }
+  showForm.value = false
+  const oldPeriod = selectedConfig.value?.app_config?.period
+  const newPeriod = cfg.app_config?.period
+  const running = selectedStat.value?.state === 'running'
+  if (oldPeriod !== undefined && oldPeriod !== newPeriod && running && monitor.selectedInstance) {
+    if (confirm('采集周期已修改，需重启实例才生效。是否立即重启？')) {
+      const stopped = await monitor.stopInstance(monitor.selectedInstance)
+      if (stopped) {
+        await monitor.startInstance(monitor.selectedInstance)
+      } else {
+        opError.value = '重启失败（实例停止失败）'
+      }
+    }
   }
 }
 /** 删除选中实例（二次确认）。 */
@@ -66,6 +81,20 @@ async function onDelete() {
   opError.value = ''
   const ok = await monitor.deleteInstance(monitor.selectedInstance)
   if (!ok) opError.value = '删除失败'
+}
+/** 清空实时数据（scope=rtdata：清缓存保留实例配置，轻量）。 */
+async function onPurgeRtdata() {
+  if (!confirm('确定清空所有设备的实时数据缓存？实例配置保留。')) return
+  opError.value = ''
+  const ok = await monitor.purge('rtdata')
+  if (!ok) opError.value = '清空实时数据失败'
+}
+/** 重置全部（scope=all：删所有实例 + 级联数据，保留登录账号。高危）。 */
+async function onPurgeAll() {
+  if (!confirm('确定重置全部？将删除所有实例及其设备/数据（登录账号保留），且不可恢复！')) return
+  opError.value = ''
+  const ok = await monitor.purge('all')
+  if (!ok) opError.value = '重置失败'
 }
 /** 启动/停止。 */
 async function onStart() {
@@ -82,7 +111,7 @@ useWorkspacePage(() => ({
     ? `正在管理采集器 ${monitor.selectedInstance}（可编辑参数/点表）`
     : '正在浏览所有采集器（内置/lua/外部）',
   facts: [
-    `实例总数 ${monitor.instances.length}`,
+    `实例总数 ${monitor.roster.length}`,
     `内建 ${builtinList.value.length} / lua ${luaList.value.length} / 外部 ${externalList.value.length}`,
     `当前实例 ${monitor.selectedInstance || '未选中'}`,
     `当前实例状态 ${selectedStat.value?.state || '未知'}`,
@@ -99,7 +128,9 @@ useWorkspacePage(() => ({
           <h3>采集器列表</h3>
         </div>
         <div class="head-actions">
-          <span class="count">{{ monitor.instances.length }} 个</span>
+          <span class="count">{{ monitor.roster.length }} 个</span>
+          <button class="btn-ghost" title="清空实时数据缓存，保留实例配置" @click="onPurgeRtdata">清空实时数据</button>
+          <button class="btn-danger" title="删除所有实例及数据（保留登录账号），不可恢复" @click="onPurgeAll">重置全部</button>
           <button class="btn-new" @click="onNew">+ 新建实例</button>
         </div>
       </div>
@@ -151,7 +182,7 @@ useWorkspacePage(() => ({
             </button>
           </div>
         </div>
-        <p v-if="!monitor.instances.length" class="empty">暂无实例，点「+ 新建实例」创建</p>
+        <p v-if="!monitor.roster.length" class="empty">暂无实例，点「+ 新建实例」创建</p>
       </div>
     </article>
 
@@ -234,7 +265,7 @@ useWorkspacePage(() => ({
 
 .panel-head h3 { margin: 0; font-family: "Bahnschrift", sans-serif; }
 
-.head-actions { display: flex; align-items: center; gap: 10px; }
+.head-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
 .count { font-size: 12px; color: var(--color-ink-dim); }
 .btn-new {
   padding: 6px 14px; border-radius: 10px;
@@ -242,6 +273,18 @@ useWorkspacePage(() => ({
   color: white; font-size: 12px; cursor: pointer; white-space: nowrap;
 }
 .btn-new:hover { background: var(--color-primary-hover); }
+.btn-ghost {
+  padding: 6px 14px; border-radius: 10px;
+  border: 1px solid var(--card-border); background: var(--card-bg);
+  color: var(--color-ink-secondary); font-size: 12px; cursor: pointer; white-space: nowrap;
+}
+.btn-ghost:hover { border-color: var(--color-primary); color: var(--color-primary); }
+.btn-danger {
+  padding: 6px 14px; border-radius: 10px;
+  border: 1px solid var(--color-danger); background: transparent;
+  color: var(--color-danger); font-size: 12px; cursor: pointer; white-space: nowrap;
+}
+.btn-danger:hover { background: var(--color-danger); color: white; }
 
 .panel-label {
   margin: 0 0 10px;

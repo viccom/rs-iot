@@ -6,7 +6,7 @@ const monitor = useMonitorStore()
 <template>
   <div class="collector-list">
     <h3>采集器</h3>
-    <div v-for="inst in monitor.instances" :key="inst.inst_id"
+    <div v-for="inst in monitor.roster" :key="inst.inst_id"
          class="item" :class="{ active: monitor.selectedInstance === inst.inst_id, [inst.state]: true }"
          @click="monitor.selectInstance(inst.inst_id)">
       <span class="dot"></span>
@@ -16,7 +16,7 @@ const monitor = useMonitorStore()
       </div>
       <span class="state">{{ inst.state }}</span>
     </div>
-    <p class="empty" v-if="!monitor.instances.length">无实例</p>
+    <p class="empty" v-if="!monitor.roster.length">无实例</p>
   </div>
 </template>
 <style scoped>

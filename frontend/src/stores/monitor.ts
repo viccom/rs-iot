@@ -1,6 +1,6 @@
 // frontend/src/stores/monitor.ts
 import { defineStore } from 'pinia'
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
 import type {
   InstanceStat,
   LogEntry,
@@ -38,6 +38,33 @@ export const useMonitorStore = defineStore('monitor', () => {
   const instances = ref<InstanceStat[]>([])
   /** 实例完整配置表（inst_id → InstConfig，来自 GET /insts；用于实例管理 + 点表类型映射）。 */
   const instanceConfigs = ref<InstanceConfigs>({})
+
+  /**
+   * 实例名册：**配置全集 ∪ 运行态**。`/inst/stats` 只含启动/注册过的实例
+   * （auto_start=false 的实例不在其中），若名册单用 stats，未启动实例在管理页
+   * 不可见不可管理。故以配置全集为底、stats 为运行态覆盖合并。
+   */
+  const roster = computed<InstanceStat[]>(() => {
+    const statsById = new Map(instances.value.map(i => [i.inst_id, i]))
+    const out: InstanceStat[] = []
+    for (const [id, cfg] of Object.entries(instanceConfigs.value)) {
+      const st = statsById.get(id)
+      out.push(
+        st ?? {
+          inst_id: id,
+          app_code: cfg.app_code,
+          host_kind: cfg.host_kind,
+          state: 'stopped',
+          health: null,
+        },
+      )
+    }
+    // 运行态中存在但配置缺失的（理论不出现，防御性补全）。
+    for (const i of instances.value) {
+      if (!(i.inst_id in instanceConfigs.value)) out.push(i)
+    }
+    return out
+  })
   /** 日志环形缓冲（最新在前，上限 MAX_LOGS）。 */
   const logs = ref<LogEntry[]>([])
   /** 报文环形缓冲（最新在前，上限 MAX_PACKETS）。 */
@@ -235,9 +262,20 @@ export const useMonitorStore = defineStore('monitor', () => {
     return true
   }
 
-  /** 删除实例（POST /inst/delete）。删后重拉。 */
+  /** 删除实例（POST /inst/delete，后端级联清 rtdata/stat/trace/运行 task）。删后重拉。 */
   async function deleteInstance(id: string): Promise<boolean> {
     const r = await postJson('/api/rsiot/api/v1/inst/delete', { inst_id: id })
+    if (!r || !r.ok) return false
+    await loadInstanceConfigs()
+    await loadInstances()
+    return true
+  }
+
+  /** 清空业务数据（POST /api/v1/purge）。
+   *  scope='rtdata'：只清实时数据缓存（保留实例配置）；scope='all'：重置——
+   *  删全部实例（级联清 rtdata/stat/trace）+ 兜底清孤儿，**保留登录账号**。 */
+  async function purge(scope: 'rtdata' | 'all'): Promise<boolean> {
+    const r = await postJson('/api/rsiot/api/v1/purge', { scope })
     if (!r || !r.ok) return false
     await loadInstanceConfigs()
     await loadInstances()
@@ -421,6 +459,7 @@ export const useMonitorStore = defineStore('monitor', () => {
 
   return {
     instances,
+    roster,
     instanceConfigs,
     logs,
     packets,
@@ -442,6 +481,7 @@ export const useMonitorStore = defineStore('monitor', () => {
     loadLogsRecent,
     saveInstance,
     deleteInstance,
+    purge,
     startInstance,
     stopInstance,
     subscribeLog,

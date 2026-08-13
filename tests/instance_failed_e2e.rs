@@ -199,3 +199,42 @@ async fn normal_stop_marks_stopped_not_failed() {
 
     common::stop_lux(handle).await;
 }
+
+/// 级联删除次生 bug 回归：stop 从未注册的实例（未启动/已删除）必须是无操作——
+/// 不得往 states 插入 Stopping/Stopped，否则已删除实例永久残留 /inst/stats。
+#[tokio::test]
+async fn stop_unregistered_instance_leaves_no_state() {
+    let data_dir = common::test_data_dir("instance_stop_unregistered");
+    let (handle, client) = common::start_lux(data_dir.to_str().expect("utf8")).await;
+    let (hub_tx, _hub_rx) = mpsc::channel::<Sample>(16);
+    let ctx = HostContext {
+        lux: client,
+        hwid: Hwid::new("test"),
+        shutdown: CancellationToken::new(),
+        ctl_registry: CtlRegistry::new(std::sync::Arc::new(
+            rs_iot::process_metrics::ProcessMetrics::new(),
+        )),
+        bridge_registry: BridgeRegistry::new(),
+        metrics: std::sync::Arc::new(rs_iot::process_metrics::ProcessMetrics::new()),
+        trace_registry: rs_iot::io_trace::TraceRegistry::new(),
+        event_tx: rs_iot::event_bus::EventBus::dummy(),
+    };
+    let mgr = InstanceManager::new(ctx, hub_tx);
+
+    // 从未启动过的实例（如删除级联时对已删实例调 stop）→ stop 后 states 仍为空。
+    mgr.stop("ghost").await.expect("stop");
+    assert!(
+        !mgr.status().contains_key("ghost"),
+        "未注册实例 stop 后不得残留状态条目（/inst/stats 会显示已删实例）"
+    );
+
+    // 已运行实例 stop 行为不受影响（收敛为 Stopped）。
+    mgr.start_source(inst("real", "__test_obedient"))
+        .await
+        .expect("start");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    mgr.stop("real").await.expect("stop");
+    assert_eq!(mgr.status().get("real").copied(), Some(InstState::Stopped));
+
+    common::stop_lux(handle).await;
+}

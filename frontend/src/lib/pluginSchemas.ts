@@ -48,7 +48,7 @@ export const PLUGIN_SCHEMAS: Record<string, PluginField[]> = {
     { key: 'stop_bits', label: '停止位', type: 'number', default: 1 },
     { key: 'flow_control', label: '流控', type: 'select', options: ['none', 'software', 'hardware'], default: 'none' },
     { key: 'slave_id', label: '从站 ID', type: 'number', default: 1 },
-    { key: 'period', label: '采集周期(秒)', type: 'number', default: 1, hint: '全插件统一秒（非毫秒）' },
+    { key: 'period', label: '采集周期(秒)', type: 'number', default: 1, hint: '全插件统一秒（非毫秒）；修改后需重启实例生效' },
     { key: 'gap_threshold', label: '最大单空洞', type: 'number', hint: '相邻点最大寄存器空隙（合并批量读用）' },
     { key: 'max_regs', label: '单区间最大寄存器数', type: 'number', default: 100 },
     { key: 'reconnect_secs', label: '重连间隔(秒)', type: 'number', default: 3 },
@@ -59,7 +59,7 @@ export const PLUGIN_SCHEMAS: Record<string, PluginField[]> = {
   opcuaClient: [
     { key: 'endpoint', label: 'OPC UA 端点', type: 'string', hint: 'opc.tcp://host:port', required: true },
     { key: 'security_policy', label: '安全策略', type: 'select', options: ['none', 'Basic256Sha256'], default: 'none' },
-    { key: 'period', label: '采集周期(秒)', type: 'number', default: 1, hint: '全插件统一秒（非毫秒）' },
+    { key: 'period', label: '采集周期(秒)', type: 'number', default: 1, hint: '全插件统一秒（非毫秒）；修改后需重启实例生效' },
     { key: 'verify_server', label: '校验服务器证书', type: 'bool', default: false, hint: '生产环境建议开' },
   ],
   // 西门子 S7（s7_client）
@@ -68,7 +68,7 @@ export const PLUGIN_SCHEMAS: Record<string, PluginField[]> = {
     { key: 'plc_type', label: 'PLC 类型', type: 'select', options: ['s200', 's200smart', 's300', 's400', 's1200', 's1500', 'sinumerik828d'], default: 's1200' },
     { key: 'rack', label: '机架号', type: 'number' },
     { key: 'slot', label: '插槽号', type: 'number' },
-    { key: 'period', label: '采集周期(秒)', type: 'number', default: 1, hint: '全插件统一秒（非毫秒）' },
+    { key: 'period', label: '采集周期(秒)', type: 'number', default: 1, hint: '全插件统一秒（非毫秒）；修改后需重启实例生效' },
     { key: 'timeout_ms', label: '超时(ms)', type: 'number' },
     { key: 'auto_reconnect', label: '自动重连', type: 'bool', default: true },
   ],
@@ -85,7 +85,7 @@ export const PLUGIN_SCHEMAS: Record<string, PluginField[]> = {
     { key: 'data_bits', label: '数据位', type: 'number', default: 8 },
     { key: 'parity', label: '校验', type: 'select', options: ['none', 'even', 'odd'], default: 'none' },
     { key: 'stop_bits', label: '停止位', type: 'number', default: 1 },
-    { key: 'period', label: '采集周期(秒)', type: 'number', default: 1, hint: '全插件统一秒（非毫秒）' },
+    { key: 'period', label: '采集周期(秒)', type: 'number', default: 1, hint: '全插件统一秒（非毫秒）；修改后需重启实例生效' },
     { key: 'timeout_ms', label: '请求超时(ms)', type: 'number', default: 200 },
     { key: 'recv_idle_ms', label: '接收空闲(ms)', type: 'number', default: 50 },
     { key: 'reconnect_secs', label: '重连间隔(秒)', type: 'number', default: 5 },
@@ -97,7 +97,7 @@ export const PLUGIN_SCHEMAS: Record<string, PluginField[]> = {
 
 /** 模拟采集（dataSim，demo 用）。dataSim 无 devices 会直接退出（必须配点表）。 */
 export const DATASIM_SCHEMA: PluginField[] = [
-  { key: 'period', label: '采集周期(秒)', type: 'number', default: 3, hint: '全插件统一秒（非毫秒）' },
+  { key: 'period', label: '采集周期(秒)', type: 'number', default: 3, hint: '全插件统一秒（非毫秒）；修改后需重启实例生效' },
 ]
 
 /** 内置 app_code 选项（新建实例下拉）。北向 mqttPub 不在此（实例管理聚焦南向采集）。 */

@@ -355,6 +355,27 @@ describe('monitor store', () => {
     fetchSpy.mockRestore()
   })
 
+  it('purge POST /api/v1/purge 携带 scope 参数 + 重拉', async () => {
+    // 锁的不变量：清空入口走 POST /purge {scope: "rtdata"|"all"}（后端级联/兜底清理，
+    // 保留登录账号），成功后备重拉配置 + 状态表。
+    const auth = useAuthStore()
+    auth.setAuth('tok', 'admin')
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async () =>
+      new Response('{"status":"purged"}', { status: 200 }),
+    )
+    const s = useMonitorStore()
+    expect(await s.purge('rtdata')).toBe(true)
+    expect(await s.purge('all')).toBe(true)
+    const rtdataCall = fetchSpy.mock.calls.find(c => String(c[0]).includes('/purge'))
+    expect(rtdataCall).toBeTruthy()
+    const bodies = fetchSpy.mock.calls
+      .filter(c => String(c[0]).includes('/purge'))
+      .map(c => JSON.parse(String((c[1] as RequestInit).body)))
+    expect(bodies).toContainEqual({ scope: 'rtdata' })
+    expect(bodies).toContainEqual({ scope: 'all' })
+    fetchSpy.mockRestore()
+  })
+
   it('startInstance/stopInstance 调对应端点', async () => {
     const auth = useAuthStore()
     auth.setAuth('tok', 'admin')

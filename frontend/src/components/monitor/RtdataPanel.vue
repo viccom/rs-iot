@@ -40,6 +40,19 @@ const typeMap = computed(() => {
   return m
 })
 
+/** devId → 归属实例 id 映射（C 修复：设备页展示设备归属哪个实例）。
+ *  与 typeMap 同源遍历（instanceConfigs），同 dev 多实例引用时首个胜出。 */
+const devOwner = computed(() => {
+  const m: Record<string, string> = {}
+  for (const cfg of Object.values(monitor.instanceConfigs)) {
+    for (const dev of cfg.devices) {
+      if (!dev.value) continue
+      m[dev.value] ??= cfg.inst_id
+    }
+  }
+  return m
+})
+
 /** 已知类型集合（类型下拉选项，从 typeMap 收集）。 */
 const knownTypes = computed(() => {
   const s = new Set<string>()
@@ -52,10 +65,11 @@ const knownTypes = computed(() => {
 /** 扁平化 + 过滤后的行（计算属性，依赖 rtdata/selectedDevice/tagFilter/typeFilter）。 */
 const rows = computed(() => {
   const all = monitor.rtdata
-  const result: { dev: string; tag: string; value: string; ts: string; type: string }[] = []
+  const result: { dev: string; tag: string; value: string; ts: string; type: string; owner: string }[] = []
   for (const [dev, tags] of Object.entries(all)) {
     if (monitor.selectedDevice && dev !== monitor.selectedDevice) continue
     const devTypes = typeMap.value[dev] ?? {}
+    const owner = devOwner.value[dev] || ''
     for (const [field, cell] of Object.entries(tags)) {
       // field 形如 <devid>.<tag>，取末段还原 tag。
       const tag = field.split('.').pop() || field
@@ -63,7 +77,7 @@ const rows = computed(() => {
       const type = devTypes[tag] || ''
       if (typeFilter.value && type !== typeFilter.value) continue
       const cellArr = cell as [number, string, string | number]
-      result.push({ dev, tag, value: String(cellArr[2]), ts: cellArr[1], type })
+      result.push({ dev, tag, value: String(cellArr[2]), ts: cellArr[1], type, owner })
     }
   }
   return result
@@ -113,7 +127,7 @@ function onMounted(el: HTMLElement | null) {
       <div class="spacer" :style="{ height: totalH + 'px', paddingTop: padTop + 'px', paddingBottom: padBottom + 'px' }">
         <table>
           <thead>
-            <tr><th>设备</th><th>Tag</th><th>值</th><th>类型</th><th>时间</th></tr>
+            <tr><th>设备</th><th>Tag</th><th>值</th><th>类型</th><th>归属实例</th><th>时间</th></tr>
           </thead>
           <tbody>
             <tr v-for="r in visibleRows" :key="r.dev + '.' + r.tag" class="row">
@@ -121,6 +135,7 @@ function onMounted(el: HTMLElement | null) {
               <td>{{ r.tag }}</td>
               <td class="val">{{ r.value }}</td>
               <td class="type">{{ r.type || '—' }}</td>
+              <td class="owner">{{ r.owner || '—' }}</td>
               <td class="ts">{{ r.ts }}</td>
             </tr>
           </tbody>
@@ -162,6 +177,13 @@ function onMounted(el: HTMLElement | null) {
 }
 
 table { width: 100%; border-collapse: collapse; font-size: 13px; table-layout: fixed; }
+/* 6 列定宽：时间/设备/归属固定，Tag/值弹性——避免均分下时间戳被挤压截断。
+   文本超宽 ellipsis（long 字段不撑破行高）。 */
+th:nth-child(1), td:nth-child(1) { width: 110px; }
+th:nth-child(4), td:nth-child(4) { width: 56px; }
+th:nth-child(5), td:nth-child(5) { width: 110px; }
+th:nth-child(6), td:nth-child(6) { width: 148px; }
+th:nth-child(n), td:nth-child(n) { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 thead th {
   position: sticky; top: 0; z-index: 1;
   background: var(--table-head-bg); color: var(--color-ink-secondary);
@@ -175,6 +197,7 @@ th, td { text-align: left; padding: 0 10px; }
 
 .val { font-family: Consolas, monospace; color: var(--chip-ink); }
 .type { color: var(--color-ink-muted); font-size: 12px; }
+.owner { color: var(--color-primary); font-size: 12px; }
 .ts { color: var(--color-ink-muted); font-family: Consolas, monospace; }
 
 .empty { color: var(--color-ink-muted); padding: 20px; text-align: center; }

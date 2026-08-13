@@ -109,6 +109,7 @@ pub fn build_router(state: AppState) -> axum::Router {
         .route("/api/v1/inst/get", get(routes_inst::get))
         .route("/api/v1/inst/set", post(routes_inst::set))
         .route("/api/v1/inst/delete", post(routes_inst::delete))
+        .route("/api/v1/purge", post(routes_inst::purge))
         .route("/api/v1/inst/stats", get(routes_stat::stats))
         // device CRUD
         .route("/api/v1/devices", get(routes_device::list))

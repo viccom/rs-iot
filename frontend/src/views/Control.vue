@@ -10,7 +10,7 @@ useWorkspacePage(() => ({
     `当前实例 ${monitor.selectedInstance || '未选中'}`,
     `当前设备 ${monitor.selectedDevice || '未选中'}`,
     `系统在线状态 ${monitor.offline ? '重连中' : '在线'}`,
-    `实例总数 ${monitor.instances.length}`,
+    `实例总数 ${monitor.roster.length}`,
   ],
 }))
 </script>

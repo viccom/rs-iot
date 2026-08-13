@@ -18,7 +18,7 @@ const latestPackets = computed(() => monitor.packets.slice(0, 4))
 useWorkspacePage(() => ({
   pageSummary: '总览当前实例健康、日志态势与报文链路活跃度',
   facts: [
-    `实例总数 ${monitor.instances.length}`,
+    `实例总数 ${monitor.roster.length}`,
     `运行中实例 ${runningCount.value}`,
     `降级实例 ${degradedCount.value}`,
     `最近日志 ${monitor.logs[0]?.message ?? '暂无'}`,
@@ -31,7 +31,7 @@ useWorkspacePage(() => ({
     <div class="hero-grid">
       <article class="hero-card accent">
         <p class="card-label">站点运行态势</p>
-        <h3>{{ runningCount }}/{{ monitor.instances.length || 0 }}</h3>
+        <h3>{{ runningCount }}/{{ monitor.roster.length || 0 }}</h3>
         <p>当前在线采集器占比与整体运行体感。</p>
         <span class="hero-note">主控链路稳定，适合继续巡检</span>
       </article>
@@ -56,7 +56,7 @@ useWorkspacePage(() => ({
             <p class="card-label">采集实例</p>
             <h3>实例一览</h3>
           </div>
-          <span>{{ monitor.instances.length }} 个实例</span>
+          <span>{{ monitor.roster.length }} 个实例</span>
         </div>
         <CollectorList />
       </section>

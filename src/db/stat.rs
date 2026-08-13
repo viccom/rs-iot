@@ -65,6 +65,14 @@ pub async fn read(c: &EmbeddedClient, inst_id: &str) -> Result<Option<InstanceSt
     }
 }
 
+/// 删除实例状态快照（`DEL stat:<inst_id>`）。
+///
+/// 实例删除时调，避免残留 stat 被误读为存活实例的指标。DEL 模式对标 `luakv::remove`。
+pub async fn delete(c: &EmbeddedClient, inst_id: &str) -> Result<(), RsIotError> {
+    c.execute("DEL", &[&key(inst_id)]).await?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -122,6 +130,17 @@ mod tests {
         let c = client().await;
         write(&c, "a", &sample()).await.unwrap();
         assert!(read(&c, "b").await.unwrap().is_none(), "实例间隔离");
+    }
+
+    /// 删除实例 stat（B 修复）：delete 后 read 应为 None，其他实例不受影响。
+    #[tokio::test]
+    async fn delete_removes_only_target_inst() {
+        let c = client().await;
+        write(&c, "a", &sample()).await.unwrap();
+        write(&c, "b", &sample()).await.unwrap();
+        delete(&c, "a").await.unwrap();
+        assert!(read(&c, "a").await.unwrap().is_none(), "a 的 stat 应被删除");
+        assert!(read(&c, "b").await.unwrap().is_some(), "b 不受影响");
     }
 
     #[test]
