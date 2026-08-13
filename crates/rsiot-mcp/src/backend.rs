@@ -42,6 +42,9 @@ pub trait RsiotBackend: Send + Sync {
 
     /// `POST <base>/api/v1/<path>` 带 JSON body，返响应 JSON。
     async fn post(&self, path: &str, body: &Value) -> Result<Value, BackendError>;
+
+    /// `DELETE <base>/api/v1/<path>`（rsiot_stop_packet_trace 关报文 trace 用，query 在 path 拼）。
+    async fn delete(&self, path: &str) -> Result<Value, BackendError>;
 }
 
 /// 调 rs-iot 主进程 loopback REST 的 WebBackend。
@@ -133,6 +136,10 @@ impl RsiotBackend for WebBackend {
 
     async fn post(&self, path: &str, body: &Value) -> Result<Value, BackendError> {
         self.request(reqwest::Method::POST, path, Some(body)).await
+    }
+
+    async fn delete(&self, path: &str) -> Result<Value, BackendError> {
+        self.request(reqwest::Method::DELETE, path, None).await
     }
 }
 

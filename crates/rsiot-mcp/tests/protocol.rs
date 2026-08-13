@@ -30,6 +30,9 @@ impl RsiotBackend for FakeBackend {
     async fn post(&self, _path: &str, _body: &Value) -> Result<Value, rsiot_mcp::BackendError> {
         Ok(json!({"status": "ok"}))
     }
+    async fn delete(&self, _path: &str) -> Result<Value, rsiot_mcp::BackendError> {
+        Ok(json!({"status": "ok"}))
+    }
 }
 
 /// 辅助：起 server + client 经 duplex 握手，返回 client（用完 cancel 即可）。
@@ -43,7 +46,10 @@ async fn spawn_handshake(
     tokio::task::JoinHandle<()>,
 ) {
     let (server_transport, client_transport) = tokio::io::duplex(16 * 1024);
-    let server = RsiotMcpServer::new(Arc::new(FakeBackend { get_value }) as Arc<dyn RsiotBackend>);
+    let server = RsiotMcpServer::new(
+        Arc::new(FakeBackend { get_value }) as Arc<dyn RsiotBackend>,
+        rsiot_mcp::RiskPolicy::default(),
+    );
     let server_task = tokio::spawn(async move {
         // serve().await 建立 server 返回 RunningService；必须接着 .waiting().await
         // 保持运行（否则 serve 返回即 drop service → client 握手 BrokenPipe）。
@@ -58,18 +64,19 @@ async fn spawn_handshake(
     (client, server_task)
 }
 
-/// 协议握手 + list_tools：10 个工具全部暴露。
+/// 协议握手 + list_tools：23 个工具全部暴露。
 ///
 /// 验证意图（规则7）：`#[tool_router]` 宏注册的工具必须在 list_tools 出现——
 /// 漏一个说明宏配置错或工具方法签名错（reasonix 会看不到该工具）。
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn handshake_lists_all_ten_tools() {
+async fn handshake_lists_all_tools() {
     let (client, server_task) = spawn_handshake(json!([])).await;
     let tools = client.peer().list_tools(None).await.expect("list_tools");
     let names: Vec<&str> = tools.tools.iter().map(|t| t.name.as_ref()).collect();
 
-    // 10 个工具全在（漏一个 = 宏没注册，agent 调不到）。
+    // 23 个工具全在（漏一个 = 宏没注册，agent 调不到）。
     for expected in [
+        // 既有 10 个
         "rsiot_list_devices",
         "rsiot_read_tags",
         "rsiot_get_status",
@@ -80,13 +87,27 @@ async fn handshake_lists_all_ten_tools() {
         "rsiot_stop_instance",
         "rsiot_save_lua_script",
         "rsiot_get_config",
+        // 新增 13 个
+        "rsiot_start_packet_trace",
+        "rsiot_list_packet_trace",
+        "rsiot_stop_packet_trace",
+        "rsiot_get_instance_stats",
+        "rsiot_reload_lua_instance",
+        "rsiot_list_lua_scripts",
+        "rsiot_get_instance_config",
+        "rsiot_set_instance",
+        "rsiot_delete_instance",
+        "rsiot_set_device",
+        "rsiot_delete_device",
+        "rsiot_list_plugins",
+        "rsiot_get_sysinfo",
     ] {
         assert!(
             names.contains(&expected),
             "tool {expected} must be listed; got {names:?}"
         );
     }
-    assert_eq!(names.len(), 10, "exactly 10 tools; got {names:?}");
+    assert_eq!(names.len(), 23, "exactly 23 tools; got {names:?}");
 
     let _ = client.cancel().await;
     server_task.abort();
@@ -163,6 +184,44 @@ async fn call_tool_write_command_round_trip() {
     assert_ne!(result.is_error, Some(true));
     let text = result.content[0].as_text().expect("text").text.clone();
     assert!(text.contains("ok"), "write post returned ok; got {text}");
+
+    let _ = client.cancel().await;
+    server_task.abort();
+}
+
+/// risk 拦截经 JSON-RPC 往返生效：默认 RiskPolicy 下 CriticalWrite（set_instance）被拦。
+///
+/// 验证意图（规则7）：拦截必须在协议层生效——只验 `check()` 纯函数不够，reasonix 实际走
+/// `call_tool` 往返路径。默认策略（allow_critical_writes=false）下 set_instance 应返
+/// error CallToolResult（is_error=true + text 含 blocked），且不触达 backend。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn call_tool_criticalwrite_blocked_over_wire() {
+    let (client, server_task) = spawn_handshake(json!(null)).await;
+    let result = client
+        .peer()
+        .call_tool(
+            CallToolRequestParams::new("rsiot_set_instance").with_arguments(
+                json!({
+                    "inst_id": "i1",
+                    "object": { "app_code": "dataSim", "app_type": "south" }
+                })
+                .as_object()
+                .cloned()
+                .unwrap_or_default(),
+            ),
+        )
+        .await
+        .expect("call_tool");
+    assert_eq!(
+        result.is_error,
+        Some(true),
+        "CriticalWrite must be blocked by default policy"
+    );
+    let text = result.content[0].as_text().expect("text").text.clone();
+    assert!(
+        text.contains("blocked"),
+        "blocked message must be readable; got {text}"
+    );
 
     let _ = client.cancel().await;
     server_task.abort();

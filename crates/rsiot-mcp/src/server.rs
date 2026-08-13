@@ -62,7 +62,7 @@ pub struct SendCommandRequest {
     #[schemars(description = "Command type, e.g. \"write\". Plugin dispatches on this.")]
     pub cmd: String,
     #[schemars(
-        description = "Command payload as JSON text, e.g. {\"address\":\"holding:0:f32:ABCD\",\"value\":12.34}"
+        description = "Command payload as JSON text, e.g. {\"address\":\"holding:0:f32\",\"value\":12.34}"
     )]
     pub data: String,
 }
@@ -83,6 +83,79 @@ pub struct SaveScriptRequest {
     pub name: String,
     #[schemars(description = "Content of main.lua")]
     pub content: String,
+}
+
+/// `rsiot_start_packet_trace`：激活报文 trace。对标 `routes_trace::TraceReq`。
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct StartPacketTraceRequest {
+    #[schemars(description = "Instance must be Running, or rs-iot returns 404")]
+    pub inst_id: String,
+    #[schemars(description = "Trace duration in seconds (default 60)")]
+    pub duration_secs: Option<u64>,
+}
+
+/// `rsiot_stop_packet_trace`：关报文 trace。对标 `routes_trace::IdQuery`（query 参数）。
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct StopPacketTraceRequest {
+    #[schemars(description = "Instance ID to stop tracing")]
+    pub inst_id: String,
+}
+
+/// `rsiot_get_instance_stats`：实例指标。对标 `routes_stat::InstQuery`。
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct GetInstanceStatsRequest {
+    #[schemars(description = "Omit to return stats for all instances")]
+    pub inst_id: Option<String>,
+}
+
+/// `rsiot_reload_lua_instance`：重载 lua 实例（stop+start）。对标 `routes_lua::InstQuery`。
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ReloadLuaRequest {
+    #[schemars(description = "luaClient instance ID (non-lua instance returns 400)")]
+    pub inst_id: String,
+}
+
+/// `rsiot_get_instance_config`：读实例完整配置。对标 `routes_inst::IdQuery`。
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct GetInstanceConfigRequest {
+    #[schemars(description = "Instance ID")]
+    pub inst_id: String,
+}
+
+/// `rsiot_set_instance`：建/改实例。对标 `routes_inst::SetReq`（inst_id + 原样配置对象）。
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct SetInstanceRequest {
+    #[schemars(description = "Instance ID (unique, routing key)")]
+    pub inst_id: String,
+    #[schemars(
+        description = "Full InstConfig JSON: inst_name/app_code(plugin name)/app_type(south|north)/auto_start/app_config(arbitrary plugin config)/devices/host_kind(builtin|external). rs-iot validates on deserialize."
+    )]
+    pub object: serde_json::Value,
+}
+
+/// `rsiot_delete_instance`：删实例。对标 `routes_inst::DelReq`。
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct DeleteInstanceRequest {
+    #[schemars(description = "Instance ID to delete")]
+    pub inst_id: String,
+}
+
+/// `rsiot_set_device`：建设备点表。对标 `routes_device::SetReq`（dev_id + 原样配置对象）。
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct SetDeviceRequest {
+    #[schemars(description = "Device ID")]
+    pub dev_id: String,
+    #[schemars(
+        description = "Full DeviceSpec JSON: label/value(device id)/children[{label,value(tag),type}]]/slave_id(optional, modbusClient only)"
+    )]
+    pub object: serde_json::Value,
+}
+
+/// `rsiot_delete_device`：删设备。对标 `routes_device::DelReq`。
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct DeleteDeviceRequest {
+    #[schemars(description = "Device ID to delete")]
+    pub dev_id: String,
 }
 
 // ============ query 拼接辅助 ============
@@ -110,16 +183,105 @@ fn encode_query_value(s: &str) -> String {
 /// 工具风险三档（rs-iot 独有，对标 dbx-mcp `sql_risk` 但绑定工具名）。
 ///
 /// - `ReadOnly`：查询类，agent 自动放行（对标 rmcp `readOnlyHint`，但运行时判定更灵活）。
-/// - `Write`：写设备/启停实例/写脚本，走 reasonix Ask 权限卡片（工具描述声明 "requires approval"）。
-/// - `CriticalWrite`：关键设备写/删实例，P1 加生产环境保护（关键设备 ID 列表禁写）。
-///
-/// P0 实现：risk 绑定在工具描述（"Read-only" / "requires approval"），由 reasonix 侧 Ask 模式
-/// 拦截。MCP server 侧不自己拦截写操作——对标 dbx（dbx 的运行时校验在 backend 层，rs-iot 后置）。
+/// - `Write`：写设备/启停实例/写脚本，工具描述声明 "requires approval"，由 reasonix Ask 模式拦。
+/// - `CriticalWrite`：建/删实例与设备点表，受 `RiskPolicy` 总开关管制（默认拦，见 `check_risk`）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolRisk {
     ReadOnly,
     Write,
     CriticalWrite,
+}
+
+/// 工具名 → risk 档静态查表（纯函数，零运行时分配；漏登名字会在拦截测试暴露）。
+///
+/// 未知名字按 `Write` 保守对待（实际 `tool_router` 已校验 name 合法性，不会走到 default）。
+fn tool_risk(name: &str) -> ToolRisk {
+    use ToolRisk::*;
+    match name {
+        // 只读（12）
+        "rsiot_list_devices"
+        | "rsiot_read_tags"
+        | "rsiot_get_status"
+        | "rsiot_list_instances"
+        | "rsiot_get_recent_logs"
+        | "rsiot_get_config"
+        | "rsiot_list_packet_trace"
+        | "rsiot_get_instance_stats"
+        | "rsiot_list_lua_scripts"
+        | "rsiot_get_instance_config"
+        | "rsiot_list_plugins"
+        | "rsiot_get_sysinfo" => ReadOnly,
+        // 普通写（描述声明 + annotations，放行）
+        "rsiot_send_device_command"
+        | "rsiot_start_instance"
+        | "rsiot_stop_instance"
+        | "rsiot_save_lua_script"
+        | "rsiot_start_packet_trace"
+        | "rsiot_stop_packet_trace"
+        | "rsiot_reload_lua_instance" => Write,
+        // 关键写（受 RiskPolicy 总开关管制）
+        "rsiot_set_instance"
+        | "rsiot_delete_instance"
+        | "rsiot_set_device"
+        | "rsiot_delete_device" => CriticalWrite,
+        _ => Write,
+    }
+}
+
+/// risk 拦截策略。
+///
+/// P0 实现：仅 `allow_critical_writes` 总开关——`false`（默认）所有 `CriticalWrite` 返 error
+/// （安全默认，生产想开才开）；`true` 放行（开发/受控环境）。
+///
+/// P1 扩展点（留接口不实现，避 dead_code）：加 `critical_device_ids: HashSet<String>`，
+/// `set/delete_device` 的 dev_id 命中即拒（即使总开关放开）——在 `check_risk` 内读参数实现。
+#[derive(Debug, Clone)]
+pub struct RiskPolicy {
+    /// 总开关：`false`=所有 CriticalWrite 被拦截（默认）；`true`=放行。
+    allow_critical_writes: bool,
+}
+
+impl Default for RiskPolicy {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl RiskPolicy {
+    /// 默认最严：CriticalWrite 全拦。
+    pub fn new() -> Self {
+        Self {
+            allow_critical_writes: false,
+        }
+    }
+
+    /// 从环境变量构造：`RSIOT_MCP_ALLOW_CRITICAL_WRITES=1|true` 放行（部署时注入）。
+    pub fn from_env() -> Self {
+        let allow = std::env::var("RSIOT_MCP_ALLOW_CRITICAL_WRITES")
+            .map(|v| matches!(v.trim(), "1" | "true" | "TRUE"))
+            .unwrap_or(false);
+        Self {
+            allow_critical_writes: allow,
+        }
+    }
+
+    /// 判定工具是否被 risk 策略拦截。返 `Some(error CallToolResult)` = 拦截，`None` = 放行。
+    ///
+    /// 拦截返 `CallToolResult::error`（非协议 Err）——工具级失败，agent 看可读文本自行决策，
+    /// 与 `backend_to_result` 既有错误约定一致。
+    fn check(&self, name: &str) -> Option<CallToolResult> {
+        if matches!(tool_risk(name), ToolRisk::CriticalWrite) && !self.allow_critical_writes {
+            // P1 扩展点：此处可读 request.arguments 取 dev_id/inst_id，
+            // 命中 critical_device_ids 即拒（即使总开关放开）。
+            Some(CallToolResult::error(vec![ContentBlock::text(format!(
+                "{name} blocked: CriticalWrite tool (creates/deletes instance or device). \
+                 Set RSIOT_MCP_ALLOW_CRITICAL_WRITES=1 to enable; \
+                 production: prefer explicit per-device policy."
+            ))]))
+        } else {
+            None
+        }
+    }
 }
 
 // ============ server 主体 ============
@@ -131,12 +293,17 @@ pub enum ToolRisk {
 /// `call_tool`/`list_tools`/`get_tool`/`get_info`（rmcp 官方模式，见 docs.rs/rmcp）。
 pub struct RsiotMcpServer {
     backend: Arc<dyn RsiotBackend>,
+    /// CriticalWrite 拦截策略（默认最严；main 从 `RSIOT_MCP_ALLOW_CRITICAL_WRITES` 构造）。
+    risk_policy: RiskPolicy,
 }
 
 impl RsiotMcpServer {
-    /// 构造 server，注入 backend。
-    pub fn new(backend: Arc<dyn RsiotBackend>) -> Self {
-        Self { backend }
+    /// 构造 server，注入 backend + risk 策略（`RiskPolicy::default()` = 最严）。
+    pub fn new(backend: Arc<dyn RsiotBackend>, risk_policy: RiskPolicy) -> Self {
+        Self {
+            backend,
+            risk_policy,
+        }
     }
 }
 
@@ -166,7 +333,8 @@ impl RsiotMcpServer {
 
     /// `rsiot_list_devices`：列设备（含子采集点 children）。映射 `GET /api/v1/devices`。
     #[tool(
-        description = "List devices registered in the rs-iot gateway, optionally filtered by dev_id. Returns device list with collection points (children). Read-only."
+        description = "List devices registered in the rs-iot gateway, optionally filtered by dev_id. Returns device list with collection points (children). Read-only.",
+        annotations(read_only_hint = true)
     )]
     async fn rsiot_list_devices(
         &self,
@@ -181,7 +349,8 @@ impl RsiotMcpServer {
 
     /// `rsiot_read_tags`：读设备实时数据。映射 `GET /api/v1/rtdatas?dev_id=`。
     #[tool(
-        description = "Read latest values of device tags from the gateway. Pass dev_id for a single device, or omit for all devices. Read-only."
+        description = "Read latest values of device tags from the gateway. Pass dev_id for a single device, or omit for all devices. Read-only.",
+        annotations(read_only_hint = true)
     )]
     async fn rsiot_read_tags(
         &self,
@@ -196,7 +365,8 @@ impl RsiotMcpServer {
 
     /// `rsiot_get_status`：网关综合状态（实例/计数器/CPU/mem）。映射 `GET /api/v1/sysstatus`。
     #[tool(
-        description = "Get gateway overall status: running instances, pipeline/hub/mqtt counters, process CPU/memory. Read-only."
+        description = "Get gateway overall status: running instances, pipeline/hub/mqtt counters, process CPU/memory. Read-only.",
+        annotations(read_only_hint = true)
     )]
     async fn rsiot_get_status(
         &self,
@@ -210,7 +380,8 @@ impl RsiotMcpServer {
 
     /// `rsiot_list_instances`：列实例状态。映射 `GET /api/v1/inststatus`。
     #[tool(
-        description = "List all gateway plugin instances with their running state (Running/Stopped/Failed etc). Read-only."
+        description = "List all gateway plugin instances with their running state (Running/Stopped/Failed etc). Read-only.",
+        annotations(read_only_hint = true)
     )]
     async fn rsiot_list_instances(
         &self,
@@ -224,7 +395,8 @@ impl RsiotMcpServer {
 
     /// `rsiot_get_recent_logs`：取最近日志。映射 `GET /api/v1/logs/recent`。
     #[tool(
-        description = "Get recent structured log entries from the gateway ring buffer. Filter by level (e.g. \"warn\" = error+warn), tracing target (e.g. \"io_trace\" for packet trace), and limit. Read-only."
+        description = "Get recent structured log entries from the gateway ring buffer. Filter by level (e.g. \"warn\" = error+warn), tracing target (e.g. \"io_trace\" for packet trace), and limit. Read-only.",
+        annotations(read_only_hint = true)
     )]
     async fn rsiot_get_recent_logs(
         &self,
@@ -310,9 +482,10 @@ impl RsiotMcpServer {
     /// `rsiot_save_lua_script`：写 lua 脚本。映射 `POST /api/v1/lua/script/save`。
     ///
     /// **写操作**：修改 scripts/ 文件树（路径白名单由 rs-iot 主进程强制）。
-    /// 写后如需生效，调 `rsiot_start_instance` 或靠 luaClient notify 热加载。
+    /// 写后对**运行中**实例调 `rsiot_reload_lua_instance`（stop+start）生效——不要用
+    /// `rsiot_start_instance`（对运行中实例是错误路径）。
     #[tool(
-        description = "Write a lua collection script to scripts/<name>/main.lua. After saving, start/reload the luaClient instance to apply. Requires approval."
+        description = "Write a lua collection script to scripts/<name>/main.lua. After saving, call rsiot_reload_lua_instance to apply to a running luaClient. Requires approval."
     )]
     async fn rsiot_save_lua_script(
         &self,
@@ -329,7 +502,8 @@ impl RsiotMcpServer {
     ///
     /// 返回的配置已脱敏（jwt_secret/mqtt 凭据遮蔽为 "***"），agent 可安全读取做诊断。
     #[tool(
-        description = "Read the gateway configuration with secrets masked (jwt_secret and mqtt credentials shown as \"***\"). Read-only."
+        description = "Read the gateway configuration with secrets masked (jwt_secret and mqtt credentials shown as \"***\"). Read-only.",
+        annotations(read_only_hint = true)
     )]
     async fn rsiot_get_config(
         &self,
@@ -337,10 +511,267 @@ impl RsiotMcpServer {
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         backend_to_result(self.backend.get("/api/v1/config").await, "rsiot_get_config")
     }
+
+    // ---- 报文 trace（开关语义与实例生命周期解耦；激活后收发字节经 io_trace target 进日志 ring buffer）----
+
+    /// `rsiot_start_packet_trace`：激活实例报文 trace。映射 `POST /api/v1/inst/trace`。
+    ///
+    /// 实例须 Running（未运行 → 404）。返回 deadline_ms（trace 到时自动失效）。
+    /// 激活后配合 `rsiot_get_recent_logs(target="io_trace")` 拉报文 hex。
+    #[tool(
+        description = "Start packet-level trace for a RUNNING instance (raw TX/RX bytes go to io_trace log target). Returns deadline_ms. Instance must be Running or rs-iot returns 404. Requires approval."
+    )]
+    async fn rsiot_start_packet_trace(
+        &self,
+        Parameters(req): Parameters<StartPacketTraceRequest>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let body = serde_json::json!({
+            "inst_id": req.inst_id,
+            "duration_secs": req.duration_secs.unwrap_or(60),
+        });
+        backend_to_result(
+            self.backend.post("/api/v1/inst/trace", &body).await,
+            "rsiot_start_packet_trace",
+        )
+    }
+
+    /// `rsiot_list_packet_trace`：当前激活 trace 的实例列表。映射 `GET /api/v1/inst/trace`。
+    #[tool(
+        description = "List currently active packet-trace instance IDs (lazy-expired). Read-only.",
+        annotations(read_only_hint = true)
+    )]
+    async fn rsiot_list_packet_trace(
+        &self,
+        Parameters(_): Parameters<NoParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        backend_to_result(
+            self.backend.get("/api/v1/inst/trace").await,
+            "rsiot_list_packet_trace",
+        )
+    }
+
+    /// `rsiot_stop_packet_trace`：关闭实例报文 trace。映射 `DELETE /api/v1/inst/trace?inst_id=`。
+    #[tool(
+        description = "Stop packet trace for an instance (DELETE /api/v1/inst/trace). Requires approval."
+    )]
+    async fn rsiot_stop_packet_trace(
+        &self,
+        Parameters(req): Parameters<StopPacketTraceRequest>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let path = format!(
+            "/api/v1/inst/trace?inst_id={}",
+            encode_query_value(&req.inst_id)
+        );
+        backend_to_result(self.backend.delete(&path).await, "rsiot_stop_packet_trace")
+    }
+
+    // ---- 诊断（比 list_instances 更富的实例健康视图）----
+
+    /// `rsiot_get_instance_stats`：实例指标（state + plugin health JSON）。映射 `GET /api/v1/inst/stats`。
+    ///
+    /// 不带 inst_id 返全实例数组；带则返单实例 `{inst_id, app_code, host_kind, state, health}`。
+    #[tool(
+        description = "Get per-instance stats: process state + plugin health JSON. Pass inst_id for one instance, omit for all. Read-only.",
+        annotations(read_only_hint = true)
+    )]
+    async fn rsiot_get_instance_stats(
+        &self,
+        Parameters(req): Parameters<GetInstanceStatsRequest>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let path = match &req.inst_id {
+            Some(id) => format!("/api/v1/inst/stats?inst_id={}", encode_query_value(id)),
+            None => "/api/v1/inst/stats".to_string(),
+        };
+        backend_to_result(self.backend.get(&path).await, "rsiot_get_instance_stats")
+    }
+
+    // ---- lua 闭环（save_script → reload 生效）----
+
+    /// `rsiot_reload_lua_instance`：重载 lua 实例。映射 `POST /api/v1/lua/reload?inst_id=`。
+    ///
+    /// 仅 `app_code=="luaClient"` 实例生效（非 lua → 400，不存在 → 404）。
+    /// 对**运行中**实例做 stop+start 使新脚本生效——这是 save_script 后正确的生效路径。
+    #[tool(
+        description = "Reload a luaClient instance (stop+start, applies new scripts without full process restart). Only works for app_code=='luaClient' instances. Requires approval."
+    )]
+    async fn rsiot_reload_lua_instance(
+        &self,
+        Parameters(req): Parameters<ReloadLuaRequest>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        // reload 走 query 参数（routes_lua.rs:41 Query<InstQuery>），非 body。
+        let path = format!(
+            "/api/v1/lua/reload?inst_id={}",
+            encode_query_value(&req.inst_id)
+        );
+        backend_to_result(
+            self.backend.post(&path, &serde_json::Value::Null).await,
+            "rsiot_reload_lua_instance",
+        )
+    }
+
+    /// `rsiot_list_lua_scripts`：列脚本目录。映射 `GET /api/v1/lua/scripts`。
+    #[tool(
+        description = "List script directories under scripts/ that have a main.lua. Read-only.",
+        annotations(read_only_hint = true)
+    )]
+    async fn rsiot_list_lua_scripts(
+        &self,
+        Parameters(_): Parameters<NoParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        backend_to_result(
+            self.backend.get("/api/v1/lua/scripts").await,
+            "rsiot_list_lua_scripts",
+        )
+    }
+
+    // ---- 实例/设备 CRUD（CriticalWrite：受 RiskPolicy 总开关管制，默认拦截）----
+
+    /// `rsiot_get_instance_config`：读实例完整配置。映射 `GET /api/v1/inst/get?inst_id=`。
+    ///
+    /// 注意：返回的配置**未脱敏**（External 实例可能含连接串/token 相关字段）。
+    #[tool(
+        description = "Read full instance config by inst_id. WARNING: not redacted — may contain credentials for External instances. Read-only.",
+        annotations(read_only_hint = true)
+    )]
+    async fn rsiot_get_instance_config(
+        &self,
+        Parameters(req): Parameters<GetInstanceConfigRequest>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let path = format!(
+            "/api/v1/inst/get?inst_id={}",
+            encode_query_value(&req.inst_id)
+        );
+        backend_to_result(self.backend.get(&path).await, "rsiot_get_instance_config")
+    }
+
+    /// `rsiot_set_instance`：建/改实例配置。映射 `POST /api/v1/inst/set`。
+    ///
+    /// **CriticalWrite**：建采集实例的写入口，错配可致采集失败。默认被 risk 策略拦截
+    /// （`RSIOT_MCP_ALLOW_CRITICAL_WRITES=1` 放行）。External 实例返回一次性 plugin_token。
+    #[tool(
+        description = "Create/update an instance config (full InstConfig JSON). HIGH RISK: CRITICAL WRITE — blocked unless RSIOT_MCP_ALLOW_CRITICAL_WRITES=1. For External host_kind, returns a one-time plugin_token.",
+        annotations(destructive_hint = true)
+    )]
+    async fn rsiot_set_instance(
+        &self,
+        Parameters(req): Parameters<SetInstanceRequest>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let body = serde_json::json!({ "inst_id": req.inst_id, "object": req.object });
+        backend_to_result(
+            self.backend.post("/api/v1/inst/set", &body).await,
+            "rsiot_set_instance",
+        )
+    }
+
+    /// `rsiot_delete_instance`：删实例。映射 `POST /api/v1/inst/delete`。
+    ///
+    /// **CriticalWrite**：连带清 ext_token + luakv。默认被 risk 策略拦截。
+    #[tool(
+        description = "Delete an instance and its External token + lua kv state. HIGH RISK: CRITICAL WRITE — blocked unless RSIOT_MCP_ALLOW_CRITICAL_WRITES=1.",
+        annotations(destructive_hint = true)
+    )]
+    async fn rsiot_delete_instance(
+        &self,
+        Parameters(req): Parameters<DeleteInstanceRequest>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let body = serde_json::json!({ "inst_id": req.inst_id });
+        backend_to_result(
+            self.backend.post("/api/v1/inst/delete", &body).await,
+            "rsiot_delete_instance",
+        )
+    }
+
+    /// `rsiot_set_device`：建/改设备点表。映射 `POST /api/v1/device/set`。
+    ///
+    /// **CriticalWrite**：建设备点表写入口。默认被 risk 策略拦截。
+    #[tool(
+        description = "Create/update a device spec (full DeviceSpec JSON: label/value/children/slave_id). HIGH RISK: CRITICAL WRITE — blocked unless RSIOT_MCP_ALLOW_CRITICAL_WRITES=1.",
+        annotations(destructive_hint = true)
+    )]
+    async fn rsiot_set_device(
+        &self,
+        Parameters(req): Parameters<SetDeviceRequest>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let body = serde_json::json!({ "dev_id": req.dev_id, "object": req.object });
+        backend_to_result(
+            self.backend.post("/api/v1/device/set", &body).await,
+            "rsiot_set_device",
+        )
+    }
+
+    /// `rsiot_delete_device`：删设备。映射 `POST /api/v1/device/delete`。
+    ///
+    /// **CriticalWrite**：默认被 risk 策略拦截。
+    #[tool(
+        description = "Delete a device spec. HIGH RISK: CRITICAL WRITE — blocked unless RSIOT_MCP_ALLOW_CRITICAL_WRITES=1.",
+        annotations(destructive_hint = true)
+    )]
+    async fn rsiot_delete_device(
+        &self,
+        Parameters(req): Parameters<DeleteDeviceRequest>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let body = serde_json::json!({ "dev_id": req.dev_id });
+        backend_to_result(
+            self.backend.post("/api/v1/device/delete", &body).await,
+            "rsiot_delete_device",
+        )
+    }
+
+    // ---- 配套只读（set_instance 前查合法 app_code；MQTT topic 根 hwid）----
+
+    /// `rsiot_list_plugins`：列注册表合法插件名。映射 `GET /api/v1/plugins`。
+    ///
+    /// `set_instance` 的 `app_code` 必须在此列表中，否则 rs-iot 校验失败。
+    #[tool(
+        description = "List registered source and sink plugin names (valid app_code values for rsiot_set_instance). Read-only.",
+        annotations(read_only_hint = true)
+    )]
+    async fn rsiot_list_plugins(
+        &self,
+        Parameters(_): Parameters<NoParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        backend_to_result(
+            self.backend.get("/api/v1/plugins").await,
+            "rsiot_list_plugins",
+        )
+    }
+
+    /// `rsiot_get_sysinfo`：网关硬件 ID + 版本。映射 `GET /api/v1/sysinfo`。
+    #[tool(
+        description = "Get gateway hardware id (hwid, MQTT topic root) and version. Read-only.",
+        annotations(read_only_hint = true)
+    )]
+    async fn rsiot_get_sysinfo(
+        &self,
+        Parameters(_): Parameters<NoParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        backend_to_result(
+            self.backend.get("/api/v1/sysinfo").await,
+            "rsiot_get_sysinfo",
+        )
+    }
 }
 
 #[tool_handler]
-impl rmcp::ServerHandler for RsiotMcpServer {}
+impl rmcp::ServerHandler for RsiotMcpServer {
+    /// 手写 call_tool：risk 拦截 + 透传。
+    ///
+    /// `#[tool_handler]` 宏检测到 `call_tool` 已手写即跳过生成（rmcp tool_handler.rs:44
+    /// `has_method` 检测），`list_tools`/`get_tool`/`get_info` 仍由宏生成。
+    /// CriticalWrite 被策略拦时返 error CallToolResult（agent 看可读文本，非协议 Err）。
+    async fn call_tool(
+        &self,
+        request: rmcp::model::CallToolRequestParams,
+        context: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let name = request.name.as_ref();
+        if let Some(blocked) = self.risk_policy.check(name) {
+            return Ok(blocked);
+        }
+        let tcc = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
+        Self::tool_router().call(tcc).await
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -355,6 +786,7 @@ mod tests {
         post_value: Value,
         paths: Mutex<Vec<String>>,
         posts: Mutex<Vec<(String, Value)>>,
+        deletes: Mutex<Vec<String>>,
     }
 
     impl FakeBackend {
@@ -364,6 +796,7 @@ mod tests {
                 post_value: Value::Null,
                 paths: Mutex::new(Vec::new()),
                 posts: Mutex::new(Vec::new()),
+                deletes: Mutex::new(Vec::new()),
             }
         }
         /// 取出收到的所有 path（get + post）。
@@ -373,6 +806,10 @@ mod tests {
         /// 取出收到的所有 (path, body) post 调用（验证写工具拼的 body）。
         fn recorded_posts(&self) -> Vec<(String, Value)> {
             self.posts.lock().expect("posts lock").clone()
+        }
+        /// 取出收到的所有 delete path（验证 stop_packet_trace 拼的 query）。
+        fn recorded_deletes(&self) -> Vec<String> {
+            self.deletes.lock().expect("deletes lock").clone()
         }
     }
 
@@ -396,6 +833,17 @@ mod tests {
                 .push((path.to_string(), body.clone()));
             Ok(self.post_value.clone())
         }
+        async fn delete(&self, path: &str) -> Result<Value, BackendError> {
+            self.paths
+                .lock()
+                .expect("paths lock")
+                .push(path.to_string());
+            self.deletes
+                .lock()
+                .expect("deletes lock")
+                .push(path.to_string());
+            Ok(self.post_value.clone())
+        }
     }
 
     /// 始终失败的 backend（测错误路径）。
@@ -406,6 +854,9 @@ mod tests {
             Err(BackendError::Unreachable("connection refused".into()))
         }
         async fn post(&self, _: &str, _: &Value) -> Result<Value, BackendError> {
+            Err(BackendError::Unreachable("connection refused".into()))
+        }
+        async fn delete(&self, _: &str) -> Result<Value, BackendError> {
             Err(BackendError::Unreachable("connection refused".into()))
         }
     }
@@ -445,7 +896,10 @@ mod tests {
     #[tokio::test]
     async fn read_tags_dev_id_with_ampersand_does_not_inject_param() {
         let backend = Arc::new(FakeBackend::new(json!({"v1": 1})));
-        let server = RsiotMcpServer::new(backend.clone() as Arc<dyn RsiotBackend>);
+        let server = RsiotMcpServer::new(
+            backend.clone() as Arc<dyn RsiotBackend>,
+            RiskPolicy::default(),
+        );
         server
             .rsiot_read_tags(Parameters(ReadTagsRequest {
                 dev_id: Some("devA&cmd=write".into()),
@@ -469,7 +923,7 @@ mod tests {
     #[tokio::test]
     async fn list_devices_returns_backend_json_as_text() {
         let backend = Arc::new(FakeBackend::new(json!([{ "dev_id": "devA" }])));
-        let server = RsiotMcpServer::new(backend);
+        let server = RsiotMcpServer::new(backend, RiskPolicy::default());
         let result = server
             .rsiot_list_devices(Parameters(ListDevicesRequest { dev_id: None }))
             .await
@@ -481,7 +935,10 @@ mod tests {
     #[tokio::test]
     async fn list_devices_with_dev_id_hits_device_get() {
         let backend = Arc::new(FakeBackend::new(json!({"dev_id": "devA"})));
-        let server = RsiotMcpServer::new(backend.clone() as Arc<dyn RsiotBackend>);
+        let server = RsiotMcpServer::new(
+            backend.clone() as Arc<dyn RsiotBackend>,
+            RiskPolicy::default(),
+        );
         server
             .rsiot_list_devices(Parameters(ListDevicesRequest {
                 dev_id: Some("devA".into()),
@@ -504,7 +961,10 @@ mod tests {
     #[tokio::test]
     async fn read_tags_all_devices_hits_rtdatas_no_query() {
         let backend = Arc::new(FakeBackend::new(json!({"devA": {"v1": 1}})));
-        let server = RsiotMcpServer::new(backend.clone() as Arc<dyn RsiotBackend>);
+        let server = RsiotMcpServer::new(
+            backend.clone() as Arc<dyn RsiotBackend>,
+            RiskPolicy::default(),
+        );
         let result = server
             .rsiot_read_tags(Parameters(ReadTagsRequest { dev_id: None }))
             .await
@@ -521,7 +981,10 @@ mod tests {
     #[tokio::test]
     async fn read_tags_with_dev_id_appends_query() {
         let backend = Arc::new(FakeBackend::new(json!({"v1": 1})));
-        let server = RsiotMcpServer::new(backend.clone() as Arc<dyn RsiotBackend>);
+        let server = RsiotMcpServer::new(
+            backend.clone() as Arc<dyn RsiotBackend>,
+            RiskPolicy::default(),
+        );
         server
             .rsiot_read_tags(Parameters(ReadTagsRequest {
                 dev_id: Some("devB".into()),
@@ -536,7 +999,10 @@ mod tests {
     #[tokio::test]
     async fn get_status_hits_sysstatus() {
         let backend = Arc::new(FakeBackend::new(json!({"status": "ok"})));
-        let server = RsiotMcpServer::new(backend.clone() as Arc<dyn RsiotBackend>);
+        let server = RsiotMcpServer::new(
+            backend.clone() as Arc<dyn RsiotBackend>,
+            RiskPolicy::default(),
+        );
         let result = server
             .rsiot_get_status(Parameters(NoParams {}))
             .await
@@ -548,7 +1014,10 @@ mod tests {
     #[tokio::test]
     async fn list_instances_hits_inststatus() {
         let backend = Arc::new(FakeBackend::new(json!([{"inst_id": "i1"}])));
-        let server = RsiotMcpServer::new(backend.clone() as Arc<dyn RsiotBackend>);
+        let server = RsiotMcpServer::new(
+            backend.clone() as Arc<dyn RsiotBackend>,
+            RiskPolicy::default(),
+        );
         server
             .rsiot_list_instances(Parameters(NoParams {}))
             .await
@@ -561,7 +1030,10 @@ mod tests {
     #[tokio::test]
     async fn recent_logs_no_params_hits_bare_path() {
         let backend = Arc::new(FakeBackend::new(json!([])));
-        let server = RsiotMcpServer::new(backend.clone() as Arc<dyn RsiotBackend>);
+        let server = RsiotMcpServer::new(
+            backend.clone() as Arc<dyn RsiotBackend>,
+            RiskPolicy::default(),
+        );
         server
             .rsiot_get_recent_logs(Parameters(GetRecentLogsRequest {
                 level: None,
@@ -580,7 +1052,10 @@ mod tests {
     #[tokio::test]
     async fn recent_logs_assembles_query_with_amp_separators() {
         let backend = Arc::new(FakeBackend::new(json!([])));
-        let server = RsiotMcpServer::new(backend.clone() as Arc<dyn RsiotBackend>);
+        let server = RsiotMcpServer::new(
+            backend.clone() as Arc<dyn RsiotBackend>,
+            RiskPolicy::default(),
+        );
         server
             .rsiot_get_recent_logs(Parameters(GetRecentLogsRequest {
                 level: Some("warn".into()),
@@ -603,7 +1078,10 @@ mod tests {
     #[tokio::test]
     async fn send_command_posts_correct_body() {
         let backend = Arc::new(FakeBackend::new(json!(null)));
-        let server = RsiotMcpServer::new(backend.clone() as Arc<dyn RsiotBackend>);
+        let server = RsiotMcpServer::new(
+            backend.clone() as Arc<dyn RsiotBackend>,
+            RiskPolicy::default(),
+        );
         server
             .rsiot_send_device_command(Parameters(SendCommandRequest {
                 instance: "inst1".into(),
@@ -633,7 +1111,10 @@ mod tests {
     #[tokio::test]
     async fn start_instance_posts_inst_id() {
         let backend = Arc::new(FakeBackend::new(json!(null)));
-        let server = RsiotMcpServer::new(backend.clone() as Arc<dyn RsiotBackend>);
+        let server = RsiotMcpServer::new(
+            backend.clone() as Arc<dyn RsiotBackend>,
+            RiskPolicy::default(),
+        );
         server
             .rsiot_start_instance(Parameters(InstanceRequest {
                 inst_id: "i9".into(),
@@ -648,7 +1129,10 @@ mod tests {
     #[tokio::test]
     async fn stop_instance_posts_inst_id() {
         let backend = Arc::new(FakeBackend::new(json!(null)));
-        let server = RsiotMcpServer::new(backend.clone() as Arc<dyn RsiotBackend>);
+        let server = RsiotMcpServer::new(
+            backend.clone() as Arc<dyn RsiotBackend>,
+            RiskPolicy::default(),
+        );
         server
             .rsiot_stop_instance(Parameters(InstanceRequest {
                 inst_id: "i9".into(),
@@ -665,7 +1149,10 @@ mod tests {
     #[tokio::test]
     async fn save_script_posts_name_and_content() {
         let backend = Arc::new(FakeBackend::new(json!(null)));
-        let server = RsiotMcpServer::new(backend.clone() as Arc<dyn RsiotBackend>);
+        let server = RsiotMcpServer::new(
+            backend.clone() as Arc<dyn RsiotBackend>,
+            RiskPolicy::default(),
+        );
         server
             .rsiot_save_lua_script(Parameters(SaveScriptRequest {
                 name: "devA".into(),
@@ -682,7 +1169,10 @@ mod tests {
     #[tokio::test]
     async fn get_config_hits_config_endpoint() {
         let backend = Arc::new(FakeBackend::new(json!({"jwt_secret": "***"})));
-        let server = RsiotMcpServer::new(backend.clone() as Arc<dyn RsiotBackend>);
+        let server = RsiotMcpServer::new(
+            backend.clone() as Arc<dyn RsiotBackend>,
+            RiskPolicy::default(),
+        );
         let result = server
             .rsiot_get_config(Parameters(NoParams {}))
             .await
@@ -691,12 +1181,316 @@ mod tests {
         assert_eq!(backend.recorded_paths()[0], "/api/v1/config");
     }
 
+    // ---- 新增 13 工具（path/body 拼对 + risk 拦截）----
+
+    #[tokio::test]
+    async fn start_packet_trace_posts_body_with_default_duration() {
+        let backend = Arc::new(FakeBackend::new(json!(null)));
+        let server = RsiotMcpServer::new(
+            backend.clone() as Arc<dyn RsiotBackend>,
+            RiskPolicy::default(),
+        );
+        server
+            .rsiot_start_packet_trace(Parameters(StartPacketTraceRequest {
+                inst_id: "i1".into(),
+                duration_secs: None,
+            }))
+            .await
+            .unwrap();
+        let (path, body) = &backend.recorded_posts()[0];
+        assert_eq!(path, "/api/v1/inst/trace");
+        assert_eq!(body["inst_id"], "i1");
+        assert_eq!(body["duration_secs"], 60, "default duration is 60");
+    }
+
+    #[tokio::test]
+    async fn start_packet_trace_posts_explicit_duration() {
+        let backend = Arc::new(FakeBackend::new(json!(null)));
+        let server = RsiotMcpServer::new(
+            backend.clone() as Arc<dyn RsiotBackend>,
+            RiskPolicy::default(),
+        );
+        server
+            .rsiot_start_packet_trace(Parameters(StartPacketTraceRequest {
+                inst_id: "i1".into(),
+                duration_secs: Some(120),
+            }))
+            .await
+            .unwrap();
+        let (_, body) = &backend.recorded_posts()[0];
+        assert_eq!(body["duration_secs"], 120);
+    }
+
+    #[tokio::test]
+    async fn list_packet_trace_hits_get() {
+        let backend = Arc::new(FakeBackend::new(json!({"active": []})));
+        let server = RsiotMcpServer::new(
+            backend.clone() as Arc<dyn RsiotBackend>,
+            RiskPolicy::default(),
+        );
+        server
+            .rsiot_list_packet_trace(Parameters(NoParams {}))
+            .await
+            .unwrap();
+        assert_eq!(backend.recorded_paths()[0], "/api/v1/inst/trace");
+    }
+
+    #[tokio::test]
+    async fn stop_packet_trace_hits_delete_with_query() {
+        let backend = Arc::new(FakeBackend::new(json!({"status": "ok"})));
+        let server = RsiotMcpServer::new(
+            backend.clone() as Arc<dyn RsiotBackend>,
+            RiskPolicy::default(),
+        );
+        server
+            .rsiot_stop_packet_trace(Parameters(StopPacketTraceRequest {
+                inst_id: "i1&x=y".into(),
+            }))
+            .await
+            .unwrap();
+        // 验证意图：DELETE 方法 + query 参数经 encode（& 不被当分隔符）。
+        assert_eq!(
+            backend.recorded_deletes()[0],
+            "/api/v1/inst/trace?inst_id=i1%26x%3Dy"
+        );
+    }
+
+    #[tokio::test]
+    async fn get_instance_stats_no_param_hits_bare() {
+        let backend = Arc::new(FakeBackend::new(json!([])));
+        let server = RsiotMcpServer::new(
+            backend.clone() as Arc<dyn RsiotBackend>,
+            RiskPolicy::default(),
+        );
+        server
+            .rsiot_get_instance_stats(Parameters(GetInstanceStatsRequest { inst_id: None }))
+            .await
+            .unwrap();
+        assert_eq!(backend.recorded_paths()[0], "/api/v1/inst/stats");
+    }
+
+    #[tokio::test]
+    async fn get_instance_stats_with_inst_id_appends_query() {
+        let backend = Arc::new(FakeBackend::new(json!({"state": "Running"})));
+        let server = RsiotMcpServer::new(
+            backend.clone() as Arc<dyn RsiotBackend>,
+            RiskPolicy::default(),
+        );
+        server
+            .rsiot_get_instance_stats(Parameters(GetInstanceStatsRequest {
+                inst_id: Some("i1".into()),
+            }))
+            .await
+            .unwrap();
+        assert_eq!(backend.recorded_paths()[0], "/api/v1/inst/stats?inst_id=i1");
+    }
+
+    #[tokio::test]
+    async fn reload_lua_posts_with_query_not_body() {
+        let backend = Arc::new(FakeBackend::new(json!(null)));
+        let server = RsiotMcpServer::new(
+            backend.clone() as Arc<dyn RsiotBackend>,
+            RiskPolicy::default(),
+        );
+        server
+            .rsiot_reload_lua_instance(Parameters(ReloadLuaRequest {
+                inst_id: "i1".into(),
+            }))
+            .await
+            .unwrap();
+        // 验证意图：reload 走 query 参数（对标 routes_lua Query<InstQuery>），body 是 Null。
+        let posts = backend.recorded_posts();
+        assert_eq!(posts[0].0, "/api/v1/lua/reload?inst_id=i1");
+        assert_eq!(posts[0].1, serde_json::Value::Null);
+    }
+
+    #[tokio::test]
+    async fn list_lua_scripts_hits_get() {
+        let backend = Arc::new(FakeBackend::new(json!({"scripts": ["devA"]})));
+        let server = RsiotMcpServer::new(
+            backend.clone() as Arc<dyn RsiotBackend>,
+            RiskPolicy::default(),
+        );
+        server
+            .rsiot_list_lua_scripts(Parameters(NoParams {}))
+            .await
+            .unwrap();
+        assert_eq!(backend.recorded_paths()[0], "/api/v1/lua/scripts");
+    }
+
+    #[tokio::test]
+    async fn get_instance_config_hits_get() {
+        let backend = Arc::new(FakeBackend::new(json!({"i1": {"app_code": "dataSim"}})));
+        let server = RsiotMcpServer::new(
+            backend.clone() as Arc<dyn RsiotBackend>,
+            RiskPolicy::default(),
+        );
+        server
+            .rsiot_get_instance_config(Parameters(GetInstanceConfigRequest {
+                inst_id: "i1".into(),
+            }))
+            .await
+            .unwrap();
+        assert_eq!(backend.recorded_paths()[0], "/api/v1/inst/get?inst_id=i1");
+    }
+
+    #[tokio::test]
+    async fn set_instance_posts_inst_id_and_object() {
+        let backend = Arc::new(FakeBackend::new(json!(null)));
+        let server = RsiotMcpServer::new(
+            backend.clone() as Arc<dyn RsiotBackend>,
+            RiskPolicy::default(),
+        );
+        server
+            .rsiot_set_instance(Parameters(SetInstanceRequest {
+                inst_id: "i1".into(),
+                object: json!({"app_code": "dataSim", "app_type": "south"}),
+            }))
+            .await
+            .unwrap();
+        let (path, body) = &backend.recorded_posts()[0];
+        assert_eq!(path, "/api/v1/inst/set");
+        assert_eq!(body["inst_id"], "i1");
+        // object 原样透传（rs-iot 侧反序列化校验，MCP 不二次解析）。
+        assert_eq!(body["object"]["app_code"], "dataSim");
+    }
+
+    #[tokio::test]
+    async fn delete_instance_posts_body() {
+        let backend = Arc::new(FakeBackend::new(json!(null)));
+        let server = RsiotMcpServer::new(
+            backend.clone() as Arc<dyn RsiotBackend>,
+            RiskPolicy::default(),
+        );
+        server
+            .rsiot_delete_instance(Parameters(DeleteInstanceRequest {
+                inst_id: "i1".into(),
+            }))
+            .await
+            .unwrap();
+        let (path, body) = &backend.recorded_posts()[0];
+        // 验证意图：rs-iot 的 inst/delete 走 POST+body（非 HTTP DELETE）。
+        assert_eq!(path, "/api/v1/inst/delete");
+        assert_eq!(body["inst_id"], "i1");
+    }
+
+    #[tokio::test]
+    async fn set_device_posts_dev_id_and_object() {
+        let backend = Arc::new(FakeBackend::new(json!(null)));
+        let server = RsiotMcpServer::new(
+            backend.clone() as Arc<dyn RsiotBackend>,
+            RiskPolicy::default(),
+        );
+        server
+            .rsiot_set_device(Parameters(SetDeviceRequest {
+                dev_id: "devA".into(),
+                object: json!({"label": "devA", "value": "devA"}),
+            }))
+            .await
+            .unwrap();
+        let (path, body) = &backend.recorded_posts()[0];
+        assert_eq!(path, "/api/v1/device/set");
+        assert_eq!(body["dev_id"], "devA");
+        assert_eq!(body["object"]["label"], "devA");
+    }
+
+    #[tokio::test]
+    async fn delete_device_posts_body() {
+        let backend = Arc::new(FakeBackend::new(json!(null)));
+        let server = RsiotMcpServer::new(
+            backend.clone() as Arc<dyn RsiotBackend>,
+            RiskPolicy::default(),
+        );
+        server
+            .rsiot_delete_device(Parameters(DeleteDeviceRequest {
+                dev_id: "devA".into(),
+            }))
+            .await
+            .unwrap();
+        let (path, body) = &backend.recorded_posts()[0];
+        assert_eq!(path, "/api/v1/device/delete");
+        assert_eq!(body["dev_id"], "devA");
+    }
+
+    #[tokio::test]
+    async fn list_plugins_hits_get() {
+        let backend = Arc::new(FakeBackend::new(json!({"sources": ["dataSim"]})));
+        let server = RsiotMcpServer::new(
+            backend.clone() as Arc<dyn RsiotBackend>,
+            RiskPolicy::default(),
+        );
+        server
+            .rsiot_list_plugins(Parameters(NoParams {}))
+            .await
+            .unwrap();
+        assert_eq!(backend.recorded_paths()[0], "/api/v1/plugins");
+    }
+
+    #[tokio::test]
+    async fn get_sysinfo_hits_get() {
+        let backend = Arc::new(FakeBackend::new(json!({"hwid": "eiot123"})));
+        let server = RsiotMcpServer::new(
+            backend.clone() as Arc<dyn RsiotBackend>,
+            RiskPolicy::default(),
+        );
+        server
+            .rsiot_get_sysinfo(Parameters(NoParams {}))
+            .await
+            .unwrap();
+        assert_eq!(backend.recorded_paths()[0], "/api/v1/sysinfo");
+    }
+
+    // ---- risk 拦截（RiskPolicy::check 纯函数路径）----
+
+    #[test]
+    fn check_blocks_criticalwrite_by_default() {
+        let policy = RiskPolicy::new();
+        // 验证意图：默认策略下 4 个 CriticalWrite 全拦，Write/ReadOnly 放行。
+        for name in [
+            "rsiot_set_instance",
+            "rsiot_delete_instance",
+            "rsiot_set_device",
+            "rsiot_delete_device",
+        ] {
+            let blocked = policy.check(name);
+            assert!(blocked.is_some(), "{name} must be blocked by default");
+            assert!(
+                blocked.unwrap().is_error == Some(true),
+                "{name} block must be error result"
+            );
+        }
+        assert!(policy.check("rsiot_send_device_command").is_none());
+        assert!(policy.check("rsiot_read_tags").is_none());
+    }
+
+    #[test]
+    fn check_passes_criticalwrite_when_allowed() {
+        let policy = RiskPolicy {
+            allow_critical_writes: true,
+        };
+        assert!(policy.check("rsiot_set_instance").is_none());
+        assert!(policy.check("rsiot_delete_device").is_none());
+    }
+
+    #[test]
+    fn tool_risk_table_maps_all_tools() {
+        use ToolRisk::*;
+        assert_eq!(tool_risk("rsiot_read_tags"), ReadOnly);
+        assert_eq!(tool_risk("rsiot_get_sysinfo"), ReadOnly);
+        assert_eq!(tool_risk("rsiot_start_packet_trace"), Write);
+        assert_eq!(tool_risk("rsiot_send_device_command"), Write);
+        assert_eq!(tool_risk("rsiot_set_instance"), CriticalWrite);
+        assert_eq!(tool_risk("rsiot_delete_device"), CriticalWrite);
+        // 未知名字保守按 Write（防御 router 校验缺口）。
+        assert_eq!(tool_risk("rsiot_unknown_tool"), Write);
+    }
+
     // ---- 错误路径（所有工具共用 backend_to_result）----
 
     #[tokio::test]
     async fn any_tool_returns_error_when_backend_unreachable() {
         // 用 read_tags 代表——所有工具走同一 backend_to_result，错误路径一致。
-        let server = RsiotMcpServer::new(Arc::new(ErrBackend));
+        let server = RsiotMcpServer::new(Arc::new(ErrBackend), RiskPolicy::default());
         let result = server
             .rsiot_read_tags(Parameters(ReadTagsRequest { dev_id: None }))
             .await

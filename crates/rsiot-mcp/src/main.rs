@@ -8,7 +8,7 @@
 use std::sync::Arc;
 
 use rmcp::ServiceExt;
-use rsiot_mcp::{RsiotMcpServer, WebBackend};
+use rsiot_mcp::{RiskPolicy, RsiotMcpServer, WebBackend};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -16,7 +16,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let jwt = std::env::var("RSIOT_JWT").unwrap_or_default();
     let backend =
         Arc::new(WebBackend::new(base, jwt).map_err(|e| std::io::Error::other(e.to_string()))?);
-    let service = RsiotMcpServer::new(backend)
+    // CriticalWrite 拦截策略从环境变量构造（缺省最严：RSIOT_MCP_ALLOW_CRITICAL_WRITES=1 放行）。
+    let service = RsiotMcpServer::new(backend, RiskPolicy::from_env())
         .serve(rmcp::transport::stdio())
         .await?;
     service.waiting().await?;

@@ -11,4 +11,4 @@ pub mod backend;
 pub mod server;
 
 pub use backend::{BackendError, RsiotBackend, WebBackend};
-pub use server::RsiotMcpServer;
+pub use server::{RiskPolicy, RsiotMcpServer};
