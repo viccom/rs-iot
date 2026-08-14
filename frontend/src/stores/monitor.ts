@@ -89,6 +89,9 @@ export const useMonitorStore = defineStore('monitor', () => {
   let packetSse: EventSource | null = null  // 报文 SSE（诊断 Tab 手动激活）
   let rtdataTimer: ReturnType<typeof setInterval> | null = null
   let sysstatusTimer: ReturnType<typeof setInterval> | null = null
+  /** 实例名册轮询：感知外部增删（如 AI 经 REST 直接改后端），SSE state 事件覆盖不到
+   *  未运行实例的删除（stop no-op 不 emit）。5s 一次，补拉 instances + configs。 */
+  let rosterTimer: ReturnType<typeof setInterval> | null = null
   /** rtdata 通知去抖句柄（风暴期间只触发一次 loadRtdata）。 */
   let rtdataDebounce: ReturnType<typeof setTimeout> | null = null
 
@@ -348,9 +351,11 @@ export const useMonitorStore = defineStore('monitor', () => {
     if (document.hidden) {
       if (rtdataTimer) { clearInterval(rtdataTimer); rtdataTimer = null }
       if (sysstatusTimer) { clearInterval(sysstatusTimer); sysstatusTimer = null }
-    } else if (!rtdataTimer || !sysstatusTimer) {
+      if (rosterTimer) { clearInterval(rosterTimer); rosterTimer = null }
+    } else if (!rtdataTimer || !sysstatusTimer || !rosterTimer) {
       rtdataTimer = setInterval(loadRtdata, 2000)
       sysstatusTimer = setInterval(loadSysstatus, 5000)
+      rosterTimer = setInterval(() => { void loadInstances(); void loadInstanceConfigs() }, 5000)
     }
   }
 
@@ -389,6 +394,7 @@ export const useMonitorStore = defineStore('monitor', () => {
     void loadSysstatus()
     rtdataTimer = setInterval(loadRtdata, 2000)
     sysstatusTimer = setInterval(loadSysstatus, 5000)
+    rosterTimer = setInterval(() => { void loadInstances(); void loadInstanceConfigs() }, 5000)
     document.addEventListener('visibilitychange', onVisibility)
   }
 
@@ -443,6 +449,7 @@ export const useMonitorStore = defineStore('monitor', () => {
     unsubscribePacket()
     if (rtdataTimer) { clearInterval(rtdataTimer); rtdataTimer = null }
     if (sysstatusTimer) { clearInterval(sysstatusTimer); sysstatusTimer = null }
+    if (rosterTimer) { clearInterval(rosterTimer); rosterTimer = null }
     if (rtdataDebounce) { clearTimeout(rtdataDebounce); rtdataDebounce = null }
     document.removeEventListener('visibilitychange', onVisibility)
   }

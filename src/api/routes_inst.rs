@@ -1,10 +1,12 @@
 //! instance CRUD（lux Hash `instances`）。
 
 use crate::api::{hget, hgetall, AppState};
+use crate::plugin::instance::InstState;
 use axum::extract::{Query, State};
 use axum::Json;
 use lux::EmbeddedValue;
 use serde::Deserialize;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Deserialize)]
 pub struct IdQuery {
@@ -13,6 +15,59 @@ pub struct IdQuery {
 
 pub async fn list(State(st): State<AppState>) -> Json<serde_json::Value> {
     Json(hgetall(&st.lux, "instances").await)
+}
+
+/// 实例名册（配置全集 ∪ 运行态合并）：每个实例配置附运行状态。
+///
+/// **单一权威数据源**——`/inststatus`（`mgr.status()`）只含已 start 过的实例，
+/// `auto_start=false` 从未启动的配置实例会缺席，导致 MCP/AI 拿到的实例列表
+/// 不完整（实测：页面 3 个实例，MCP 只看到 1 个运行中的）。roster 合并 lux
+/// `instances` 配置全集与运行态，未在运行态的实例标 `state="stopped"`。
+pub async fn roster(State(st): State<AppState>) -> Json<serde_json::Value> {
+    let cfgs = hgetall(&st.lux, "instances").await;
+    let stats = st.mgr.status();
+    Json(merge_roster(cfgs, &stats))
+}
+
+/// 合并配置全集与运行态为名册（纯函数，便于单测）。
+///
+/// - 配置中的实例：附 `state`（取自运行态），未运行标 `"stopped"`。
+/// - 运行态中配置没有的实例（config.toml/代码启动，不在 lux `instances`）：追加，
+///   仅含 `inst_id` + `state`。**必须合并**——否则 MCP/AI 漏看这类实例
+///   （前端 roster 会合并，后端不合并则又不一致）。
+fn merge_roster(
+    cfgs: serde_json::Value,
+    stats: &HashMap<String, InstState>,
+) -> serde_json::Value {
+    let mut out = Vec::new();
+    let cfg_obj = cfgs.as_object();
+    let cfg_keys: HashSet<&str> = cfg_obj
+        .map(|m| m.keys().map(String::as_str).collect())
+        .unwrap_or_default();
+    // 1. 配置全集：每个实例附运行状态。
+    if let Some(map) = cfg_obj {
+        for (inst_id, cfg) in map {
+            let mut entry = cfg.clone();
+            if let Some(m) = entry.as_object_mut() {
+                let state = stats
+                    .get(inst_id)
+                    .and_then(|s| serde_json::to_value(s).ok())
+                    .unwrap_or_else(|| serde_json::json!("stopped"));
+                m.insert("state".into(), state);
+            }
+            out.push(entry);
+        }
+    }
+    // 2. 运行态中配置没有的实例（config.toml 启动，不在 lux instances）。
+    for (inst_id, state) in stats {
+        if !cfg_keys.contains(inst_id.as_str()) {
+            out.push(serde_json::json!({
+                "inst_id": inst_id,
+                "state": serde_json::to_value(state).unwrap_or_else(|_| serde_json::json!("stopped")),
+            }));
+        }
+    }
+    serde_json::Value::Array(out)
 }
 
 pub async fn get(State(st): State<AppState>, Query(q): Query<IdQuery>) -> Json<serde_json::Value> {
@@ -78,16 +133,25 @@ pub struct DelReq {
 /// `purge` 批量复用。
 pub(crate) async fn cascade_delete(st: &AppState, inst_id: &str) {
     // 1. 先读配置，收集该实例的所有 devid（rtdata key 依据）。
+    //    优先 lux instances；配置不在 lux（config.toml/代码启动实例，如 sim1）时
+    //    回退 mgr 运行态配置快照——否则 devids=[] → rtdata 不清 → 孤儿残留（前端"设备残留"bug）。
     let devids: Vec<String> = match hget(&st.lux, "instances", inst_id).await {
         Some(raw) => serde_json::from_str::<crate::types::InstConfig>(&raw)
             .map(|cfg| cfg.devices.into_iter().map(|d| d.value).collect())
             .unwrap_or_default(),
-        None => Vec::new(),
+        None => st
+            .mgr
+            .config_snapshot(inst_id)
+            .map(|cfg| cfg.devices.into_iter().map(|d| d.value).collect())
+            .unwrap_or_default(),
     };
     // 2. 停运行中的实例 task（若在跑，否则 no-op）。
     if let Err(e) = st.mgr.stop(inst_id).await {
         tracing::warn!("[routes_inst] stop {inst_id} on delete failed: {e}");
     }
+    // 2b. stop 仅置 Stopped（保留死活历史），删除需彻底移除运行态记录——
+    //     否则 /inst/stats 持续返回已删除实例（残留 bug）。
+    st.mgr.remove_state(inst_id);
     // 3. 清该实例所有设备的实时数据（防 mqttPub 发孤儿）。
     for dev_id in &devids {
         if let Err(e) = crate::db::rtdata::delete_device(&st.lux, dev_id).await {
@@ -227,5 +291,55 @@ mod tests {
         assert_ne!(stat_exists, lux::EmbeddedValue::Int(0), "stat 保留");
         let users_exists = c.execute_value("EXISTS", &["users:keep"]).await.unwrap();
         assert_ne!(users_exists, lux::EmbeddedValue::Int(0), "users 保留");
+    }
+
+    /// roster = 配置全集 ∪ 运行态：未启动的配置实例也列出，标 state="stopped"。
+    /// 这是 MCP `rsiot_list_instances` 的核心不变量——之前调 /inststatus（仅运行态）
+    /// 会漏掉 auto_start=false 从未启动的实例（实测 bug：页面 3 个，MCP 只见 1 个）。
+    #[test]
+    fn merge_roster_includes_unstarted_instances_as_stopped() {
+        let cfgs = serde_json::json!({
+            "sim-01": {"inst_id": "sim-01", "app_code": "dataSim"},
+            "sim-02": {"inst_id": "sim-02", "app_code": "dataSim"},
+            "sim-03": {"inst_id": "sim-03", "app_code": "dataSim"}
+        });
+        let mut stats = HashMap::new();
+        stats.insert("sim-01".to_string(), InstState::Running);
+        let roster = merge_roster(cfgs, &stats);
+        let arr = roster.as_array().expect("roster is array");
+        assert_eq!(arr.len(), 3, "全部 3 个配置实例都列出");
+        let state_of = |id: &str| {
+            arr.iter()
+                .find(|e| e.get("inst_id").and_then(|v| v.as_str()) == Some(id))
+                .and_then(|e| e.get("state"))
+                .and_then(|v| v.as_str())
+        };
+        assert_eq!(state_of("sim-01"), Some("running"), "运行中的标 running");
+        assert_eq!(state_of("sim-02"), Some("stopped"), "未启动的标 stopped");
+        assert_eq!(state_of("sim-03"), Some("stopped"), "未启动的标 stopped");
+    }
+
+    /// roster 必须收录运行态中配置没有的实例（config.toml 启动的，不在 lux instances）。
+    /// 否则 MCP/AI 漏看这类实例，与前端 roster（合并运行态）不一致。
+    #[test]
+    fn merge_roster_includes_runtime_only_instances() {
+        let cfgs = serde_json::json!({
+            "sim-01": {"inst_id": "sim-01", "app_code": "dataSim"}
+        });
+        let mut stats = HashMap::new();
+        stats.insert("sim-01".to_string(), InstState::Running);
+        stats.insert("sim-cfgless".to_string(), InstState::Running); // 配置里没有
+        let roster = merge_roster(cfgs, &stats);
+        let arr = roster.as_array().expect("roster is array");
+        assert_eq!(arr.len(), 2, "配置1个 + 运行态多余1个 = 2");
+        let cfgless = arr
+            .iter()
+            .find(|e| e.get("inst_id").and_then(|v| v.as_str()) == Some("sim-cfgless"))
+            .expect("运行态多余实例被收录");
+        assert_eq!(
+            cfgless.get("state").and_then(|v| v.as_str()),
+            Some("running"),
+            "运行态多余实例带 state"
+        );
     }
 }

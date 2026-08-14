@@ -232,11 +232,13 @@ export const useAgentStore = defineStore('agent', () => {
    * - tool（工具结果）→ 不新建消息，回溯配对到上一条 assistant 的 toolCalls
    *   （id===toolCallId）填 result。
    * - notice（steer 文本）→ 跳过（保持消息流干净，对标 serve 前端行为）。
+   * - system（系统提示词）→ 跳过（serve 新建会话时 JSONL 首条写入 role=system 的
+   *   系统提示词，是给模型的指令，不应展示给用户；不过滤会被降级渲染成 assistant 气泡）。
    */
   function historyToChatMessages(hist: ServeHistoryMessage[]): ChatMessage[] {
     const out: ChatMessage[] = []
     for (const m of hist) {
-      if (m.role === 'notice') continue
+      if (m.role === 'notice' || m.role === 'system') continue
       if (m.role === 'tool') {
         // 工具结果：回溯配对到上一条 assistant 的 toolCalls（id===toolCallId）。
         const last = out.at(-1)

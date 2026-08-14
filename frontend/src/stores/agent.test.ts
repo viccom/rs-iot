@@ -200,6 +200,38 @@ describe('agent store', () => {
     expect(tc?.result).toBe('{"v":1}')
   })
 
+  it('historyToChatMessages: system role（系统提示词）被过滤，不渲染为可见气泡', async () => {
+    // 锁的不变量：serve 新建会话时 JSONL 首条写入 role=system 的系统提示词
+    // （"You are Reasonix, a coding agent..."），是给模型的指令而非对话内容。
+    // historyToChatMessages 必须跳过 system role，否则被三元降级成 assistant 气泡
+    // 原样展示给用户（实测 bug：新建会话即冒出系统提示词）。
+    const s = useAgentStore()
+    vi.mocked(api).mockImplementation(async (path: string) => {
+      if (path === '/api/agent/history') {
+        return new Response(JSON.stringify([
+          { role: 'system', content: 'You are Reasonix, a coding agent. Use the available tools when they help.' },
+          { role: 'user', content: '你好' },
+          { role: 'assistant', content: '你好！有什么可以帮你？' },
+        ]))
+      }
+      if (path === '/api/agent/sessions') return new Response('[]')
+      return new Response('{}')
+    })
+    try {
+      await s.newSession()
+      // system 提示词不应出现在任何消息文本中
+      expect(s.messages.find(m => m.text.includes('Reasonix, a coding agent'))).toBeUndefined()
+      expect(s.messages.length).toBe(2)  // user + assistant，system 被过滤
+      expect(s.messages[0].role).toBe('user')
+      expect(s.messages[0].text).toBe('你好')
+      expect(s.messages[1].role).toBe('assistant')
+    } finally {
+      // 恢复默认 mock（文件顶部工厂的 async () => new Response('{}')），
+      // 避免 mockImplementation 污染后续依赖空 body 的测试。
+      vi.mocked(api).mockImplementation(async () => new Response('{}'))
+    }
+  })
+
   it('setModel 发 /model 命令（serve submit 拦截，gateway 跳 HINT）', async () => {
     // 锁的不变量：模型切换走 submit 发 `/model <ref>`（serve.go:719 前缀拦截 → 204）。
     // gateway 已加斜杠命令跳过 HINT 注入（proxy.rs input_should_get_hint）。

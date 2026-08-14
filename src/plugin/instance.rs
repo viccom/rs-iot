@@ -185,6 +185,18 @@ impl InstanceManager {
         Ok(())
     }
 
+    /// 彻底移除实例运行态记录（**删除**场景专用，区别于 `stop`）。
+    ///
+    /// `stop` 仅将 `states` 置 `Stopped`（保留死活历史，供 /inst/stats 显示"刚停止"），
+    /// 但删除实例应不留残影——需额外清 `states` + `configs`（`handles` 已由 stop 移除）。
+    /// 否则 /inst/stats 持续返回已删除实例（实测残留 bug：页面 Ctrl+F5 后仍见已删实例 stopped）。
+    pub fn remove_state(&self, inst_id: &str) {
+        self.states.remove(inst_id);
+        self.configs.remove(inst_id);
+        // handles 已由 stop 移除；防御性再清一次（未走 stop 直接 remove 的理论场景）。
+        self.handles.remove(inst_id);
+    }
+
     /// 停止所有实例（关闭流程用）。
     pub async fn stop_all(&self) {
         let ids: Vec<String> = self.handles.iter().map(|r| r.key().clone()).collect();

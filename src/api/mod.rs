@@ -106,6 +106,7 @@ pub fn build_router(state: AppState) -> axum::Router {
         .route("/api/v1/stopinst", post(routes_sys::stopinst))
         // instance CRUD
         .route("/api/v1/insts", get(routes_inst::list))
+        .route("/api/v1/inst/roster", get(routes_inst::roster))
         .route("/api/v1/inst/get", get(routes_inst::get))
         .route("/api/v1/inst/set", post(routes_inst::set))
         .route("/api/v1/inst/delete", post(routes_inst::delete))

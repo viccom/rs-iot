@@ -411,9 +411,9 @@ impl RsiotMcpServer {
         )
     }
 
-    /// `rsiot_list_instances`：列实例状态。映射 `GET /api/v1/inststatus`。
+    /// `rsiot_list_instances`：列实例名册（配置全集 ∪ 运行态）。映射 `GET /api/v1/inst/roster`。
     #[tool(
-        description = "List all gateway plugin instances with their running state (Running/Stopped/Failed etc). Read-only.",
+        description = "List ALL gateway plugin instances (configured + running state), including auto_start=false ones never started. Each entry carries its state (running/stopped/failed etc). Read-only.",
         annotations(read_only_hint = true)
     )]
     async fn rsiot_list_instances(
@@ -421,7 +421,7 @@ impl RsiotMcpServer {
         Parameters(_): Parameters<NoParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         backend_to_result(
-            self.backend.get("/api/v1/inststatus").await,
+            self.backend.get("/api/v1/inst/roster").await,
             "rsiot_list_instances",
         )
     }
@@ -1057,7 +1057,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn list_instances_hits_inststatus() {
+    async fn list_instances_hits_inst_roster() {
         let backend = Arc::new(FakeBackend::new(json!([{"inst_id": "i1"}])));
         let server = RsiotMcpServer::new(
             backend.clone() as Arc<dyn RsiotBackend>,
@@ -1067,7 +1067,7 @@ mod tests {
             .rsiot_list_instances(Parameters(NoParams {}))
             .await
             .unwrap();
-        assert_eq!(backend.recorded_paths()[0], "/api/v1/inststatus");
+        assert_eq!(backend.recorded_paths()[0], "/api/v1/inst/roster");
     }
 
     // ---- get_recent_logs（query 拼接逻辑）----
