@@ -140,3 +140,6 @@ strip = true
 # Windows Service（仅 windows target）
 [target.'cfg(windows)'.dependencies]
 windows-service = "0.7"
+# SetConsoleCtrlHandler:监听 CTRL_C + CTRL_BREAK(后者供 warden 等监护器经
+# GenerateConsoleCtrlEvent 发给独立 process group 触发 graceful SAVE)
+windows-sys = { version = "0.59", features = ["Win32_System_Console"] }

@@ -118,7 +118,46 @@ pub fn init_tracing(
     (guard, ring_buffer, event_bus)
 }
 
-/// CLI `run` 入口：内部建 shutdown + ctrl_c 监听，委托给 `run_app_with_shutdown`。
+/// Windows console 信号监听(CTRL_C + CTRL_BREAK),供 warden 等监护器触发 graceful。
+#[cfg(windows)]
+mod console_shutdown {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    /// 收到 CTRL_C(0)/CTRL_BREAK(1)后置位。CTRL_BREAK 供 warden 等监护器经
+    /// GenerateConsoleCtrlEvent 发给独立 process group 触发 graceful。
+    pub(crate) static GOT: AtomicBool = AtomicBool::new(false);
+    pub(crate) extern "system" fn on_console_ctrl(ctrl: u32) -> i32 {
+        if ctrl == 0 || ctrl == 1 {
+            GOT.store(true, Ordering::SeqCst);
+            1 // TRUE:已处理,阻止默认 handler
+        } else {
+            0
+        }
+    }
+}
+
+/// 等待关闭信号:Windows=CTRL_C/CTRL_BREAK(底层 SetConsoleCtrlHandler),
+/// Unix=SIGINT(tokio ctrl_c)。收到后返回,调用方据此 cancel shutdown token。
+async fn shutdown_signal() {
+    #[cfg(windows)]
+    {
+        use std::sync::atomic::Ordering;
+        unsafe {
+            windows_sys::Win32::System::Console::SetConsoleCtrlHandler(
+                Some(console_shutdown::on_console_ctrl),
+                1,
+            );
+        }
+        while !console_shutdown::GOT.load(Ordering::SeqCst) {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
+}
+
+/// CLI `run` 入口：内部建 shutdown + 信号监听，委托给 `run_app_with_shutdown`。
 ///
 /// `log_ringbuffer` 与 `event_bus` 由调用方（binary 入口 `init_tracing` 解构得到）注入，
 /// 透传至 `run_app_with_shutdown` → AppState（同一 Arc/EventBus 供 `RingBufferLayer`
@@ -132,8 +171,8 @@ pub async fn run_app(
     let shutdown = CancellationToken::new();
     let s = shutdown.clone();
     tokio::spawn(async move {
-        let _ = tokio::signal::ctrl_c().await;
-        tracing::info!("ctrl_c received, shutting down");
+        shutdown_signal().await;
+        tracing::info!("shutdown signal received, shutting down");
         s.cancel();
     });
     run_app_with_shutdown(cfg, shutdown, log_ringbuffer, event_bus).await
