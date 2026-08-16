@@ -113,6 +113,16 @@ export const useAgentStore = defineStore('agent', () => {
         if (last?.role === 'assistant') last.reasoning = (last.reasoning || '') + (e.text || '')
         break
       }
+      case 'notice': {
+        // 系统提示（如 capability proxy 路由信息）归集到当前 assistant 消息，
+        // 随思考过程折叠展示（对标 aifa）。历史回放的 notice 角色仍是 steer 文本，
+        // historyToChatMessages 继续跳过——两者来源不同，不混同。
+        const last = cur()
+        if (e.text && last?.role === 'assistant') {
+          last.notices = [...(last.notices || []), e.text]
+        }
+        break
+      }
       case 'tool_dispatch': {
         // 携带 args（serve tool.args 字符串）；readOnly 标记只读工具（不审批）。
         const last = cur()

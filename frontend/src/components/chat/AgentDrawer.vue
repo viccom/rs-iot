@@ -121,6 +121,17 @@ watch(
   () => followIfAtBottom(),
 )
 
+/**
+ * Enter 发送（Shift+Enter 换行由 .exact/.shift 修饰符排除）。
+ * IME 组词中的 Enter（选词/确认，isComposing=true）不发送且保留默认行为——
+ * 否则中文输入法里选词即误发半句话（与 aifa InputBar 同款防护）。
+ */
+function onEnterKey(e: KeyboardEvent) {
+  if (e.isComposing) return
+  e.preventDefault()
+  void send()
+}
+
 /** 发送：目标 draft 态提交为目标（POST /goal），否则普通 submit。失败给 UI 反馈（T9 M2）。 */
 async function send() {
   const text = input.value.trim()
@@ -423,7 +434,7 @@ async function onApprovalModeChange(e: Event) {
           rows="2"
           :placeholder="inputPlaceholder"
           :disabled="agent.running || agent.sessionBusy"
-          @keydown.enter.exact.prevent="send"
+          @keydown.enter.exact="onEnterKey"
         />
         <button
           class="btn-send"

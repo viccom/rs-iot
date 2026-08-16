@@ -64,6 +64,14 @@ describe('agent store', () => {
     expect(s.messages.at(-1)?.reasoning).toBe('Planning')
   })
 
+  it('notice 事件归集到当前 assistant 消息（路由提示随思考折叠展示，对标 aifa）', () => {
+    const s = useAgentStore()
+    s.onEvent({ kind: 'turn_started' })
+    s.onEvent({ kind: 'notice', text: 'routed to cloud model' })
+    s.onEvent({ kind: 'notice', text: 'tool fallback' })
+    expect(s.messages.at(-1)?.notices).toEqual(['routed to cloud model', 'tool fallback'])
+  })
+
   it('approve keeps approval on non-2xx (review I1: no deadlock)', async () => {
     // I1 意图：gateway/serve 返错时绝不能清 approval——否则 agent 仍在等决策、
     // UI 已无弹窗，用户无法重发 → 死锁。approval 必须保留到下一次成功提交。

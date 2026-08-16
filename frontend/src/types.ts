@@ -202,6 +202,8 @@ export interface ChatMessage {
   text: string
   /** 推理过程（reasoning 事件累积，可选）。 */
   reasoning?: string
+  /** 系统提示（notice 事件归集，如 capability proxy 路由信息；历史回放不回填）。 */
+  notices?: string[]
   /** 本轮调用的工具列表（tool_dispatch 建立、tool_result 填充结果）。 */
   toolCalls?: ToolCallEntry[]
 }

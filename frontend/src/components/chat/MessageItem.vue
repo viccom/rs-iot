@@ -31,6 +31,9 @@ const reasoningBodyRef = ref<HTMLElement | null>(null)
 /** 是否有思考过程（决定折叠面板是否展示）。 */
 const hasReasoning = computed(() => !!props.message.reasoning && props.message.reasoning.length > 0)
 
+/** 是否有系统提示（notice 事件归集，与思考过程共用折叠面板）。 */
+const hasNotices = computed(() => (props.message.notices?.length ?? 0) > 0)
+
 /**
  * 是否为流式进行中的 assistant 消息（turn 未结束）。
  * AgentDrawer 经 provide(runningKey) 广播一个 Ref<boolean>；无注入源时回退静态 false。
@@ -74,15 +77,16 @@ watch(
 
 <template>
   <div class="msg-row" :class="isUser ? 'is-user' : 'is-assistant'">
-    <!-- 思考折叠面板（assistant + 有 reasoning 才显示） -->
-    <details v-if="!isUser && hasReasoning" class="reasoning">
+    <!-- 思考折叠面板（assistant + 有 reasoning/notices 才显示；notice 为路由等系统提示行） -->
+    <details v-if="!isUser && (hasReasoning || hasNotices)" class="reasoning">
       <summary class="reasoning-summary" :class="{ active: running }">
         <span>{{ running ? '思考中' : '思考过程' }}</span>
         <span v-if="running" class="dots" aria-hidden="true">
           <span class="dot dot-sm" /><span class="dot dot-sm" /><span class="dot dot-sm" />
         </span>
       </summary>
-      <div ref="reasoningBodyRef" class="reasoning-body">{{ message.reasoning }}</div>
+      <div v-if="hasReasoning" ref="reasoningBodyRef" class="reasoning-body">{{ message.reasoning }}</div>
+      <div v-for="(n, i) in message.notices" :key="i" class="reasoning-body notice-line">ℹ️ {{ n }}</div>
     </details>
 
     <!-- user：右对齐气泡 -->
@@ -199,6 +203,7 @@ watch(
   scrollbar-width: thin;
   scrollbar-color: rgba(203, 213, 225, 0.9) transparent;
 }
+.notice-line { color: var(--color-ink-muted); }
 
 .tool-wrap { width: 100%; }
 
