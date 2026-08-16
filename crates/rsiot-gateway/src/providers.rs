@@ -68,6 +68,126 @@ pub struct DefaultModelReq {
     pub model: String,
 }
 
+/// 上游模型列表发现请求（参考 cc-switch-go proxy/models.go：动态发现 + 勾选代替手填）。
+/// api_key 与 name 二选一提供密钥线索：显式 api_key 优先；否则用 name 对应供应商
+/// 已存 .env 密钥（编辑场景免重输）；都无则匿名请求（少数端点公开）。
+#[derive(Debug, Deserialize)]
+pub struct FetchModelsReq {
+    pub base_url: String,
+    /// "openai" | "anthropic"（决定端点路径与鉴权头）。
+    #[serde(default)]
+    pub kind: String,
+    #[serde(default)]
+    pub api_key: String,
+    /// 供应商名（取其 .env 已存密钥）。
+    #[serde(default)]
+    pub name: String,
+}
+
+/// 按协议族构造候选模型列表 URL（附带该 URL 的鉴权风格）。
+/// - openai：`{base}/models`，未带 /v1 的基址回退 `{base}/v1/models`（均 Bearer）。
+/// - anthropic：`{base}/v1/models` → `{base}/models`（均 x-api-key）→ **同源根的
+///   OpenAI 面** `{origin}/v1/models`（Bearer；DeepSeek anthropic 面不开放模型列表
+///   实测 404，同源 OpenAI 面可用——通用回退，非厂商特判）。
+///
+/// 纯函数便于单测。
+pub fn build_models_urls(base_url: &str, kind: &str) -> Vec<(String, bool)> {
+    let base = base_url.trim().trim_end_matches('/');
+    if base.is_empty() {
+        return vec![];
+    }
+    // (url, use_openai_auth)
+    let anthropic = kind.trim().eq_ignore_ascii_case("anthropic");
+    if anthropic {
+        let mut out = vec![
+            (format!("{base}/v1/models"), false),
+            (format!("{base}/models"), false),
+        ];
+        // 同源根（scheme://host[:port]）的 OpenAI 面。
+        if let Some(origin) = origin_of(base) {
+            let cand = format!("{origin}/v1/models");
+            if !out.iter().any(|(u, _)| *u == cand) {
+                out.push((cand, true));
+            }
+        }
+        out
+    } else if base.ends_with("/v1") {
+        // 已带版本段的 openai 基址没有第二个合理形态，回退重复无意义。
+        vec![(format!("{base}/models"), true)]
+    } else {
+        vec![
+            (format!("{base}/models"), true),
+            (format!("{base}/v1/models"), true),
+        ]
+    }
+}
+
+/// 取 URL 的 `scheme://host[:port]`（无 scheme 时返 None）。
+fn origin_of(base: &str) -> Option<String> {
+    let (scheme, rest) = base.split_once("://")?;
+    if scheme != "http" && scheme != "https" || rest.is_empty() {
+        return None;
+    }
+    let host = rest.split('/').next()?;
+    if host.is_empty() {
+        None
+    } else {
+        Some(format!("{scheme}://{host}"))
+    }
+}
+
+/// 解析上游模型列表响应为 id 列表。兼容三种形态（各家实测差异）：
+/// `{"data":[{"id":..}]}`（OpenAI/Anthropic 标准）、`{"models":[".."]}`、裸数组。
+/// 纯函数便于单测。
+pub fn parse_model_ids(body: &str) -> Vec<String> {
+    let v: serde_json::Value = match serde_json::from_str(body) {
+        Ok(v) => v,
+        Err(_) => return vec![],
+    };
+    let items = v
+        .get("data")
+        .and_then(|d| d.as_array())
+        .cloned()
+        .or_else(|| v.get("models").and_then(|m| m.as_array()).cloned())
+        .or_else(|| v.as_array().cloned());
+    let mut ids: Vec<String> = Vec::new();
+    if let Some(arr) = items {
+        for it in arr {
+            let id = it
+                .as_str()
+                .map(str::to_string)
+                .or_else(|| it.get("id").and_then(|i| i.as_str()).map(str::to_string));
+            if let Some(id) = id {
+                if !id.is_empty() && !ids.contains(&id) {
+                    ids.push(id);
+                }
+            }
+        }
+    }
+    ids.sort();
+    ids
+}
+
+/// 从 .env 读已存密钥（供应商 name → api_key_env → 值；缺任一返 None）。
+/// 仅供 fetch-models 出网鉴权用，不经 API 返回（密钥只写不读的边界不变：
+/// 密钥内容只流向上游，不流向浏览器）。
+fn stored_key(home: &Path, name: &str) -> Option<String> {
+    let (provs, _) = read_state(home).ok()?;
+    let env_name = provs
+        .iter()
+        .find(|p| p.name == name)
+        .map(|p| p.api_key_env.clone())?;
+    if env_name.is_empty() {
+        return None;
+    }
+    let lines = read_env_lines(home).ok()?;
+    lines
+        .iter()
+        .find(|l| is_env_assign(l, &env_name))
+        .map(|l| l[env_name.len() + 1..].trim().to_string())
+        .filter(|v| !v.is_empty())
+}
+
 // ---- 配置文件读写（纯函数 + 薄 IO，便于单测） ----
 
 fn config_path(home: &Path) -> PathBuf {
@@ -472,6 +592,61 @@ pub async fn set_default(
         .into_response()
 }
 
+/// POST /api/agent/providers/fetch-models → 从上游拉模型 id 列表（前端勾选用，
+/// 对标 cc-switch-go 动态发现）。密钥解析：显式 api_key > name 对应已存 .env 密钥。
+/// 依次尝试候选 URL（主形态失败回退），首个返回非空列表者胜；全败返 502 带摘要。
+pub async fn fetch_models(
+    State(st): State<Arc<GwState>>,
+    Json(req): Json<FetchModelsReq>,
+) -> axum::response::Response {
+    if st.reasonix.home_dir.is_empty() {
+        return not_configured();
+    }
+    if req.base_url.trim().is_empty() {
+        return err(StatusCode::BAD_REQUEST, "base_url is required");
+    }
+    let home = PathBuf::from(&st.reasonix.home_dir);
+    let key = if !req.api_key.trim().is_empty() {
+        Some(req.api_key.trim().to_string())
+    } else {
+        stored_key(&home, &req.name)
+    };
+    let mut attempts: Vec<String> = Vec::new();
+    for (url, use_openai_auth) in build_models_urls(&req.base_url, &req.kind) {
+        let mut r = st.client.get(&url).timeout(Duration::from_secs(15));
+        if let Some(k) = &key {
+            if use_openai_auth {
+                r = r.header("Authorization", format!("Bearer {k}"));
+            } else {
+                r = r
+                    .header("x-api-key", k)
+                    .header("anthropic-version", "2023-06-01");
+            }
+        }
+        match r.send().await {
+            Ok(resp) => {
+                let status = resp.status();
+                if status.is_success() {
+                    let body = resp.text().await.unwrap_or_default();
+                    let ids = parse_model_ids(&body);
+                    if !ids.is_empty() {
+                        return (StatusCode::OK, Json(serde_json::json!({ "models": ids })))
+                            .into_response();
+                    }
+                    attempts.push(format!("{url} → {status} 空或不可解析的模型列表"));
+                } else {
+                    attempts.push(format!("{url} → {status}"));
+                }
+            }
+            Err(e) => attempts.push(format!("{url} → {e}")),
+        }
+    }
+    err(
+        StatusCode::BAD_GATEWAY,
+        &format!("上游模型列表获取失败：{}", attempts.join("; ")),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -579,5 +754,58 @@ mod tests {
     fn derive_key_env_sanitizes() {
         assert_eq!(derive_key_env("CLIProxyAPI"), "CLIPROXYAPI_API_KEY");
         assert_eq!(derive_key_env("my-provider 2"), "MY_PROVIDER_2_API_KEY");
+    }
+
+    #[test]
+    fn build_models_urls_per_kind_with_fallback() {
+        // openai 基址带 /v1：只有一个合理形态。
+        assert_eq!(
+            build_models_urls("https://api.x.com/v1/", "openai"),
+            vec![("https://api.x.com/v1/models".to_string(), true)]
+        );
+        // openai 基址不带 /v1：先 /models 后 /v1/models 回退（均 Bearer）。
+        assert_eq!(
+            build_models_urls("https://api.x.com", "openai"),
+            vec![
+                ("https://api.x.com/models".to_string(), true),
+                ("https://api.x.com/v1/models".to_string(), true),
+            ]
+        );
+        // anthropic：/v1/models → /models（x-api-key）→ 同源根 OpenAI 面（Bearer）。
+        // DeepSeek anthropic 面不开放列表（404），第三级同源回退实测可用。
+        assert_eq!(
+            build_models_urls("https://api.deepseek.com/anthropic", "anthropic"),
+            vec![
+                (
+                    "https://api.deepseek.com/anthropic/v1/models".to_string(),
+                    false
+                ),
+                (
+                    "https://api.deepseek.com/anthropic/models".to_string(),
+                    false
+                ),
+                ("https://api.deepseek.com/v1/models".to_string(), true),
+            ]
+        );
+        assert!(build_models_urls("", "openai").is_empty());
+    }
+
+    #[test]
+    fn parse_model_ids_shapes() {
+        // OpenAI/Anthropic 标准 data[].id。
+        assert_eq!(
+            parse_model_ids(r#"{"object":"list","data":[{"id":"b"},{"id":"a"},{"id":"a"}]}"#),
+            vec!["a", "b"],
+            "排序去重"
+        );
+        // {"models":[...]} 形态。
+        assert_eq!(
+            parse_model_ids(r#"{"models":["m1","m2"]}"#),
+            vec!["m1", "m2"]
+        );
+        // 裸数组（字符串或对象元素）。
+        assert_eq!(parse_model_ids(r#"["x",{"id":"y"}]"#), vec!["x", "y"]);
+        assert!(parse_model_ids("not json").is_empty());
+        assert!(parse_model_ids(r#"{"data":[]}"#).is_empty());
     }
 }

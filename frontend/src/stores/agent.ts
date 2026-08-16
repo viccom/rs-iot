@@ -585,6 +585,23 @@ export const useAgentStore = defineStore('agent', () => {
     }
   }
 
+  /** 从上游拉模型 id 列表（勾选代替手填，对标 cc-switch-go 动态发现）。
+   *  编辑场景 name 传供应商名即可自动用已存 .env 密钥（免重输）。 */
+  async function fetchUpstreamModels(payload: {
+    base_url: string
+    kind?: string
+    api_key?: string
+    name?: string
+  }) {
+    const r = await api('/api/agent/providers/fetch-models', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    })
+    if (!r.ok) throw new Error(`fetch models failed: ${r.status} ${await r.text().catch(() => '')}`.trim())
+    const data = await r.json()
+    return (data.models ?? []) as string[]
+  }
+
   /** 当前活动模型 ref（models 里 active==true 的条目，模型下拉绑它）。 */
   const activeModelRef = computed(() => models.value.find(m => m.active)?.ref ?? '')
 
@@ -592,7 +609,7 @@ export const useAgentStore = defineStore('agent', () => {
     messages, running, approval, ask,
     sessions, currentSession, models, status, sessionBusy, controlBusy, activeModelRef,
     providers, defaultModel, providerBusy,
-    loadProviders, saveProvider, deleteProvider, setDefaultModel,
+    loadProviders, saveProvider, deleteProvider, setDefaultModel, fetchUpstreamModels,
     onEvent, submit, approve, cancel, answer,
     loadSessions, loadHistory, loadModels, loadStatus,
     newSession, switchSession, deleteSession,

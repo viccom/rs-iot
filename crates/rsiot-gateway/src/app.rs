@@ -34,6 +34,7 @@ pub fn build_router(st: Arc<GwState>) -> Router {
             axum::routing::get(providers::list).post(providers::upsert),
         )
         .route("/providers/default", post(providers::set_default))
+        .route("/providers/fetch-models", post(providers::fetch_models))
         .route(
             "/providers/{name}",
             axum::routing::delete(providers::delete),

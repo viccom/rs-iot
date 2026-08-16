@@ -19,9 +19,32 @@ const editing = ref<LLMProvider | 'new' | null>(null)
 /** 重启等待态：gateway 已触发 warden 重启 reasonix，轮询 /models 直到恢复。 */
 const restarting = ref(false)
 
-/** 表单字段（models 用逗号/换行分隔文本编辑）。 */
-const form = ref({ name: '', kind: 'openai', base_url: '', models: '', api_key: '' })
+/** 表单字段（模型经拉取勾选/手动添加，存 selected 数组）。 */
+const form = ref({ name: '', kind: 'openai', base_url: '', api_key: '' })
 const formBusy = ref(false)
+/** 上游拉取的候选模型（空 = 未拉取）。 */
+const fetchedModels = ref<string[]>([])
+/** 已选模型 id（提交 payload 的 models）。 */
+const selected = ref<string[]>([])
+/** 手动添加输入框（部分供应商不开放列表接口）。 */
+const customModel = ref('')
+const fetching = ref(false)
+const fetchError = ref('')
+
+/** 勾选/取消一个模型。 */
+function toggleModel(m: string) {
+  selected.value = selected.value.includes(m) ? selected.value.filter(x => x !== m) : [...selected.value, m]
+}
+function addCustom() {
+  const m = customModel.value.trim()
+  if (m && !selected.value.includes(m)) selected.value = [...selected.value, m]
+  customModel.value = ''
+}
+function removeModel(m: string) {
+  selected.value = selected.value.filter(x => x !== m)
+}
+/** 已选但不在拉取列表里的（自定义/上游已下架）——chips 展示可移除。 */
+const customSelected = computed(() => selected.value.filter(m => !fetchedModels.value.includes(m)))
 
 /** 所有 provider/model 组合（默认模型下拉数据源）。 */
 const modelOptions = computed(() =>
@@ -40,20 +63,46 @@ onMounted(async () => {
 })
 
 function openAdd() {
-  form.value = { name: '', kind: 'openai', base_url: '', models: '', api_key: '' }
+  form.value = { name: '', kind: 'openai', base_url: '', api_key: '' }
+  selected.value = []
+  fetchedModels.value = []
+  customModel.value = ''
+  fetchError.value = ''
   editing.value = 'new'
   errorMsg.value = ''
 }
 function openEdit(p: LLMProvider) {
-  form.value = {
-    name: p.name,
-    kind: p.kind || 'openai',
-    base_url: p.base_url,
-    models: p.models.join('\n'),
-    api_key: '',
-  }
+  form.value = { name: p.name, kind: p.kind || 'openai', base_url: p.base_url, api_key: '' }
+  selected.value = [...p.models]
+  fetchedModels.value = []
+  customModel.value = ''
+  fetchError.value = ''
   editing.value = p
   errorMsg.value = ''
+}
+
+/** 从上游拉模型列表（编辑场景自动用已存密钥；新增场景用输入框里的 key）。 */
+async function onFetch() {
+  fetchError.value = ''
+  if (!form.value.base_url.trim()) {
+    fetchError.value = '请先填写 API 地址'
+    return
+  }
+  fetching.value = true
+  try {
+    fetchedModels.value = await agent.fetchUpstreamModels({
+      base_url: form.value.base_url.trim(),
+      kind: form.value.kind,
+      api_key: form.value.api_key.trim() || undefined,
+      // 编辑既有供应商：后端用 .env 已存密钥（api_key 输入框留空时）。
+      name: isEditExisting.value ? form.value.name : undefined,
+    })
+    if (!fetchedModels.value.length) fetchError.value = '上游返回了空列表'
+  } catch (e) {
+    fetchError.value = e instanceof Error ? e.message : '获取失败'
+  } finally {
+    fetching.value = false
+  }
 }
 
 /** 变更后的重启等待：轮询 /models 直到 serve 恢复（默认模型变更需重启生效）。 */
@@ -72,9 +121,8 @@ async function waitRestart() {
 
 async function onSave() {
   errorMsg.value = ''
-  const models = form.value.models.split(/[\n,]/).map(s => s.trim()).filter(Boolean)
-  if (!form.value.name.trim() || !form.value.base_url.trim() || !models.length) {
-    errorMsg.value = '名称、API 地址、模型列表均必填'
+  if (!form.value.name.trim() || !form.value.base_url.trim() || !selected.value.length) {
+    errorMsg.value = '名称、API 地址必填，且至少选择一个模型'
     return
   }
   formBusy.value = true
@@ -83,7 +131,7 @@ async function onSave() {
       name: form.value.name.trim(),
       kind: form.value.kind,
       base_url: form.value.base_url.trim(),
-      models,
+      models: selected.value,
       api_key: form.value.api_key.trim() || undefined,
     })
     editing.value = null
@@ -193,10 +241,43 @@ async function onSetDefault(ref: string) {
             <span>API 地址（base_url）</span>
             <input v-model="form.base_url" placeholder="https://api.example.com/v1" />
           </label>
-          <label class="field">
-            <span>模型 ID 列表（逗号或换行分隔）</span>
-            <textarea v-model="form.models" rows="3" placeholder="model-a&#10;model-b" />
-          </label>
+          <div class="field">
+            <span>模型（从 API 获取勾选，或手动添加）</span>
+            <div class="models-toolbar">
+              <button
+                type="button"
+                class="btn-fetch"
+                :disabled="fetching || formBusy"
+                @click="onFetch"
+              >{{ fetching ? '获取中…' : '⟳ 从 API 获取模型列表' }}</button>
+              <span v-if="isEditExisting && !form.api_key" class="hint">自动使用已保存的密钥</span>
+            </div>
+            <p v-if="fetchError" class="fetch-error">{{ fetchError }}</p>
+            <div v-if="fetchedModels.length" class="models-list">
+              <label v-for="m in fetchedModels" :key="m" class="model-check">
+                <input
+                  type="checkbox"
+                  :checked="selected.includes(m)"
+                  @change="toggleModel(m)"
+                />{{ m }}
+              </label>
+            </div>
+            <div class="custom-row">
+              <input
+                v-model="customModel"
+                placeholder="手动添加模型 ID（供应商不开放列表接口时用）"
+                @keydown.enter.prevent="addCustom"
+              />
+              <button type="button" class="btn-fetch" @click="addCustom">添加</button>
+            </div>
+            <div class="selected-chips">
+              <span v-for="m in selected" :key="m" class="chip" :class="{ custom: customSelected.includes(m) }">
+                {{ m }}<button type="button" aria-label="移除" @click="removeModel(m)">✕</button>
+              </span>
+              <span v-if="!selected.length" class="hint">尚未选择模型</span>
+              <span v-else class="hint">已选 {{ selected.length }} 个</span>
+            </div>
+          </div>
           <label class="field">
             <span>API Key{{ isEditExisting ? '（留空 = 不修改现有密钥）' : '' }}</span>
             <input v-model="form.api_key" type="password" autocomplete="off" placeholder="sk-..." />
@@ -289,7 +370,46 @@ async function onSetDefault(ref: string) {
   background: var(--card-bg); color: var(--color-ink);
 }
 .field input:disabled, .field textarea:disabled { background: var(--color-surface-hover); }
-.field textarea { resize: vertical; }
+
+.models-toolbar { display: flex; align-items: center; gap: 8px; }
+.btn-fetch {
+  font-size: 12px; padding: 6px 12px; cursor: pointer;
+  background: var(--card-bg); color: var(--color-ink-secondary);
+  border: 1px solid var(--card-border); border-radius: 8px;
+}
+.btn-fetch:hover:not(:disabled) { border-color: var(--color-primary); color: var(--color-primary); }
+.btn-fetch:disabled { opacity: 0.5; cursor: not-allowed; }
+.hint { font-size: 11px; color: var(--color-ink-muted); }
+.fetch-error {
+  margin: 0; font-size: 12px; color: var(--color-danger);
+  word-break: break-all; max-height: 72px; overflow-y: auto;
+}
+.models-list {
+  max-height: 180px; overflow-y: auto;
+  border: 1px solid var(--color-divider); border-radius: 8px;
+  padding: 6px 10px; display: flex; flex-direction: column; gap: 2px;
+  background: var(--card-bg);
+}
+.model-check {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 12px; color: var(--color-ink); cursor: pointer; padding: 2px 0;
+}
+.model-check input { accent-color: var(--color-primary); }
+.custom-row { display: flex; gap: 6px; }
+.custom-row input { flex: 1; font-size: 12px; padding: 6px 10px; border: 1px solid var(--card-border); border-radius: 8px; background: var(--card-bg); color: var(--color-ink); }
+.selected-chips { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+.chip {
+  display: inline-flex; align-items: center; gap: 4px;
+  font-size: 11px; padding: 2px 6px; border-radius: 999px;
+  background: color-mix(in srgb, var(--color-primary) 10%, var(--card-bg));
+  color: var(--color-ink-secondary);
+}
+.chip.custom { background: var(--color-surface-hover); }
+.chip button {
+  border: none; background: transparent; cursor: pointer;
+  font-size: 10px; color: var(--color-ink-muted); padding: 0 2px;
+}
+.chip button:hover { color: var(--color-danger); }
 
 .actions { display: flex; gap: 8px; justify-content: flex-end; }
 .btn {
