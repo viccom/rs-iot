@@ -9,6 +9,7 @@ use axum::routing::{any, post};
 use axum::Router;
 
 use crate::auth::auth_middleware;
+use crate::providers;
 use crate::proxy::{forward, forward_agent_submit, GwState, Upstream};
 use crate::routes_gw::{health, login};
 use crate::static_assets;
@@ -27,6 +28,16 @@ pub fn build_router(st: Arc<GwState>) -> Router {
     // `/submit` 走注入 handler（工具提示，冷启动盲区缓解），其余 fallback 裸透传。
     let agent_routes = Router::new()
         .route("/submit", post(forward_agent_submit))
+        // 供应商管理（本地处理，不转发 serve——serve 无此 API，配置面由网关直管）。
+        .route(
+            "/providers",
+            axum::routing::get(providers::list).post(providers::upsert),
+        )
+        .route("/providers/default", post(providers::set_default))
+        .route(
+            "/providers/{name}",
+            axum::routing::delete(providers::delete),
+        )
         .fallback(any(move |req: Request| {
             let st = serve_st.clone();
             async move { forward(State(st), req, Upstream::Serve).await }

@@ -5,6 +5,7 @@ import type {
   AskAnswer,
   AskQuestion,
   ChatMessage,
+  LLMProvider,
   ServeEvent,
   ServeHistoryMessage,
   ServeModel,
@@ -83,6 +84,12 @@ export const useAgentStore = defineStore('agent', () => {
   const sessionBusy = ref(false)
   /** 控件操作进行中（4 控件 disable）。 */
   const controlBusy = ref(false)
+  /** LLM 供应商列表（gateway /api/agent/providers，密钥只报有无）。 */
+  const providers = ref<LLMProvider[]>([])
+  /** 新会话默认模型（"<provider>/<model>"，reasonix config default_model）。 */
+  const defaultModel = ref('')
+  /** 供应商管理操作进行中（弹窗 disable + 重启等待态）。 */
+  const providerBusy = ref(false)
 
   let nextId = 1
   let sse: EventSource | null = null
@@ -517,12 +524,75 @@ export const useAgentStore = defineStore('agent', () => {
     }
   }
 
+  /** 读 LLM 供应商列表 + 默认模型（gateway 本地实现，不落 serve）。非 2xx 抛错带响应体。 */
+  async function loadProviders() {
+    const r = await api('/api/agent/providers')
+    if (!r.ok) throw new Error(`load providers failed: ${r.status} ${await r.text().catch(() => '')}`.trim())
+    const data = await r.json()
+    providers.value = data.providers ?? []
+    defaultModel.value = data.default_model ?? ''
+  }
+
+  /** 新增/更新供应商（POST /api/agent/providers）。api_key 留空 = 不动现有密钥。
+   *  返回 {created, restarted}——restarted=false 时需提示手动重启 reasonix。 */
+  async function saveProvider(payload: {
+    name: string
+    kind?: string
+    base_url: string
+    models: string[]
+    api_key_env?: string
+    api_key?: string
+  }) {
+    providerBusy.value = true
+    try {
+      const r = await api('/api/agent/providers', {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      })
+      if (!r.ok) throw new Error(`save provider failed: ${r.status} ${await r.text().catch(() => '')}`.trim())
+      const data = await r.json()
+      await loadProviders()
+      return data as { created: boolean; restarted: boolean; restart_error?: string }
+    } finally {
+      providerBusy.value = false
+    }
+  }
+
+  /** 删除供应商（条目 + .env 密钥；URL 名字需 encode 防 `/` 等字符）。 */
+  async function deleteProvider(name: string) {
+    providerBusy.value = true
+    try {
+      const r = await api(`/api/agent/providers/${encodeURIComponent(name)}`, { method: 'DELETE' })
+      if (!r.ok) throw new Error(`delete provider failed: ${r.status} ${await r.text().catch(() => '')}`.trim())
+      await loadProviders()
+    } finally {
+      providerBusy.value = false
+    }
+  }
+
+  /** 设新会话默认模型（"<provider>/<model>"）。变更后 reasonix 需重启生效（gateway 已触发）。 */
+  async function setDefaultModel(model: string) {
+    providerBusy.value = true
+    try {
+      const r = await api('/api/agent/providers/default', {
+        method: 'POST',
+        body: JSON.stringify({ model }),
+      })
+      if (!r.ok) throw new Error(`set default model failed: ${r.status} ${await r.text().catch(() => '')}`.trim())
+      defaultModel.value = model
+    } finally {
+      providerBusy.value = false
+    }
+  }
+
   /** 当前活动模型 ref（models 里 active==true 的条目，模型下拉绑它）。 */
   const activeModelRef = computed(() => models.value.find(m => m.active)?.ref ?? '')
 
   return {
     messages, running, approval, ask,
     sessions, currentSession, models, status, sessionBusy, controlBusy, activeModelRef,
+    providers, defaultModel, providerBusy,
+    loadProviders, saveProvider, deleteProvider, setDefaultModel,
     onEvent, submit, approve, cancel, answer,
     loadSessions, loadHistory, loadModels, loadStatus,
     newSession, switchSession, deleteSession,

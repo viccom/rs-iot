@@ -361,6 +361,54 @@ describe('agent store', () => {
   })
 })
 
+describe('LLM 供应商管理（gateway /api/agent/providers*）', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    vi.mocked(api).mockClear() // 模块级 mock 的 calls 跨用例累积，逐用例清零再按下标断言
+  })
+
+  it('loadProviders 填充 providers/defaultModel（密钥只报有无）', async () => {
+    const s = useAgentStore()
+    vi.mocked(api).mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          default_model: 'deepseek/deepseek-v4-flash',
+          providers: [{ name: 'deepseek', kind: 'anthropic', base_url: 'https://x', models: ['deepseek-v4-flash'], api_key_env: 'DEEPSEEK_API_KEY', has_key: true }],
+        }),
+      ),
+    )
+    await s.loadProviders()
+    expect(s.providers).toHaveLength(1)
+    expect(s.providers[0].has_key).toBe(true)
+    expect(s.defaultModel).toBe('deepseek/deepseek-v4-flash')
+    expect(JSON.stringify(s.providers[0])).not.toContain('sk-') // 密钥内容不可出现在前端状态
+  })
+
+  it('saveProvider POST 供应商载荷（api_key 缺省不传字段）', async () => {
+    const s = useAgentStore()
+    vi.mocked(api).mockResolvedValueOnce(new Response(JSON.stringify({ saved: true, created: true, restarted: true })))
+    vi.mocked(api).mockResolvedValueOnce(new Response(JSON.stringify({ default_model: '', providers: [] })))
+    await s.saveProvider({ name: 'mm', base_url: 'https://x', models: ['m1'] })
+    const [url, init] = vi.mocked(api).mock.calls[0]
+    expect(url).toBe('/api/agent/providers')
+    expect(init?.method).toBe('POST')
+    expect(JSON.parse(init!.body as string)).toEqual({ name: 'mm', base_url: 'https://x', models: ['m1'] })
+  })
+
+  it('setDefaultModel / deleteProvider 打正确端点；非 2xx 抛错带响应体', async () => {
+    const s = useAgentStore()
+    vi.mocked(api).mockResolvedValueOnce(new Response('{}'))
+    await s.setDefaultModel('mm/m1')
+    expect(vi.mocked(api).mock.calls[0][0]).toBe('/api/agent/providers/default')
+
+    vi.mocked(api).mockResolvedValueOnce(new Response('still in use', { status: 409 }))
+    await expect(s.deleteProvider('deep seek')).rejects.toThrow('409 still in use')
+    expect(vi.mocked(api).mock.calls[1][1]?.method).toBe('DELETE')
+    // 名字含空格需 URL 编码（否则路由错位）。
+    expect(vi.mocked(api).mock.calls[1][0]).toBe('/api/agent/providers/deep%20seek')
+  })
+})
+
 describe('effortLevelsFor（映射来源 Reasonix config/effort.go EffortCapabilityForEntry）', () => {
   it('deepseek-v4-flash 独有 low 档', () => {
     expect(effortLevelsFor('deepseek-flash', 'deepseek-v4-flash')).toEqual([

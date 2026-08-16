@@ -192,6 +192,24 @@ export interface AskAnswer {
   selected: string[]
 }
 
+/** LLM 供应商视图（gateway /api/agent/providers；密钥只报有无，不回传内容）。 */
+export interface LLMProvider {
+  /** 供应商名（[[providers]] name，如 "deepseek"）。 */
+  name: string
+  /** 协议族："openai" | "anthropic"（openai 兼容缺省）。 */
+  kind: string
+  /** API 基址（如 "https://api.deepseek.com/anthropic"）。 */
+  base_url: string
+  /** 可用模型 ID 列表。 */
+  models: string[]
+  /** 条目自带缺省模型（default 字段；缺省 Reasonix 取 models[0]）。 */
+  default?: string
+  /** 密钥环境变量名（.env 键）。 */
+  api_key_env: string
+  /** 密钥是否已配置（.env 有非空值）。 */
+  has_key: boolean
+}
+
 /** 单条聊天消息（对标 zacp ChatMessage，简化）。一条 assistant 消息聚合一个 turn。 */
 export interface ChatMessage {
   /** 自增 ID（前端分配，无持久化）。 */

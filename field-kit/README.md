@@ -13,7 +13,7 @@
 | `config/services.toml.template` | warden 服务定义模板（`__ROOT__` 占位，启动时生成） |
 | `config/reasonix.toml.template` | reasonix 项目配置模板（`__ROOT__`/`__JWT__` 占位，启动时生成） |
 | `config/rsiot-config.toml` | rs-iot 主程序配置（REST 8790 / lux 6390 / MQTT 公共 broker） |
-| `config/gateway.toml` | rsiot-gateway 配置（jwt_secret 与 rsiot-config.toml 同值） |
+| `config/gateway.toml.example` | rsiot-gateway 配置模板（jwt_secret 与 rsiot-config.toml 同值；含可选 `[reasonix]` 供应商管理段。部署时复制为 `gateway.toml` 并替换 `__ROOT__`） |
 | `config/simulator-config.yaml` | 设备模拟器配置（REST 8090 避让 gateway / RTU 从站 COM3） |
 | `pack-field-kit.ps1` | 从本机标准位置组装**完整**测试场发行包（含全部二进制与 com0com 驱动包） |
 

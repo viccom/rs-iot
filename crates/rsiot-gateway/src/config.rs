@@ -13,6 +13,30 @@
 
 use serde::Deserialize;
 
+/// 供应商管理段（可选）：指向 reasonix 的 REASONIX_HOME 与 warden。
+/// 缺省（空 home_dir）时 /api/agent/providers* 返 503（现场未启用该能力）。
+#[derive(Debug, Deserialize, Clone, Default)]
+#[serde(default)]
+pub struct ReasonixCfg {
+    /// REASONIX_HOME 目录（其下 config.toml + .env 由本网关外科手术式编辑）。
+    pub home_dir: String,
+    /// warden REST 基址（改配置后重启 reasonix 服务，serve 启动时快照配置）。
+    pub warden_url: String,
+    /// warden 中的 reasonix 服务名。
+    pub service_name: String,
+}
+
+impl ReasonixCfg {
+    /// 服务名缺省值。
+    pub fn service_name(&self) -> &str {
+        if self.service_name.is_empty() {
+            "reasonix"
+        } else {
+            &self.service_name
+        }
+    }
+}
+
 /// Gateway 配置。
 #[derive(Debug, Deserialize, Clone)]
 pub struct GwConfig {
@@ -27,6 +51,9 @@ pub struct GwConfig {
     /// reasonix serve token（伪造 Cookie: reasonix_token 注入，层3）。
     /// 来自 serve 启动 `--auth token --token <值>` 或 `--token-file`。
     pub serve_token: String,
+    /// 供应商管理段（可选）。
+    #[serde(default)]
+    pub reasonix: ReasonixCfg,
 }
 
 impl GwConfig {

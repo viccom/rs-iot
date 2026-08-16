@@ -16,6 +16,7 @@ import { useChatScroll } from './composables/useChatScroll'
 import MessageItem, { runningKey } from './MessageItem.vue'
 import PermissionModal from './PermissionModal.vue'
 import AskModal from './AskModal.vue'
+import ProviderModal from './ProviderModal.vue'
 import type { ToolApprovalMode } from '../../types'
 
 const agent = useAgentStore()
@@ -39,6 +40,8 @@ const listRef = ref<HTMLElement | null>(null)
 const sessionMenuOpen = ref(false)
 /** 会话下拉根元素（点击外部检测用）。 */
 const sessionMenuRef = ref<HTMLElement | null>(null)
+/** LLM 供应商管理弹窗（初装配 key/模型 + 默认模型设置）。 */
+const providerModalOpen = ref(false)
 
 const emit = defineEmits<{ close: [] }>()
 
@@ -326,6 +329,12 @@ async function onApprovalModeChange(e: Event) {
       <span class="status" :class="{ on: agent.running }">
         {{ agent.running ? '思考中…' : '就绪' }}
       </span>
+      <button
+        class="btn-icon"
+        title="LLM 供应商管理（新增/编辑/删除供应商、设置默认模型、配置 API Key）"
+        aria-label="LLM 供应商管理"
+        @click="providerModalOpen = true"
+      >⚙</button>
       <button v-if="agent.running" class="btn-text btn-cancel" @click="cancel">停止</button>
       <button class="btn-icon" aria-label="关闭" @click="emit('close')">✕</button>
     </header>
@@ -451,6 +460,7 @@ async function onApprovalModeChange(e: Event) {
       @answer="onAskAnswer"
       @close="agent.ask = null"
     />
+    <ProviderModal v-if="providerModalOpen" @close="providerModalOpen = false" />
   </aside>
 </template>
 

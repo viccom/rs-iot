@@ -6,6 +6,7 @@
 pub mod app;
 pub mod auth;
 pub mod config;
+pub mod providers;
 pub mod proxy;
 pub mod routes_gw;
 pub mod static_assets;
