@@ -233,9 +233,12 @@ mod batch_tests {
     #[tokio::test]
     async fn delete_device_removes_only_target_dev() {
         let (_h, c) = start_lux("deldev").await;
-        write_batch(&c, &[sample("d1", &[("t1", 1.0)]), sample("d2", &[("t2", 2.0)])])
-            .await
-            .unwrap();
+        write_batch(
+            &c,
+            &[sample("d1", &[("t1", 1.0)]), sample("d2", &[("t2", 2.0)])],
+        )
+        .await
+        .unwrap();
         delete_device(&c, "d1").await.unwrap();
         // d1 已清空（HGETALL 返回空数组）。
         let arr = c.execute_value("HGETALL", &["rtdata:d1"]).await.unwrap();

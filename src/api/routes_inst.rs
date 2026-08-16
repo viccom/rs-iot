@@ -35,10 +35,7 @@ pub async fn roster(State(st): State<AppState>) -> Json<serde_json::Value> {
 /// - 运行态中配置没有的实例（config.toml/代码启动，不在 lux `instances`）：追加，
 ///   仅含 `inst_id` + `state`。**必须合并**——否则 MCP/AI 漏看这类实例
 ///   （前端 roster 会合并，后端不合并则又不一致）。
-fn merge_roster(
-    cfgs: serde_json::Value,
-    stats: &HashMap<String, InstState>,
-) -> serde_json::Value {
+fn merge_roster(cfgs: serde_json::Value, stats: &HashMap<String, InstState>) -> serde_json::Value {
     let mut out = Vec::new();
     let cfg_obj = cfgs.as_object();
     let cfg_keys: HashSet<&str> = cfg_obj

@@ -198,7 +198,9 @@ const SLASH_COMMAND_PREFIXES: &[&str] = &["/model ", "/effort "];
 /// 纯函数便于单测（input_should_get_hint / slash_command_skips_hint）。
 fn input_should_get_hint(input: &str) -> bool {
     let trimmed = input.trim_start();
-    !SLASH_COMMAND_PREFIXES.iter().any(|p| trimmed.starts_with(p))
+    !SLASH_COMMAND_PREFIXES
+        .iter()
+        .any(|p| trimmed.starts_with(p))
 }
 
 /// agent submit 工具提示（冷启动盲区缓解）。
@@ -256,7 +258,8 @@ pub async fn forward_agent_submit(State(st): State<Arc<GwState>>, req: Request) 
                 if !input_should_get_hint(&original) {
                     bytes.to_vec()
                 } else {
-                    v["input"] = serde_json::Value::String(format!("{AGENT_TOOL_HINT}\n\n{original}"));
+                    v["input"] =
+                        serde_json::Value::String(format!("{AGENT_TOOL_HINT}\n\n{original}"));
                     injected = true;
                     serde_json::to_vec(&v).unwrap_or_else(|_| {
                         injected = false;
