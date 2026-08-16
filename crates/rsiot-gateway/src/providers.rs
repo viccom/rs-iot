@@ -441,9 +441,19 @@ pub fn delete_provider(home: &Path, name: &str) -> Result<(), String> {
     if arr.len() == before {
         return Err(format!("provider {name:?} not found"));
     }
+    // 共享密钥防护（现场事故根因）：多个供应商可共用同一 api_key_env（如
+    // deepseek-flash/pro/deepseek 三条目共用 DEEPSEEK_API_KEY）——仅当删除后
+    // **再无任何条目引用**该 env 时才清 .env，否则连带断掉其余供应商的密钥。
+    // retain 后 arr 即删除后状态；引用检查须在 save_doc 释放可变借用前完成。
+    let still_referenced = key_env.as_deref().is_some_and(|k| {
+        !k.is_empty()
+            && arr
+                .iter()
+                .any(|t| t.get("api_key_env").and_then(|v| v.as_str()) == Some(k))
+    });
     save_doc(home, &doc)?;
     if let Some(k) = key_env {
-        if !k.is_empty() {
+        if !k.is_empty() && !still_referenced {
             env_remove_key(home, &k)?;
         }
     }
@@ -735,6 +745,34 @@ mod tests {
         assert!(!env.contains("MINIMAX_API_KEY"));
         assert!(env.contains("DEEPSEEK_API_KEY=sk-123"));
         assert!(delete_provider(&home, "nope").is_err());
+    }
+
+    /// 共享密钥防护（现场事故回归锁定）：多条目共用同一 api_key_env（用户日常
+    /// 配置 deepseek-flash/pro/deeppress 三条目共用 DEEPSEEK_API_KEY）时，删除
+    /// 其中一条**不得**清掉仍被其余条目引用的密钥；最后一条删完才清。
+    #[test]
+    fn delete_keeps_shared_env_key_while_referenced() {
+        let home = setup_home("shared");
+        // deepseek（fixture 自带，DEEPSEEK_API_KEY=sk-123）+ 两个共用同 env 的条目。
+        let mut f = upsert_req("deepseek-pro", &["deepseek-v4-pro"], "");
+        f.api_key_env = "DEEPSEEK_API_KEY".into();
+        upsert_provider(&home, &f).unwrap();
+        // 删 deepseek-pro：deepseek 仍引用 DEEPSEEK_API_KEY → 密钥必须保留。
+        delete_provider(&home, "deepseek-pro").unwrap();
+        let env = std::fs::read_to_string(env_path(&home)).unwrap();
+        assert!(
+            env.contains("DEEPSEEK_API_KEY=sk-123"),
+            "仍有引用时密钥被误删（事故根因）"
+        );
+        let (provs, _) = read_state(&home).unwrap();
+        assert!(provs.iter().find(|p| p.name == "deepseek").unwrap().has_key);
+        // 删最后一条引用者：密钥此时才清。
+        delete_provider(&home, "deepseek").unwrap();
+        let env = std::fs::read_to_string(env_path(&home)).unwrap();
+        assert!(
+            !env.contains("DEEPSEEK_API_KEY"),
+            "最后引用者删除后密钥应清理"
+        );
     }
 
     #[test]
