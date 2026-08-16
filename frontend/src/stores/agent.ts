@@ -72,6 +72,90 @@ export function escapeRefPath(path: string): string {
  * 事件路径走 gateway `/api/agent/*`（**不带** `/api/v1/`，serve 端点本身无该
  * 前缀；这与 monitor 的 `/api/rsiot/api/v1/*` 不同——rs-iot 端点带 /api/v1/）。
  */
+/**
+ * 剥离 Reasonix 注入用户消息的 transient 块（会话标题/预览/rewind 选择器同款，
+ * 源码 internal/agent/preview.go TransientUserBlockTags——单一权威清单）。
+ * 宿主把运行时上下文（reasoning-language 偏好、capability-route 工具路由提示
+ * 等）前缀注入 user turn 并持久化；serve `/history` 未剥离直接返回（官方 UI
+ * 客户端侧剥），前端同款处理——否则 markup 漏进历史会话的用户气泡
+ * （<capability-route> 实测泄漏）。execution-policy 特殊：追加在 user 文本
+ * 之后（尾缀块，带属性），按上游 reTrailingExecutionPolicy 剥尾。
+ */
+const TRANSIENT_BLOCK_TAGS = [
+  'response-language', 'reasoning-language', 'memory-update', 'background-jobs',
+  'active-goal', 'autoresearch-runtime', 'hook-context', 'capability-route',
+  'interrupted-turn-recovery',
+] as const
+const TRANSIENT_LEADING_RE = new RegExp(
+  `^\\s*(?:<(?:${TRANSIENT_BLOCK_TAGS.join('|')})(?:\\s+[^>]*)?>[\\s\\S]*?</(?:${TRANSIENT_BLOCK_TAGS.join('|')})>[\\r\\n]*)+`,
+)
+const TRAILING_EXECUTION_POLICY_RE = /\n*<execution-policy(?:\s+[^>]*)?>[\s\S]*?<\/execution-policy>\s*$/
+
+function stripTransientBlocks(content: string): string {
+  return content
+    .replace(TRANSIENT_LEADING_RE, '')
+    .replace(TRAILING_EXECUTION_POLICY_RE, '')
+}
+
+/**
+ * plan 模式标记（上游 internal/planmode/policy.go Marker + control/input.go
+ * legacy 变体，Compose 在 plan 模式下前缀注入 user turn）。桌面端
+ * StripComposePrefixes 剥它后显示，前端同款——两串字面量由脚本从 Go 源码
+ * 直接生成（字节级校验），勿手改。
+ */
+export const PLAN_MODE_MARKERS = [
+  '[Plan mode — planning workflow. Gather context, ask clarifying questions with ask, maintain planning state with todo_write, and delegate focused research when useful. Do not begin implementation in this mode: avoid file writes, unsafe shell commands, capability installation, memory mutation, writer-capable delegation, long-lived process control, or execution-step completion. This is a workflow instruction, not a permission boundary; every tool call remains governed by the active Permissions and Sandbox policy. Before planning, if a decision that is genuinely the user\'s — tech stack, an ambiguous requirement, scope, an irreversible choice — would materially shape the plan and you can\'t settle it from the codebase or a sensible default, use the ask tool to clarify it first; otherwise pick the obvious default and state the assumption in the plan instead of asking. Then present a LAYERED plan as your reply and stop. Structure the plan as a two-level markdown list so it becomes a layered task list: each PHASE is a top-level numbered list item (a coherent milestone, e.g. "1. Add the config loader"), and each phase\'s concrete, verifiable sub-steps are bullets indented beneath it (e.g. "   - parse the TOML into Config"). Use plain numbered list items for phases — do NOT write phases as markdown headings (##, ###) — so both levels parse. Keep phases few (about 2-6). The user will be asked to approve the plan before the workflow switches to implementation.]',
+  '[Plan mode — read-only. Explore the codebase first (read_file, ls, grep, glob, web_fetch, task, ask are available; writers are refused by the harness). Before planning, if a decision that is genuinely the user\'s — tech stack, an ambiguous requirement, scope, an irreversible choice — would materially shape the plan and you can\'t settle it from the codebase or a sensible default, use the ask tool to clarify it first; otherwise pick the obvious default and state the assumption in the plan instead of asking. Then present a LAYERED plan as your reply and stop — do not write files, edit, or run side-effecting bash. Structure the plan as a two-level markdown list so it becomes a layered task list: each PHASE is a top-level numbered list item (a coherent milestone, e.g. "1. Add the config loader"), and each phase\'s concrete, verifiable sub-steps are bullets indented beneath it (e.g. "   - parse the TOML into Config"). Use plain numbered list items for phases — do NOT write phases as markdown headings (##, ###) — so both levels parse. Keep phases few (about 2-6). The user will be asked to approve before any changes are made.]',
+]
+
+function stripPlanModeMarker(content: string): string {
+  let s = content
+  for (const marker of PLAN_MODE_MARKERS) {
+    if (s.startsWith(marker + '\n\n')) s = s.slice(marker.length + 2)
+    else if (s.startsWith(marker)) s = s.slice(marker.length)
+  }
+  return s
+}
+
+/**
+ * 剥 `Referenced context:` 前导块（上游 control/input.go StripReferencedContextPrefix
+ * 的 TS 移植）：@ 引用解析后 serve 把 `Referenced context:\n\n<file ...>...</file>\n\n
+ * + 原输入` 整体持久化，桌面端显示层剥掉——/history 原样返回，前端同款剥，
+ * 否则注入的文件内容漏进历史气泡（实测泄漏）。块标签多含 path-instructions
+ * （resolveReferencedInstructions 注入，上游清单遗漏——此处补上）。
+ */
+function stripReferencedContextPrefix(content: string): string {
+  const preamble = 'Referenced context:'
+  let s = content.trim()
+  if (!s.startsWith(preamble)) return content
+  s = s.slice(preamble.length).trim()
+  for (;;) {
+    s = s.trim()
+    if (!s) return ''
+    const open = /^<(file|dir|resource|image|path-instructions) /.exec(s)
+    if (!open) break
+    const closeTag = `</${open[1]}>`
+    const closeIdx = s.indexOf(closeTag)
+    if (closeIdx < 0) break
+    s = s.slice(closeIdx + closeTag.length).trim()
+  }
+  return s
+}
+
+/** rs-iot 自有页面上下文尾缀（buildAgentContextBlock 追加在 user 输入之后）。 */
+const PAGE_CONTEXT_SUFFIX_RE = /\n\n\[页面上下文\]\n[\s\S]*$/
+
+/**
+ * 历史回放的用户气泡文本 = 用户实时所见（对标桌面端显示管线
+ * StripReferencedContextPrefix(StripComposePrefixes(content))）：
+ * 瞬态块 → plan 标记 → Referenced context 前缀逐层剥，再剥页面上下文尾缀。
+ */
+function userDisplayText(content: string): string {
+  return stripReferencedContextPrefix(stripPlanModeMarker(stripTransientBlocks(content)))
+    .replace(PAGE_CONTEXT_SUFFIX_RE, '')
+    .trim()
+}
+
 export const useAgentStore = defineStore('agent', () => {
   /** 聊天消息列表（user 输入 + assistant 聚合 turn）。 */
   const messages = ref<ChatMessage[]>([])
@@ -250,30 +334,6 @@ export const useAgentStore = defineStore('agent', () => {
     ask.value = null
   }
 
-/**
- * 剥离 Reasonix 注入用户消息的 transient 块（会话标题/预览/rewind 选择器同款，
- * 源码 internal/agent/preview.go TransientUserBlockTags——单一权威清单）。
- * 宿主把运行时上下文（reasoning-language 偏好、capability-route 工具路由提示
- * 等）前缀注入 user turn 并持久化；serve `/history` 未剥离直接返回（官方 UI
- * 客户端侧剥），前端同款处理——否则 markup 漏进历史会话的用户气泡
- * （<capability-route> 实测泄漏）。execution-policy 特殊：追加在 user 文本
- * 之后（尾缀块，带属性），按上游 reTrailingExecutionPolicy 剥尾。
- */
-const TRANSIENT_BLOCK_TAGS = [
-  'response-language', 'reasoning-language', 'memory-update', 'background-jobs',
-  'active-goal', 'autoresearch-runtime', 'hook-context', 'capability-route',
-  'interrupted-turn-recovery',
-] as const
-const TRANSIENT_LEADING_RE = new RegExp(
-  `^\\s*(?:<(?:${TRANSIENT_BLOCK_TAGS.join('|')})(?:\\s+[^>]*)?>[\\s\\S]*?</(?:${TRANSIENT_BLOCK_TAGS.join('|')})>[\\r\\n]*)+`,
-)
-const TRAILING_EXECUTION_POLICY_RE = /\n*<execution-policy(?:\s+[^>]*)?>[\s\S]*?<\/execution-policy>\s*$/
-
-function stripTransientBlocks(content: string): string {
-  return content
-    .replace(TRANSIENT_LEADING_RE, '')
-    .replace(TRAILING_EXECUTION_POLICY_RE, '')
-}
 
 /**
  * serve 历史消息 → ChatMessage 映射（loadHistory 用）。
@@ -304,7 +364,7 @@ function stripTransientBlocks(content: string): string {
       out.push({
         id: nextId++,
         role: m.role === 'user' ? 'user' : 'assistant',
-        text: m.role === 'user' ? stripTransientBlocks(m.content || '') : m.content || '',
+        text: m.role === 'user' ? userDisplayText(m.content || '') : m.content || '',
         reasoning: m.reasoning,
         toolCalls: m.toolCalls?.map(t => ({ id: t.id, name: t.name, args: t.arguments })),
       })

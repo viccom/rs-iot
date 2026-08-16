@@ -9,7 +9,7 @@ import { setActivePinia, createPinia } from 'pinia'
 vi.mock('../api/client', () => ({ api: vi.fn(async () => new Response('{}')) }))
 
 import { api } from '../api/client'
-import { useAgentStore, effortLevelsFor, escapeRefPath } from './agent'
+import { useAgentStore, effortLevelsFor, escapeRefPath, PLAN_MODE_MARKERS } from './agent'
 import { useMonitorStore } from './monitor'
 import { useWorkspaceStore } from './workspace'
 
@@ -112,6 +112,41 @@ describe('agent store', () => {
     )
     await s.loadHistory()
     expect(s.messages[0].text).toBe('@docs/faq.md 总结这个文件')
+  })
+
+  it('historyToChatMessages 剥 Referenced context 注入块 + 页面上下文尾缀（气泡=实时所见）', async () => {
+    // 现场实测形态（2026-08-16）：@ 引用解析后 serve 持久化
+    // "Referenced context:\n\n<file ...>…</file>\n\n+ 用户原文"；rs-iot 前端
+    // 另追加 [页面上下文] 尾缀。桌面端显示管线 StripReferencedContextPrefix
+    // (StripComposePrefixes(content)) 剥掉宿主注入，/history 不剥——前端同款。
+    const s = useAgentStore()
+    vi.mocked(api).mockClear()
+    vi.mocked(api).mockResolvedValueOnce(
+      new Response(
+        JSON.stringify([
+          {
+            role: 'user',
+            content:
+              'Referenced context:\n\n<file path=".reasonix/attachments/upload-20260816-215755.466221-000001.txt">\nfield pump daily check 2026-08-16: vibration 2.1mm/s OK, temp 41C OK\n</file>\n\n@.reasonix/attachments/upload-20260816-215755.466221-000001.txt 请引用附件原文片段回答：附件第一句写了什么？\n\n[页面上下文]\n当前页面: 全局总览\n页面路径: /overview\n页面摘要: 总览当前实例健康\n当前可见数据:\n- 实例总数 3',
+          },
+        ]),
+      ),
+    )
+    await s.loadHistory()
+    expect(s.messages[0].text).toBe(
+      '@.reasonix/attachments/upload-20260816-215755.466221-000001.txt 请引用附件原文片段回答：附件第一句写了什么？',
+    )
+  })
+
+  it('historyToChatMessages 剥 plan 模式标记（Compose 前缀注入）', async () => {
+    const s = useAgentStore()
+    const marker = PLAN_MODE_MARKERS[0]
+    vi.mocked(api).mockClear()
+    vi.mocked(api).mockResolvedValueOnce(
+      new Response(JSON.stringify([{ role: 'user', content: `${marker}\n\n帮我规划采集实例扩容方案` }])),
+    )
+    await s.loadHistory()
+    expect(s.messages[0].text).toBe('帮我规划采集实例扩容方案')
   })
 
   it('approve keeps approval on non-2xx (review I1: no deadlock)', async () => {
