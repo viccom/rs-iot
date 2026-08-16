@@ -9,7 +9,7 @@ import { setActivePinia, createPinia } from 'pinia'
 vi.mock('../api/client', () => ({ api: vi.fn(async () => new Response('{}')) }))
 
 import { api } from '../api/client'
-import { useAgentStore, effortLevelsFor } from './agent'
+import { useAgentStore, effortLevelsFor, escapeRefPath } from './agent'
 import { useMonitorStore } from './monitor'
 import { useWorkspaceStore } from './workspace'
 
@@ -427,6 +427,55 @@ describe('LLM 供应商管理（gateway /api/agent/providers*）', () => {
     expect(vi.mocked(api).mock.calls[1][1]?.method).toBe('DELETE')
     // 名字含空格需 URL 编码（否则路由错位）。
     expect(vi.mocked(api).mock.calls[1][0]).toBe('/api/agent/providers/deep%20seek')
+  })
+})
+
+describe('附件上传 + 工作区引用（gateway /api/agent/attachments、/workspace）', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    vi.mocked(api).mockClear()
+  })
+
+  it('uploadAttachment 以 FormData POST file 字段，返回落盘 @ 路径', async () => {
+    const s = useAgentStore()
+    vi.mocked(api).mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({ files: [{ name: '泵房.png', path: '.reasonix/attachments/upload-x.png' }] }),
+        { status: 201 },
+      ),
+    )
+    const path = await s.uploadAttachment(new File([new Uint8Array([1])], '泵房.png'))
+    expect(path).toBe('.reasonix/attachments/upload-x.png')
+    const [url, init] = vi.mocked(api).mock.calls[0]
+    expect(url).toBe('/api/agent/attachments')
+    expect(init?.method).toBe('POST')
+    expect(init?.body).toBeInstanceOf(FormData)
+    expect((init!.body as FormData).get('file')).toBeInstanceOf(File)
+  })
+
+  it('uploadAttachment 非 2xx 抛错带响应体', async () => {
+    const s = useAgentStore()
+    vi.mocked(api).mockResolvedValueOnce(new Response('超过 25 MB 上限', { status: 413 }))
+    await expect(s.uploadAttachment(new File([new Uint8Array([1])], 'a.zip'))).rejects.toThrow('413')
+  })
+
+  it('listWorkspace GET 带编码 path，返回条目数组', async () => {
+    const s = useAgentStore()
+    vi.mocked(api).mockResolvedValueOnce(
+      new Response(JSON.stringify({ path: 'docs', entries: [{ name: 'a.md', is_dir: false }] })),
+    )
+    const es = await s.listWorkspace('docs 旧')
+    expect(es).toEqual([{ name: 'a.md', is_dir: false }])
+    expect(vi.mocked(api).mock.calls[0][0]).toBe(`/api/agent/workspace?path=${encodeURIComponent('docs 旧')}`)
+    expect(vi.mocked(api).mock.calls[0][1]).toBeUndefined() // GET 无 body
+  })
+})
+
+describe('escapeRefPath（对标 Reasonix refs.go EscapeRefPath——@token 以空白分界）', () => {
+  it('空格/制表符转义，其余原样（/ 分隔符不动）', () => {
+    expect(escapeRefPath('docs/read me.md')).toBe('docs/read\\ me.md')
+    expect(escapeRefPath('a\tb')).toBe('a\\\tb')
+    expect(escapeRefPath('plain/path.txt')).toBe('plain/path.txt')
   })
 })
 

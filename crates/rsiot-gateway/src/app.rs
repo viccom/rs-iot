@@ -8,6 +8,7 @@ use axum::extract::{Request, State};
 use axum::routing::{any, post};
 use axum::Router;
 
+use crate::attachments;
 use crate::auth::auth_middleware;
 use crate::providers;
 use crate::proxy::{forward, forward_agent_submit, GwState, Upstream};
@@ -39,6 +40,15 @@ pub fn build_router(st: Arc<GwState>) -> Router {
             "/providers/{name}",
             axum::routing::delete(providers::delete),
         )
+        // 附件上传 + 工作区浏览（本地处理：serve 只有 @ 解析，无落盘/浏览端点）。
+        // 上传路由单独抬请求体上限（axum 默认 2MB），其余路由维持默认。
+        .route(
+            "/attachments",
+            post(attachments::upload).layer(axum::extract::DefaultBodyLimit::max(
+                attachments::UPLOAD_BODY_LIMIT,
+            )),
+        )
+        .route("/workspace", axum::routing::get(attachments::workspace))
         .fallback(any(move |req: Request| {
             let st = serve_st.clone();
             async move { forward(State(st), req, Upstream::Serve).await }

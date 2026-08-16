@@ -13,7 +13,8 @@ path = "src/main.rs"
 
 [dependencies]
 # 与 rs-iot 同版本栈（gateway 复用，零新增心智）。见根 Cargo.toml:56-60。
-axum = { version = "0.8", features = ["macros"] }
+# multipart：附件上传端点（/api/agent/attachments）需要 Multipart extractor。
+axum = { version = "0.8", features = ["macros", "multipart"] }
 tower = "0.5"
 tower-http = { version = "0.6", features = ["trace", "cors"] }
 # stream feature 必加：SSE 裸字节流透传用 bytes_stream()（plan-gateway-tech-selection.md §五关键决策）。
@@ -37,6 +38,8 @@ futures-util = "0.3"
 # rust-embed 编译时把 frontend/dist 嵌入二进制，gateway 独立部署不需随附静态文件。
 rust-embed = { version = "8", features = ["mime-guess"] }
 mime_guess = "2"
+# 附件落盘文件名的时间戳部分（与 reasonix clipboard-* 命名同款可读格式）。
+chrono = "0.4"
 
 [dev-dependencies]
 # 集成测试签 JWT exp 时间戳（B1-1 SSE 透传端到端测）。

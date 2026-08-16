@@ -4,6 +4,7 @@
 //! 设计见 `docs/plan-gateway-tech-selection.md`（axum 0.8 + reqwest 手写方案）。
 
 pub mod app;
+pub mod attachments;
 pub mod auth;
 pub mod config;
 pub mod providers;

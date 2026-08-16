@@ -44,7 +44,7 @@ E:\rsiot-field\
 ├── start-rsiot.bat                 # 一键冷启动（6 步编排，幂等，见 field-kit/）
 ├── stop-rsiot.bat                  # 一键停止（stop-all + 杀 warden，Job Object 清树）
 ├── config.toml                     # rs-iot 配置（api_port 8790 / lux 6390 / [mqtt] 公共 broker）
-├── gateway.toml                    # 网关配置（jwt_secret 与 config.toml 同值）
+├── gateway.toml                    # 网关配置（jwt_secret 与 config.toml 同值；[reasonix] workspace_dir 指 work/）
 ├── bin\                            # rs-iot.exe / rsiot-gateway.exe / rsiot-mcp.exe / reasonix.exe
 ├── warden\
 │   ├── warden.exe

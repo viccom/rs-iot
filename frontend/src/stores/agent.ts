@@ -12,6 +12,7 @@ import type {
   ServeSession,
   ServeStatus,
   ToolApprovalMode,
+  WorkspaceEntry,
 } from '../types'
 import { useAuthStore } from './auth'
 import { useMonitorStore } from './monitor'
@@ -45,6 +46,15 @@ export function effortLevelsFor(provider: string, model: string): string[] {
   if (p.includes('anthropic') || m.includes('claude')) return ['auto', 'low', 'medium', 'high', 'xhigh', 'max']
   // 通用 OpenAI 兼容端点（openAIEffortCapability）。
   return ['auto', 'low', 'medium', 'high']
+}
+
+/**
+ * @ 引用路径转义（对标 Reasonix internal/control/refs.go EscapeRefPath）：
+ * 空格/制表符前加反斜杠——@token 以空白分界，路径含空格不转义会被截断。
+ * 其余字符（含 Windows 反斜杠，本面板只产生 `/` 路径）原样保留。
+ */
+export function escapeRefPath(path: string): string {
+  return path.replace(/[ \t]/g, (ch) => `\\${ch}`)
 }
 
 /**
@@ -615,6 +625,27 @@ function stripTransientBlocks(content: string): string {
     return (data.models ?? []) as string[]
   }
 
+  /** 上传附件到 reasonix 工作区（gateway 落 `.reasonix/attachments/`），返回 @ 引用路径。
+   *  发送时把路径以 `@` 前缀写进消息文本，serve 提交时解析内容/图片输入。 */
+  async function uploadAttachment(file: File) {
+    const fd = new FormData()
+    fd.append('file', file, file.name)
+    const r = await api('/api/agent/attachments', { method: 'POST', body: fd })
+    if (!r.ok) throw new Error(`upload failed: ${r.status} ${await r.text().catch(() => '')}`.trim())
+    const data = await r.json()
+    const f = data.files?.[0]
+    if (!f?.path) throw new Error('upload response missing path')
+    return f.path as string
+  }
+
+  /** 列工作区一层目录（gateway 沙箱 + 噪音过滤），@ 引用选择器数据源。 */
+  async function listWorkspace(path: string) {
+    const r = await api(`/api/agent/workspace?path=${encodeURIComponent(path)}`)
+    if (!r.ok) throw new Error(`list workspace failed: ${r.status} ${await r.text().catch(() => '')}`.trim())
+    const data = await r.json()
+    return (data.entries ?? []) as WorkspaceEntry[]
+  }
+
   /** 当前活动模型 ref（models 里 active==true 的条目，模型下拉绑它）。 */
   const activeModelRef = computed(() => models.value.find(m => m.active)?.ref ?? '')
 
@@ -623,6 +654,7 @@ function stripTransientBlocks(content: string): string {
     sessions, currentSession, models, status, sessionBusy, controlBusy, activeModelRef,
     providers, defaultModel, providerBusy,
     loadProviders, saveProvider, deleteProvider, setDefaultModel, fetchUpstreamModels,
+    uploadAttachment, listWorkspace,
     onEvent, submit, approve, cancel, answer,
     loadSessions, loadHistory, loadModels, loadStatus,
     newSession, switchSession, deleteSession,

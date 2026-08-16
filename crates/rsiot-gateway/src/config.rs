@@ -24,6 +24,12 @@ pub struct ReasonixCfg {
     pub warden_url: String,
     /// warden 中的 reasonix 服务名。
     pub service_name: String,
+    /// reasonix 工作区根（@ 引用解析锚点，即 serve 的 workspaceRoot）。
+    /// 附件上传落 `<workspace_dir>/.reasonix/attachments/`，工作区浏览以此为沙箱。
+    /// 须与 warden 里 reasonix 服务的 working_dir 一致；若其上是 git 仓库则应填
+    /// git 根（reasonix 取最近 git 根为 workspaceRoot，boot.go resolveWorkspaceRoot）。
+    /// 缺省（空）时 /api/agent/attachments、/api/agent/workspace 返 503。
+    pub workspace_dir: String,
 }
 
 impl ReasonixCfg {

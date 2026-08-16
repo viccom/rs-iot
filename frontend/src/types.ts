@@ -210,6 +210,12 @@ export interface LLMProvider {
   has_key: boolean
 }
 
+/** 工作区目录项（gateway /api/agent/workspace，reasonix @ 引用选择器数据源）。 */
+export interface WorkspaceEntry {
+  name: string
+  is_dir: boolean
+}
+
 /** 单条聊天消息（对标 zacp ChatMessage，简化）。一条 assistant 消息聚合一个 turn。 */
 export interface ChatMessage {
   /** 自增 ID（前端分配，无持久化）。 */
