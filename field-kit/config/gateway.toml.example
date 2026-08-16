@@ -7,6 +7,7 @@ jwt_secret  = "qwerty1234567890asdfgh1234567890"   # 与 config.toml 同值
 serve_token = "test-serve-token-123"      # reasonix serve --auth token（联调用）
 
 # LLM 供应商管理（/api/agent/providers*）：直管 reasonix 配置面 + 经 warden 重启生效。
+# __ROOT__ 由 pack-field-kit.ps1 打包时替换为部署根正斜杠路径（手工部署需自行替换）。
 [reasonix]
 home_dir   = "__ROOT__/home"
 warden_url = "http://127.0.0.1:8789"

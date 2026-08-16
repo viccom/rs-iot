@@ -35,7 +35,9 @@ Copy-Item "$PSScriptRoot\start-rsiot.bat", "$PSScriptRoot\stop-rsiot.bat" $kit
 Copy-Item "$PSScriptRoot\config\services.toml.template" "$kit\warden\config\"
 Copy-Item "$PSScriptRoot\config\reasonix.toml.template" "$kit\work\"
 Copy-Item "$PSScriptRoot\config\rsiot-config.toml" "$kit\config.toml"
-Copy-Item "$PSScriptRoot\config\gateway.toml" $kit
+# gateway 配置：example -> 实际 gateway.toml，__ROOT__ 替换为部署根（正斜杠）。
+$gwTmpl = [IO.File]::ReadAllText("$PSScriptRoot\config\gateway.toml.example")
+[IO.File]::WriteAllText("$kit\gateway.toml", $gwTmpl.Replace("__ROOT__", ($kit -replace "\\", "/")))
 
 # 2. 二进制（rs-iot 三件套 + warden + reasonix）
 Copy-Item "$RsiotTarget\rs-iot.exe", "$RsiotTarget\rsiot-gateway.exe", "$RsiotTarget\rsiot-mcp.exe" "$kit\bin\"
