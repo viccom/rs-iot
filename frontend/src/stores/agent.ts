@@ -240,8 +240,21 @@ export const useAgentStore = defineStore('agent', () => {
     ask.value = null
   }
 
-  /**
-   * serve 历史消息 → ChatMessage 映射（loadHistory 用）。
+/**
+ * 剥离 Reasonix 注入用户消息的 transient 偏好块（`<reasoning-language>` /
+ * `<response-language>`，源码 agent/reasoning_language.go WithReasoningLanguage
+ * 前缀注入、设计为瞬态）。serve `/history` 未剥离直接返回持久化内容（官方 UI
+ * 客户端侧剥），前端同款处理——否则指令文本漏进历史会话的用户气泡。
+ */
+function stripTransientBlocks(content: string): string {
+  return content
+    .replace(/<reasoning-language>[\s\S]*?<\/reasoning-language>\s*/g, '')
+    .replace(/<response-language>[\s\S]*?<\/response-language>\s*/g, '')
+    .replace(/^[\r\n]+/, '')
+}
+
+/**
+ * serve 历史消息 → ChatMessage 映射（loadHistory 用）。
    *
    * 规则（对标 serve.go:838-884 historyMessage）：
    * - user → 新建 user 消息；assistant → 新建 assistant 消息（toolCalls 字段名
@@ -269,7 +282,7 @@ export const useAgentStore = defineStore('agent', () => {
       out.push({
         id: nextId++,
         role: m.role === 'user' ? 'user' : 'assistant',
-        text: m.content || '',
+        text: m.role === 'user' ? stripTransientBlocks(m.content || '') : m.content || '',
         reasoning: m.reasoning,
         toolCalls: m.toolCalls?.map(t => ({ id: t.id, name: t.name, args: t.arguments })),
       })

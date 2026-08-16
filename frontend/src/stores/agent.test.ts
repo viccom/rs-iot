@@ -72,6 +72,27 @@ describe('agent store', () => {
     expect(s.messages.at(-1)?.notices).toEqual(['routed to cloud model', 'tool fallback'])
   })
 
+  it('historyToChatMessages 剥离 Reasonix 注入的 transient 偏好块（用户气泡不漏指令）', async () => {
+    // serve /history 原样返回持久化内容：注入块 + 真实 prompt（现场实测形态）。
+    // 官方 UI 客户端侧剥，前端同款——否则切换历史会话时指令文本漏进气泡。
+    const s = useAgentStore()
+    vi.mocked(api).mockClear()
+    vi.mocked(api).mockResolvedValueOnce(
+      new Response(
+        JSON.stringify([
+          { role: 'user', content: '<reasoning-language>\n必须使用简体中文书写全部可见思考/推理文本。\n</reasoning-language>\n\n列出所有设备' },
+          { role: 'assistant', content: '3 台设备' },
+          { role: 'user', content: '你好' },
+        ]),
+      ),
+    )
+    await s.loadHistory()
+    // 注入块剥离且去除前导空行；assistant 与普通用户消息不受影响。
+    expect(s.messages[0].text).toBe('列出所有设备')
+    expect(s.messages[1].text).toBe('3 台设备')
+    expect(s.messages[2].text).toBe('你好')
+  })
+
   it('approve keeps approval on non-2xx (review I1: no deadlock)', async () => {
     // I1 意图：gateway/serve 返错时绝不能清 approval——否则 agent 仍在等决策、
     // UI 已无弹窗，用户无法重发 → 死锁。approval 必须保留到下一次成功提交。
