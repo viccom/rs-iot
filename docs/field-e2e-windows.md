@@ -273,3 +273,8 @@ python scripts/test_serve_e2e.py "按顺序执行：1) 先调用 todo_write 建�
    runtimepolicy/guards.go），提示词见 5.7。
 6. **模拟器控制台端口**：默认 8080 与 gateway 冲突，测试场配置已改 8090。
 7. **换 exe 前先 stop 服务**：Windows 锁运行中的可执行文件，cp 报 "Device or resource busy"。
+8. **Git Bash 控制台是 GBK——curl -d 直传中文必污染会话**：控制台把中文按 GBK 编码
+   发出，serve 的 JSON 解码将非法 UTF-8 替换为 U+FFFD（混合 GBK 字节）落库，前端
+   忠实渲染成乱码（实测现场事故）。中文 payload 一律用 **`curl --data-binary @文件`**
+   （UTF-8 文件）或经 `scripts/test_serve_e2e.py`（python 自动 `\uXXXX` 转义）提交。
+   污染会话处置：`POST /new` 后逐个 `POST /delete-session {"name":...}` 删除。
