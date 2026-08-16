@@ -25,19 +25,55 @@ pub struct IdQuery {
 }
 
 /// `GET /api/v1/devices`：聚合所有实例配置的设备表 `{dev_id: DeviceSpec}`。
+///
+/// 实例配置全集 = lux `instances` + **运行态补缺**（config.toml/代码启动的实例
+/// 不落 lux，如 demo sim1——不合并则设备实际在采集而 API 返回空表，AI/前端
+/// 误报"无设备"。与 routes_inst::merge_roster / cascade_delete 的 mgr 快照
+/// 回退同款语义）。
 pub async fn list(State(st): State<AppState>) -> Json<serde_json::Value> {
-    let insts = crate::api::hgetall(&st.lux, "instances").await;
+    let insts = inst_configs(&st).await;
     Json(serde_json::Value::Object(aggregate_from_insts(&insts)))
 }
 
 /// `GET /api/v1/device/get?dev_id=`：聚合后过滤单设备；不存在返空对象。
 pub async fn get(State(st): State<AppState>, Query(q): Query<IdQuery>) -> Json<serde_json::Value> {
-    let insts = crate::api::hgetall(&st.lux, "instances").await;
+    let insts = inst_configs(&st).await;
     let agg = aggregate_from_insts(&insts);
     match agg.get(&q.dev_id) {
         Some(v) => Json(serde_json::json!({ q.dev_id: v })),
         None => Json(serde_json::json!({})),
     }
+}
+
+/// lux instances + 运行态补缺的实例配置全集（list/get 取数入口）。
+async fn inst_configs(st: &AppState) -> serde_json::Value {
+    let lux = crate::api::hgetall(&st.lux, "instances").await;
+    let runtime: Vec<(String, InstConfig)> = st
+        .mgr
+        .status()
+        .keys()
+        .filter_map(|id| st.mgr.config_snapshot(id).map(|c| (id.clone(), c)))
+        .collect();
+    merge_runtime_insts(&lux, &runtime)
+}
+
+/// 把运行态实例配置并入 lux 全集（纯函数，便于单测）。
+///
+/// lux 同名优先（落盘配置是持久化权威）；运行态快照只补 lux 缺的实例。
+fn merge_runtime_insts(
+    lux: &serde_json::Value,
+    runtime: &[(String, InstConfig)],
+) -> serde_json::Value {
+    let mut obj = lux.as_object().cloned().unwrap_or_default();
+    for (inst_id, cfg) in runtime {
+        if obj.contains_key(inst_id) {
+            continue;
+        }
+        if let Ok(v) = serde_json::to_value(cfg) {
+            obj.insert(inst_id.clone(), v);
+        }
+    }
+    serde_json::Value::Object(obj)
 }
 
 /// `POST /api/v1/device/set` body：`inst_id` 定位实例 + `dev_id` + `object`（DeviceSpec）。
@@ -333,5 +369,57 @@ mod tests {
         let new = json!({"children": [{"value": "a"}]});
         merge_children(&mut existing, &new);
         assert_eq!(existing["children"].as_array().unwrap().len(), 1);
+    }
+
+    /// 运行态补缺（现场 bug）：config.toml/代码启动的实例（demo sim1）不落 lux
+    /// `instances`——不合并进聚合全集，设备实际在采集而 /devices 返回空表，
+    /// AI/前端误报"无设备"。合并语义：lux 同名优先，运行态只补缺。
+    #[test]
+    fn merge_runtime_insts_fills_gaps_lux_wins() {
+        use crate::types::{AppType, HostKind};
+        let lux = json!({
+            "mb-1": {"inst_id": "mb-1", "app_code": "modbusClient", "app_type": "south",
+                     "devices": [{"value": "devLux", "children": []}]}
+        });
+        let sim1 = InstConfig {
+            inst_id: "sim1".into(),
+            inst_name: String::new(),
+            app_code: "dataSim".into(),
+            app_type: AppType::South,
+            auto_start: true,
+            app_config: serde_json::json!({}),
+            devices: vec![DeviceSpec {
+                label: "demo".into(),
+                value: "devA".into(),
+                children: vec![crate::types::ChildSpec {
+                    label: "温度".into(),
+                    value: "temp".into(),
+                    r#type: "float".into(),
+                }],
+                slave_id: None,
+            }],
+            host_kind: HostKind::Builtin,
+        };
+        // mb-1 也在运行态（快照 devices 不同）→ lux 优先不被覆盖；sim1 补入。
+        let mb1_snap = InstConfig {
+            inst_id: "mb-1".into(),
+            inst_name: String::new(),
+            app_code: "modbusClient".into(),
+            app_type: AppType::South,
+            auto_start: true,
+            app_config: serde_json::json!({}),
+            devices: vec![],
+            host_kind: HostKind::Builtin,
+        };
+        let merged = merge_runtime_insts(&lux, &[("sim1".into(), sim1), ("mb-1".into(), mb1_snap)]);
+
+        let agg = aggregate_from_insts(&merged);
+        assert!(agg.contains_key("devA"), "运行态实例(sim1)的设备并入聚合");
+        assert_eq!(agg["devA"]["inst_id"], "sim1");
+        assert!(agg.contains_key("devLux"), "lux 实例设备仍在");
+        assert!(
+            agg["devLux"]["children"].as_array().unwrap().is_empty(),
+            "mb-1 同名 lux 优先，运行态空 devices 不覆盖"
+        );
     }
 }
