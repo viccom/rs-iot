@@ -93,6 +93,27 @@ describe('agent store', () => {
     expect(s.messages[2].text).toBe('你好')
   })
 
+  it('historyToChatMessages 剥离叠加瞬态块（capability-route 带属性）+ 尾缀 execution-policy', async () => {
+    // 现场实测形态（2026-08-16）：user turn 前缀叠加 capability-route + reasoning-language，
+    // 上游 preview.go TransientUserBlockTags 全清单客户端剥离；execution-policy 是
+    // 唯一追加在 user 文本之后的尾缀块（带属性）。
+    const s = useAgentStore()
+    vi.mocked(api).mockClear()
+    vi.mocked(api).mockResolvedValueOnce(
+      new Response(
+        JSON.stringify([
+          {
+            role: 'user',
+            content:
+              '<capability-route version="1">\nRelevant capabilities for this turn:\n- mcp-tool:rsiot/rsiot_list_devices prefer: ...\n</capability-route>\n\n<reasoning-language>\n必须使用简体中文书写。\n</reasoning-language>\n\n@docs/faq.md 总结这个文件\n\n<execution-policy mode="ask">\nsome trailing policy\n</execution-policy>',
+          },
+        ]),
+      ),
+    )
+    await s.loadHistory()
+    expect(s.messages[0].text).toBe('@docs/faq.md 总结这个文件')
+  })
+
   it('approve keeps approval on non-2xx (review I1: no deadlock)', async () => {
     // I1 意图：gateway/serve 返错时绝不能清 approval——否则 agent 仍在等决策、
     // UI 已无弹窗，用户无法重发 → 死锁。approval 必须保留到下一次成功提交。

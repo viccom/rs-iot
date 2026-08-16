@@ -251,16 +251,28 @@ export const useAgentStore = defineStore('agent', () => {
   }
 
 /**
- * 剥离 Reasonix 注入用户消息的 transient 偏好块（`<reasoning-language>` /
- * `<response-language>`，源码 agent/reasoning_language.go WithReasoningLanguage
- * 前缀注入、设计为瞬态）。serve `/history` 未剥离直接返回持久化内容（官方 UI
- * 客户端侧剥），前端同款处理——否则指令文本漏进历史会话的用户气泡。
+ * 剥离 Reasonix 注入用户消息的 transient 块（会话标题/预览/rewind 选择器同款，
+ * 源码 internal/agent/preview.go TransientUserBlockTags——单一权威清单）。
+ * 宿主把运行时上下文（reasoning-language 偏好、capability-route 工具路由提示
+ * 等）前缀注入 user turn 并持久化；serve `/history` 未剥离直接返回（官方 UI
+ * 客户端侧剥），前端同款处理——否则 markup 漏进历史会话的用户气泡
+ * （<capability-route> 实测泄漏）。execution-policy 特殊：追加在 user 文本
+ * 之后（尾缀块，带属性），按上游 reTrailingExecutionPolicy 剥尾。
  */
+const TRANSIENT_BLOCK_TAGS = [
+  'response-language', 'reasoning-language', 'memory-update', 'background-jobs',
+  'active-goal', 'autoresearch-runtime', 'hook-context', 'capability-route',
+  'interrupted-turn-recovery',
+] as const
+const TRANSIENT_LEADING_RE = new RegExp(
+  `^\\s*(?:<(?:${TRANSIENT_BLOCK_TAGS.join('|')})(?:\\s+[^>]*)?>[\\s\\S]*?</(?:${TRANSIENT_BLOCK_TAGS.join('|')})>[\\r\\n]*)+`,
+)
+const TRAILING_EXECUTION_POLICY_RE = /\n*<execution-policy(?:\s+[^>]*)?>[\s\S]*?<\/execution-policy>\s*$/
+
 function stripTransientBlocks(content: string): string {
   return content
-    .replace(/<reasoning-language>[\s\S]*?<\/reasoning-language>\s*/g, '')
-    .replace(/<response-language>[\s\S]*?<\/response-language>\s*/g, '')
-    .replace(/^[\r\n]+/, '')
+    .replace(TRANSIENT_LEADING_RE, '')
+    .replace(TRAILING_EXECUTION_POLICY_RE, '')
 }
 
 /**
