@@ -58,16 +58,42 @@ def auth_bootstrap():
 
 def submit(prompt):
     # serve Web UI 契约:fetch('/submit',{body: JSON.stringify({input: submitInput})})
-    s, _, txt = post("/submit", {"input": prompt})
-    print(f"[submit] input → {s}: {txt[:250]}")
-    if s in (200, 202):
-        # 200/202 可能无 body,task 从 SSE 流首事件里取
-        return "", {}
-    return None, None
+    # v1.25.x:提交后同步准入检查——会话 rotating/closed/finishing 时静默丢弃并返
+    # 409 "not admitted"(serve.go submit)。轮转通常秒级完成,短退避重试即可穿过。
+    tries = 0
+    while True:
+        tries += 1
+        s, _, txt = post("/submit", {"input": prompt})
+        print(f"[submit] input → {s}: {txt[:250]}")
+        if s in (200, 202):
+            # 200/202 可能无 body,task 从 SSE 流首事件里取
+            return "", {}
+        if s == 409 and "not admitted" in txt and tries < 6:
+            print(f"[submit-retry] 会话轮转中,2s 后重试 {tries}/5 ...")
+            time.sleep(2)
+            continue
+        return None, None
+
+
+def sse_lines(resp, deadline):
+    """逐行迭代 SSE/NDJSON 流。
+
+    必须逐行读:http.client 的 r.read(N) 会阻塞到凑满 N 字节或 EOF——空闲流上
+    serve 只发稀疏心跳,凑不满 N 字节且心跳阻止 socket 超时 → 永久挂死
+    (v1.25.2/1.25.3 实测两轮挂死根因)。readline 随每条心跳/事件即时返回。"""
+    for raw in resp:
+        if time.time() > deadline:
+            return
+        line = raw.decode("utf-8", "replace").strip()
+        if not line or line.startswith(":"):
+            continue
+        if line.startswith("data:"):
+            line = line[5:].strip()
+        yield line
 
 
 def stream_events(task_id, max_wait=60):
-    """拉 /events SSE 流,打印每条事件 + 收集 tool 列表与 dispatch。
+    """拉 /events SSE 流,打印每条事件 + 收集工具列表与 dispatch。
     serve 202 不返 task_id,EventSource('/events') 走 cookie 关联 session(无 task_id 参数)。"""
     if task_id:
         qs = urllib.parse.urlencode({"task_id": task_id, "token": TOKEN})
@@ -80,41 +106,36 @@ def stream_events(task_id, max_wait=60):
     approval_payload = None
     t0 = time.time()
     try:
-        with opener.open(req, timeout=max_wait) as r:
-            buf = b""
-            while time.time() - t0 < max_wait:
-                chunk = r.read(4096)
-                if not chunk:
+        with opener.open(req, timeout=30) as r:
+            for line in sse_lines(r, t0 + max_wait):
+                try:
+                    ev = json.loads(line)
+                except Exception:
+                    continue
+                # 归一化打印
+                kind = ev.get("type") or ev.get("kind") or ev.get("event") or "?"
+                print(f"[event] {kind}: {json.dumps(ev, ensure_ascii=False)[:300]}")
+                # 收集工具清单
+                if "tools" in ev and isinstance(ev["tools"], list):
+                    for t in ev["tools"]:
+                        n = t.get("name") if isinstance(t, dict) else str(t)
+                        if n:
+                            seen_tools.add(n)
+                # tool dispatch
+                if "tool" in ev and kind in ("tool_dispatch", "tool_use", "tool_call"):
+                    tool = ev.get("tool")
+                    dispatched.append(tool)
+                    # v1.25.3:capability proxy 分发,真实工具名在 resolvedName
+                    #(如 mcp__rsiot__rsiot_read_tags)——只看 name 会全是 use_capability。
+                    if isinstance(tool, dict) and tool.get("resolvedName"):
+                        seen_tools.add(tool["resolvedName"])
+                # turn 结束自然收尾(不硬等 max_wait)
+                if kind == "turn_done":
                     break
-                buf += chunk
-                while b"\n" in buf:
-                    line, buf = buf.split(b"\n", 1)
-                    line = line.decode("utf-8", "replace").strip()
-                    if not line or line.startswith(":"):
-                        continue
-                    # serve 用裸 NDJSON(无 event: 头),每行一个 JSON 对象
-                    if line.startswith("data:"):
-                        line = line[5:].strip()
-                    try:
-                        ev = json.loads(line)
-                    except Exception:
-                        continue
-                    # 归一化打印
-                    kind = ev.get("type") or ev.get("kind") or ev.get("event") or "?"
-                    print(f"[event] {kind}: {json.dumps(ev, ensure_ascii=False)[:300]}")
-                    # 收集工具清单
-                    if "tools" in ev and isinstance(ev["tools"], list):
-                        for t in ev["tools"]:
-                            n = t.get("name") if isinstance(t, dict) else str(t)
-                            if n:
-                                seen_tools.add(n)
-                    # tool dispatch
-                    if "tool" in ev and kind in ("tool_dispatch", "tool_use", "tool_call"):
-                        dispatched.append(ev.get("tool"))
-                    # approval
-                    if "approval" in ev or kind in ("approval_request", "permission_request"):
-                        approval_payload = ev
-                        return seen_tools, dispatched, approval_payload, True
+                # approval
+                if "approval" in ev or kind in ("approval_request", "permission_request"):
+                    approval_payload = ev
+                    return seen_tools, dispatched, approval_payload, True
     except Exception as e:
         print(f"[stream] end: {e}")
     return seen_tools, dispatched, approval_payload, False
@@ -123,40 +144,29 @@ def stream_events(task_id, max_wait=60):
 def warmup_mcp_connect(server_name="rsiot", max_wait=20):
     """启动预热:POST /submit 发管理动词 `/mcp connect <name>`,零 LLM token 触发 MCP 握手。
 
-    根因(serve 冷启动盲区):MCP plugin 是 lazy spawn,首轮任务时 capability catalog
-    还没 rsiot 工具条目,模型看不到 MCP 工具退回 bash。`/mcp connect` 走管理动词路径
-    (slash.go:518),同步 spawn + 握手 + 注册真实工具 + UpsertServer 更新 catalog,
-    并触发 schema 缓存落盘(下次冷启动 catalog 从 boot 就带条目——根治)。
-
-    409 双语义(审查 finding):serve 对管理动词与 busy 都返 409,但**只有管理动词的
-    409 是"副作用已执行"**;busy 的 409 是不执行(sessionInUseError)。这里区分:
-    - 200/202/409 → 视为已提交(409 继续等 Notice 确认)
-    - 400/401/500 → FATAL 退出(真错误,不误判"已执行")
-    busy 与否靠 Notice 轮询结果判定,捕获不到 Notice 返 False(由 main 裁决)。
+    v1.25.3 实测两个坑(源码 internal/serve/serve.go submit):
+    1. 管理动词不置 ctrl.Running → submit 后置准入检查恒误报 409 "not admitted"
+       (动词实际已执行)——成败只能靠 SSE Notice 判定,状态码仅排除 400/401/500。
+    2. SSE 无 replay:必须**先挂 /events 流再提交**,后挂流会错过 Notice。
+    watcher 线程用独立 cookiejar(urllib opener 非线程安全,不与主流程共用)。
     """
-    print(f'[warmup] POST /submit {{"input": "/mcp connect {server_name}"}} (零 token 触发握手)')
-    s, _, txt = post("/submit", {"input": f"/mcp connect {server_name}"})
-    if s not in (200, 202, 409):
-        print(f"[warmup] FATAL: submit 返 {s}(非 200/202/409,握手未发起); body={txt[:200]}")
-        raise SystemExit(1)
-    # 409 可能是 busy(未执行)或管理动词(已执行)——不在这里断言,靠 Notice 确认。
-    print(f"[warmup] submit → {s} (200/202/409=已提交;是否执行靠 Notice 确认); body={txt[:120]}")
+    import threading
 
-    # 轮询 SSE 等 Notice `connected rsiot — N tools`(serve.go:1939 notice → sink.Emit)。
-    # chunk 读(4KB)替代逐字节读——逐字节 O(n²) 缓冲(审查 Minor)。
-    req = urllib.request.Request(f"{SERVE}/events")
-    t0 = time.time()
-    try:
-        with opener.open(req, timeout=max_wait) as r:
-            buf = b""
-            while time.time() - t0 < max_wait:
-                chunk = r.read(4096)
-                if not chunk:
-                    break
-                buf += chunk
-                while b"\n" in buf:
-                    line, buf = buf.split(b"\n", 1)
-                    line = line.decode("utf-8", "replace").strip()
+    result = {}
+
+    def watch():
+        cj2 = http.cookiejar.CookieJar()
+        op2 = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cj2))
+        try:
+            req = urllib.request.Request(
+                f"{SERVE}/auth/token",
+                data=json.dumps({"token": TOKEN}).encode(),
+                headers={"Content-Type": "application/json"},
+            )
+            op2.open(req, timeout=10)
+            with op2.open(f"{SERVE}/events", timeout=30) as r:
+                for raw in r:
+                    line = raw.decode("utf-8", "replace").strip()
                     if not line or line.startswith(":"):
                         continue
                     if line.startswith("data:"):
@@ -167,12 +177,24 @@ def warmup_mcp_connect(server_name="rsiot", max_wait=20):
                         continue
                     text = (ev.get("text") or "") if isinstance(ev, dict) else ""
                     if f"connected {server_name}" in text:
-                        print(f"[warmup] ✓ Notice: {text[:200]}")
-                        return True
-    except Exception as e:
-        print(f"[warmup] SSE 结束(未确认 Notice): {e}")
-    # 未捕获 Notice:可能 busy(未执行)或握手已完成但 Notice 错过——返 False 由 main 裁决。
-    print("[warmup] 未捕获确认 Notice(可能 busy 未执行,或握手完成但 Notice 错过)")
+                        result["ok"] = text
+                        return
+        except Exception:
+            pass
+
+    t = threading.Thread(target=watch, daemon=True)
+    t.start()
+    time.sleep(0.8)  # 等流挂稳(SSE 无 replay,错过即失)
+    s, _, txt = post("/submit", {"input": f"/mcp connect {server_name}"})
+    if s not in (200, 202, 409):
+        print(f"[warmup] FATAL: submit 返 {s}(非 200/202/409,握手未发起); body={txt[:200]}")
+        raise SystemExit(1)
+    print(f"[warmup] submit → {s} (409=管理动词误报态,实际执行与否靠 Notice); body={txt[:120]}")
+    t.join(timeout=max_wait)
+    if result.get("ok"):
+        print(f"[warmup] ✓ Notice: {result['ok'][:200]}")
+        return True
+    print("[warmup] 未捕获确认 Notice(握手可能完成但 Notice 错过)")
     return False
 
 
