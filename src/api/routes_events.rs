@@ -55,7 +55,7 @@ pub async fn events(State(st): State<AppState>, Query(q): Query<EventsQuery>) ->
         Err(_) => None,
         Ok(payload) => {
             let kind = payload.kind();
-            if !filter.as_ref().map_or(true, |f| f.contains(kind)) {
+            if filter.as_ref().is_some_and(|f| !f.contains(kind)) {
                 return None;
             }
             Event::default()

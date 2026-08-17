@@ -83,7 +83,7 @@ impl StatTracker {
 
     /// 是否到周期 flush 点（tick % FLUSH_EVERY_TICKS == 0 且 tick>0）。
     pub fn should_flush(&self) -> bool {
-        self.stat.tick_count != 0 && self.stat.tick_count % FLUSH_EVERY_TICKS == 0
+        self.stat.tick_count != 0 && self.stat.tick_count.is_multiple_of(FLUSH_EVERY_TICKS)
     }
 
     /// 当前 tick_count（测试用）。

@@ -54,7 +54,7 @@ fn hex_nibble(b: u8) -> Option<u8> {
 /// hex 字符串 → 字节（损坏/奇数长度返回 `None`）。
 fn hex_decode(hex: &str) -> Option<Vec<u8>> {
     let bytes = hex.as_bytes();
-    if bytes.len() % 2 != 0 {
+    if !bytes.len().is_multiple_of(2) {
         return None;
     }
     let mut out = Vec::with_capacity(bytes.len() / 2);

@@ -66,8 +66,8 @@ impl LogRingBuffer {
         let threshold = level.map(level_num);
         e.iter()
             .rev()
-            .filter(|en| threshold.map_or(true, |t| level_num(&en.level) <= t))
-            .filter(|en| target.map_or(true, |tg| en.target == tg))
+            .filter(|en| threshold.is_none_or(|t| level_num(&en.level) <= t))
+            .filter(|en| target.is_none_or(|tg| en.target == tg))
             .take(limit)
             .cloned()
             .collect()
