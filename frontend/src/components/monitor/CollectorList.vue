@@ -65,7 +65,16 @@ h3 {
 .dot { width: 10px; height: 10px; border-radius: 50%; }
 .running .dot { background: var(--color-success); }
 .failed .dot { background: var(--color-danger); }
-.stopped .dot, .starting .dot, .stopping .dot { background: var(--color-ink-muted); }
+.stopped .dot { background: var(--color-ink-muted); }
+/* 过渡态（starting/stopping）：黄色闪烁，与 stopped 灰点区分（C5） */
+.starting .dot, .stopping .dot {
+  background: var(--color-warning);
+  animation: dot-pulse 1s ease-in-out infinite;
+}
+@keyframes dot-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.25; }
+}
 
 .copy {
   display: grid;

@@ -62,6 +62,34 @@ const textareaEl = ref<HTMLTextAreaElement | null>(null)
 
 const emit = defineEmits<{ close: [] }>()
 
+/** 抽屉宽度（px，C7）：默认 570，支持边缘拖拽调宽 400–800，localStorage 持久化。 */
+const DRAWER_WIDTH_KEY = 'rsiot_drawer_width'
+function readDrawerWidth(): number {
+  const saved = Number(window.localStorage.getItem(DRAWER_WIDTH_KEY))
+  return saved >= 400 && saved <= 800 ? saved : 570
+}
+const drawerWidth = ref(readDrawerWidth())
+/** 拖拽进行中（临时禁用元素过渡，避免拖拽时抖动）。 */
+const dragging = ref(false)
+
+/** 拖拽手柄指针按下：记录起点宽度 + 起点 clientX（handle 上绑定 @pointermove/@pointerup）。 */
+function onResizeStart(e: PointerEvent) {
+  dragging.value = true
+  const startX = e.clientX
+  const startW = drawerWidth.value
+  const onMove = (ev: PointerEvent) => {
+    drawerWidth.value = Math.min(800, Math.max(400, startW + (startX - ev.clientX)))
+  }
+  const onUp = () => {
+    dragging.value = false
+    window.localStorage.setItem(DRAWER_WIDTH_KEY, String(drawerWidth.value))
+    window.removeEventListener('pointermove', onMove)
+    window.removeEventListener('pointerup', onUp)
+  }
+  window.addEventListener('pointermove', onMove)
+  window.addEventListener('pointerup', onUp)
+}
+
 const { showBackToBottom, onScroll, snapToBottom, followIfAtBottom } = useChatScroll(listRef)
 
 /** provide running 态给 MessageItem（思考面板活跃色 + 加载占位判断）。用 computed
@@ -373,7 +401,14 @@ async function onApprovalModeChange(e: Event) {
 </script>
 
 <template>
-  <aside class="drawer" aria-label="AI 助手面板">
+  <aside class="drawer" :class="{ dragging }" aria-label="AI 助手面板" :style="{ width: drawerWidth + 'px' }">
+    <!-- 拖拽调宽手柄（C7）：左缘 6px 热区，指针拖拽改宽，400–800 夹取，松手持久化 -->
+    <div
+      class="resize-handle"
+      title="拖拽调整面板宽度"
+      aria-hidden="true"
+      @pointerdown="onResizeStart"
+    />
     <header class="head">
       <div ref="sessionMenuRef" class="session-picker">
         <button
@@ -589,7 +624,17 @@ async function onApprovalModeChange(e: Event) {
   grid-template-rows: 44px 1fr auto;
   z-index: 100;
   box-shadow: -20px 0 60px color-mix(in srgb, var(--color-surface) 70%, black 30%);
+  transition: width 0.12s ease-out;
 }
+.drawer.dragging { transition: none; }
+.resize-handle {
+  position: absolute;
+  left: 0; top: 0; bottom: 0;
+  width: 6px;
+  cursor: ew-resize;
+  z-index: 5;
+}
+.resize-handle:hover { background: color-mix(in srgb, var(--color-primary) 22%, transparent); }
 
 /* 头部 */
 .head {

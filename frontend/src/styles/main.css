@@ -241,3 +241,66 @@ textarea::placeholder {
 #app {
   min-height: 100vh;
 }
+
+/* ---- 紧凑模式（C2，opt-in）：html[data-density="compact"] 下收敛圆角与留白。
+   只覆盖装饰性尺寸（圆角/内边距/大标题），不动尺寸耦合项（虚拟滚动行高 40px、
+   表格列宽等）。选择器用 html[data-density] 前缀抬高特异性，压过 scoped 样式；
+   默认舒适模式零影响。 ---- */
+html[data-density="compact"] {
+  --radius-panel: 12px;
+  --radius-card: 10px;
+}
+
+html[data-density="compact"] .shell-topbar,
+html[data-density="compact"] .shell-content {
+  padding-left: 16px;
+  padding-right: 16px;
+}
+
+html[data-density="compact"] .shell-content {
+  padding-bottom: 16px;
+}
+
+html[data-density="compact"] .content-frame {
+  padding: 10px;
+  border-radius: 14px;
+}
+
+html[data-density="compact"] .page-panel,
+html[data-density="compact"] .panel,
+html[data-density="compact"] .hero-card,
+html[data-density="compact"] .sidebar-panel {
+  padding: 13px;
+}
+
+html[data-density="compact"] .hero-card h3 {
+  font-size: 26px;
+}
+
+html[data-density="compact"] .nav-item {
+  padding: 9px 12px;
+}
+
+html[data-density="compact"] .content-grid,
+html[data-density="compact"] .overview-page,
+html[data-density="compact"] .telemetry-page,
+html[data-density="compact"] .collectors-page,
+html[data-density="compact"] .control-page,
+html[data-density="compact"] .lua-page,
+html[data-density="compact"] .diagnostics-page,
+html[data-density="compact"] .hero-grid {
+  gap: 10px;
+}
+
+html[data-density="compact"] .topbar-chip {
+  padding: 4px 8px;
+  min-width: 72px;
+}
+
+html[data-density="compact"] .topbar-chip strong {
+  font-size: 12px;
+}
+
+html[data-density="compact"] .theme-button {
+  padding: 6px 10px;
+}

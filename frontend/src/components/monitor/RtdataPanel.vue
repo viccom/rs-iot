@@ -6,6 +6,7 @@
 -->
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { RouterLink } from 'vue-router'
 import { useMonitorStore } from '../../stores/monitor'
 
 const monitor = useMonitorStore()
@@ -162,7 +163,9 @@ onUnmounted(() => {
       </div>
     </div>
 
-    <p v-if="!rows.length" class="empty">无数据（调整过滤或检查采集器是否运行）</p>
+    <p v-if="!rows.length" class="empty">
+      无数据——<RouterLink to="/collectors" class="empty-link">检查采集器是否运行</RouterLink>或调整过滤条件
+    </p>
   </div>
 </template>
 
@@ -220,4 +223,6 @@ th, td { text-align: left; padding: 0 10px; }
 .ts { color: var(--color-ink-muted); font-family: Consolas, monospace; }
 
 .empty { color: var(--color-ink-muted); padding: 20px; text-align: center; }
+.empty-link { color: var(--color-primary); }
+.empty-link:hover { text-decoration: underline; }
 </style>

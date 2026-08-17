@@ -6,7 +6,7 @@ import { PRIMARY_ROUTES } from '../../lib/navigation'
 import { useMonitorStore } from '../../stores/monitor'
 import { useWorkspaceStore } from '../../stores/workspace'
 import { useAuthStore } from '../../stores/auth'
-import { applyTheme, persistTheme, readStoredTheme, type ThemeName } from '../../lib/theme'
+import { applyTheme, persistTheme, readStoredTheme, applyDensity, persistDensity, readStoredDensity, type ThemeName, type DensityName } from '../../lib/theme'
 
 const route = useRoute()
 const router = useRouter()
@@ -15,6 +15,7 @@ const monitor = useMonitorStore()
 const workspace = useWorkspaceStore()
 const drawerOpen = ref(false)
 const currentTheme = ref<ThemeName>(readStoredTheme())
+const currentDensity = ref<DensityName>(readStoredDensity())
 const clockText = ref('--:--:--')
 const dateText = ref('----/--/--')
 
@@ -22,10 +23,10 @@ const currentRoute = computed(() =>
   PRIMARY_ROUTES.find(item => item.key === route.name) ?? PRIMARY_ROUTES[0],
 )
 const runningCollectors = computed(() =>
-  monitor.instances.filter(instance => instance.state === 'running').length,
+  monitor.roster.filter(instance => instance.state === 'running').length,
 )
 const degradedCollectors = computed(() =>
-  monitor.instances.filter(instance => instance.health?.status === 'degraded').length,
+  monitor.roster.filter(instance => instance.health?.status === 'degraded').length,
 )
 const deviceCount = computed(() => Object.keys(monitor.rtdata).length)
 const tagCount = computed(() =>
@@ -55,6 +56,7 @@ onMounted(() => {
   syncClock()
   clockTimer = setInterval(syncClock, 1000)
   applyTheme(currentTheme.value)
+  applyDensity(currentDensity.value)
   monitor.start()
   // 一次性补拉最近日志（REST，非 SSE 订阅——不违背"日志推送默认关闭、诊断页手动激活"）：
   // 侧栏"连接态势"与总览"现场脉搏"读 logs 缓冲，否则默认恒空、显示误导。
@@ -84,6 +86,12 @@ function setThemeMode(nextTheme: ThemeName) {
   currentTheme.value = nextTheme
   persistTheme(nextTheme)
   applyTheme(nextTheme)
+}
+
+function setDensityMode(nextDensity: DensityName) {
+  currentDensity.value = nextDensity
+  persistDensity(nextDensity)
+  applyDensity(nextDensity)
 }
 </script>
 
@@ -150,6 +158,14 @@ function setThemeMode(nextTheme: ThemeName) {
             <span class="label">连接</span>
             <strong>{{ monitor.offline ? '重连中' : '在线' }}</strong>
           </div>
+          <div class="topbar-chip" title="运行中实例数 / 实例总数（roster：配置全集 ∪ 运行态）">
+            <span class="label">运行</span>
+            <strong>{{ runningCollectors }}/{{ monitor.roster.length }}</strong>
+          </div>
+          <div class="topbar-chip" :class="{ warn: degradedCollectors > 0 }" title="health 降级的实例数">
+            <span class="label">降级</span>
+            <strong>{{ degradedCollectors }}</strong>
+          </div>
           <div class="topbar-chip">
             <span class="label">DBSIZE</span>
             <strong>{{ dbSizeText }}</strong>
@@ -178,32 +194,24 @@ function setThemeMode(nextTheme: ThemeName) {
               @click="setThemeMode('dark')"
             >深色</button>
           </div>
-        </div>
-      </div>
-
-      <header class="shell-header">
-        <div class="header-copy">
-          <p class="header-eyebrow">{{ currentRoute.title }}</p>
-          <h2>{{ currentRoute.summary }}</h2>
-          <p class="header-caption">
-            以更清晰的视觉优先级组织数据，让巡检、诊断和处置可以连续完成。
-          </p>
-        </div>
-        <div class="header-actions">
-          <div class="metric-pill">
-            <span>运行中</span>
-            <strong>{{ runningCollectors }}</strong>
-          </div>
-          <div class="metric-pill warning">
-            <span>降级</span>
-            <strong>{{ degradedCollectors }}</strong>
+          <div class="theme-toggle" role="tablist" aria-label="界面密度切换">
+            <button
+              class="theme-button"
+              :class="{ active: currentDensity === 'cozy' }"
+              @click="setDensityMode('cozy')"
+            >舒适</button>
+            <button
+              class="theme-button"
+              :class="{ active: currentDensity === 'compact' }"
+              @click="setDensityMode('compact')"
+            >紧凑</button>
           </div>
           <button class="ghost-button" @click="drawerOpen = !drawerOpen">
             {{ drawerOpen ? '收起 AI' : '打开 AI' }}
           </button>
           <button class="ghost-button" @click="logout">退出</button>
         </div>
-      </header>
+      </div>
 
       <div v-if="monitor.offline" class="offline-banner" role="status" aria-live="polite">
         数据连接暂时中断，系统正在自动补拉日志并尝试重连。
@@ -255,14 +263,12 @@ function setThemeMode(nextTheme: ThemeName) {
   z-index: 1;
 }
 
-.brand-block h1,
-.shell-header h2 {
+.brand-block h1 {
   margin: 0;
   font-family: "Bahnschrift", "Segoe UI Variable Display", sans-serif;
   letter-spacing: 0.04em;
 }
 
-.header-eyebrow,
 .panel-label {
   margin: 0 0 6px;
   font-size: 11px;
@@ -403,7 +409,7 @@ function setThemeMode(nextTheme: ThemeName) {
 
 .shell-main {
   display: grid;
-  grid-template-rows: auto auto auto 1fr;
+  grid-template-rows: auto auto 1fr;
   min-width: 0;
   position: relative;
   z-index: 1;
@@ -414,7 +420,7 @@ function setThemeMode(nextTheme: ThemeName) {
   justify-content: space-between;
   gap: 16px;
   align-items: center;
-  padding: 14px 30px 0;
+  padding: 14px 30px 10px;
 }
 
 .topbar-brand {
@@ -491,9 +497,10 @@ function setThemeMode(nextTheme: ThemeName) {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-/* 连接状态 chip：在线绿 / 断连红（与 offline 横幅一致语义） */
+/* 连接状态 chip：在线绿 / 断连红（与 offline 横幅一致语义）；降级 chip 警示色 */
 .topbar-chip.up strong { color: var(--color-success); }
 .topbar-chip.down strong { color: var(--color-danger); }
+.topbar-chip.warn strong { color: var(--color-warning); }
 
 .topbar-chip.clock {
   min-width: 138px;
@@ -524,71 +531,13 @@ function setThemeMode(nextTheme: ThemeName) {
   color: var(--shell-theme-active-ink);
 }
 
-.shell-header {
-  display: flex;
-  justify-content: space-between;
-  gap: 16px;
-  padding: 30px 30px 20px;
-  align-items: end;
-}
-
-.header-copy {
-  max-width: 640px;
-}
-
-.shell-header h2 {
-  max-width: 620px;
-  font-size: 30px;
-  line-height: 1.18;
-}
-
-.header-caption {
-  margin: 12px 0 0;
-  max-width: 580px;
-  color: var(--color-ink-dim);
-  line-height: 1.7;
-}
-
-.header-actions {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  flex-wrap: wrap;
-}
-
-.metric-pill,
-.ghost-button {
-  border-radius: 999px;
-  border: 1px solid var(--shell-card-border);
-  background: var(--shell-card-bg-strong);
-  box-shadow: var(--shadow-glow);
-}
-
-.metric-pill {
-  display: flex;
-  gap: 10px;
-  align-items: center;
-  padding: 11px 15px;
-}
-
-.metric-pill span {
-  color: var(--color-ink-dim);
-  font-size: 12px;
-}
-
-.metric-pill strong {
-  font-family: "Bahnschrift", sans-serif;
-  font-size: 18px;
-}
-
-.metric-pill.warning strong {
-  color: var(--color-warning);
-}
-
 .ghost-button {
   padding: 11px 16px;
   color: var(--color-ink);
+  border-radius: 999px;
+  border: 1px solid var(--shell-card-border);
   background: var(--shell-button-bg);
+  box-shadow: var(--shadow-glow);
 }
 
 .ghost-button:hover {
@@ -628,9 +577,13 @@ function setThemeMode(nextTheme: ThemeName) {
     border-bottom: 1px solid rgba(148, 163, 184, 0.16);
   }
 
-  .shell-header {
-    flex-direction: column;
-    align-items: start;
+  /* C4 轻量缓解：窄屏侧栏堆叠在内容上方时，收起品牌文案/元信息/导航摘要/页脚，
+     只留品牌标识 + 导航主项——缩短到达数据的滚动距离（完整抽屉化侧栏另行排期）。 */
+  .brand-copy,
+  .brand-meta,
+  .nav-summary,
+  .sidebar-footer {
+    display: none;
   }
 
   .shell-topbar {
@@ -640,10 +593,6 @@ function setThemeMode(nextTheme: ThemeName) {
 
   .topbar-metrics {
     justify-content: start;
-  }
-
-  .brand-meta {
-    grid-template-columns: 1fr;
   }
 }
 </style>

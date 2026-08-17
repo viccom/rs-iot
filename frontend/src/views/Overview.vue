@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed } from 'vue'
+import { RouterLink } from 'vue-router'
 import CollectorList from '../components/monitor/CollectorList.vue'
 import { useWorkspacePage } from '../composables/useWorkspacePage'
 import { useMonitorStore } from '../stores/monitor'
@@ -92,7 +93,9 @@ useWorkspacePage(() => ({
             <span>{{ entry.target }}</span>
             <p>{{ entry.message }}</p>
           </article>
-          <p v-if="!latestLogs.length" class="empty">暂无日志进入缓冲区（可在诊断页激活日志推送）。</p>
+          <p v-if="!latestLogs.length" class="empty">
+            暂无日志进入缓冲区——<RouterLink to="/diagnostics" class="empty-link">去诊断页激活日志推送</RouterLink>
+          </p>
         </div>
       </section>
 
@@ -110,7 +113,9 @@ useWorkspacePage(() => ({
             <strong>{{ packet.inst_id }}</strong>
             <code>{{ packet.hex }}</code>
           </article>
-          <p v-if="!latestPackets.length" class="empty">暂无报文样本（诊断页激活抓样后展示）。</p>
+          <p v-if="!latestPackets.length" class="empty">
+            暂无报文样本——<RouterLink to="/diagnostics" class="empty-link">去诊断页激活抓样</RouterLink>
+          </p>
         </div>
       </section>
     </div>
@@ -263,6 +268,14 @@ useWorkspacePage(() => ({
 
 .empty {
   color: var(--color-ink-dim);
+}
+
+.empty-link {
+  color: var(--color-primary);
+}
+
+.empty-link:hover {
+  text-decoration: underline;
 }
 
 @media (max-width: 1080px) {

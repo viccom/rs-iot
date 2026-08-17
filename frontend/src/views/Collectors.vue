@@ -160,11 +160,19 @@ useWorkspacePage(() => ({
         </div>
         <div class="head-actions">
           <span class="count">{{ monitor.roster.length }} 个</span>
-          <button class="btn-ghost" title="清空实时数据缓存，保留实例配置" @click="onPurgeRtdata">清空实时数据</button>
-          <button class="btn-danger" title="删除所有实例及数据（保留登录账号），不可恢复" @click="onPurgeAll">重置全部</button>
           <button class="btn-new" @click="onNew">+ 新建实例</button>
         </div>
       </div>
+
+      <!-- 危险区（C6）：清空/重置与常规操作隔离——折叠展示，防止误触一步点掉全站数据。
+           折叠态只占一行文字，点击展开后才露出两个红色按钮。 -->
+      <details class="danger-zone">
+        <summary>危险操作（清空实时数据 / 重置全部）</summary>
+        <div class="danger-body">
+          <button class="btn-ghost" title="清空实时数据缓存，保留实例配置" @click="onPurgeRtdata">清空实时数据</button>
+          <button class="btn-danger" title="删除所有实例及数据（保留登录账号），不可恢复" @click="onPurgeAll">重置全部</button>
+        </div>
+      </details>
 
       <!-- 三类型分组列表 -->
       <div class="kind-list">
@@ -318,6 +326,33 @@ useWorkspacePage(() => ({
 }
 .btn-danger:hover { background: var(--color-danger); color: white; }
 
+/* 危险区折叠（C6）：summary 常显一行，展开后才是按钮 */
+.danger-zone {
+  position: relative;
+  z-index: 1;
+  margin-bottom: 12px;
+  border: 1px dashed var(--color-danger);
+  border-radius: 10px;
+  padding: 0;
+}
+.danger-zone summary {
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--color-danger);
+  padding: 8px 12px;
+  user-select: none;
+  list-style: none;
+}
+.danger-zone summary::-webkit-details-marker { display: none; }
+.danger-zone summary::before { content: "⚠ "; }
+.danger-zone[open] summary { border-bottom: 1px dashed var(--color-danger); }
+.danger-body {
+  display: flex;
+  gap: 8px;
+  padding: 10px 12px;
+  flex-wrap: wrap;
+}
+
 .panel-label {
   margin: 0 0 10px;
   font-size: 11px; letter-spacing: 0.18em; text-transform: uppercase;
@@ -347,7 +382,16 @@ useWorkspacePage(() => ({
 .dot { width: 8px; height: 8px; border-radius: 50%; }
 .running .dot { background: var(--color-success); }
 .failed .dot { background: var(--color-danger); }
-.stopped .dot, .starting .dot, .stopping .dot { background: var(--color-ink-muted); }
+.stopped .dot { background: var(--color-ink-muted); }
+/* 过渡态（starting/stopping）：黄色闪烁，与 stopped 灰点区分（C5） */
+.starting .dot, .stopping .dot {
+  background: var(--color-warning);
+  animation: dot-pulse 1s ease-in-out infinite;
+}
+@keyframes dot-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.25; }
+}
 .id { font-family: Consolas, monospace; }
 .code { color: var(--color-ink-muted); font-size: 11px; }
 .state {
@@ -363,6 +407,10 @@ useWorkspacePage(() => ({
 }
 .state-badge.running { background: color-mix(in srgb, var(--color-success) 20%, transparent); color: var(--color-success); }
 .state-badge.failed { background: color-mix(in srgb, var(--color-danger) 20%, transparent); color: var(--color-danger); }
+.state-badge.starting, .state-badge.stopping {
+  background: color-mix(in srgb, var(--color-warning) 20%, transparent);
+  color: var(--color-warning);
+}
 
 .detail-body { position: relative; z-index: 1; display: flex; flex-direction: column; gap: 16px; }
 .detail-grid { display: grid; gap: 12px; grid-template-columns: repeat(2, minmax(0, 1fr)); }
