@@ -1,0 +1,35 @@
+[package]
+name = "rsiot-mcp"
+version = "0.1.0"
+edition = { workspace = true }
+rust-version = { workspace = true }
+license = { workspace = true }
+description = "MCP server 子进程：把 reasonix 的工具调用翻译成 rs-iot REST（照 dbx-mcp 范本）"
+repository = { workspace = true }
+
+[[bin]]
+name = "rsiot-mcp"
+path = "src/main.rs"
+
+[dependencies]
+# MCP 官方 SDK（与 dbx-mcp 同版本）。client feature 供集成测试用 client 拨号；
+# transport-io 提供 stdio transport（reasonix 经 [[plugins]] spawn 本进程走 stdio NDJSON）。
+# macros 提供 #[tool]/#[tool_router]/#[tool_handler] 三宏（零手写 schema）。
+rmcp = { version = "2.2", features = ["client", "transport-io", "macros"] }
+# schemars 经 rmcp re-export（避免双版本，dbx-mcp 教训）。工具参数 derive JsonSchema 自动生成 inputSchema。
+# 这里仍显式声明以在 rsiot-mcp 内 derive，版本须与 rmcp 内置一致（rmcp 2.2 用 schemars 1.x）。
+schemars = "1"
+# 调 rs-iot 主进程 loopback REST。stream feature 当前 MCP 工具不需要（工具是请求-响应，非流式），
+# 但保留以备未来 trace 类工具拉 SSE。rustls-tls 避免拉 OpenSSL（与 rs-iot reqwest 配置对齐）。
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+async-trait = "0.1"
+thiserror = "2"
+
+[dev-dependencies]
+# 集成测试用 rmcp client 经 duplex 拨号验证协议握手（dbx-mcp tests/protocol.rs 范式）。
+rmcp = { version = "2.2", features = ["client", "transport-io"] }
+tokio = { version = "1", features = ["io-util", "rt-multi-thread", "macros"] }
+async-trait = "0.1"

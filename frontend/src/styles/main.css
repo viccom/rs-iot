@@ -1,0 +1,306 @@
+/* frontend/src/styles/main.css */
+:root {
+  --color-primary: #146a9a;
+  --color-primary-strong: #0d5279;
+  --color-primary-hover: #2b81b4;
+  --color-accent: #5f67d8;
+  --color-surface: #eef3f8;
+  --color-surface-raised: rgba(255, 255, 255, 0.9);
+  --color-surface-hover: rgba(214, 226, 239, 0.82);
+  --color-surface-active: rgba(196, 214, 233, 0.94);
+  --color-panel: rgba(255, 255, 255, 0.84);
+  --color-panel-strong: rgba(246, 249, 252, 0.98);
+  --color-divider: rgba(104, 129, 155, 0.18);
+  --color-divider-strong: rgba(20, 106, 154, 0.26);
+  --color-ink: #132235;
+  --color-ink-secondary: #20324a;
+  --color-ink-muted: #50657d;
+  --color-ink-dim: #6f8297;
+  --color-success: #1d8a4b;
+  --color-warning: #ba7a14;
+  --color-danger: #c25353;
+  --shadow-soft: 0 16px 40px rgba(17, 33, 52, 0.08);
+  --shadow-panel: 0 24px 60px rgba(17, 33, 52, 0.12);
+  --shadow-glow: 0 0 0 1px rgba(20, 106, 154, 0.06), 0 14px 30px rgba(17, 33, 52, 0.08);
+  --radius-panel: 26px;
+  --radius-card: 20px;
+
+  --page-bg:
+    radial-gradient(circle at 16% 12%, rgba(20, 106, 154, 0.1), transparent 24%),
+    radial-gradient(circle at 82% 10%, rgba(95, 103, 216, 0.08), transparent 26%),
+    linear-gradient(140deg, #f5f8fb 0%, #eef3f8 44%, #e7eef6 100%);
+  --panel-bg: linear-gradient(180deg, rgba(255, 255, 255, 0.96), rgba(241, 246, 251, 0.9));
+  --panel-border: rgba(104, 129, 155, 0.14);
+  --panel-highlight: rgba(20, 106, 154, 0.08);
+  --panel-inner-border: rgba(255, 255, 255, 0.6);
+  --card-bg: linear-gradient(180deg, rgba(248, 251, 255, 0.92), rgba(238, 244, 249, 0.96));
+  --card-border: rgba(104, 129, 155, 0.14);
+  --chip-bg: rgba(20, 106, 154, 0.08);
+  --chip-border: rgba(20, 106, 154, 0.12);
+  --chip-ink: #1a6b98;
+  --table-head-bg: rgba(240, 245, 250, 0.94);
+  --table-row-hover: rgba(20, 106, 154, 0.05);
+  --soft-overlay: rgba(255, 255, 255, 0.04);
+  --warning-soft: #fef2df;
+  --warning-border: rgba(186, 122, 20, 0.22);
+
+  --shell-app-bg:
+    radial-gradient(circle at 100% 0%, rgba(20, 106, 154, 0.1), transparent 22%),
+    radial-gradient(circle at 10% 88%, rgba(95, 103, 216, 0.09), transparent 22%),
+    linear-gradient(135deg, #eef3f8 0%, #edf3f9 48%, #e7eef6 100%);
+  --shell-noise-opacity: 0.1;
+  --shell-noise-line: rgba(19, 34, 53, 0.04);
+  --shell-sidebar-bg: linear-gradient(180deg, rgba(247, 250, 253, 0.94), rgba(239, 245, 250, 0.84));
+  --shell-sidebar-border: rgba(104, 129, 155, 0.12);
+  --shell-chip-bg: rgba(255, 255, 255, 0.8);
+  --shell-chip-border: rgba(20, 106, 154, 0.12);
+  --shell-card-bg: linear-gradient(180deg, rgba(255, 255, 255, 0.9), rgba(243, 248, 252, 0.84));
+  --shell-card-bg-strong: rgba(255, 255, 255, 0.9);
+  --shell-card-border: rgba(104, 129, 155, 0.12);
+  --shell-nav-bg: linear-gradient(180deg, rgba(253, 254, 255, 0.9), rgba(241, 246, 251, 0.94));
+  --shell-nav-border: rgba(104, 129, 155, 0.12);
+  --shell-nav-active-bg: linear-gradient(135deg, rgba(20, 106, 154, 0.18), rgba(243, 248, 252, 0.98));
+  --shell-nav-active-border: rgba(20, 106, 154, 0.28);
+  --shell-nav-active-shadow: 0 12px 30px rgba(20, 106, 154, 0.1);
+  --shell-nav-highlight: rgba(20, 106, 154, 0.12);
+  --shell-theme-active-bg: #132235;
+  --shell-theme-active-ink: #f8fbff;
+  --shell-button-bg: linear-gradient(180deg, rgba(250, 252, 255, 0.98), rgba(239, 245, 250, 0.94));
+  --shell-content-bg: linear-gradient(180deg, rgba(255, 255, 255, 0.62), rgba(247, 250, 253, 0.5));
+  --shell-content-border: rgba(104, 129, 155, 0.1);
+  --shell-content-highlight: rgba(255, 255, 255, 0.4);
+  --shell-warning-bg: linear-gradient(135deg, rgba(247, 188, 90, 0.92), rgba(221, 134, 47, 0.9));
+  --shell-warning-ink: #fff9ef;
+  --shell-warning-shadow: 0 16px 32px rgba(221, 134, 47, 0.18);
+}
+
+html[data-theme="dark"] {
+  --color-primary: #72ddff;
+  --color-primary-strong: #1fb9ea;
+  --color-primary-hover: #a5e9ff;
+  --color-accent: #7c86ff;
+  --color-surface: #040b16;
+  --color-surface-raised: rgba(15, 27, 46, 0.84);
+  --color-surface-hover: rgba(23, 39, 65, 0.96);
+  --color-surface-active: rgba(31, 58, 94, 0.94);
+  --color-panel: rgba(9, 19, 34, 0.78);
+  --color-panel-strong: rgba(12, 24, 43, 0.92);
+  --color-divider: rgba(146, 176, 218, 0.18);
+  --color-divider-strong: rgba(114, 221, 255, 0.28);
+  --color-ink: #edf6ff;
+  --color-ink-secondary: #d5e3f3;
+  --color-ink-muted: #97aac4;
+  --color-ink-dim: #7389a7;
+  --color-success: #34d399;
+  --color-warning: #ffb84d;
+  --color-danger: #ff7f7f;
+  --shadow-soft: 0 20px 55px rgba(1, 7, 18, 0.32);
+  --shadow-panel: 0 24px 80px rgba(1, 8, 24, 0.42);
+  --shadow-glow: 0 0 0 1px rgba(114, 221, 255, 0.08), 0 18px 60px rgba(31, 185, 234, 0.08);
+
+  --page-bg:
+    radial-gradient(circle at 18% 18%, rgba(31, 185, 234, 0.14), transparent 24%),
+    radial-gradient(circle at 82% 12%, rgba(124, 134, 255, 0.12), transparent 28%),
+    linear-gradient(140deg, #040b16 0%, #06111f 38%, #081424 100%);
+  --panel-bg: linear-gradient(180deg, rgba(10, 20, 35, 0.88), rgba(8, 16, 29, 0.76));
+  --panel-border: rgba(146, 176, 218, 0.12);
+  --panel-highlight: rgba(114, 221, 255, 0.08);
+  --panel-inner-border: rgba(255, 255, 255, 0.03);
+  --card-bg: linear-gradient(180deg, rgba(15, 24, 42, 0.72), rgba(10, 18, 31, 0.92));
+  --card-border: rgba(146, 176, 218, 0.12);
+  --chip-bg: rgba(114, 221, 255, 0.08);
+  --chip-border: rgba(114, 221, 255, 0.14);
+  --chip-ink: #a5e9ff;
+  --table-head-bg: rgba(7, 15, 27, 0.92);
+  --table-row-hover: rgba(114, 221, 255, 0.04);
+  --soft-overlay: rgba(255, 255, 255, 0.04);
+  --warning-soft: rgba(255, 184, 77, 0.12);
+  --warning-border: rgba(255, 184, 77, 0.24);
+
+  --shell-app-bg:
+    radial-gradient(circle at top right, rgba(114, 221, 255, 0.18), transparent 26%),
+    radial-gradient(circle at 14% 82%, rgba(124, 134, 255, 0.14), transparent 24%),
+    linear-gradient(135deg, #040b16 0%, #081321 48%, #0a1627 100%);
+  --shell-noise-opacity: 0.16;
+  --shell-noise-line: rgba(255, 255, 255, 0.04);
+  --shell-sidebar-bg: linear-gradient(180deg, rgba(7, 14, 25, 0.92), rgba(6, 12, 22, 0.72));
+  --shell-sidebar-border: rgba(146, 176, 218, 0.14);
+  --shell-chip-bg: rgba(9, 20, 34, 0.72);
+  --shell-chip-border: rgba(114, 221, 255, 0.18);
+  --shell-card-bg: linear-gradient(180deg, rgba(8, 16, 30, 0.86), rgba(6, 14, 24, 0.74));
+  --shell-card-bg-strong: rgba(9, 18, 33, 0.82);
+  --shell-card-border: rgba(146, 176, 218, 0.1);
+  --shell-nav-bg: linear-gradient(180deg, rgba(10, 20, 36, 0.78), rgba(9, 18, 31, 0.92));
+  --shell-nav-border: rgba(146, 176, 218, 0.14);
+  --shell-nav-active-bg: linear-gradient(135deg, rgba(23, 86, 122, 0.48), rgba(13, 24, 42, 0.96));
+  --shell-nav-active-border: rgba(114, 221, 255, 0.36);
+  --shell-nav-active-shadow: 0 14px 36px rgba(6, 36, 56, 0.28);
+  --shell-nav-highlight: rgba(114, 221, 255, 0.12);
+  --shell-theme-active-bg: linear-gradient(135deg, var(--color-primary), var(--color-primary-strong));
+  --shell-theme-active-ink: #03111d;
+  --shell-button-bg: linear-gradient(180deg, rgba(11, 22, 38, 0.88), rgba(9, 17, 30, 0.9));
+  --shell-content-bg: linear-gradient(180deg, rgba(7, 15, 28, 0.62), rgba(6, 13, 23, 0.36));
+  --shell-content-border: rgba(146, 176, 218, 0.08);
+  --shell-content-highlight: rgba(255, 255, 255, 0.02);
+  --shell-warning-bg: linear-gradient(135deg, rgba(217, 119, 6, 0.92), rgba(194, 65, 12, 0.92));
+  --shell-warning-ink: #fff7ed;
+  --shell-warning-shadow: 0 16px 32px rgba(194, 65, 12, 0.18);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  background: var(--color-surface);
+  color-scheme: light;
+  scroll-behavior: smooth;
+}
+
+html[data-theme="dark"] {
+  color-scheme: dark;
+}
+
+body {
+  margin: 0;
+  font-family: "Segoe UI Variable Text", "Segoe UI", sans-serif;
+  background: var(--color-surface);
+  color: var(--color-ink);
+  background-image: var(--page-bg);
+}
+
+a,
+button,
+input,
+select,
+textarea {
+  font: inherit;
+}
+
+a {
+  color: inherit;
+}
+
+button {
+  cursor: pointer;
+  transition:
+    transform 0.18s ease,
+    box-shadow 0.18s ease,
+    border-color 0.18s ease,
+    background-color 0.18s ease,
+    color 0.18s ease;
+}
+
+button:hover {
+  transform: translateY(-1px);
+}
+
+button:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible {
+  outline: none;
+  border-color: var(--color-divider-strong);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-primary) 18%, transparent);
+}
+
+input,
+select,
+textarea {
+  border: 1px solid var(--color-divider);
+  background: var(--color-surface-raised);
+  color: var(--color-ink);
+  box-shadow: inset 0 1px 0 var(--panel-inner-border);
+}
+
+input::placeholder,
+textarea::placeholder {
+  color: var(--color-ink-dim);
+}
+
+::selection {
+  background: color-mix(in srgb, var(--color-primary) 20%, transparent);
+  color: var(--color-ink);
+}
+
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+*::-webkit-scrollbar-track {
+  background: color-mix(in srgb, var(--color-surface) 88%, black 12%);
+}
+
+*::-webkit-scrollbar-thumb {
+  background: linear-gradient(180deg, color-mix(in srgb, var(--color-primary) 38%, transparent), color-mix(in srgb, var(--color-accent) 30%, transparent));
+  border: 2px solid color-mix(in srgb, var(--color-surface) 86%, black 14%);
+  border-radius: 999px;
+}
+
+#app {
+  min-height: 100vh;
+}
+
+/* ---- 紧凑模式（C2，opt-in）：html[data-density="compact"] 下收敛圆角与留白。
+   只覆盖装饰性尺寸（圆角/内边距/大标题），不动尺寸耦合项（虚拟滚动行高 40px、
+   表格列宽等）。选择器用 html[data-density] 前缀抬高特异性，压过 scoped 样式；
+   默认舒适模式零影响。 ---- */
+html[data-density="compact"] {
+  --radius-panel: 12px;
+  --radius-card: 10px;
+}
+
+html[data-density="compact"] .shell-topbar,
+html[data-density="compact"] .shell-content {
+  padding-left: 16px;
+  padding-right: 16px;
+}
+
+html[data-density="compact"] .shell-content {
+  padding-bottom: 16px;
+}
+
+html[data-density="compact"] .content-frame {
+  padding: 10px;
+  border-radius: 14px;
+}
+
+html[data-density="compact"] .page-panel,
+html[data-density="compact"] .panel,
+html[data-density="compact"] .hero-card,
+html[data-density="compact"] .sidebar-panel {
+  padding: 13px;
+}
+
+html[data-density="compact"] .hero-card h3 {
+  font-size: 26px;
+}
+
+html[data-density="compact"] .nav-item {
+  padding: 9px 12px;
+}
+
+html[data-density="compact"] .content-grid,
+html[data-density="compact"] .overview-page,
+html[data-density="compact"] .telemetry-page,
+html[data-density="compact"] .collectors-page,
+html[data-density="compact"] .control-page,
+html[data-density="compact"] .lua-page,
+html[data-density="compact"] .diagnostics-page,
+html[data-density="compact"] .hero-grid {
+  gap: 10px;
+}
+
+html[data-density="compact"] .topbar-chip {
+  padding: 4px 8px;
+  min-width: 72px;
+}
+
+html[data-density="compact"] .topbar-chip strong {
+  font-size: 12px;
+}
+
+html[data-density="compact"] .theme-button {
+  padding: 6px 10px;
+}

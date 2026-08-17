@@ -1,0 +1,14 @@
+# 100-point out-of-the-box test configuration (copy next to simulator.exe)
+# Field customization: REST/dashboard moved 8080 -> 8090 (rs-iot gateway owns 8080);
+# RTU slave on COM3 (com0com pair CNCA0/CNCB0 = COM2/COM3, rs-iot master opens COM2).
+modbus:
+  bind: "0.0.0.0:502"
+  serial: "COM3"
+  baud: 9600
+opcua:
+  endpoint: "opc.tcp://0.0.0.0:4840"
+  url: "opc.tcp://127.0.0.1:4840"
+rest:
+  bind: "127.0.0.1:8090"
+points_file: points-100.yaml
+update_ms: 200

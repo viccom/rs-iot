@@ -1,0 +1,107 @@
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+
+env:
+  RUSTFLAGS: -D warnings
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fmt:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # lux 为 path 依赖（../lux）；CI 一并 checkout（仓库名按实际 GitHub org 调整）
+      - uses: actions/checkout@v4
+        with:
+          repository: viccom/lux
+          path: ../lux
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all --check
+
+  clippy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: viccom/lux
+          path: ../lux
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      # serialport/tokio-serial（RTU over serial）在 Linux 链接 libudev，需头文件。
+      - name: Install libudev-dev (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev
+      - run: cargo clippy --all-targets -- -D warnings
+
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: viccom/lux
+          path: ../lux
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install libudev-dev (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev
+      - run: cargo test --all-targets --all-features
+
+  minimal:
+    # 验证裁剪组合可编译：关掉三协议，覆盖最小现场部署（lua 脚本采集）。
+    # 防止 feature 化后裁剪组合悄悄编译失败却无人发现（docs/plan-feature-gating-protocols.md R4）。
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: viccom/lux
+          path: ../lux
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install libudev-dev (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev
+      # test（非 build）：让 feature_gate_e2e（#![cfg(not(feature = "modbus"))]）在
+      # 裁剪组合下执行，验证关协议时优雅降级（R1）；同时回归保护裁剪组合下其他测试。
+      - run: cargo test --no-default-features --features lua
+      # modbus 开启 → feature_gate_e2e 被 cfg 跳过；此处仅验证该组合可编译。
+      - run: cargo build --no-default-features --features "lua,modbus,opcua"
+
+  doc:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: viccom/lux
+          path: ../lux
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install libudev-dev (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev
+      - run: cargo doc --no-deps
+
+  audit:
+    runs-on: ubuntu-latest
+    # 信息性：传递依赖（rustls TLS 链，经 rumqttc/lux 引入）当前有已知 advisory
+    # （rustls-webpki 0.102.8 / rustls-pemfile 2.2.0 等）；rs-iot 用明文 MQTT
+    # （broker:1883，TLS 路径未启用）实际风险低。升级 lux/rumqttc 依赖链后
+    # 移除 continue-on-error 改为严格。
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo install cargo-audit --locked
+      - run: cargo audit

@@ -1,0 +1,145 @@
+[workspace]
+resolver = "2"
+# rs-iot 主 crate（root）+ AI Agent 集成新增的独立 crate。
+# - rsiot-mcp：reasonix 的 [[plugins]] 子进程，把 MCP 工具调用翻译成 rs-iot REST（照 dbx-mcp 范本）。
+# - rsiot-gateway：v3 独立 API Gateway，纯反代 rs-iot + reasonix serve（照 plan-gateway-tech-selection.md）。
+# 两个子 crate 与主 crate 解耦：核心数据流（pipeline/lux/采集）零改动是硬约束。
+members = [".", "crates/rsiot-mcp", "crates/rsiot-gateway"]
+
+[workspace.package]
+edition = "2021"
+rust-version = "1.81"
+license = "MIT"
+repository = "https://github.com/viccom/rs-iot"
+
+[package]
+name = "rs-iot"
+version = "0.1.0"
+edition = { workspace = true }
+rust-version = { workspace = true }
+description = "Lightweight cross-platform industrial IoT edge framework (Rust), with embedded lux as an in-process Redis-compatible database."
+license = { workspace = true }
+repository = { workspace = true }
+
+[dependencies]
+# 嵌入式内存数据库：对外 RESP + Tiered 持久化
+lux = { path = "../lux" }
+
+# 异步运行时
+tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["rt", "codec"] }
+# SSE 实时推送(阶段一):broadcast → Stream(BroadcastStream,需 sync feature)。
+tokio-stream = { version = "0.1", features = ["sync"] }
+
+# 日志
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# 错误
+anyhow = "1"
+thiserror = "2"
+
+# 序列化 / 配置。
+# +rc:EventPayload::Log 用 Arc<LogEntry>(N 个 SSE 客户端共享同一份日志,避免深拷贝)。
+# LogEntry 树状无 cycle,启用 Arc/Rc 序列化安全。
+serde = { version = "1", features = ["derive", "rc"] }
+serde_json = "1"
+toml = "0.8"
+
+# 系统 / 硬件 ID
+sysinfo = "0.32"
+sha2 = "0.10"
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# 身份认证（与 lux 对齐版本，减少重复编译）
+bcrypt = "0.17"
+
+# trait async
+async-trait = "0.1"
+
+# M2: 插件系统 + MQTT 北向 + 数据转换
+rumqttc = { version = "0.25", features = ["url"] }
+inventory = "0.3"
+dashmap = "6"
+rhai = { version = "1.25", optional = true }
+chrono = "0.4"
+
+# M3: REST 管理 API + JWT + 静态前端嵌入
+axum = { version = "0.8", features = ["macros"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["trace", "cors"] }
+jsonwebtoken = { version = "10", features = ["rust_crypto"] }
+rust-embed = { version = "8", features = ["mime-guess"] }
+mime_guess = "2"
+
+# OPC UA 南向插件（async-opcua：freeopcua 社区接棒 locka99 的现代纯 async 实现）
+async-opcua = { version = "0.19", default-features = false, features = ["client"], optional = true }
+
+# 文件日志（tokio-rs 官方 appender，RollingFileAppender daily 轮转 + non_blocking）
+tracing-appender = "0.2"
+
+# Modbus 南向插件（tokio-modbus：纯 async，client-only；tcp + rtu 协议编解码）。
+# RTU over serial 单独依赖 tokio-serial（SerialStream 实现 tokio AsyncRead+AsyncWrite）。
+tokio-modbus = { version = "0.17", default-features = false, features = ["tcp", "rtu"], optional = true }
+# tokio-serial 保持无条件依赖：lua_client（默认开启）的串口 IO 也依赖它（B1 方案，
+# 详见 docs/plan-feature-gating-protocols.md §2.2）。仅随 modbus 一起 gate 会破坏 lua serial。
+tokio-serial = "5.5"
+
+# S7 南向插件（tokio-s7：纯 Rust async，ISO-on-TCP，西门子 S7-200/200Smart/300/400/1200/1500/Sinumerik828D；
+# Apache-2.0 与 MIT 兼容无传染；无 FFI/无系统库，跨平台编译零额外依赖）。
+tokio-s7 = { version = "0.1", optional = true }
+
+# 外部插件 bridge（sidecarClient）：token hmac 校验 + 高熵 token 生成 + 长度前缀帧
+hmac = "0.12"
+rand = "0.8"
+bytes = "1"
+futures-util = "0.3"
+
+# Lua 动态脚本采集（luaClient）：mlua 0.12，Lua 5.4 vendored 编入，async+send 桥接 tokio。
+# send 是必需的（rs-iot multi_thread runtime 下 spawn 持 Lua 的 future 须 Send）。
+mlua = { version = "0.12", features = ["lua54", "vendored", "async", "send", "serde", "macros"], optional = true }
+
+# Lua 脚本 HTTP 出站（lua-http feature，默认开启）：reqwest rustls-tls，不拉 OpenSSL。
+# json feature 供 http_post body 序列化（v1 直接传文本 body，json feature 备用）。
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"], optional = true }
+
+# Lua 脚本热加载（lua feature）：notify 监听 scripts/ 改动 + notify-debouncer-mini 去抖。
+# notify-debouncer-mini 0.7 依赖 notify ^8.2（0.5 要 notify 7 会冲突，已核实 crates.io）。
+notify = { version = "8", optional = true }
+notify-debouncer-mini = { version = "0.7", optional = true }
+
+[features]
+default = ["transform", "lua", "lua-http", "opcua", "modbus", "s7"]
+# L2 数据转换（rhai 脚本，默认开启）
+transform = ["dep:rhai"]
+# Lua 动态脚本采集（luaClient，默认开启）
+lua = ["dep:mlua", "dep:notify", "dep:notify-debouncer-mini"]
+# Lua HTTP 出站（ctx:http_get/http_post，默认随 lua 开；独立可关以裁 release / 减出站风险面）
+lua-http = ["lua", "dep:reqwest"]
+# 内置南向协议插件（默认全开，向后兼容）。现场可 `--no-default-features --features "..."` 按需裁剪
+# （减体积 / 省系统依赖）。关掉某协议后，该 app_code 建实例会返回 "source plugin not found"
+# （find_source 优雅降级，非崩溃）。详见 docs/plan-feature-gating-protocols.md。
+opcua = ["dep:async-opcua"]
+modbus = ["dep:tokio-modbus"]
+s7 = ["dep:tokio-s7"]
+# 预留（后续里程碑）：
+# local-broker = ["dep:rumqttd"]
+# analytics = ["dep:datafusion"]
+# windows-svc = ["dep:windows-service"]
+
+[profile.release]
+# workspace 层共享（rs-iot + rsiot-mcp + rsiot-gateway 复用同一 release 配置）。
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true
+# 不设 panic = "abort"，保留 unwind 以支持优雅关闭
+
+# Windows Service（仅 windows target）
+[target.'cfg(windows)'.dependencies]
+windows-service = "0.7"
+# SetConsoleCtrlHandler:监听 CTRL_C + CTRL_BREAK(后者供 warden 等监护器经
+# GenerateConsoleCtrlEvent 发给独立 process group 触发 graceful SAVE)
+windows-sys = { version = "0.59", features = ["Win32_System_Console"] }

@@ -1,0 +1,82 @@
+# warden 服务定义模板 —— rs-iot 现场测试场四件套（模拟器 + rs-iot 三件套）。
+# __ROOT__ 由 start-rsiot.bat 启动时替换为部署根的正斜杠绝对路径，生成 services.toml（幂等）。
+# 端口：模拟器 Modbus TCP 502 / RTU COM3 / OPC UA 4840 / 控制台 8090；
+#       rs-iot REST 8790 / lux 6390；reasonix serve 8787；gateway 8080；warden UI 8789。
+#
+# auto_start=false：reasonix 的 [[plugins]] 需要 rs-iot 登录签发的 RSIOT_JWT 注入
+# work/reasonix.toml 后才能起，按 start-rsiot.bat 的顺序编排拉起。
+# priority：小者先启动（模拟器=设备先上电，采集器其次，网关最后）。
+
+[daemon]
+api_bind   = "127.0.0.1:8789"
+auth_token = ""                      # 本地测试场不设；远程暴露必须改
+data_dir   = "__ROOT__/warden/data"
+
+# ── 0. simulator（工厂设备模拟器）─────────────────────────────────
+[[service]]
+name         = "simulator"
+display_name = "设备模拟器"
+description  = "Modbus TCP :502 / RTU COM3 / OPC UA :4840 / 控制台 :8090"
+command      = "__ROOT__/simulator/dist/simulator.exe"
+args         = []
+working_dir  = "__ROOT__/simulator/dist"
+priority     = 0
+auto_start   = false
+auto_restart = true
+graceful_timeout_secs = 5
+[service.health]
+type = "tcp"
+host = "127.0.0.1"
+port = 502
+
+# ── 1. rs-iot 主程序（REST :8790 / lux :6390）─────────────────────
+[[service]]
+name         = "rs-iot"
+display_name = "rs-iot 主程序"
+description  = "工业 IoT 边缘网关核心，REST :8790 / lux :6390"
+command      = "__ROOT__/bin/rs-iot.exe"
+args         = ["--config", "config.toml"]
+working_dir  = "__ROOT__"
+priority     = 1
+auto_start   = false
+auto_restart = true                  # 核心：崩溃自愈（指数退避，超限熔断）
+graceful_timeout_secs = 10           # run 模式支持监护器 graceful 触发
+[service.health]
+type = "tcp"
+host = "127.0.0.1"
+port = 8790
+
+# ── 2. reasonix serve（AI agent 宿主 :8787，spawn rsiot-mcp）──────
+[[service]]
+name         = "reasonix"
+display_name = "Reasonix AI Agent"
+description  = "AI agent 宿主，:8787，stdio spawn rsiot-mcp"
+command      = "__ROOT__/bin/reasonix.exe"
+args         = ["serve", "-addr", "127.0.0.1:8787", "--no-open"]
+working_dir  = "__ROOT__/work"
+environment  = { REASONIX_HOME = "__ROOT__/home", REASONIX_CREDENTIALS_STORE = "file" }
+priority     = 5
+auto_start   = false
+auto_restart = false                 # agent 交互进程，崩溃经 warden UI 手动重启
+graceful_timeout_secs = 15           # 给 stdio plugin（rsiot-mcp）清理留时间
+[service.health]
+type = "tcp"
+host = "127.0.0.1"
+port = 8787
+
+# ── 3. rsiot-gateway（前端 + 反代 :8080）─────────────────────────
+[[service]]
+name         = "rsiot-gateway"
+display_name = "前端 + 反代网关"
+description  = ":8080，嵌入前端 + 反代 rs-iot/reasonix"
+command      = "__ROOT__/bin/rsiot-gateway.exe"
+args         = ["gateway.toml"]
+working_dir  = "__ROOT__"
+priority     = 10
+auto_start   = false
+auto_restart = true
+graceful_timeout_secs = 10
+[service.health]
+type = "tcp"
+host = "127.0.0.1"
+port = 8080

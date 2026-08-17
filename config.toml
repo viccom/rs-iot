@@ -1,0 +1,37 @@
+# rs-iot 配置（开发验证用）。生产部署按需调整。
+api_port = 8790                       # 8780 被本机其他服务占用，临时改 8790
+jwt_secret = "qwerty1234567890asdfgh1234567890"
+
+[lux]
+port = 6390
+bind_host = "127.0.0.1"
+data_dir = "./data/lux"
+save_interval_secs = 300
+
+[pipeline]
+# worker 数。0 = auto（min(cpu,8)）。50万点/秒建议 auto 或 4-8。
+# workers=1 退回单 worker（阶段1 形态）。
+workers = 0
+
+[mqtt]
+# 公共 MQTT broker（匿名，开发/验证用；生产部署换私有 broker + credentials）
+host = "broker.emqx.io"
+port = 1883
+# publish 周期（秒）。50万点下全量序列化压力大，建议 ≥2s；默认 5s 合理。
+publish_interval_secs = 5
+
+[bridge]
+# 外部插件 bridge（sidecarClient）。默认关（现有部署零影响）；本机端到端验证时改 true。
+enable = false
+bind_host = "127.0.0.1"
+port = 8781
+heartbeat_timeout_secs = 30
+accept_hello_timeout_secs = 10
+
+# 日志（默认即可：落盘 ./logs，保留 7 天，daily 轮转，退出自动 flush）。
+# 不写 [log] section 也走此默认（M3）。
+[log]
+dir = "./logs"        # 默认 "./logs"；置 "" 关闭文件层（仅终端）
+level = "info"        # RUST_LOG 优先
+max_days = 7          # 按文件名日期保留最近 N 天（0 = 不按天删）
+max_size_mb = 0       # 0=不限；>0 时按目录总大小删最旧

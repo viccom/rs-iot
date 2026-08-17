@@ -1,0 +1,5 @@
+# Go 构建产物
+*.exe
+# 端到端测试临时文件
+opc1.json
+opc1_token.txt

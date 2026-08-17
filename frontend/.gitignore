@@ -1,0 +1,4 @@
+# frontend/.gitignore
+node_modules/
+dist/
+*.tsbuildinfo

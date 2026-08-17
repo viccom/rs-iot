@@ -1,0 +1,1549 @@
+<!DOCTYPE html>
+<html lang="zh" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>RS-IOT // 采集器监控终端</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+/* ============================================================
+   AMBER PHOSPHOR CONTROL CABINET — rs-iot SCADA terminal
+   ============================================================ */
+:root{
+  --bg:#06080b; --panel:#0c1015; --panel-2:#11171f; --inset:#070a0e;
+  --line:#1b232d; --line-2:#2a3642; --line-bright:#3a4a59;
+  --ink:#dbe3ea; --ink-2:#8b97a3; --ink-3:#56636e; --ink-4:#36414b;
+  --amber:#ffb300; --amber-2:#ff8a00; --amber-dim:#7a5a10;
+  --green:#3fd66c; --green-dim:#1f6a37;
+  --red:#ff4d4d; --red-dim:#6e1f1f;
+  --cyan:#41c7d6; --yellow:#f2c14e;
+  --glow:0 0 0 1px rgba(255,179,0,.35), 0 0 18px -4px rgba(255,179,0,.45);
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%}
+body{
+  font-family:'Chakra Petch',sans-serif;background:var(--bg);color:var(--ink);
+  font-size:13px;line-height:1.45;letter-spacing:.01em;overflow:hidden;
+  -webkit-font-smoothing:antialiased;
+}
+/* atmosphere: radial vignette + blueprint grid + scanlines */
+body::before{
+  content:"";position:fixed;inset:0;pointer-events:none;z-index:0;
+  background:
+    radial-gradient(120% 90% at 50% -10%,rgba(255,138,0,.06),transparent 55%),
+    radial-gradient(100% 100% at 50% 120%,rgba(0,0,0,.6),transparent 60%),
+    linear-gradient(rgba(255,179,0,.018) 1px,transparent 1px) 0 0/100% 26px,
+    linear-gradient(90deg,rgba(255,179,0,.018) 1px,transparent 1px) 0 0/26px 100%;
+}
+body::after{
+  content:"";position:fixed;inset:0;pointer-events:none;z-index:9999;
+  background:repeating-linear-gradient(0deg,rgba(0,0,0,.18) 0 1px,transparent 1px 3px);
+  mix-blend-mode:multiply;opacity:.45;
+}
+.mono{font-family:'IBM Plex Mono',monospace;font-variant-numeric:tabular-nums}
+::selection{background:var(--amber);color:#000}
+::-webkit-scrollbar{width:9px;height:9px}
+::-webkit-scrollbar-track{background:var(--inset)}
+::-webkit-scrollbar-thumb{background:var(--line-2);border:2px solid var(--inset)}
+::-webkit-scrollbar-thumb:hover{background:var(--amber-dim)}
+
+/* ---------- app shell ---------- */
+.app{position:relative;z-index:1;display:grid;grid-template-rows:54px 1fr 30px;height:100vh}
+.topbar{display:flex;align-items:center;gap:18px;padding:0 16px;
+  background:linear-gradient(180deg,#0e1319,#090c11);
+  border-bottom:1px solid var(--line);position:relative}
+.topbar::after{content:"";position:absolute;left:0;right:0;bottom:-1px;height:1px;
+  background:linear-gradient(90deg,transparent,var(--amber-dim) 20%,var(--amber-dim) 80%,transparent)}
+.brand{display:flex;align-items:center;gap:11px;min-width:230px}
+.brand .mark{width:30px;height:30px;display:grid;place-items:center;
+  border:1px solid var(--amber-dim);color:var(--amber);position:relative;
+  background:radial-gradient(circle at 50% 40%,rgba(255,179,0,.16),transparent 70%)}
+.brand .mark svg{width:17px;height:17px}
+.brand .mark::before,.brand .mark::after{content:"";position:absolute;width:5px;height:5px;border:1px solid var(--amber)}
+.brand .mark::before{top:-2px;left:-2px;border-right:0;border-bottom:0}
+.brand .mark::after{bottom:-2px;right:-2px;border-left:0;border-top:0}
+.brand .t1{font-weight:700;font-size:15px;letter-spacing:.12em;color:var(--ink);text-transform:uppercase}
+.brand .t1 b{color:var(--amber)}
+.brand .t2{font-size:9.5px;letter-spacing:.34em;color:var(--ink-3);text-transform:uppercase}
+
+.tb-mid{display:flex;align-items:center;gap:14px;flex:1;justify-content:center}
+.chip{display:flex;align-items:center;gap:7px;padding:5px 10px;border:1px solid var(--line-2);
+  background:var(--inset);font-size:11px}
+.chip .k{color:var(--ink-3);letter-spacing:.18em;text-transform:uppercase;font-size:9.5px}
+.chip .v{color:var(--ink);font-weight:600}
+.chip .v.amber{color:var(--amber)}
+.tb-clock{display:flex;flex-direction:column;align-items:flex-end;line-height:1.1}
+.tb-clock .t{font-size:17px;font-weight:600;color:var(--amber);letter-spacing:.06em}
+.tb-clock .d{font-size:9px;color:var(--ink-3);letter-spacing:.2em}
+
+.tb-right{display:flex;align-items:center;gap:10px;min-width:300px;justify-content:flex-end}
+.heartbeat{width:120px;height:30px;border:1px solid var(--line);background:var(--inset);position:relative;overflow:hidden}
+.heartbeat::before{content:"CPU";position:absolute;left:4px;top:3px;font-size:8px;color:var(--ink-3);letter-spacing:.2em;z-index:2}
+.heartbeat svg{position:absolute;inset:0;width:100%;height:100%}
+.rec{display:flex;align-items:center;gap:7px;padding:5px 9px;border:1px solid var(--red-dim)}
+.rec .dot{width:8px;height:8px;border-radius:50%;background:var(--red);box-shadow:0 0 8px var(--red);
+  animation:blink 1.1s steps(1) infinite}
+.rec .lbl{font-size:10px;letter-spacing:.2em;color:var(--ink-2)}
+@keyframes blink{50%{opacity:.15}}
+.conn{display:flex;align-items:center;gap:7px;font-size:10px;letter-spacing:.16em;color:var(--ink-2)}
+.led{width:8px;height:8px;border-radius:50%;flex:none}
+.led.on{background:var(--green);box-shadow:0 0 7px var(--green)}
+.led.off{background:var(--ink-4)}
+.led.amber{background:var(--amber);box-shadow:0 0 7px var(--amber)}
+.led.red{background:var(--red);box-shadow:0 0 7px var(--red);animation:blink .7s steps(1) infinite}
+.op{display:flex;align-items:center;gap:8px;padding-left:10px;border-left:1px solid var(--line)}
+.op .av{width:24px;height:24px;border:1px solid var(--amber-dim);display:grid;place-items:center;
+  color:var(--amber);font-weight:700;font-size:11px;background:var(--inset)}
+.op .nm{font-size:11px}
+.op .rl{font-size:9px;color:var(--ink-3);letter-spacing:.16em}
+.btn{font-family:inherit;font-size:11px;letter-spacing:.1em;text-transform:uppercase;cursor:pointer;
+  background:var(--inset);color:var(--ink);border:1px solid var(--line-2);padding:6px 12px;
+  transition:.12s;display:inline-flex;align-items:center;gap:6px}
+.btn:hover{border-color:var(--amber-dim);color:var(--amber)}
+.btn:active{transform:translateY(1px)}
+.btn.primary{border-color:var(--amber-dim);color:var(--amber)}
+.btn.primary:hover{background:rgba(255,179,0,.08);box-shadow:var(--glow)}
+.btn.ghost{border-color:var(--line)}
+.btn.danger:hover{border-color:var(--red);color:var(--red)}
+.btn.sm{padding:3px 8px;font-size:10px}
+.btn:disabled{opacity:.35;cursor:not-allowed}
+
+/* ---------- body grid: rail + canvas ---------- */
+.body{display:grid;grid-template-columns:212px 1fr;min-height:0;overflow:hidden}
+.rail{background:var(--panel);border-right:1px solid var(--line);display:flex;flex-direction:column;padding:14px 0}
+.rail .hd{font-size:9px;letter-spacing:.3em;color:var(--ink-3);padding:0 16px 10px;text-transform:uppercase}
+.nav{display:flex;flex-direction:column;gap:2px;padding:0 10px}
+.nav button{display:grid;grid-template-columns:22px 1fr auto;align-items:center;gap:9px;width:100%;
+  text-align:left;background:transparent;border:1px solid transparent;color:var(--ink-2);
+  padding:9px 10px;cursor:pointer;font-family:inherit;transition:.12s;position:relative}
+.nav button svg{width:16px;height:16px;justify-self:center;color:var(--ink-3)}
+.nav button .zh{font-size:12.5px;font-weight:600;letter-spacing:.04em;color:var(--ink)}
+.nav button .en{font-size:8.5px;letter-spacing:.22em;color:var(--ink-3);text-transform:uppercase}
+.nav button .num{font-size:9px;color:var(--ink-4);font-family:'IBM Plex Mono',monospace}
+.nav button:hover{background:var(--inset);border-color:var(--line)}
+.nav button:hover svg{color:var(--ink-2)}
+.nav button.active{background:linear-gradient(90deg,rgba(255,179,0,.12),transparent);
+  border-color:var(--amber-dim);border-right:0}
+.nav button.active svg,.nav button.active .zh{color:var(--amber)}
+.nav button.active::before{content:"";position:absolute;left:0;top:6px;bottom:6px;width:2px;background:var(--amber)}
+.nav button.active .num{color:var(--amber)}
+.rail .spacer{flex:1}
+.rail .ft{padding:12px 16px 4px;border-top:1px solid var(--line);font-size:9px;color:var(--ink-3);
+  letter-spacing:.18em;line-height:1.7}
+.rail .ft b{color:var(--ink-2)}
+
+/* ---------- canvas ---------- */
+.canvas{overflow:auto;position:relative;padding:16px}
+.canvas::before,.canvas::after{content:"";position:absolute;z-index:0;pointer-events:none;
+  color:var(--ink-4);font-family:'IBM Plex Mono',monospace;font-size:8px;letter-spacing:.1em}
+/* corner registration marks on canvas */
+.reg{position:fixed;width:14px;height:14px;pointer-events:none;z-index:5;opacity:.5}
+.reg::before,.reg::after{content:"";position:absolute;background:var(--amber-dim)}
+.reg::before{left:50%;top:0;bottom:0;width:1px;transform:translateX(-.5px)}
+.reg::after{top:50%;left:0;right:0;height:1px;transform:translateY(-.5px)}
+.reg.tl{left:222px;top:60px}
+.reg.tr{right:8px;top:60px}
+
+section.view{display:none;animation:fade .25s ease}
+section.view.active{display:block}
+@keyframes fade{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
+
+/* ---------- panel (engraved nameplate) ---------- */
+.panel{background:var(--panel);border:1px solid var(--line);position:relative;margin-bottom:14px}
+.panel::before,.panel::after{content:"";position:absolute;width:7px;height:7px;border:1px solid var(--line-bright)}
+.panel::before{top:-1px;left:-1px;border-right:0;border-bottom:0}
+.panel::after{bottom:-1px;right:-1px;border-left:0;border-top:0}
+.panel .ph{display:flex;align-items:center;gap:10px;padding:8px 13px;border-bottom:1px solid var(--line);
+  background:linear-gradient(180deg,var(--panel-2),var(--panel))}
+.panel .ph .code{font-family:'IBM Plex Mono',monospace;font-size:10px;color:var(--amber);
+  border:1px solid var(--amber-dim);padding:2px 6px;letter-spacing:.1em}
+.panel .ph .ttl{font-size:12px;font-weight:600;letter-spacing:.16em;text-transform:uppercase;color:var(--ink)}
+.panel .ph .sub{font-size:9.5px;color:var(--ink-3);letter-spacing:.14em;text-transform:uppercase}
+.panel .ph .grow{flex:1}
+.panel .ph .meta{font-family:'IBM Plex Mono',monospace;font-size:10px;color:var(--ink-2)}
+.panel .pb{padding:13px}
+.panel.tight .pb{padding:0}
+
+.grid{display:grid;gap:14px}
+.g2{grid-template-columns:repeat(2,1fr)}
+.g3{grid-template-columns:repeat(3,1fr)}
+.g4{grid-template-columns:repeat(4,1fr)}
+
+/* ---------- stat tiles / gauges ---------- */
+.tile{background:var(--inset);border:1px solid var(--line);padding:11px 12px;position:relative;overflow:hidden}
+.tile .lab{font-size:9.5px;letter-spacing:.2em;text-transform:uppercase;color:var(--ink-3)}
+.tile .val{font-family:'IBM Plex Mono',monospace;font-size:24px;font-weight:600;color:var(--ink);line-height:1.1;margin-top:5px}
+.tile .val.amber{color:var(--amber);text-shadow:0 0 14px rgba(255,179,0,.35)}
+.tile .val.green{color:var(--green)}
+.tile .val.red{color:var(--red)}
+.tile .val small{font-size:11px;color:var(--ink-3);font-weight:400;margin-left:3px}
+.tile .dlt{font-size:9.5px;color:var(--ink-3);margin-top:3px;font-family:'IBM Plex Mono',monospace}
+.tile .dlt.up{color:var(--green)}
+.tile .dlt.down{color:var(--red)}
+/* bar meter gauge */
+.meter{margin-top:9px}
+.meter .top{display:flex;justify-content:space-between;font-size:9px;letter-spacing:.16em;color:var(--ink-3);
+  text-transform:uppercase;margin-bottom:4px}
+.meter .top b{font-family:'IBM Plex Mono',monospace;color:var(--ink);font-weight:600;letter-spacing:.04em}
+.bar{height:9px;background:#000;border:1px solid var(--line);position:relative;overflow:hidden}
+.bar .fill{height:100%;background:linear-gradient(90deg,var(--amber-2),var(--amber));position:relative;
+  box-shadow:0 0 10px -1px var(--amber);transition:width .5s ease}
+.bar .fill.green{background:linear-gradient(90deg,#1f8a48,var(--green));box-shadow:0 0 10px -1px var(--green)}
+.bar .fill.red{background:linear-gradient(90deg,#8a1f1f,var(--red));box-shadow:0 0 10px -1px var(--red)}
+.bar .fill::after{content:"";position:absolute;inset:0;
+  background:repeating-linear-gradient(90deg,transparent 0 6px,rgba(0,0,0,.32) 6px 7px)}
+/* ruler ticks under bar */
+.ruler{display:flex;justify-content:space-between;margin-top:2px;font-family:'IBM Plex Mono',monospace;
+  font-size:8px;color:var(--ink-4)}
+
+/* ---------- instance summary chips ---------- */
+.istates{display:flex;gap:10px;flex-wrap:wrap}
+.istate{flex:1;min-width:90px;background:var(--inset);border:1px solid var(--line);padding:9px 11px;display:flex;align-items:center;gap:10px}
+.istate .n{font-family:'IBM Plex Mono',monospace;font-size:22px;font-weight:600;line-height:1}
+.istate .l{font-size:9px;letter-spacing:.18em;text-transform:uppercase;color:var(--ink-3)}
+
+/* ---------- telemetry matrix ---------- */
+.tm-toolbar{display:flex;align-items:center;gap:9px;padding:10px 13px;border-bottom:1px solid var(--line);
+  background:var(--panel-2);flex-wrap:wrap}
+.tm-toolbar .cnt{font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--ink-2)}
+.tm-toolbar .cnt b{color:var(--amber)}
+.tm-toolbar input{font-family:'IBM Plex Mono',monospace;background:var(--inset);border:1px solid var(--line-2);
+  color:var(--ink);padding:4px 9px;font-size:11px;width:150px}
+.tm-toolbar input:focus{outline:none;border-color:var(--amber-dim)}
+.tm-toolbar .grow{flex:1}
+.seg{display:inline-flex;border:1px solid var(--line-2)}
+.seg button{background:var(--inset);border:0;border-right:1px solid var(--line-2);color:var(--ink-2);
+  padding:4px 10px;font-family:inherit;font-size:10px;letter-spacing:.1em;cursor:pointer;text-transform:uppercase}
+.seg button:last-child{border-right:0}
+.seg button.on{background:var(--amber);color:#000;font-weight:600}
+
+.devs{display:grid;grid-template-columns:repeat(auto-fill,minmax(268px,1fr));gap:13px;padding:13px}
+.dev{background:var(--inset);border:1px solid var(--line);position:relative}
+.dev .dh{display:flex;align-items:center;gap:9px;padding:7px 10px;border-bottom:1px solid var(--line);
+  background:linear-gradient(180deg,#0e141b,var(--inset))}
+.dev .dh .ic{width:20px;height:20px;border:1px solid var(--line-2);display:grid;place-items:center;color:var(--ink-3)}
+.dev .dh .ic svg{width:12px;height:12px}
+.dev .dh .id{font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--amber);font-weight:600}
+.dev .dh .lb{font-size:10.5px;color:var(--ink-2)}
+.dev .dh .ct{margin-left:auto;font-family:'IBM Plex Mono',monospace;font-size:9.5px;color:var(--ink-3)}
+.dev table{width:100%;border-collapse:collapse}
+.dev td,.dev th{padding:5px 9px;text-align:left;border-bottom:1px solid #0e141b;font-size:11px;vertical-align:middle}
+.dev th{font-size:8.5px;letter-spacing:.16em;color:var(--ink-3);text-transform:uppercase;font-weight:500;
+  background:#0a0e13}
+.dev td.tag{font-family:'IBM Plex Mono',monospace;color:var(--ink-2);width:42%}
+.dev td.val{font-family:'IBM Plex Mono',monospace;color:var(--ink);font-weight:600;text-align:right;font-size:12px}
+.dev td.age{font-family:'IBM Plex Mono',monospace;color:var(--ink-3);width:48px;text-align:right;font-size:10px}
+.dev tr.fresh td.val{color:var(--green)}
+.dev tr.warm td.val{color:var(--amber)}
+.dev tr.stale td.val{color:var(--red);opacity:.8}
+.dev tr.stale td.tag{opacity:.5}
+.dev tr:hover{background:#0b1016}
+.dev .empty{padding:14px;text-align:center;color:var(--ink-3);font-size:11px}
+.pulse-dot{width:6px;height:6px;border-radius:50%;flex:none}
+.pulse-dot.fresh{background:var(--green);box-shadow:0 0 6px var(--green)}
+.pulse-dot.warm{background:var(--amber);box-shadow:0 0 6px var(--amber)}
+.pulse-dot.stale{background:var(--red)}
+
+/* ---------- collectors table ---------- */
+table.t{width:100%;border-collapse:collapse}
+table.t th{font-size:8.5px;letter-spacing:.16em;text-transform:uppercase;color:var(--ink-3);font-weight:500;
+  text-align:left;padding:8px 11px;border-bottom:1px solid var(--line);background:var(--panel-2);
+  position:sticky;top:0;z-index:1}
+table.t td{padding:8px 11px;border-bottom:1px solid #0e141b;font-size:11.5px;vertical-align:middle}
+table.t tr:hover td{background:#0b1016}
+.scode{font-family:'IBM Plex Mono',monospace;font-size:10px;color:var(--ink-3)}
+.appcode{font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--amber);font-weight:600}
+.badge{display:inline-flex;align-items:center;gap:6px;padding:2px 8px;border:1px solid var(--line-2);
+  font-size:9.5px;letter-spacing:.1em;text-transform:uppercase;font-family:'IBM Plex Mono',monospace}
+.badge.ext{border-color:var(--cyan);color:var(--cyan)}
+.badge.blt{border-color:var(--line-bright);color:var(--ink-2)}
+.badge.north{border-color:var(--amber-dim);color:var(--amber)}
+.state{display:inline-flex;align-items:center;gap:7px;font-size:10px;letter-spacing:.12em;text-transform:uppercase;
+  font-family:'IBM Plex Mono',monospace;font-weight:600}
+.state.running{color:var(--green)}
+.state.stopped{color:var(--ink-3)}
+.state.starting{color:var(--amber)}
+.state.stopping{color:var(--amber)}
+.state.failed{color:var(--red)}
+.kvs{display:flex;flex-direction:column;gap:2px;font-family:'IBM Plex Mono',monospace;font-size:10px;color:var(--ink-2)}
+.kvs b{color:var(--ink);font-weight:600}
+.kvs .ok{color:var(--green)}
+.kvs .bad{color:var(--red)}
+.row-actions{display:flex;gap:6px;justify-content:flex-end}
+.num{font-family:'IBM Plex Mono',monospace;font-variant-numeric:tabular-nums}
+
+/* ---------- command composer ---------- */
+.cmd-grid{display:grid;grid-template-columns:1.3fr 1fr;gap:14px}
+.field{display:flex;flex-direction:column;gap:5px;margin-bottom:11px}
+.field label{font-size:9px;letter-spacing:.2em;text-transform:uppercase;color:var(--ink-3)}
+.field label b{color:var(--amber);font-family:'IBM Plex Mono',monospace}
+.field input,.field select,.field textarea{font-family:'IBM Plex Mono',monospace;background:var(--inset);
+  border:1px solid var(--line-2);color:var(--ink);padding:7px 10px;font-size:12px;width:100%}
+.field textarea{min-height:108px;resize:vertical;line-height:1.5}
+.field input:focus,.field select:focus,.field textarea:focus{outline:none;border-color:var(--amber-dim);box-shadow:0 0 0 1px var(--amber-dim)}
+.tmpls{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px}
+.tmpls button{font-family:'IBM Plex Mono',monospace;font-size:10px;background:var(--inset);border:1px solid var(--line-2);
+  color:var(--ink-2);padding:4px 9px;cursor:pointer}
+.tmpls button:hover{border-color:var(--amber-dim);color:var(--amber)}
+.cmd-log{font-family:'IBM Plex Mono',monospace;font-size:11px;line-height:1.6;max-height:280px;overflow:auto;
+  background:#04060800;padding:0}
+.cmd-log .row{padding:6px 12px;border-bottom:1px solid #0e141b;display:flex;gap:10px;align-items:flex-start}
+.cmd-log .row .t{color:var(--ink-3);flex:none;width:62px}
+.cmd-log .row.ok .b{color:var(--green)}
+.cmd-log .row.err .b{color:var(--red)}
+.cmd-log .row .b{color:var(--ink);word-break:break-all}
+.cmd-log .empty{padding:18px;text-align:center;color:var(--ink-3)}
+
+/* ---------- diagnostics: logs + trace ---------- */
+.diag-grid{display:grid;grid-template-columns:1fr 300px;gap:14px;align-items:start}
+.log-stream{font-family:'IBM Plex Mono',monospace;font-size:11px;line-height:1.55;max-height:560px;overflow:auto}
+.log-stream .le{display:grid;grid-template-columns:74px 64px 110px 1fr;gap:10px;padding:4px 12px;border-bottom:1px solid #0c1117}
+.log-stream .le:hover{background:#0b1016}
+.log-stream .le .ts{color:var(--ink-3)}
+.log-stream .le .lv{font-weight:600}
+.log-stream .le.error .lv,.log-stream .le.error .msg{color:var(--red)}
+.log-stream .le.warn .lv{color:var(--amber)}
+.log-stream .le.info .lv{color:var(--cyan)}
+.log-stream .le.debug .lv,.log-stream .le.trace .lv{color:var(--ink-3)}
+.log-stream .le .tg{color:var(--ink-2)}
+.log-stream .le .msg{color:var(--ink);white-space:pre-wrap;word-break:break-word}
+.log-stream .le .msg .fld{color:var(--amber)}
+.trace-box .pb{padding:11px 13px}
+.trace-inst{display:flex;align-items:center;gap:9px;padding:7px 0;border-bottom:1px solid var(--line)}
+.trace-inst:last-child{border:0}
+.trace-inst .id{font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--ink);font-weight:600}
+.trace-inst .st{font-size:9px;letter-spacing:.14em;color:var(--ink-3);text-transform:uppercase;margin-left:auto}
+.trace-inst .st.live{color:var(--green)}
+
+/* ---------- footer status strip ---------- */
+.strip{display:flex;align-items:center;gap:0;background:#070a0e;border-top:1px solid var(--line);
+  font-size:10px;letter-spacing:.1em;overflow:hidden}
+.strip .seg{border:0;border-right:1px solid var(--line);padding:0 13px;height:100%;display:flex;align-items:center;gap:7px;
+  background:transparent;cursor:default;color:var(--ink-2);text-transform:none;letter-spacing:.04em;font-family:'Chakra Petch',sans-serif}
+.strip .seg b{font-family:'IBM Plex Mono',monospace;color:var(--ink);font-weight:600}
+.strip .seg b.amber{color:var(--amber)}
+.strip .seg b.green{color:var(--green)}
+.strip .seg b.red{color:var(--red)}
+.strip .seg .ll{width:6px;height:6px;border-radius:50%}
+.minibar{width:54px;height:6px;background:#000;border:1px solid var(--line);position:relative}
+.minibar .f{height:100%;background:var(--amber)}
+.minibar .f.g{background:var(--green)}
+.strip .ticker{flex:1;overflow:hidden;white-space:nowrap;color:var(--ink-3);padding:0 14px;mask:linear-gradient(90deg,transparent,#000 6%,#000 94%,transparent)}
+.strip .ticker span{display:inline-block;animation:tick 38s linear infinite;padding-left:100%}
+@keyframes tick{to{transform:translateX(-100%)}}
+
+/* ---------- login overlay ---------- */
+.veil{position:fixed;inset:0;z-index:1000;background:rgba(3,5,7,.92);display:grid;place-items:center;
+  backdrop-filter:blur(3px)}
+.veil.hidden{display:none}
+.login-card{width:380px;background:var(--panel);border:1px solid var(--amber-dim);position:relative;
+  box-shadow:0 0 60px -10px rgba(255,179,0,.25)}
+.login-card::before,.login-card::after{content:"";position:absolute;width:12px;height:12px;border:1px solid var(--amber)}
+.login-card::before{top:-1px;left:-1px;border-right:0;border-bottom:0}
+.login-card::after{bottom:-1px;right:-1px;border-left:0;border-top:0}
+.login-card .lh{padding:18px 20px 14px;border-bottom:1px solid var(--line);background:linear-gradient(180deg,#11171f,var(--panel))}
+.login-card .lh .b1{font-size:17px;font-weight:700;letter-spacing:.12em;text-transform:uppercase;color:var(--amber)}
+.login-card .lh .b2{font-size:10px;letter-spacing:.28em;color:var(--ink-3);text-transform:uppercase;margin-top:5px}
+.login-card .lf{padding:18px 20px 20px}
+.login-card .err{color:var(--red);font-size:11px;margin-bottom:10px;min-height:14px;font-family:'IBM Plex Mono',monospace}
+.login-card .hint{margin-top:13px;padding-top:11px;border-top:1px dashed var(--line);font-size:9.5px;color:var(--ink-3);
+  letter-spacing:.08em;line-height:1.6;font-family:'IBM Plex Mono',monospace}
+.login-card .hint b{color:var(--amber)}
+
+/* toast */
+.toast{position:fixed;bottom:42px;right:18px;z-index:2000;display:flex;flex-direction:column;gap:8px}
+.toast .t{background:var(--panel);border:1px solid var(--line-2);border-left:3px solid var(--amber);
+  padding:9px 14px;font-size:11.5px;max-width:340px;animation:slidein .25s ease;box-shadow:0 8px 30px -8px #000}
+.toast .t.ok{border-left-color:var(--green)}
+.toast .t.err{border-left-color:var(--red)}
+.toast .t .h{font-size:9px;letter-spacing:.18em;text-transform:uppercase;color:var(--ink-3);margin-bottom:2px}
+@keyframes slidein{from{opacity:0;transform:translateX(20px)}to{opacity:1;transform:none}}
+
+.sim-badge{position:fixed;top:62px;right:14px;z-index:50;display:flex;align-items:center;gap:7px;padding:5px 11px;
+  background:var(--panel);border:1px solid var(--yellow);color:var(--yellow);font-size:10px;letter-spacing:.18em;
+  text-transform:uppercase;font-weight:600}
+.sim-badge .dot{width:7px;height:7px;border-radius:50%;background:var(--yellow);animation:blink 1s steps(1) infinite}
+.empty-state{padding:40px;text-align:center;color:var(--ink-3)}
+.empty-state svg{width:42px;height:42px;color:var(--ink-4);margin-bottom:12px}
+.empty-state .t{font-size:12px;letter-spacing:.12em;text-transform:uppercase}
+.empty-state .s{font-size:10.5px;margin-top:6px;color:var(--ink-4)}
+
+.kvline{display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px solid #0e141b;font-size:11px}
+.kvline:last-child{border:0}
+.kvline .k{color:var(--ink-3);letter-spacing:.1em}
+.kvline .v{font-family:'IBM Plex Mono',monospace;color:var(--ink);font-weight:600}
+@media(max-width:1100px){.cmd-grid,.diag-grid{grid-template-columns:1fr}.g4{grid-template-columns:repeat(2,1fr)}}
+
+/* ============================================================
+   主题系统（浅/深）+ 全局放大（工业现场大字可读）
+   追加段在后，同特异性覆盖原值；data-theme 控制。
+   ============================================================ */
+:root{
+  --vig-a:rgba(255,138,0,.06); --vig-b:rgba(0,0,0,.55);
+  --scan-op:.45; --fill-shadow:0 0 10px -1px var(--amber);
+  --led-glow:7px; --on-amber:#101006;
+}
+html[data-theme="light"]{
+  --bg:#dbe2e9; --panel:#ffffff; --panel-2:#f1f4f8; --inset:#e8edf3;
+  --line:#c5cfd9; --line-2:#b1bdc9; --line-bright:#7e8b98;
+  --ink:#13202c; --ink-2:#3d4d5a; --ink-3:#5f6d78; --ink-4:#8b97a3;
+  --amber:#a8620a; --amber-2:#8c5208; --amber-dim:#d8a45e;
+  --green:#1a8a3e; --green-dim:#6fbf8a;
+  --red:#c81e1e; --red-dim:#e59191;
+  --cyan:#0a7e8c; --yellow:#846000;
+  --vig-a:transparent; --vig-b:transparent; --scan-op:.05;
+  --fill-shadow:none; --led-glow:4px; --on-amber:#ffffff;
+  --glow:0 0 0 1px rgba(168,98,10,.38), 0 2px 10px -2px rgba(0,0,0,.14);
+}
+/* 装饰元素改用变量（两套主题各取其值） */
+body::before{
+  background:
+    radial-gradient(120% 90% at 50% -10%,var(--vig-a),transparent 55%),
+    radial-gradient(100% 100% at 50% 120%,var(--vig-b),transparent 60%),
+    linear-gradient(var(--grid-line,rgba(255,179,0,.018)) 1px,transparent 1px) 0 0/100% 30px,
+    linear-gradient(90deg,var(--grid-line,rgba(255,179,0,.018)) 1px,transparent 1px) 0 0/30px 100%;
+}
+html[data-theme="light"] body::before{--grid-line:rgba(20,45,70,.05)}
+body::after{opacity:var(--scan-op)}
+html[data-theme="light"] body::after{mix-blend-mode:normal;background:repeating-linear-gradient(0deg,rgba(0,0,0,.022) 0 1px,transparent 1px 3px)}
+.bar .fill{box-shadow:var(--fill-shadow)}
+.bar .fill.green,.bar .fill.red{box-shadow:var(--fill-shadow)}
+.led.on{box-shadow:0 0 var(--led-glow) var(--green)}
+.led.amber{box-shadow:0 0 var(--led-glow) var(--amber)}
+.led.red{box-shadow:0 0 var(--led-glow) var(--red)}
+.pulse-dot.fresh{box-shadow:0 0 var(--led-glow) var(--green)}
+.pulse-dot.warm{box-shadow:0 0 var(--led-glow) var(--amber)}
+.rec .dot{box-shadow:0 0 8px var(--red)}
+.btn.primary:hover{box-shadow:var(--glow)}
+::selection{background:var(--amber);color:var(--on-amber)}
+.seg button.on{background:var(--amber);color:var(--on-amber)}
+/* 浅色主题：覆盖原硬编码深色背景/边框/hover */
+html[data-theme="light"] .topbar{background:linear-gradient(180deg,#f8fafc,#e9eef3)}
+html[data-theme="light"] .strip{background:#e4eaf0}
+html[data-theme="light"] .rail{background:#f3f6f9}
+html[data-theme="light"] .dev th{background:#eef2f7}
+html[data-theme="light"] .dev td,html[data-theme="light"] .dev th{border-bottom:1px solid var(--line)}
+html[data-theme="light"] .dev tr:hover{background:#e7edf3}
+html[data-theme="light"] .dev .dh{background:linear-gradient(180deg,#eef2f7,var(--inset))}
+html[data-theme="light"] table.t tr:hover td{background:#e7edf3}
+html[data-theme="light"] .cmd-log .row{border-bottom:1px solid var(--line)}
+html[data-theme="light"] .log-stream .le:hover{background:#e7edf3}
+html[data-theme="light"] .log-stream .le{border-bottom:1px solid var(--line)}
+html[data-theme="light"] .kvline{border-bottom:1px solid var(--line)}
+html[data-theme="light"] .trace-inst{border-bottom:1px solid var(--line)}
+html[data-theme="light"] .brand .mark{background:radial-gradient(circle at 50% 40%,rgba(168,98,10,.14),transparent 70%)}
+html[data-theme="light"] .nav button.active{background:linear-gradient(90deg,rgba(168,98,10,.14),transparent)}
+
+/* ===== 全局放大字号 + 间距（工业现场大字可读） ===== */
+body{font-size:15.5px}
+.app{grid-template-rows:62px 1fr 36px}
+.topbar{padding:0 18px;gap:20px}
+.brand{min-width:250px;gap:12px}
+.brand .mark{width:34px;height:34px}
+.brand .mark svg{width:19px;height:19px}
+.brand .t1{font-size:18px}
+.brand .t2{font-size:10.5px}
+.tb-mid{gap:16px}
+.chip{padding:6px 12px;font-size:12.5px;gap:8px}
+.chip .k{font-size:10.5px}
+.tb-clock .t{font-size:20px}
+.tb-clock .d{font-size:10px}
+.tb-right{gap:12px;min-width:330px}
+.heartbeat{width:134px;height:34px}
+.rec{padding:6px 11px} .rec .dot{width:9px;height:9px} .rec .lbl{font-size:11px}
+.conn{font-size:11px;gap:8px} .led{width:9px;height:9px}
+.op .av{width:30px;height:30px;font-size:13px}
+.op .nm{font-size:12.5px} .op .rl{font-size:10px}
+.btn{font-size:12px;padding:8px 14px}
+.btn.sm{padding:5px 11px;font-size:11px}
+
+.body{grid-template-columns:242px 1fr}
+.rail{padding:16px 0}
+.rail .hd{font-size:10.5px;padding:0 18px 12px}
+.nav button{padding:12px 12px;gap:11px}
+.nav button svg{width:20px;height:20px}
+.nav button .zh{font-size:14.5px}
+.nav button .en{font-size:10px}
+.nav button .num{font-size:10px}
+.rail .ft{padding:13px 18px 4px;font-size:9.5px}
+.canvas{padding:18px}
+
+.panel{margin-bottom:15px}
+.panel .ph{padding:10px 15px;gap:11px}
+.panel .ph .code{font-size:11px;padding:3px 8px}
+.panel .ph .ttl{font-size:13.5px}
+.panel .ph .sub{font-size:10.5px}
+.panel .ph .meta{font-size:11px}
+.panel .pb{padding:15px}
+.grid{gap:15px}
+
+.tile{padding:14px 15px}
+.tile .lab{font-size:11.5px}
+.tile .val{font-size:30px;margin-top:6px}
+.tile .val small{font-size:13px}
+.tile .dlt{font-size:11px;margin-top:4px}
+.meter{margin-top:11px}
+.meter .top{font-size:10.5px;margin-bottom:5px}
+.bar{height:12px}
+.ruler{font-size:9.5px}
+.istate{padding:11px 14px;gap:11px;min-width:104px}
+.istate .n{font-size:27px}
+.istate .l{font-size:10.5px}
+
+.tm-toolbar{padding:12px 15px;gap:11px}
+.tm-toolbar .cnt{font-size:12px}
+.tm-toolbar input{font-size:12.5px;padding:6px 11px;width:185px}
+.seg button{padding:6px 13px;font-size:11px}
+.devs{grid-template-columns:repeat(auto-fill,minmax(296px,1fr));gap:15px;padding:15px}
+.dev .dh{padding:9px 12px;gap:10px}
+.dev .dh .ic{width:22px;height:22px}
+.dev .dh .ic svg{width:13px;height:13px}
+.dev .dh .id{font-size:12.5px}
+.dev .dh .lb{font-size:11.5px}
+.dev .dh .ct{font-size:10.5px}
+.dev td,.dev th{padding:7px 12px;font-size:12.5px}
+.dev th{font-size:9.5px}
+.dev td.val{font-size:14px}
+.dev td.tag{font-size:12px}
+.dev td.age{font-size:11px;width:54px}
+
+table.t th{font-size:10px;padding:11px 14px}
+table.t td{padding:11px 14px;font-size:13.5px}
+.appcode{font-size:12px}
+.scode{font-size:10.5px}
+.badge{font-size:10.5px;padding:3px 9px;gap:6px}
+.state{font-size:11.5px;gap:8px}
+.state .led{width:9px;height:9px}
+.kvs{font-size:11.5px;gap:3px}
+.kvline{font-size:12px;padding:6px 0}
+.row-actions{gap:7px}
+
+.cmd-grid{gap:15px}
+.field{gap:6px;margin-bottom:13px}
+.field label{font-size:10.5px}
+.field input,.field select,.field textarea{font-size:13px;padding:9px 11px}
+.field textarea{min-height:118px}
+.tmpls button{font-size:11px;padding:5px 11px}
+.cmd-log{font-size:12px;max-height:320px}
+.cmd-log .row{padding:8px 14px;gap:11px}
+.cmd-log .row .t{width:70px;font-size:11px}
+.cmd-log .empty{padding:20px;font-size:12px}
+
+.log-stream{font-size:12px;max-height:600px}
+.log-stream .le{grid-template-columns:82px 70px 128px 1fr;gap:12px;padding:5px 14px}
+.log-stream .le .ts{font-size:11.5px}
+.log-stream .le .lv{font-size:11.5px}
+
+.diag-grid{grid-template-columns:1fr 320px;gap:15px}
+.trace-box .pb{padding:13px 15px}
+
+.strip{font-size:11px}
+.strip .seg{padding:0 15px;gap:8px}
+.minibar{width:62px;height:7px}
+
+.login-card{width:430px}
+.login-card .lh{padding:22px 24px 16px}
+.login-card .lh .b1{font-size:19px}
+.login-card .lh .b2{font-size:11px}
+.login-card .lf{padding:22px 24px 24px}
+.login-card .field input{font-size:13.5px;padding:9px 11px}
+.login-card .err{font-size:12px}
+.login-card .hint{font-size:10.5px}
+
+.sim-badge{font-size:11px;padding:6px 13px}
+.toast .t{font-size:12.5px;padding:11px 16px;max-width:360px}
+.toast .t .h{font-size:10px}
+
+/* 主题切换器 */
+.theme-toggle{display:inline-flex;border:1px solid var(--line-2);background:var(--inset)}
+.theme-toggle button{background:transparent;border:0;border-right:1px solid var(--line-2);
+  color:var(--ink-2);padding:8px 13px;font-family:inherit;font-size:11.5px;cursor:pointer;letter-spacing:.06em}
+.theme-toggle button:last-child{border-right:0}
+.theme-toggle button.on{background:var(--amber);color:var(--on-amber);font-weight:600}
+/* 新增采集器表单 */
+.nimode{display:none;margin-bottom:13px;padding:9px 12px;border:1px solid var(--amber-dim);background:rgba(255,179,0,.06);font-size:11.5px;color:var(--ink-2);letter-spacing:.03em;line-height:1.6}
+.nimode.show{display:block}
+html[data-theme="light"] .nimode{background:rgba(168,98,10,.07)}
+.newgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(198px,1fr));gap:12px;margin-bottom:13px}
+.newgrid .field:last-child{display:flex;flex-direction:column;justify-content:flex-end}
+.newfoot{display:flex;align-items:center;gap:12px;margin-top:8px;flex-wrap:wrap}
+.chk{display:inline-flex;align-items:center;gap:8px;font-size:11.5px;color:var(--ink-2);cursor:pointer;letter-spacing:.04em}
+.chk input{width:15px;height:15px;accent-color:var(--amber);cursor:pointer}
+.newresult{margin-top:14px;padding:12px 14px;border:1px solid var(--line);font-size:12px;line-height:1.75;display:none}
+.newresult.show{display:block}
+.newresult.ok{border-color:var(--green);background:rgba(63,214,108,.07)}
+.newresult.err{border-color:var(--red);background:rgba(255,77,77,.07)}
+.newresult.info{border-color:var(--amber-dim);color:var(--ink-2)}
+.newresult code{display:block;margin-top:8px;padding:8px 10px;background:#0c1015;color:var(--amber);word-break:break-all;font-size:11px;border:1px solid #1b232d}
+html[data-theme="light"] .newresult code{background:#10161d;color:#ffb300;border-color:#2a3642}
+/* 诊断：trace 控制 + 日志/报文标签页 + 报文流 */
+.trc-inline{display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap}
+.trc-inline .field{margin:0;flex:1;min-width:170px}
+.trc-active-wrap{display:flex;align-items:center;gap:8px;width:100%;margin-top:8px;padding-top:10px;border-top:1px solid var(--line);font-size:11px}
+.trc-active-wrap .tk{text-transform:uppercase;font-size:9.5px;letter-spacing:.16em;color:var(--ink-3)}
+.tac{display:inline-flex;align-items:center;gap:5px;padding:3px 9px;border:1px solid var(--green-dim);color:var(--green);font-family:'IBM Plex Mono',monospace;font-size:11px;margin-right:6px}
+.diag-tabs{display:flex;align-items:stretch;gap:0;border-bottom:1px solid var(--line);padding:0 14px}
+.diag-tabs button{background:transparent;border:0;border-bottom:2px solid transparent;color:var(--ink-2);padding:13px 22px;font-family:inherit;font-size:13.5px;cursor:pointer;letter-spacing:.08em;font-weight:600}
+.diag-tabs button:hover{color:var(--ink)}
+.diag-tabs button.on{color:var(--amber);border-bottom-color:var(--amber)}
+.diag-tabs .cnt{font-size:10.5px;color:var(--ink-3);margin-left:6px;font-family:'IBM Plex Mono',monospace;font-weight:400}
+.diag-tabs .grow{flex:1}
+.tab-tools{display:flex;gap:9px;align-items:center;align-self:center}
+.tab-tools[hide]{display:none}
+.pkt-stream{font-family:'IBM Plex Mono',monospace;font-size:12px;max-height:calc(100vh - 270px);overflow:auto}
+.pkt{display:grid;grid-template-columns:48px 160px 1fr 72px;gap:12px;padding:6px 14px;border-bottom:1px solid var(--line);align-items:baseline}
+.pkt:hover{background:var(--inset)}
+.pkt .dir{font-weight:700;text-align:center;font-size:11px;padding:2px 0;border:1px solid;letter-spacing:.05em}
+.pkt.tx .dir{color:var(--amber);border-color:var(--amber-dim);background:rgba(255,179,0,.09)}
+.pkt.rx .dir{color:var(--green);border-color:var(--green-dim);background:rgba(63,214,108,.09)}
+.pkt .inst{color:var(--ink-2);font-size:11.5px}
+.pkt .hex{color:var(--ink);word-break:break-all;font-size:11.5px;letter-spacing:.1em}
+.pkt .ts{color:var(--ink-3);font-size:10.5px;text-align:right}
+html[data-theme="light"] .pkt.tx .dir{background:rgba(168,98,10,.1)}
+html[data-theme="light"] .pkt.rx .dir{background:rgba(26,138,62,.1)}
+</style>
+</head>
+<body>
+<div class="app">
+
+  <!-- ===================== TOP BAR ===================== -->
+  <header class="topbar">
+    <div class="brand">
+      <div class="mark"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12h4l2-7 4 14 2-7h6"/></svg></div>
+      <div>
+        <div class="t1">RS-IOT <b>SCADA</b></div>
+        <div class="t2">采集器监控终端 · COLLECTOR TERMINAL</div>
+      </div>
+    </div>
+    <div class="tb-mid">
+      <div class="chip"><span class="k">HWID</span><span class="v amber mono" id="hwid">——</span></div>
+      <div class="chip"><span class="k">VER</span><span class="v mono" id="ver">——</span></div>
+      <div class="chip"><span class="k">DBSIZE</span><span class="v mono" id="dbsize">0</span></div>
+      <div class="tb-clock">
+        <div class="t mono" id="clock">--:--:--</div>
+        <div class="d" id="date">—— · UTC+8</div>
+      </div>
+    </div>
+    <div class="tb-right">
+      <div class="heartbeat"><svg id="hb" viewBox="0 0 120 30" preserveAspectRatio="none"><polyline id="hbpoly" fill="none" stroke="#ffb300" stroke-width="1.2" points=""/></svg></div>
+      <div class="rec"><span class="dot"></span><span class="lbl">REC</span></div>
+      <div class="conn"><span class="led off" id="connLed"></span><span id="connTxt">LINK ·</span></div>
+      <div class="theme-toggle" id="themeToggle" title="界面主题">
+        <button data-t="light" class="on">浅色</button>
+        <button data-t="dark">深色</button>
+      </div>
+      <div class="op">
+        <div class="av" id="opAv">A</div>
+        <div>
+          <div class="nm" id="opNm">admin</div>
+          <div class="rl" id="opRl">OPERATOR</div>
+        </div>
+      </div>
+    </div>
+  </header>
+
+  <!-- ===================== BODY ===================== -->
+  <div class="body">
+    <!-- rail -->
+    <nav class="rail">
+      <div class="hd">监控模块 · MODULES</div>
+      <div class="nav" id="nav">
+        <button data-v="overview" class="active"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="3" y="3" width="7" height="9"/><rect x="14" y="3" width="7" height="5"/><rect x="14" y="12" width="7" height="9"/><rect x="3" y="16" width="7" height="5"/></svg><span><span class="zh">概览</span><br><span class="en">Overview</span></span><span class="num">MOD-01</span></button>
+        <button data-v="telemetry"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M3 12h4l2-7 4 14 2-7h6"/></svg><span><span class="zh">实时数据</span><br><span class="en">Telemetry</span></span><span class="num">MOD-02</span></button>
+        <button data-v="collectors"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="3" y="4" width="18" height="6" rx="1"/><rect x="3" y="14" width="18" height="6" rx="1"/><circle cx="7" cy="7" r=".8" fill="currentColor"/><circle cx="7" cy="17" r=".8" fill="currentColor"/></svg><span><span class="zh">采集器</span><br><span class="en">Collectors</span></span><span class="num">MOD-03</span></button>
+        <button data-v="control"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M22 2 11 13"/><path d="M22 2 15 22l-4-9-9-4 20-7z"/></svg><span><span class="zh">命令下发</span><br><span class="en">Control</span></span><span class="num">MOD-04</span></button>
+        <button data-v="diagnostics"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M9 2h6l1 3 2 1 3-1 1 4-2 2v3l2 2-1 4-3-1-2 1-1 3H9l-1-3-2-1-3 1-1-4 2-2v-3L2 7l1-4 3 1 2-1 1-3z"/><circle cx="12" cy="12" r="3"/></svg><span><span class="zh">诊断</span><br><span class="en">Diagnostics</span></span><span class="num">MOD-05</span></button>
+      </div>
+      <div class="spacer"></div>
+      <div class="ft">
+        <div><b>PROTOCOL</b> · RESP :6390</div>
+        <div><b>MANAGE</b> · REST :8780</div>
+        <div><b>BUILD</b> · <span class="mono">edge-gw</span></div>
+      </div>
+    </nav>
+
+    <!-- canvas -->
+    <main class="canvas">
+      <div class="reg tl"></div><div class="reg tr"></div>
+
+      <!-- ========== OVERVIEW ========== -->
+      <section class="view active" id="v-overview">
+        <div class="grid g4" style="margin-bottom:14px">
+          <div class="tile"><div class="lab">运行时长 · UPTIME</div><div class="val amber mono" id="ov-uptime">0<small>d</small></div><div class="dlt" id="ov-uptime-s">—</div></div>
+          <div class="tile"><div class="lab">采集实例 · INSTANCES</div><div class="val mono" id="ov-inst">0<small>/0</small></div><div class="dlt" id="ov-inst-s">运行 / 总数</div></div>
+          <div class="tile"><div class="lab">数据点位 · TAGS</div><div class="val mono" id="ov-tags">0</div><div class="dlt" id="ov-tags-s">实时缓存</div></div>
+          <div class="tile"><div class="lab">命令吞吐 · CTL RATE</div><div class="val mono" id="ov-ctl">0</div><div class="dlt" id="ov-ctl-s">已投递 / 丢弃</div></div>
+        </div>
+
+        <div class="grid g3" style="margin-bottom:14px">
+          <div class="panel">
+            <div class="ph"><span class="code">SYS</span><span class="ttl">进程资源</span><span class="sub">PROCESS</span><span class="grow"></span><span class="meta" id="sys-res-meta">—</span></div>
+            <div class="pb">
+              <div class="meter"><div class="top"><span>CPU 负载</span><b id="cpu-v">0.0%</b></div>
+                <div class="bar"><div class="fill" id="cpu-bar" style="width:0%"></div></div>
+                <div class="ruler"><span>0</span><span>50</span><span>100%</span></div></div>
+              <div class="meter"><div class="top"><span>内存占用</span><b id="mem-v">0 MB</b></div>
+                <div class="bar"><div class="fill green" id="mem-bar" style="width:0%"></div></div>
+                <div class="ruler"><span>0</span><span>—</span><span id="mem-scale">MB</span></div></div>
+            </div>
+          </div>
+          <div class="panel">
+            <div class="ph"><span class="code">BUS</span><span class="ttl">数据总线</span><span class="sub">HUB / MQTT</span></div>
+            <div class="pb">
+              <div class="meter"><div class="top"><span>HUB 队列深度</span><b id="hub-v">0</b></div>
+                <div class="bar"><div class="fill" id="hub-bar" style="width:0%"></div></div>
+                <div class="ruler"><span>0</span><span>128</span><span>256</span></div></div>
+              <div class="kvline"><span class="k">MQTT 链路</span><span class="v" id="mqtt-st">—</span></div>
+              <div class="kvline"><span class="k">发布计数</span><span class="v" id="mqtt-pub">0</span></div>
+              <div class="kvline"><span class="k">发布失败</span><span class="v" id="mqtt-fail">0</span></div>
+            </div>
+          </div>
+          <div class="panel">
+            <div class="ph"><span class="code">PIPE</span><span class="ttl">管道吞吐</span><span class="sub">PIPELINE</span></div>
+            <div class="pb">
+              <div class="kvline"><span class="k">已处理 SAMPLE</span><span class="v" id="pp-proc">0</span></div>
+              <div class="kvline"><span class="k">写库失败</span><span class="v" id="pp-fail">0</span></div>
+              <div class="kvline"><span class="k">CTL 已投递</span><span class="v" id="pp-send">0</span></div>
+              <div class="kvline"><span class="k">CTL 已丢弃</span><span class="v" id="pp-drop">0</span></div>
+              <div class="kvline"><span class="k">CTL 未命中</span><span class="v" id="pp-nf">0</span></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="grid g2">
+          <div class="panel">
+            <div class="ph"><span class="code">ST</span><span class="ttl">采集器状态摘要</span><span class="sub">INSTANCE STATES</span><span class="grow"></span><span class="meta" id="ov-states-meta">—</span></div>
+            <div class="pb"><div class="istates" id="istates"></div></div>
+          </div>
+          <div class="panel">
+            <div class="ph"><span class="code">LOG</span><span class="ttl">最近事件</span><span class="sub">EVENT STREAM</span><span class="grow"></span><span class="meta">ringbuffer</span></div>
+            <div class="pb" style="padding:4px 0;max-height:180px;overflow:auto" id="ov-logs"></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ========== TELEMETRY ========== -->
+      <section class="view" id="v-telemetry">
+        <div class="panel">
+          <div class="tm-toolbar">
+            <span class="cnt">设备 <b id="tm-devcnt">0</b> · 点位 <b id="tm-tagcnt">0</b></span>
+            <input id="tm-filter" placeholder="过滤 设备/点位…">
+            <div class="seg" id="tm-fresh">
+              <button class="on" data-f="all">全部</button>
+              <button data-f="fresh">新鲜</button>
+              <button data-f="stale">停滞</button>
+            </div>
+            <div class="grow"></div>
+            <span class="cnt">采样 <b id="tm-period">2s</b></span>
+          </div>
+          <div class="devs" id="tm-devs"></div>
+        </div>
+      </section>
+
+      <!-- ========== COLLECTORS ========== -->
+      <section class="view" id="v-collectors">
+        <div class="panel" id="newInstPanel">
+          <div class="ph"><span class="code">NEW</span><span class="ttl">新增采集器</span><span class="sub">REGISTER INSTANCE</span><span class="grow"></span><button class="btn sm" id="newInstToggle">＋ 新增采集器</button></div>
+          <div class="pb" id="newInstBody" style="display:none">
+            <div class="nimode" id="ni-mode"></div>
+            <div class="newgrid">
+              <div class="field"><label>实例ID · <b>inst_id</b> *</label><input id="ni-id" class="mono" placeholder="如 mb-power2"></div>
+              <div class="field"><label>显示名 · inst_name</label><input id="ni-name" placeholder="如 2号线电力监控"></div>
+              <div class="field"><label>协议 · <b>app_code</b></label><select id="ni-appcode"><option value="dataSim">dataSim · 数据模拟</option><option value="opcuaClient">opcuaClient · OPC UA</option><option value="modbusClient">modbusClient · Modbus</option><option value="s7Client">s7Client · 西门子 S7</option><option value="luaClient">luaClient · LUA 脚本</option><option value="sidecarClient">sidecarClient · 外部插件</option></select></div>
+              <div class="field"><label>形态 · host_kind</label><select id="ni-host"><option value="builtin">内置 builtin</option><option value="external">外部 external</option></select></div>
+              <div class="field"><label>自启 · auto_start</label><label class="chk"><input type="checkbox" id="ni-auto" checked> 随系统自启</label></div>
+            </div>
+            <div class="field"><label>app_config · 协议参数 JSON <span id="ni-ac-hint" style="color:var(--ink-3);font-family:'Chakra Petch';font-size:11px"></span></label><textarea id="ni-ac" spellcheck="false"></textarea></div>
+            <div class="field"><label>devices · 设备点表 JSON <span style="color:var(--ink-3);font-family:'Chakra Petch';font-size:11px">children.value = 协议地址</span></label><textarea id="ni-dev" spellcheck="false"></textarea></div>
+            <div class="newfoot">
+              <label class="chk" id="ni-start-wrap"><input type="checkbox" id="ni-start" checked> <span id="ni-start-label">提交后启动</span></label>
+              <span class="grow"></span>
+              <button class="btn" id="ni-cancel">取消</button>
+              <button class="btn primary" id="ni-submit">▸ 提交</button>
+            </div>
+            <div class="newresult" id="ni-result"></div>
+          </div>
+        </div>
+        <div class="panel">
+          <div class="ph"><span class="code">REG</span><span class="ttl">采集器实例</span><span class="sub">COLLECTOR INSTANCES</span><span class="grow"></span><span class="meta" id="cl-meta">南向 / 北向</span></div>
+          <div class="pb tight" style="overflow:auto;max-height:calc(100vh - 160px)">
+            <table class="t">
+              <thead><tr>
+                <th>实例 · INSTANCE</th><th>协议</th><th>形态</th><th>方向</th><th>运行状态</th>
+                <th>健康 · HEALTH</th><th>操作</th>
+              </tr></thead>
+              <tbody id="cl-body"></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <!-- ========== CONTROL ========== -->
+      <section class="view" id="v-control">
+        <div class="cmd-grid">
+          <div class="panel">
+            <div class="ph"><span class="code">TX</span><span class="ttl">命令下发</span><span class="sub">CONTROL DISPATCH</span><span class="grow"></span><span class="meta">CtlRegistry</span></div>
+            <div class="pb">
+              <div class="field"><label>目标实例 · <b>instance</b> <span style="color:var(--ink-3)">(仅运行中可投递)</span></label>
+                <select id="cmd-inst"></select></div>
+              <div class="field"><label>目标设备 · <b>devid</b></label><input id="cmd-devid" class="mono" placeholder="例: devA"></div>
+              <div class="field"><label>命令类型 · <b>cmd</b></label><input id="cmd-cmd" class="mono" value="write"></div>
+              <div class="field"><label>载荷模板 · <b>data</b> (JSON 文本)</label>
+                <div class="tmpls" id="cmd-tmpls"></div>
+                <textarea id="cmd-data" spellcheck="false"></textarea></div>
+              <button class="btn primary" id="cmd-send">▸ 投递命令 · DISPATCH</button>
+            </div>
+          </div>
+          <div class="panel">
+            <div class="ph"><span class="code">LOG</span><span class="ttl">下发日志</span><span class="sub">DISPATCH LOG</span><span class="grow"></span><span class="meta" id="cmd-cnt">0 条</span></div>
+            <div class="pb tight cmd-log" id="cmd-log"><div class="empty">尚无命令记录</div></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ========== DIAGNOSTICS ========== -->
+      <section class="view" id="v-diagnostics">
+        <div class="panel trace-box">
+          <div class="ph"><span class="code">TRC</span><span class="ttl">报文 trace 控制</span><span class="sub">PACKET TRACE</span><span class="grow"></span><span class="meta" id="trc-active-cnt">—</span></div>
+          <div class="pb trc-inline">
+            <div class="field"><label>目标实例</label><select id="trc-inst"></select></div>
+            <div class="field" style="max-width:130px"><label>持续 · 秒</label><input id="trc-dur" class="mono" type="number" value="60" min="5" max="3600"></div>
+            <button class="btn primary" id="trc-start">● 激活报文 trace</button>
+            <div class="trc-active-wrap"><span class="tk">已激活</span><span id="trc-active"></span></div>
+          </div>
+        </div>
+        <div class="panel">
+          <div class="diag-tabs">
+            <button class="on" data-tab="log">日志流 <span class="cnt" id="tab-log-cnt">0</span></button>
+            <button data-tab="pkt">报文流 <span class="cnt" id="tab-pkt-cnt">0</span></button>
+            <span class="grow"></span>
+            <div class="tab-tools" id="log-tools">
+              <div class="seg" id="lg-level">
+                <button class="on" data-l="">ALL</button>
+                <button data-l="error">ERR</button>
+                <button data-l="warn">WARN</button>
+                <button data-l="info">INFO</button>
+              </div>
+              <input id="lg-target" placeholder="target 过滤" style="width:120px;font-size:11px">
+              <button class="btn sm" id="lg-refresh" title="刷新">↻</button>
+            </div>
+          </div>
+          <div class="tab-pane" id="pane-log"><div class="log-stream" id="lg-stream"></div></div>
+          <div class="tab-pane" id="pane-pkt" style="display:none"><div class="pkt-stream" id="pkt-stream"></div></div>
+        </div>
+        </div>
+      </section>
+
+    </main>
+  </div>
+
+  <!-- ===================== STATUS STRIP ===================== -->
+  <footer class="strip">
+    <div class="seg"><span class="ll" style="background:var(--amber)"></span> CORE <b class="amber" id="st-core">ALIVE</b></div>
+    <div class="seg">HUB <b id="st-hub">0/256</b><div class="minibar"><div class="f" id="st-hub-bar" style="width:0%"></div></div></div>
+    <div class="seg">MQTT <b id="st-mqtt">—</b></div>
+    <div class="seg">CPU <b id="st-cpu">0%</b><div class="minibar"><div class="f" id="st-cpu-bar" style="width:0%"></div></div></div>
+    <div class="seg">MEM <b id="st-mem">0M</b><div class="minibar"><div class="f g" id="st-mem-bar" style="width:0%"></div></div></div>
+    <div class="seg">PIPE <b class="green" id="st-pipe">0</b></div>
+    <div class="seg">CTL <b id="st-ctl">0</b></div>
+    <div class="ticker"><span id="ticker-txt">SYSTEM NOMINAL · 所有子系统在线 · 数据总线正常 · 采集器心跳良好 · 报文链路加密就绪 · WAL 持久化运行中 · </span></div>
+    <div class="seg">© EDGE-IOT</div>
+  </footer>
+</div>
+
+<!-- login overlay -->
+<div class="veil" id="veil">
+  <div class="login-card">
+    <div class="lh">
+      <div class="b1">接入认证</div>
+      <div class="b2">ACCESS CONTROL · OPERATOR LOGIN</div>
+    </div>
+    <div class="lf">
+      <div class="field"><label>操作员 · OPERATOR ID</label><input id="lg-user" class="mono" value="admin" autocomplete="username"></div>
+      <div class="field"><label>通行密钥 · PASSPHRASE</label><input id="lg-pass" class="mono" type="password" value="admin" autocomplete="current-password"></div>
+      <div class="err" id="lg-err"></div>
+      <button class="btn primary" id="lg-btn" style="width:100%;justify-content:center">▸ 接入终端 · AUTHENTICATE</button>
+      <div class="hint">
+        凭据经 <b>POST /api/v1/user/login</b> 校验，签发 JWT。<br>
+        默认管理员 <b>admin / admin</b>（首次部署请改密）。
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="sim-badge hidden" id="simBadge"><span class="dot"></span> SIM · 演练数据</div>
+<div class="toast" id="toast"></div>
+
+<script>
+/* ============================================================
+   rs-iot SCADA terminal — frontend logic
+   对接 REST API (/api/v1/*)，JWT via Authorization 头。
+   API 不可达时自动进入 SIM 演练模式（真实 HMI 仿真概念）。
+   ============================================================ */
+const $ = (s,r=document)=>r.querySelector(s);
+const $$ = (s,r=document)=>[...r.querySelectorAll(s)];
+const fmt = {
+  num:(v,d=0)=>{const n=Number(v);if(!isFinite(n))return '—';return n.toLocaleString('en-US',{minimumFractionDigits:d,maximumFractionDigits:d});},
+  bytes:(b)=>{b=Number(b)||0;const u=['B','KB','MB','GB','TB'];let i=0;while(b>=1024&&i<u.length-1){b/=1024;i++;}return b.toFixed(b<10&&i>0?1:0)+' '+u[i];},
+  uptime:(s)=>{s=Number(s)||0;const d=Math.floor(s/86400),h=Math.floor(s%86400/3600),m=Math.floor(s%3600/60),x=Math.floor(s%60);
+    return {d,h:`${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:${String(x).padStart(2,'0')}`,full:d>0?`${d}d ${h}h`:`${h}:${String(m).padStart(2,'0')}:${String(x).padStart(2,'0')}`};},
+  age:(ts)=>{if(!ts)return '—';const d=Math.max(0,Math.floor(Date.now()/1000)-ts);if(d<60)return d+'s';if(d<3600)return Math.floor(d/60)+'m';if(d<86400)return Math.floor(d/3600)+'h';return Math.floor(d/86400)+'d';},
+  clock:(d)=>{const p=n=>String(n).padStart(2,'0');return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;},
+  val:(v)=>{if(v===null||v===undefined)return '—';if(typeof v==='boolean')return v?'TRUE':'FALSE';return String(v);},
+};
+const STATE_COLOR={running:'green',stopped:'',starting:'amber',stopping:'amber',failed:'red'};
+const PROTO_LABEL={dataSim:'数据模拟',opcuaClient:'OPC UA',modbusClient:'MODBUS',s7Client:'SIEMENS S7',sidecarClient:'外部插件',mqttPub:'MQTT 北向',luaClient:'LUA 脚本'};
+
+const State={
+  token: (document.cookie.match(/token=([^;]+)/)||[])[1] || localStorage.getItem('rsiot_token') || '',
+  user:'', authed:false, sim:false,
+  sys:{}, stats:[], insts:{}, devices:{}, rtdata:{}, logs:[],
+  freshFilter:'all', lgLevel:'', pollT:null,
+};
+
+/* ---------- API ---------- */
+async function api(path, opts={}){
+  const headers = Object.assign({'Authorization':State.token,'Content-Type':'application/json'}, opts.headers||{});
+  const r = await fetch(path, Object.assign({headers}, opts));
+  const t = await r.text();
+  let j=null; try{j=JSON.parse(t);}catch(e){}
+  return {status:r.status, body:t, json:j};
+}
+function setToken(tk){State.token=tk; localStorage.setItem('rsiot_token',tk);}
+
+async function login(){
+  $('#lg-err').textContent='';
+  const u=$('#lg-user').value.trim(), p=$('#lg-pass').value;
+  const r = await api('/api/v1/user/login',{method:'POST',body:JSON.stringify({user_id:u,pass:p})});
+  if(r.status===200 && r.json && r.json.token){
+    setToken(r.json.token); State.user=u; enterApp();
+  } else {
+    $('#lg-err').textContent='✗ 认证失败 — '+(r.json&&r.json.status||r.status);
+  }
+}
+async function enterApp(){
+  State.authed=true; $('#veil').classList.add('hidden');
+  $('#opNm').textContent=State.user; $('#opAv').textContent=(State.user[0]||'A').toUpperCase();
+  await loadAll();
+  startPolling();
+  startSSE();
+}
+
+/* ---------- SSE 实时推送（日志/报文/实例状态） ---------- */
+let sse=null;
+const MAX_STREAM=200;
+function startSSE(){
+  if(sse)sse.close();
+  sse=new EventSource('/api/v1/events?types=log,packet,state');
+  sse.addEventListener('log', e=>onSSELog(JSON.parse(e.data)));
+  sse.addEventListener('packet', e=>onSSEPacket(JSON.parse(e.data)));
+  sse.addEventListener('state', e=>onSSEState(JSON.parse(e.data)));
+  sse.onerror=()=>{
+    markLink(false);
+    // 重连由 EventSource 自动进行；补拉一次 logs/recent 兜底丢帧。
+    if(State.authed && !State.sim) loadLogs(State.lgLevel, $('#lg-target').value.trim());
+  };
+}
+function onSSELog(entry){
+  // 增量 prepend：State.logs + DOM afterbegin，尾裁剪 MAX_STREAM。
+  // 后端已过滤 io_trace（报文走 packet 通道），此处 entry 均为普通日志。
+  // filter 切换时走原 renderLogStream 全量。
+  State.logs.unshift(entry);
+  if(State.logs.length>MAX_STREAM) State.logs.length=MAX_STREAM;
+  // 仅当当前视图未过滤掉此条时 prepend。
+  const tg=$('#lg-target').value.trim();
+  if(!tg || entry.target===tg){
+    if(!State.lgLevel || levelRank(entry.level)>=levelRank(State.lgLevel)){
+      const el=document.createElement('div');
+      el.className=`le ${(entry.level||'').toLowerCase()}`;
+      el.innerHTML=`<span class="ts">${fmtAge(entry.ts)}</span><span class="lv">${(entry.level||'').toUpperCase()}</span><span class="tg">${esc(entry.target||'')}</span><span class="msg">${esc(entry.message||'')}${entry.fields&&Object.keys(entry.fields).length?` <span class="fld">${esc(JSON.stringify(entry.fields))}</span>`:''}</span>`;
+      const box=$('#lg-stream');
+      const empty=box.querySelector('.empty-state'); if(empty)box.innerHTML='';
+      box.insertBefore(el, box.firstChild);
+      while(box.children.length>MAX_STREAM) box.lastChild.remove();
+    }
+  }
+  renderOverviewLogs();
+}
+function onSSEPacket(pkt){
+  // 报文：构造 io_trace 等价 LogEntry 入 State.logs（与 /logs/recent 同构），prepend DOM。
+  const entry={ts:pkt.ts, level:'debug', target:'io_trace', message:`${pkt.dir==='tx'?'TX':'RX'} ${pkt.hex||''}`, fields:{dir:(pkt.dir||'').toUpperCase(), hex:pkt.hex, inst_id:pkt.inst_id}};
+  State.logs.unshift(entry);
+  if(State.logs.length>MAX_STREAM) State.logs.length=MAX_STREAM;
+  const el=document.createElement('div');
+  el.className=`pkt ${(pkt.dir||'').toLowerCase()}`;
+  el.innerHTML=`<span class="dir">${(pkt.dir||'').toUpperCase()}</span><span class="inst">${esc(pkt.inst_id||'')}</span><span class="hex">${esc(pkt.hex||'')}</span><span class="ts">${fmtAge(pkt.ts)}</span>`;
+  const box=$('#pkt-stream');
+  const empty=box.querySelector('.empty-state'); if(empty)box.innerHTML='';
+  box.insertBefore(el, box.firstChild);
+  while(box.children.length>MAX_STREAM) box.lastChild.remove();
+  const cntEl=$('#tab-pkt-cnt'); if(cntEl)cntEl.textContent=State.logs.filter(l=>l.target==='io_trace').length;
+}
+function onSSEState(s){
+  // 实例状态变更：更新 State.stats + 刷新概览状态计数 + 采集器表。
+  const idx=State.stats.findIndex(x=>x.inst_id===s.inst_id);
+  if(idx>=0) State.stats[idx]={...State.stats[idx], state:s.state};
+  else if(s.inst_id && State.insts[s.inst_id]){
+    // 新实例（SSE 推送但本地 stats 未含）：补一条最小记录，下次 tick 轮询补全 health。
+    State.stats.push({inst_id:s.inst_id, app_code:s.app_code, host_kind:s.host_kind, state:s.state, health:null});
+  }
+  renderCollectors();
+  renderOverviewStates();
+}
+
+/* ---------- data load ---------- */
+async function loadAll(){
+  await Promise.all([loadSysInfo(), loadFull()]);
+}
+async function loadSysInfo(){
+  const r=await api('/api/v1/sysinfo');
+  if(r.json){$('#hwid').textContent=r.json.hwid||'——';$('#ver').textContent=r.json.version||'——';}
+}
+async function loadFull(){
+  const [ss, is, dv, stats] = await Promise.all([
+    api('/api/v1/sysstatus'), api('/api/v1/insts'), api('/api/v1/devices'), api('/api/v1/inst/stats')
+  ]);
+  if(ss.json) State.sys=ss.json;
+  if(is.json) State.insts=is.json;
+  if(dv.json) State.devices=dv.json;
+  if(Array.isArray(stats.json)) State.stats=stats.json;
+  renderAll();
+  await loadLogs();
+}
+async function loadRtdata(){
+  const r=await api('/api/v1/rtdatas'); if(r.json) State.rtdata=r.json;
+  renderTelemetry(); renderOverviewQuick();
+}
+async function loadLogs(level,target){
+  let q='/api/v1/logs/recent?limit=200';
+  if(level)q+='&level='+level; if(target)q+='&target='+encodeURIComponent(target);
+  const r=await api(q); State.logs=Array.isArray(r.json)?r.json:[];
+  renderLogStream(); renderPacketStream(); renderOverviewLogs();
+}
+
+/* ---------- SIM mode (演练数据) ---------- */
+function enterSim(){
+  if(State.sim)return; State.sim=true; $('#simBadge').classList.remove('hidden');
+  $('#connLed').className='led amber'; $('#connTxt').textContent='SIM · LINK';
+  toast('SIM 模式','API 不可达，已切换演练数据','ok');
+  seedSim();
+  startPolling();
+}
+const SIM={
+  insts:{
+    'sim-plant-a':{inst_id:'sim-plant-a',inst_name:'A线模拟采集',app_code:'dataSim',app_type:'south',auto_start:true,host_kind:'builtin',app_config:{period:2},devices:[{label:'反应釜A',value:'devA',children:[{label:'温度',value:'temp',type:'f32'},{label:'压力',value:'press',type:'f32'},{label:'液位',value:'level',type:'f32'}]}]},
+    'opcua-line1':{inst_id:'opcua-line1',inst_name:'1号线 OPC UA',app_code:'opcuaClient',app_type:'south',auto_start:true,host_kind:'builtin',app_config:{endpoint:'opc.tcp://127.0.0.1:49320',period:2},devices:[{label:'产线1',value:'line1',children:[{label:'主轴转速',value:'rpm',type:'Int32'},{label:'电压',value:'volt',type:'Double'},{label:'运行',value:'run',type:'Boolean'}]}]},
+    'mb-power':{inst_id:'mb-power',inst_name:'电力监控 Modbus',app_code:'modbusClient',app_type:'south',auto_start:true,host_kind:'builtin',app_config:{kind:'tcp',endpoint:'127.0.0.1:502',slave_id:1,period:2},devices:[{label:'电表1',value:'pwr1',children:[{label:'有功功率',value:'holding:0:f32:ABCD',type:'f32'},{label:'电流',value:'holding:2:f32:CDAB',type:'f32'},{label:'电压',value:'holding:4:f32',type:'f32'}]}]},
+    's7-press':{inst_id:'s7-press',inst_name:'压机 S7-1200',app_code:'s7Client',app_type:'south',auto_start:false,host_kind:'builtin',app_config:{endpoint:'192.168.0.1:102',plc_type:'s1200',period:3},devices:[]},
+    'ext-gw':{inst_id:'ext-gw',inst_name:'外部网关(sidecar)',app_code:'sidecarClient',app_type:'south',auto_start:true,host_kind:'external',app_config:{},devices:[{label:'第三方PLC',value:'extPlc',children:[{label:'产量',value:'cnt',type:'int'},{label:'状态字',value:'status',type:'int'}]}]},
+    'north-mqtt':{inst_id:'north-mqtt',inst_name:'MQTT 北向发布',app_code:'mqttPub',app_type:'north',auto_start:true,host_kind:'builtin',app_config:{},devices:[]},
+  },
+  states:{'sim-plant-a':'running','opcua-line1':'running','mb-power':'running','s7-press':'stopped','ext-gw':'running','north-mqtt':'running'},
+  health:{
+    'sim-plant-a':{status:'running',tick_count:8421,fail_count:0,last_activity_ts:Math.floor(Date.now()/1000),last_activity_duration_ms:3,last_err:''},
+    'opcua-line1':{status:'running',tick_count:3120,fail_count:2,last_activity_ts:Math.floor(Date.now()/1000)-1,last_activity_duration_ms:41,last_err:'',session_reconnect_count:1},
+    'mb-power':{status:'degraded',tick_count:2890,fail_count:38,last_activity_ts:Math.floor(Date.now()/1000),last_activity_duration_ms:18,last_err:'slave 2 timeout'},
+    'ext-gw':{status:'running',tick_count:1024,fail_count:0,last_activity_ts:Math.floor(Date.now()/1000),last_activity_duration_ms:7,last_err:''},
+  },
+  rt:{}, // generated live
+};
+function seedSim(){
+  State.insts=Object.assign({},SIM.insts);
+  State.devices={}; Object.values(SIM.insts).forEach(i=>{i.devices.forEach(d=>State.devices[d.value]={...d,dev_id:d.value});});
+  State.stats=Object.keys(SIM.insts).map(id=>({inst_id:id,app_code:SIM.insts[id].app_code,host_kind:SIM.insts[id].host_kind,state:SIM.states[id],health:SIM.health[id]||null}));
+  State.sys={
+    status:'ok',dbsize:1247,
+    instances:SIM.states,
+    metrics:{ctl_send_count:521,ctl_dropped_count:0,ctl_not_found_count:3,pipeline_processed_count:189342,pipeline_write_fail_count:0,hub:{depth_last:6,depth_max:42},mqtt:{publish_count:37844,publish_fail_count:2,connected:1}},
+    process:{uptime_secs:257880,cpu_pct:6.4,mem_bytes:58720256}
+  };
+  genSimRt();
+  State.logs=genSimLogs();
+}
+function genSimRt(){
+  const now=Math.floor(Date.now()/1000);
+  const lt=new Date().toLocaleString('zh-CN',{hour12:false});
+  const wob=(base,amp)=>(base+Math.sin(now/7)*amp+ (Math.random()-0.5)*amp*0.3);
+  const cell=(v)=>JSON.stringify([now,lt,v]);
+  State.rtdata={
+    devA:{'devA.temp':cell(wob(86,4).toFixed(1)),'devA.press':cell(wob(1.2,0.15).toFixed(3)),'devA.level':cell(wob(64,5).toFixed(1))},
+    line1:{'line1.rpm':cell(Math.round(wob(1450,60))),'line1.volt':cell(wob(380,3).toFixed(1)),'line1.run':cell(true)},
+    pwr1:{'pwr1.holding:0:f32:ABCD':cell(wob(128,12).toFixed(1)),'pwr1.holding:2:f32:CDAB':cell(wob(195,8).toFixed(1)),'pwr1.holding:4:f32':cell(wob(220.4,1.2).toFixed(1))},
+    extPlc:{'extPlc.cnt':cell(Math.round(1000+now%5000)),'extPlc.status':cell(1)},
+  };
+}
+function genSimLogs(){
+  const now=Math.floor(Date.now()/1000);
+  return [
+    {ts:now,level:'info',target:'modbusClient',message:'[mb-power] poll ok slave=1 regs=6',fields:{}},
+    {ts:now-4,level:'warn',target:'modbusClient',message:'[mb-power] slave 2 request timeout, skip (fault isolation)',fields:{}},
+    {ts:now-9,level:'info',target:'pipeline',message:'sample processed devA.temp=86.2 → rtdata:devA',fields:{}},
+    {ts:now-12,level:'info',target:'mqtt',message:'publish 3 devices → broker.emqx.io ok',fields:{}},
+    {ts:now-30,level:'error',target:'instance',message:'[opcua-line1] session dropped, reconnect scheduled',fields:{}},
+    {ts:now-60,level:'debug',target:'io_trace',message:'[mb-power] TX 01 03 00 00 00 06 c5 c8',fields:{dir:'TX',hex:'01 03 00 00 00 06 c5 c8'}},
+    {ts:now-61,level:'debug',target:'io_trace',message:'[mb-power] RX 01 03 0c ... 12 bytes',fields:{dir:'RX'}},
+  ];
+}
+
+/* ---------- polling ---------- */
+function startPolling(){
+  if(State.pollT)clearInterval(State.pollT);
+  State.pollT=setInterval(tick, 2000);
+  tick();
+}
+async function tick(){
+  try{
+    if(State.sim){
+      genSimRt(); State.logs=genSimLogs();
+      // jitter health
+      State.sys.process.cpu_pct=Math.max(1,Math.min(60,6+Math.sin(Date.now()/9000)*5+(Math.random()-0.5)*3));
+      State.sys.process.mem_bytes=55000000+Math.round(Math.sin(Date.now()/13000)*8000000);
+      State.sys.metrics.pipeline_processed_count+=Math.round(Math.random()*4);
+      State.sys.metrics.hub.depth_last=Math.round(Math.max(0,Math.sin(Date.now()/4000)*20+6));
+      if(State.stats[2]&&State.stats[2].health){State.stats[2].health.tick_count+=Math.round(Math.random()*2);State.stats[2].health.fail_count+=Math.random()<0.1?1:0;}
+      renderAll(); markLink(true,'SIM'); return;
+    }
+    const r=await api('/api/v1/sysstatus');
+    if(r.status===401){markLink(false); forceLogin('会话过期，请重新认证');return;}
+    if(r.status!==200||!r.json){markLink(false);return;}
+    State.sys=r.json; markLink(true,'LIVE');
+    // light refresh
+    const [stats,dv]=await Promise.all([api('/api/v1/inst/stats'),api('/api/v1/devices')]);
+    if(Array.isArray(stats.json))State.stats=stats.json;
+    if(dv.json)State.devices=dv.json;
+    await loadRtdata(); renderOverviewVitals();
+  }catch(e){ markLink(false); /* network blip */ }
+}
+function markLink(ok,lbl){
+  $('#connLed').className='led '+(ok?(State.sim?'amber':'on'):'red');
+  $('#connTxt').textContent=(ok?lbl:'LINK · DOWN');
+  $('#st-core').textContent=ok?'ALIVE':'DOWN';
+  $('#st-core').className=ok?'amber':'red';
+}
+function forceLogin(msg){
+  State.authed=false; clearInterval(State.pollT);
+  if(sse){sse.close(); sse=null;}
+  $('#veil').classList.remove('hidden'); $('#lg-err').textContent=msg;
+}
+
+/* ============================================================
+   RENDER
+   ============================================================ */
+function renderAll(){
+  renderOverviewVitals(); renderOverviewStates(); renderOverviewLogs();
+  renderTelemetry(); renderCollectors(); renderCmdTargets(); renderTraceTargets(); renderLogStream(); renderPacketStream();
+  renderStrip();
+}
+function renderOverviewQuick(){ renderOverviewVitals(); renderStrip(); }
+let prevCpu=0;
+function renderOverviewVitals(){
+  const s=State.sys; if(!s||!s.process)return;
+  const p=s.process, m=s.metrics||{};
+  const up=fmt.uptime(p.uptime_secs||0);
+  $('#ov-uptime').innerHTML=up.d>0?`${up.d}<small>d</small>`:up.h;
+  $('#ov-uptime-s').textContent=up.full;
+  const cpu=Math.max(0,Math.min(100,(p.cpu_pct||0))), mem=p.mem_bytes||0;
+  $('#cpu-v').textContent=cpu.toFixed(1)+'%'; $('#cpu-bar').style.width=cpu+'%';
+  $('#cpu-bar').className='fill'+(cpu>80?' red':(cpu>50?'':' green'));
+  $('#mem-v').textContent=fmt.bytes(mem); $('#mem-bar').style.width=Math.min(100,mem/512/1024/1024*100)+'%';
+  $('#mem-scale').textContent='512MB 上限';
+  $('#sys-res-meta').textContent='pid live';
+  const hub=m.hub||{}; $('#hub-v').textContent=hub.depth_last||0;
+  $('#hub-bar').style.width=Math.min(100,(hub.depth_last||0)/256*100)+'%';
+  $('#mqtt-st').innerHTML=m.mqtt&&m.mqtt.connected?'<span style="color:var(--green)">已连接</span>':'<span style="color:var(--red)">断开</span>';
+  $('#mqtt-pub').textContent=fmt.num(m.mqtt&&m.mqtt.publish_count);
+  $('#mqtt-fail').textContent=fmt.num(m.mqtt&&m.mqtt.publish_fail_count);
+  $('#pp-proc').textContent=fmt.num(m.pipeline_processed_count); $('#pp-fail').textContent=fmt.num(m.pipeline_write_fail_count);
+  $('#pp-send').textContent=fmt.num(m.ctl_send_count); $('#pp-drop').textContent=fmt.num(m.ctl_dropped_count); $('#pp-nf').textContent=fmt.num(m.ctl_not_found_count);
+  // overview tiles
+  const south=State.stats.filter(x=>x.app_code!=='mqttPub'); const running=south.filter(x=>x.state==='running').length;
+  $('#ov-inst').innerHTML=running+'<small>/'+south.length+'</small>';
+  const tagc=Object.values(State.rtdata).reduce((a,d)=>a+Object.keys(d||{}).length,0);
+  $('#ov-tags').textContent=fmt.num(tagc); $('#ov-tags-s').textContent=Object.keys(State.rtdata).length+' 设备';
+  $('#ov-ctl').textContent=fmt.num(m.ctl_send_count||0); $('#ov-ctl-s').textContent='丢弃 '+fmt.num(m.ctl_dropped_count||0);
+  // heartbeat
+  pushHb(cpu);
+}
+function renderOverviewStates(){
+  const cnt={running:0,stopped:0,starting:0,stopping:0,failed:0};
+  State.stats.forEach(s=>{if(cnt[s.state]!==undefined)cnt[s.state]++;});
+  const rows=[['running','运行'],['stopped','停止'],['starting','启动中'],['failed','故障'],['stopping','停止中']];
+  $('#istates').innerHTML=rows.map(([k,l])=>`<div class="istate"><span class="n" style="color:var(--${STATE_COLOR[k]||'ink'})">${cnt[k]}</span><span class="l">${l}</span></div>`).join('');
+  $('#ov-states-meta').textContent=State.stats.length+' 实例';
+}
+function renderOverviewLogs(){
+  const els=State.logs.slice(0,8);
+  $('#ov-logs').innerHTML=els.length?els.map(l=>`<div class="kvline"><span class="k" style="letter-spacing:.04em;font-family:'IBM Plex Mono',monospace">[${(l.level||'').toUpperCase().slice(0,4)}] ${l.target||''}</span><span class="v" style="font-weight:400;color:var(--ink-2);max-width:60%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(l.message||'')}</span></div>`).join(''):'<div class="empty-state" style="padding:20px"><div class="t">无日志</div></div>';
+}
+
+/* telemetry */
+function freshnessOf(ts){
+  if(!ts)return 'stale';
+  const a=Math.max(0,Math.floor(Date.now()/1000)-ts);
+  return a<4?'fresh':(a<15?'warm':'stale');
+}
+function parseCell(c){
+  // [ts, localTime, value]
+  if(Array.isArray(c))return {ts:c[0],lt:c[1],v:c[2]};
+  return {ts:0,lt:'',v:c};
+}
+function renderTelemetry(){
+  const devs=State.rtdata||{};
+  const filt=($('#tm-filter').value||'').trim().toLowerCase();
+  const ff=State.freshFilter;
+  let devCnt=0,tagCnt=0;
+  const cards=Object.entries(devs).map(([devId,fields])=>{
+    const meta=State.devices[devId]||{};
+    let rows=Object.entries(fields||{}).map(([f,cell])=>{
+      const c=parseCell(cell); const tag=f.replace(devId+'.','');
+      const fr=freshnessOf(c.ts);
+      return {tag,fr,v:c.v,ts:c.ts,lt:c.lt};
+    });
+    tagCnt+=rows.length;
+    rows=rows.filter(r=>{
+      if(filt && !(devId.toLowerCase().includes(filt)||r.tag.toLowerCase().includes(filt)))return false;
+      if(ff==='fresh'&&r.fr!=='fresh')return false;
+      if(ff==='stale'&&r.fr==='fresh')return false;
+      return true;
+    });
+    if(!rows.length && filt)return '';
+    devCnt++;
+    // device overall freshness = worst
+    const dfr=rows.some(r=>r.fr==='stale')?'stale':(rows.some(r=>r.fr==='warm')?'warm':(rows.length?'fresh':'stale'));
+    return `<div class="dev">
+      <div class="dh"><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="4" y="4" width="16" height="16" rx="1"/><path d="M4 9h16M9 4v16"/></svg></span>
+        <span class="pulse-dot ${dfr}"></span><span class="id">${esc(devId)}</span><span class="lb">${esc(meta.label||'')}</span><span class="ct">${rows.length} pts</span></div>
+      <table><thead><tr><th>点位 TAG</th><th style="text-align:right">数值</th><th style="text-align:right">AGE</th></tr></thead>
+      <tbody>${rows.length?rows.map(r=>`<tr class="${r.fr}"><td class="tag">${esc(r.tag)}</td><td class="val">${esc(fmt.val(r.v))}</td><td class="age">${fmt.age(r.ts)}</td></tr>`).join(''):`<tr><td colspan="3" class="empty">无匹配点位</td></tr>`}</tbody></table>
+    </div>`;
+  }).join('');
+  $('#tm-devs').innerHTML=cards||`<div class="empty-state" style="grid-column:1/-1"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3 12h4l2-7 4 14 2-7h6"/></svg><div class="t">暂无实时数据</div><div class="s">启动南向采集器后点位将出现在此</div></div>`;
+  $('#tm-devcnt').textContent=devCnt; $('#tm-tagcnt').textContent=tagCnt;
+}
+
+/* collectors */
+function renderCollectors(){
+  const rows=Object.values(State.insts||{});
+  const byId=Object.fromEntries(State.stats.map(s=>[s.inst_id,s]));
+  $('#cl-body').innerHTML=rows.map(i=>{
+    const st=byId[i.inst_id]||{state:'stopped',health:null};
+    const isNorth=i.app_type==='north';
+    const h=st.health||{};
+    const failRate=h.tick_count? (h.fail_count/h.tick_count*100):0;
+    const frCls=failRate>5?'bad':(failRate>0?'':'ok');
+    return `<tr>
+      <td><div style="display:flex;flex-direction:column;gap:2px"><span style="font-weight:600">${esc(i.inst_name||i.inst_id)}</span><span class="scode">${esc(i.inst_id)}</span></div></td>
+      <td><span class="appcode">${esc(i.app_code)}</span><div class="scode">${PROTO_LABEL[i.app_code]||''}</div></td>
+      <td><span class="badge ${i.host_kind==='external'?'ext':'blt'}">${i.host_kind==='external'?'外部 EXT':'内置 BLT'}</span></td>
+      <td><span class="badge ${isNorth?'north':'blt'}">${isNorth?'北向 N':'南向 S'}</span></td>
+      <td><span class="state ${st.state}"><span class="led ${st.state==='running'?'on':(st.state==='failed'?'red':(st.state==='stopped'?'off':'amber'))}"></span>${st.state||'stopped'}</span></td>
+      <td><div class="kvs">
+          <div>TICK <b>${fmt.num(h.tick_count||0)}</b> · FAIL <b class="${frCls}">${fmt.num(h.fail_count||0)}</b> ${failRate?`<span class="${frCls}">(${failRate.toFixed(1)}%)</span>`:''}</div>
+          <div>ACT <b>${h.last_activity_duration_ms||0}ms</b> · <span class="${h.last_err?'bad':''}">${esc(h.last_err||'—')}</span></div>
+        </div></td>
+      <td><div class="row-actions">
+          ${isNorth?'<span class="scode">北向</span>':`<button class="btn sm" onclick="ctrlInst('${esc(i.inst_id)}','start')" ${st.state==='running'?'disabled':''}>启动</button><button class="btn sm danger" onclick="ctrlInst('${esc(i.inst_id)}','stop')" ${st.state==='stopped'?'disabled':''}>停止</button>`}
+          <button class="btn sm" onclick="editInst('${esc(i.inst_id)}')">编辑</button>
+          <button class="btn sm danger" onclick="deleteInst('${esc(i.inst_id)}')">删除</button>
+        </div></td>
+    </tr>`;
+  }).join('')||`<tr><td colspan="7"><div class="empty-state"><div class="t">无采集器实例</div><div class="s">经 /api/v1/inst/set 注册实例后出现</div></div></td></tr>`;
+  const south=rows.filter(r=>r.app_type!=='north').length;
+  $('#cl-meta').textContent=`南向 ${south} / 北向 ${rows.length-south}`;
+}
+
+async function ctrlInst(id,action){
+  if(State.sim){ toast(action==='start'?'启动':'停止',`SIM: ${id} → ${action}`,'ok');
+    SIM.states[id]=action==='start'?'running':'stopped';
+    State.stats=State.stats.map(s=>s.inst_id===id?{...s,state:SIM.states[id]||s.state}:s);
+    renderCollectors(); return; }
+  const path=action==='start'?'/api/v1/startinst':'/api/v1/stopinst';
+  const r=await api(path,{method:'POST',body:JSON.stringify({inst_id:id})});
+  if(r.status===200){ toast(action==='start'?'启动成功':'停止成功',id,'ok'); setTimeout(loadFull,400); }
+  else toast(action+' 失败', `${id} · ${r.status} ${r.body.slice(0,80)}`,'err');
+}
+
+/* ---------- 新增采集器 ---------- */
+const INST_TEMPLATES={
+  dataSim:{hint:'· period=采样周期(秒)',app_config:{period:2},devices:[{label:'设备A',value:'devA',children:[{label:'温度',value:'temp',type:'f32'},{label:'压力',value:'press',type:'f32'}]}]},
+  opcuaClient:{hint:'· endpoint/security_policy/period/verify_server',app_config:{endpoint:'opc.tcp://127.0.0.1:49320',security_policy:'none',period:2,verify_server:false},devices:[{label:'设备1',value:'opcdev1',children:[{label:'变量1',value:'ns=2;s=Channel1.Device1.Tag1',type:'Double'}]}]},
+  modbusClient:{hint:'· kind=tcp/rtu_tcp/rtu_udp/rtu_serial',app_config:{kind:'tcp',endpoint:'127.0.0.1:502',slave_id:1,period:2},devices:[{label:'电表1',value:'mbdev1',slave_id:1,children:[{label:'有功功率',value:'holding:0:f32:ABCD',type:'f32'}]}]},
+  s7Client:{hint:'· plc_type=s200..s1500',app_config:{endpoint:'192.168.0.1:102',plc_type:'s1200',period:3},devices:[{label:'PLC1',value:'s7dev1',children:[{label:'温度',value:'DB1.DBD0',type:'f32'}]}]},
+  luaClient:{hint:'· kind/endpoint 链路 + 脚本',app_config:{kind:'tcp',endpoint:'127.0.0.1:502',period:2},devices:[{label:'设备1',value:'luadev1',children:[{label:'点1',value:'holding:0:f32',type:'f32'}]}]},
+  sidecarClient:{hint:'· 自动 external，set 返回 token',app_config:{heartbeat_timeout_secs:30},devices:[{label:'外部设备',value:'extdev1',children:[{label:'点1',value:'tag1',type:'float'}]}]},
+};
+function showNiResult(kind,html){const el=$('#ni-result');el.className='newresult show '+kind;el.innerHTML=html;}
+function onAppCodeChange(){
+  const ac=$('#ni-appcode').value,t=INST_TEMPLATES[ac]||INST_TEMPLATES.dataSim;
+  $('#ni-ac').value=JSON.stringify(t.app_config,null,2);
+  $('#ni-dev').value=JSON.stringify(t.devices,null,2);
+  $('#ni-ac-hint').textContent=t.hint||'';
+  if(ac==='sidecarClient'){$('#ni-host').value='external';}
+  else if($('#ni-host').value==='external'){$('#ni-host').value='builtin';}
+}
+function resetNewInstForm(){
+  State.newInstEdit=null;State.newInstEditRunning=false;State.newInstEditAppType='south';
+  $('#ni-id').value='';$('#ni-id').disabled=false;
+  $('#ni-name').value='';
+  $('#ni-appcode').value='dataSim';
+  $('#ni-host').value='builtin';
+  $('#ni-auto').checked=true;$('#ni-start').checked=true;
+  $('#ni-submit').textContent='▸ 提交';
+  $('#ni-start-label').textContent='提交后启动';
+  $('#ni-mode').classList.remove('show');
+  $('#ni-result').classList.remove('show');
+  onAppCodeChange();
+}
+function toggleNewInst(open){
+  const body=$('#newInstBody');
+  const o=open===undefined?(body.style.display==='none'):open;
+  body.style.display=o?'block':'none';
+  $('#newInstToggle').textContent=o?'收起新增面板':'＋ 新增采集器';
+  if(!o){resetNewInstForm();}
+  else if(!State.newInstEdit&&!$('#ni-id').value){onAppCodeChange();}
+}
+async function submitNewInst(){
+  const editing=!!State.newInstEdit;
+  const id=$('#ni-id').value.trim();
+  if(!id)return showNiResult('err','✗ 实例 ID 必填');
+  let ac,dev;
+  try{ac=JSON.parse($('#ni-ac').value);}catch(e){return showNiResult('err','✗ app_config JSON 解析失败: '+e.message);}
+  try{dev=JSON.parse($('#ni-dev').value);}catch(e){return showNiResult('err','✗ devices JSON 解析失败: '+e.message);}
+  const obj={inst_id:id,inst_name:$('#ni-name').value.trim(),app_code:$('#ni-appcode').value,app_type:editing?(State.newInstEditAppType||'south'):'south',auto_start:$('#ni-auto').checked,host_kind:$('#ni-host').value,app_config:ac,devices:dev};
+  const wantStart=$('#ni-start').checked;
+  if(State.sim){
+    SIM.insts[id]=obj;State.insts[id]=obj;
+    if(wantStart)SIM.states[id]='running';
+    State.stats=State.stats.filter(s=>s.inst_id!==id);
+    State.stats.push({inst_id:id,app_code:obj.app_code,host_kind:obj.host_kind,state:wantStart?'running':'stopped',health:{status:wantStart?'running':'stopped',tick_count:0,fail_count:0,last_activity_ts:Math.floor(Date.now()/1000),last_activity_duration_ms:0,last_err:''}});
+    renderCollectors();
+    showNiResult('ok',(editing?'SIM: 已更新 ':'SIM: 已写入 ')+'<b>'+esc(id)+'</b>（'+esc(obj.app_code)+'）'+(wantStart?(State.newInstEditRunning?' 并重启':' 并启动'):''));
+    toast(editing?'更新成功(SIM)':'新增成功(SIM)',id,'ok');return;
+  }
+  showNiResult('info',editing?'保存中…':'提交中…');
+  const r=await api('/api/v1/inst/set',{method:'POST',body:JSON.stringify({inst_id:id,object:obj})});
+  if(r.status!==200||!r.json||r.json.status!=='ok')return showNiResult('err','✗ set 失败 ['+r.status+']: '+esc((r.body||'').slice(0,180)));
+  let msg=editing?'✓ 配置已更新（覆盖）':'✓ 配置已写入 instances 表'+(obj.host_kind==='external'?' (external)':'');
+  if(obj.host_kind==='external'&&r.json.plugin_token)msg+='<br><b>外部插件 token（明文仅此次，旧 token 已失效）:</b><code>'+esc(r.json.plugin_token)+'</code>';
+  if(editing){
+    if(wantStart){
+      if(State.newInstEditRunning){
+        await api('/api/v1/stopinst',{method:'POST',body:JSON.stringify({inst_id:id})});
+        const st2=await api('/api/v1/startinst',{method:'POST',body:JSON.stringify({inst_id:id})});
+        msg+=(st2.status===200?'<br>✓ 已重启生效 (stop+start)':'<br>✗ 重启失败 ['+st2.status+']: '+esc((st2.body||'').slice(0,100)));
+      }else{
+        const st2=await api('/api/v1/startinst',{method:'POST',body:JSON.stringify({inst_id:id})});
+        msg+=(st2.status===200?'<br>✓ 已启动':'<br>✗ 启动失败 ['+st2.status+']: '+esc((st2.body||'').slice(0,100)));
+      }
+    }else if(State.newInstEditRunning){msg+='<br>⚠ 运行中实例需重启才生效（配置已存）';}
+  }else if(wantStart){
+    const s=await api('/api/v1/startinst',{method:'POST',body:JSON.stringify({inst_id:id})});
+    msg+=(s.status===200?'<br>✓ 已启动 (startinst)':'<br>✗ 启动失败 ['+s.status+']: '+esc((s.body||'').slice(0,120)));
+  }
+  showNiResult('ok',msg);
+  toast(editing?'更新成功':'新增成功',id+(wantStart?(State.newInstEditRunning?' · 已重启':' · 已启动'):''),'ok');
+  loadFull();
+}
+$('#newInstToggle').onclick=()=>toggleNewInst();
+$('#ni-appcode').onchange=onAppCodeChange;
+$('#ni-cancel').onclick=()=>toggleNewInst(false);
+$('#ni-submit').onclick=submitNewInst;
+function editInst(id){
+  const inst=State.insts[id];
+  if(!inst){toast('编辑失败','实例不存在','err');return;}
+  $('#newInstBody').style.display='block';
+  $('#newInstToggle').textContent='收起新增面板';
+  const sel=$('#ni-appcode');
+  if(![...sel.options].some(o=>o.value===inst.app_code)){const o=document.createElement('option');o.value=inst.app_code;o.textContent=inst.app_code;sel.appendChild(o);}
+  sel.value=inst.app_code;
+  $('#ni-id').value=inst.inst_id;$('#ni-id').disabled=true;
+  $('#ni-name').value=inst.inst_name||'';
+  $('#ni-host').value=inst.host_kind||'builtin';
+  $('#ni-auto').checked=!!inst.auto_start;
+  $('#ni-ac').value=JSON.stringify(inst.app_config||{},null,2);
+  $('#ni-dev').value=JSON.stringify(inst.devices||[],null,2);
+  $('#ni-ac-hint').textContent=(INST_TEMPLATES[inst.app_code]||{}).hint||'';
+  State.newInstEdit=id;
+  State.newInstEditAppType=inst.app_type||'south';
+  const st=State.stats.find(s=>s.inst_id===id);
+  State.newInstEditRunning=!!(st&&st.state==='running');
+  $('#ni-submit').textContent='▸ 保存修改';
+  $('#ni-start').checked=State.newInstEditRunning;
+  $('#ni-start-label').textContent=State.newInstEditRunning?'保存后重启生效':'保存后启动';
+  $('#ni-mode').textContent='编辑模式 · '+id+'（inst_id 只读，保存即覆盖配置'+(inst.host_kind==='external'?'；external 将重新签发 token，旧 token 失效':'')+'）';
+  $('#ni-mode').classList.add('show');
+  $('#ni-result').classList.remove('show');
+  document.getElementById('newInstPanel').scrollIntoView({behavior:'smooth',block:'start'});
+}
+async function deleteInst(id){
+  if(!confirm('确认删除采集器「'+id+'」？\n\n将清除：实例配置 + 外部插件 token + lua kv。\n不可恢复。'))return;
+  if(State.sim){delete SIM.insts[id];delete SIM.states[id];delete State.insts[id];State.stats=State.stats.filter(s=>s.inst_id!==id);if(State.newInstEdit===id)toggleNewInst(false);renderCollectors();toast('已删除(SIM)',id,'ok');return;}
+  const r=await api('/api/v1/inst/delete',{method:'POST',body:JSON.stringify({inst_id:id})});
+  if(r.status===200&&r.json&&r.json.status==='deleted'){if(State.newInstEdit===id)toggleNewInst(false);toast('已删除',id,'ok');loadFull();}
+  else toast('删除失败',id+' ['+r.status+'] '+esc((r.body||'').slice(0,60)),'err');
+}
+
+/* control */
+const TEMPLATES={
+  modbus:{label:'Modbus 写',data:{"address":"holding:0:f32:ABCD","value":12.34}},
+  opcua:{label:'OPC UA 写',data:{"node_id":"ns=2;s=v1","value":123,"opc_type":"Int32"}},
+  s7:{label:'S7 写',data:{"address":"DB1.DBD0","value":42.5,"kind":"f32"}},
+  generic:{label:'通用',data:{"value":1}},
+};
+function renderCmdTargets(){
+  const running=State.stats.filter(s=>s.state==='running');
+  $('#cmd-inst').innerHTML=running.length?running.map(s=>`<option value="${esc(s.inst_id)}">${esc(s.inst_id)} · ${s.app_code}</option>`).join(''):'<option>（无运行中实例）</option>';
+  $('#cmd-tmpls').innerHTML=Object.entries(TEMPLATES).map(([k,v])=>`<button data-t="${k}">${v.label}</button>`).join('');
+  $$('#cmd-tmpls button').forEach(b=>b.onclick=()=>{const t=TEMPLATES[b.dataset.t];$('#cmd-data').value=JSON.stringify(t.data,null,2);});
+  // auto-pick template by selected instance app_code
+  pickCmdTmpl();
+}
+function pickCmdTmpl(){
+  const id=$('#cmd-inst').value, st=State.stats.find(s=>s.inst_id===id);
+  const ac=st&&st.app_code; const map={modbusClient:'modbus',opcuaClient:'opcua',s7Client:'s7'};
+  const t=TEMPLATES[map[ac]||'generic'];
+  $('#cmd-data').value=JSON.stringify(t.data,null,2);
+}
+async function sendCmd(){
+  const inst=$('#cmd-inst').value, dev=$('#cmd-devid').value.trim(), cmd=$('#cmd-cmd').value.trim();
+  let dataStr=$('#cmd-data').value;
+  try{JSON.parse(dataStr);}catch(e){toast('载荷格式错误','data 不是合法 JSON','err');return;}
+  const body={instance:inst,devid:dev,cmd:cmd||'write',data:dataStr};
+  const ts=fmt.clock(new Date());
+  if(State.sim){pushCmdLog(true,ts,inst,dev,body);toast('命令已投递(SIM)',`${inst} → ${dev}`,'ok');return;}
+  const r=await api('/api/v1/command/send',{method:'POST',body:JSON.stringify(body)});
+  pushCmdLog(r.status===200,ts,inst,dev,body,r.status);
+  toast(r.status===200?'投递成功':'投递失败',`${inst} · ${r.status===200?'已路由至 cmd_rx':r.body.slice(0,60)}`,r.status===200?'ok':'err');
+}
+let cmdCount=0;
+function pushCmdLog(ok,ts,inst,dev,body,status){
+  cmdCount++; $('#cmd-cnt').textContent=cmdCount+' 条';
+  const el=$('#cmd-log');
+  if(el.querySelector('.empty'))el.innerHTML='';
+  const row=document.createElement('div'); row.className='row '+(ok?'ok':'err');
+  row.innerHTML=`<span class="t">${ts}</span><span class="b"><b>${ok?'✓':'✗'}</b> ${esc(inst)} → ${esc(dev)} · cmd=${esc(body.cmd)}<br><span style="color:var(--ink-3)">${esc(body.data)}</span>${status?` <span style="color:var(--ink-3)">[${status}]</span>`:''}</span>`;
+  el.prepend(row);
+}
+
+/* diagnostics */
+async function trcStart(){
+  const id=$('#trc-inst').value, dur=parseInt($('#trc-dur').value)||60;
+  if(!id){toast('未选实例','请先选择采集器','err');return;}
+  if(State.sim){toast('trace 已激活(SIM)',`${id} · ${dur}s`,'ok');return;}
+  const r=await api('/api/v1/inst/trace',{method:'POST',body:JSON.stringify({inst_id:id,duration_secs:dur})});
+  toast(r.status===200?'trace 已激活':'激活失败',r.status===200?`${id} · hex 将进 io_trace`:(`${id} · ${r.status} ${r.body.slice(0,50)}`),r.status===200?'ok':'err');
+  setTimeout(renderTraceTargets,300);
+}
+function renderTraceTargets(){ $('#trc-inst').innerHTML=State.stats.map(s=>`<option value="${esc(s.inst_id)}">${esc(s.inst_id)} · ${s.app_code}</option>`).join(''); renderTraceActive(); }
+async function renderTraceActive(){
+  let active=[];
+  if(State.sim){active=['opcua-line1','mb-power'];}
+  else{const r=await api('/api/v1/inst/trace');active=(r.json&&r.json.active)||[];}
+  $('#trc-active').innerHTML=active.length?active.map(id=>`<span class="tac"><span class="led on"></span>${esc(id)}</span>`).join(''):'<span style="color:var(--ink-3);font-family:IBM Plex Mono,monospace">无</span>';
+  const cntEl=$('#trc-active-cnt'); if(cntEl)cntEl.textContent=active.length+' 激活中';
+}
+function renderLogStream(){
+  let arr=(State.logs||[]).filter(l=>(l.target||'')!=='io_trace');
+  if(State.lgLevel)arr=arr.filter(l=>levelRank(l.level)>=levelRank(State.lgLevel));
+  const tg=$('#lg-target').value.trim();
+  if(tg)arr=arr.filter(l=>(l.target||'')===tg);
+  $('#tab-log-cnt').textContent=arr.length;
+  $('#lg-stream').innerHTML=arr.length?arr.map(l=>`<div class="le ${(l.level||'').toLowerCase()}"><span class="ts">${fmtAge(l.ts)}</span><span class="lv">${(l.level||'').toUpperCase()}</span><span class="tg">${esc(l.target||'')}</span><span class="msg">${esc(l.message||'')}${l.fields&&Object.keys(l.fields).length?` <span class="fld">${esc(JSON.stringify(l.fields))}</span>`:''}</span></div>`).join(''):'<div class="empty-state"><div class="t">无日志</div></div>';
+}
+function renderPacketStream(){
+  const arr=(State.logs||[]).filter(l=>(l.target||'')==='io_trace');
+  $('#tab-pkt-cnt').textContent=arr.length;
+  $('#pkt-stream').innerHTML=arr.length?arr.map(l=>{
+    const dir=((l.fields&&l.fields.dir)||'?').toString();
+    const hex=(l.fields&&l.fields.hex)||'';
+    const inst=(l.fields&&l.fields.inst_id)||'';
+    return `<div class="pkt ${dir.toLowerCase()}"><span class="dir">${dir.toUpperCase()}</span><span class="inst">${esc(inst)}</span><span class="hex">${esc(hex)}</span><span class="ts">${fmtAge(l.ts)}</span></div>`;
+  }).join(''):'<div class="empty-state"><div class="t">无报文</div><div class="s">激活上方「报文 trace 控制」后，收发字节(hex)显示于此</div></div>';
+}
+function switchDiagTab(tab){
+  $$('.diag-tabs button').forEach(b=>b.classList.toggle('on',b.dataset.tab===tab));
+  $('#pane-log').style.display=tab==='log'?'block':'none';
+  $('#pane-pkt').style.display=tab==='pkt'?'block':'none';
+  const lt=$('#log-tools'); if(lt)lt.style.display=tab==='log'?'':'none';
+}
+function levelRank(l){return {error:4,warn:3,info:2,debug:1,trace:0}[String(l).toLowerCase()] ?? 2;}
+function fmtAge(ts){if(!ts)return '--:--:--';const d=new Date(ts);if(isNaN(d.getTime()))return String(ts).slice(11,19);return fmt.clock(d);}
+
+/* strip */
+function renderStrip(){
+  const s=State.sys||{}, m=s.metrics||{}, p=s.process||{};
+  $('#st-hub').textContent=`${(m.hub&&m.hub.depth_last)||0}/256`;
+  $('#st-hub-bar').style.width=Math.min(100,((m.hub&&m.hub.depth_last)||0)/256*100)+'%';
+  $('#st-mqtt').innerHTML=m.mqtt&&m.mqtt.connected?'<span style="color:var(--green)">ON</span>':'<span style="color:var(--red)">OFF</span>';
+  const cpu=Math.max(0,Math.min(100,p.cpu_pct||0));
+  $('#st-cpu').textContent=cpu.toFixed(0)+'%'; $('#st-cpu-bar').style.width=cpu+'%';
+  $('#st-mem').textContent=fmt.bytes(p.mem_bytes||0);
+  $('#st-mem-bar').style.width=Math.min(100,(p.mem_bytes||0)/512/1024/1024*100)+'%';
+  $('#st-pipe').textContent=fmt.num(m.pipeline_processed_count||0);
+  $('#st-ctl').textContent=fmt.num(m.ctl_send_count||0);
+  $('#dbsize').textContent=fmt.num(s.dbsize||0);
+}
+/* heartbeat waveform */
+const HB_LEN=40, hbArr=new Array(HB_LEN).fill(8);
+function pushHb(cpu){
+  hbArr.push(28 - Math.min(24,cpu*0.3) - Math.random()*3); hbArr.shift();
+  const w=120,h=30,step=w/(HB_LEN-1);
+  $('#hbpoly').setAttribute('points', hbArr.map((y,i)=>`${(i*step).toFixed(1)},${Math.max(2,y).toFixed(1)}`).join(' '));
+}
+
+/* ---------- utils ---------- */
+function esc(s){s=(s===null||s===undefined)?'':String(s);return s.replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
+function toast(h,msg,kind){const w=$('#toast');const t=document.createElement('div');t.className='t '+(kind||'');t.innerHTML=`<div class="h">${esc(h)}</div>${esc(msg)}`;w.prepend(t);setTimeout(()=>{t.style.opacity=0;t.style.transition='.3s';setTimeout(()=>t.remove(),300);},3400);}
+
+/* ---------- nav ---------- */
+$$('#nav button').forEach(b=>b.onclick=()=>{
+  $$('#nav button').forEach(x=>x.classList.remove('active')); b.classList.add('active');
+  $$('.view').forEach(v=>v.classList.remove('active')); $('#v-'+b.dataset.v).classList.add('active');
+  if(b.dataset.v==='diagnostics'){renderTraceTargets();loadLogs(State.lgLevel,$('#lg-target').value.trim());}
+  if(b.dataset.v==='telemetry')renderTelemetry();
+  if(b.dataset.v==='control')renderCmdTargets();
+});
+/* telemetry toolbar */
+$('#tm-filter').oninput=renderTelemetry;
+$$('#tm-fresh button').forEach(b=>b.onclick=()=>{$$('#tm-fresh button').forEach(x=>x.classList.remove('on'));b.classList.add('on');State.freshFilter=b.dataset.f;renderTelemetry();});
+/* control */
+$('#cmd-inst').onchange=pickCmdTmpl;
+$('#cmd-send').onclick=sendCmd;
+/* diagnostics */
+$$('#lg-level button').forEach(b=>b.onclick=()=>{$$('#lg-level button').forEach(x=>x.classList.remove('on'));b.classList.add('on');State.lgLevel=b.dataset.l;renderLogStream();});
+$('#lg-target').oninput=renderLogStream; $('#lg-refresh').onclick=()=>loadLogs(State.lgLevel,$('#lg-target').value.trim());
+$$('.diag-tabs button').forEach(b=>b.onclick=()=>switchDiagTab(b.dataset.tab));
+$('#trc-start').onclick=trcStart;
+
+/* ---------- theme ---------- */
+function setTheme(t){document.documentElement.dataset.theme=t;localStorage.setItem('rsiot_theme',t);$$('#themeToggle button').forEach(b=>b.classList.toggle('on',b.dataset.t===t));}
+setTheme(localStorage.getItem('rsiot_theme')||'light');
+$$('#themeToggle button').forEach(b=>b.onclick=()=>setTheme(b.dataset.t));
+
+/* ---------- clock ---------- */
+setInterval(()=>{const d=new Date();$('#clock').textContent=fmt.clock(d);
+  $('#date').textContent=d.toLocaleDateString('zh-CN')+' · UTC'+((-d.getTimezoneOffset()/60>=0?'+':'')+(-d.getTimezoneOffset()/60));},1000);
+
+/* ---------- bootstrap ---------- */
+async function boot(){
+  if(State.token){
+    const r=await api('/api/v1/user/checktoken');
+    if(r.status===200&&r.json&&r.json.userId){State.user=r.json.userId;await enterApp();return;}
+  }
+  // 无有效 token → 显示登录界面（后端在线时）；后端离线由下方 SIM fallback 接管。
+  $('#veil').classList.remove('hidden');
+}
+$('#lg-btn').onclick=login;
+$('#lg-pass').addEventListener('keydown',e=>{if(e.key==='Enter')login();});
+boot();
+
+// SIM fallback: 后端不可达（网络层失败）→ 进入演练模式，使设计可独立演示。
+// 仅靠 fetch throw（连接拒绝/DNS 失败）触发；HTTP 401/5xx 视为后端在线，保持登录界面。
+setTimeout(()=>{ if(!State.authed && !State.sim){
+  fetch('/api/v1/sysinfo').then(()=>{/* 后端在线：保持登录界面 */}).catch(()=>enterSim());
+}}, 800);
+</script>
+</body>
+</html>

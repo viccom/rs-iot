@@ -1,0 +1,17 @@
+# rsiot-gateway 配置（开发验证用）。
+# jwt_secret 必须与 rs-iot config.toml [api] jwt_secret 同值（层1 JWT 直通）。
+listen      = "127.0.0.1:8080"            # 浏览器访问入口
+rsiot_base  = "http://127.0.0.1:8790"     # rs-iot 主程序
+serve_base  = "http://127.0.0.1:8787"     # reasonix serve
+jwt_secret  = "qwerty1234567890asdfgh1234567890"   # 与 config.toml 同值
+serve_token = "test-serve-token-123"      # reasonix serve --auth token（联调用）
+
+# LLM 供应商管理（/api/agent/providers*）：直管 reasonix 配置面 + 经 warden 重启生效。
+# __ROOT__ 由 pack-field-kit.ps1 打包时替换为部署根正斜杠路径（手工部署需自行替换）。
+# workspace_dir：附件上传/工作区浏览锚点（= reasonix serve 的 workspaceRoot，须与
+# services.toml 里 reasonix 服务的 working_dir 一致）。
+[reasonix]
+home_dir   = "__ROOT__/home"
+warden_url = "http://127.0.0.1:8789"
+service_name = "reasonix"
+workspace_dir = "__ROOT__/work"

@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>rs-iot apiTest</title>
+<style>
+  body{font-family:system-ui,sans-serif;margin:20px;max-width:960px}
+  pre{background:#f4f4f4;padding:8px;white-space:pre-wrap;word-break:break-all;border-radius:4px}
+  button{margin:2px;padding:4px 10px} input{margin:2px;padding:4px}
+  .row{margin:6px 0}
+  .muted{color:#888}
+</style>
+</head>
+<body>
+<h2>rs-iot apiTest</h2>
+<div class="row">hwid: <b id="hwid">-</b> <span class="muted">| version:</span> <b id="ver">-</b></div>
+
+<div class="row">
+  <input id="u" value="admin">
+  <input id="p" type="password" value="admin" placeholder="password">
+  <button onclick="login()">login</button>
+  <span id="lstat"></span>
+</div>
+
+<div class="row">
+  <button onclick="call('/api/v1/sysinfo')">sysinfo</button>
+  <button onclick="call('/api/v1/sysstatus')">sysstatus</button>
+  <button onclick="call('/api/v1/plugins')">plugins</button>
+  <button onclick="call('/api/v1/inststatus')">inststatus</button>
+  <button onclick="call('/api/v1/insts')">insts</button>
+  <button onclick="call('/api/v1/devices')">devices</button>
+  <button onclick="call('/api/v1/users')">users</button>
+  <button onclick="call('/api/v1/usergroups')">usergroups</button>
+  <button onclick="call('/api/v1/user/checktoken')">checktoken</button>
+</div>
+
+<div class="row">
+  startinst id: <input id="sid" style="width:100px"><button onclick="startinst()">startinst</button>
+  stopinst id: <input id="xid" style="width:100px"><button onclick="stopinst()">stopinst</button>
+</div>
+
+<pre id="out">(点击按钮调用接口)</pre>
+
+<script>
+let token = (document.cookie.match(/token=([^;]+)/) || [])[1] || '';
+
+async function call(path, opts) {
+  try {
+    const r = await fetch(path, Object.assign({
+      headers: { 'Authorization': token || '', 'Content-Type': 'application/json' }
+    }, opts || {}));
+    const t = await r.text();
+    document.getElementById('out').textContent = r.status + '  ' + path + '\n' + t;
+    return { status: r.status, body: t };
+  } catch (e) { document.getElementById('out').textContent = 'ERR ' + e; return {status:0,body:''}; }
+}
+
+async function login() {
+  const u = document.getElementById('u').value, p = document.getElementById('p').value;
+  const r = await call('/api/v1/user/login', { method: 'POST', body: JSON.stringify({ user_id: u, pass: p }) });
+  try {
+    const j = JSON.parse(r.body);
+    if (j.token) { token = j.token; document.getElementById('lstat').textContent = ' ✓'; loadSys(); }
+    else document.getElementById('lstat').textContent = ' ✗';
+  } catch (e) { document.getElementById('lstat').textContent = ' ✗'; }
+}
+async function startinst() { const id = document.getElementById('sid').value; call('/api/v1/startinst', { method: 'POST', body: JSON.stringify({ inst_id: id }) }); }
+async function stopinst() { const id = document.getElementById('xid').value; call('/api/v1/stopinst', { method: 'POST', body: JSON.stringify({ inst_id: id }) }); }
+async function loadSys() { const r = await call('/api/v1/sysinfo'); try { const j = JSON.parse(r.body); document.getElementById('hwid').textContent = j.hwid; document.getElementById('ver').textContent = j.version; } catch (e) {} }
+
+loadSys();
+</script>
+</body>
+</html>
