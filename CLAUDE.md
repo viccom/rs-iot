@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 项目地图
 
-轻量跨平台工业 IoT 边缘框架（Rust），Go 项目 [Lite_IOT](D:\Go_Codes\Lite_IOT) 的 Rust 重写与增强。内嵌 [lux](E:\github.com\lux) 作为进程内 Redis 兼容数据库（RESP :6390 + Tiered WAL 持久化）。
+轻量跨平台工业 IoT 边缘框架（Rust），Go 项目 [Lite_IOT](D:\Go_Codes\Lite_IOT) 的 Rust 重写与增强。内嵌 lux 作为进程内 Redis 兼容数据库（RESP :6390 + Tiered WAL 持久化）——lux 为**同级目录** `../lux` 的 path 依赖，新机器需先按 `docs/lux-upstream-sync-strategy.md` §一.5 恢复（clone 官方 + 从私人 fork 拉补丁）。
 
 **Cargo workspace 结构**（2026-08 起，AI Agent 集成项目引入）：根 `rs-iot` crate（主程序，工业数采核心）+ `crates/rsiot-mcp`（reasonix `[[plugins]]` 子进程，MCP 工具→rs-iot REST 翻译层，照 dbx-mcp 范本）+ `crates/rsiot-gateway`（v3 独立 API Gateway，纯反代 rs-iot+reasonix serve，见 `docs/plan-ai-agent-integration-v3.md`）。**三 crate 解耦**：核心数据流（pipeline/lux/采集）只在主 crate，AI 集成全部在子 crate——改子 crate 零影响主 crate（194 单测验证）。改子 crate：`cargo build -p rsiot-mcp` / `-p rsiot-gateway`。
 
@@ -60,7 +60,7 @@ POST /api/v1/command/send ─┼─► CtlRegistry.try_send(64) ──► 实例
 `users` / `passwords`(bcrypt) / `groups` / `instances` / `devices` / `children` / `accesskey` / `ext_tokens`(外部插件 token: field=instId, value=JSON{token_hash,created_at,enabled}) / `rtdata:<devId>`（field=`<devid>.<tag>`，value=`[ts, localTime, value]` JSON）。
 
 **环境依赖**：
-- `lux = { path = "../lux" }` — 需 lux 源码在**同级** `E:\github.com\lux`；修改 lux 会直接影响本项目的编译与行为（EmbeddedClient 无 Debug、`ServerConfig` 无 Builder 等特性已被本项目代码 `expect` 依赖）。
+- `lux = { path = "../lux" }` — 需 lux 源码在 rs-iot **同级目录**（任何机器/盘符均可；clone `https://github.com/lux-db/lux.git` 到同级 + 按 `docs/lux-upstream-sync-strategy.md` 恢复 2 个本地补丁，或直接从私人 fork `https://git.metme.top/viccom/lux.git` 拉取含补丁的 main）。修改 lux 会直接影响本项目的编译与行为（EmbeddedClient 无 Debug、`ServerConfig` 无 Builder 等特性已被本项目代码 `expect` 依赖）。
 - **lux 上游同步**：rs-iot 非 lux 维护方（无 PR 权限），以"克隆官方源 + 本地小补丁"跟随上游；同步流程、rebase 冲突决策、风险点与应急恢复见 `docs/lux-upstream-sync-strategy.md`。
 - `D:\Go_Codes\Lite_IOT` — 对标参考实现，新功能常按"Lite_IOT 的 X 模块"定位。
 - 端口：lux RESP 6390（避开本机 redis 6379）、REST 8780（config.toml 中 8780 被占用临时改 8790）、MQTT 公共 broker broker.emqx.io:1883（开发验证用）。

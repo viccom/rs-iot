@@ -13,7 +13,37 @@ lux = { path = "../lux" }
 
 - 纯路径依赖,**无 `version` / 无 `features`**
 - Cargo.lock 记录 lux 当前版本(`0.37.0`),但实际编译用本地 working tree
-- lux 必须位于 rs-iot 同级 `E:\github.com\lux`,修改 lux 直接影响 rs-iot 编译与行为
+- lux 必须位于 rs-iot **同级目录**(任何机器/任何盘符均可,路径是相对的),修改 lux 直接影响 rs-iot 编译与行为
+
+**路径约定**(本文所有命令用变量,按机器实际位置设置):
+
+```bash
+RSIOT=<rs-iot 仓库根>     # 例:Git Bash 下 /e/Rs_Codes/rs-iot
+LUX=<rs-iot 同级 lux>     # 例:Git Bash 下 /e/Rs_Codes/lux
+```
+
+## 一.5、新机器初始化(从零恢复 lux)
+
+lux 是 path 依赖,新机器 clone rs-iot 后必须先恢复同级 lux(否则 `cargo build` 报 `failed to read ../lux/Cargo.toml`):
+
+```bash
+# ① 克隆官方源
+git clone https://github.com/lux-db/lux.git "$LUX"
+cd "$LUX"
+
+# ② 配私人 fork remote 并拉取含本地补丁的历史
+git remote add mine https://git.metme.top/viccom/lux.git
+git fetch mine
+git checkout -B main mine/main
+
+# ③ 若官方 main 有新提交,把补丁 rebase 上去(冲突按 §七 决策树)
+git fetch origin
+git rebase origin/main
+
+# ④ 验证:lux 自身测试 + rs-iot 集成(见 §八)
+```
+
+> 若 `mine` 不可达(网络/凭证问题),退路:clone 官方后按 §四 补丁清单**手动重打补丁**(清单记录了每个补丁的改动文件与内容,改动面极小),再 `git push mine main` 重建云端备份。
 
 ## 二、是否只能 git clone lux 到本地?
 
@@ -42,19 +72,19 @@ mine   → https://git.metme.top/viccom/lux.git     私人 fork,push 备份
 查看当前状态:
 
 ```bash
-cd /e/github.com/lux
+cd "$LUX"
 git remote -v
 git branch -vv          # 看 main 相对 origin/main ahead/behind
 ```
 
 ## 四、当前本地补丁清单
 
-本地 `main` 领先 `origin/main` 2 个提交:
+本地 `main` 领先 `origin/main` 2 个提交(2026-08-17 仓库重建,mlua 补丁以新 hash 重放并已同步 `mine`):
 
 | commit | 用途 | 改动文件 | 冲突热点 | 丢弃条件 |
 |---|---|---|---|---|
-| `3068806` | mlua 0.10→0.12 对齐 rs-iot | `Cargo.toml`(mlua 版本 1 行) + `Cargo.lock` + `src/lua.rs`(3 处 `String`→`LuaString` + `set_hook` 返回 `Result`) | mlua 版本行、lua.rs API 改名 | 官方 lux 升 mlua ≥ 0.12 |
-| `206bc22` | Windows 测试套件 + WAL truncate 修复 | `src/disk.rs`(`Wal` 加 `path` 字段 + `truncate` 两阶段 reopen) + `tests/*` | `Wal` 结构体字段、`truncate` 方法体 | 官方修了同 bug |
+| `cc900b5` | mlua 0.10→0.12 对齐 rs-iot | `Cargo.toml`(mlua 版本 1 行) + `Cargo.lock` + `src/lua.rs`(3 处 `String`→`LuaString` + `set_hook` 返回 `Result`) | mlua 版本行、lua.rs API 改名 | 官方 lux 升 mlua ≥ 0.12 |
+| `206bc22` | Windows 测试套件 + WAL truncate 修复 | `src/disk.rs`(`Wal` 加 `path` 字段 + `truncate` 两阶段 reopen) + `tests/common/mod.rs` + `tests/public_api.rs` | `Wal` 结构体字段、`truncate` 方法体 | 官方修了同 bug |
 
 **关键**:两个补丁都在 lux **内部**(lua 引擎 / WAL 存储),**完全不碰 rs-iot 耦合面**(`ServerConfig`/`EmbeddedClient`/`EmbeddedValue` 等)。所以补丁本身不会让 rs-iot 代码失效。
 
@@ -71,10 +101,10 @@ merge 会产生 merge commit,多次同步后补丁埋进 merge 历史,难追踪�
 ## 六、标准同步流程
 
 ```bash
-cd /e/github.com/lux
+cd "$LUX"
 
 # ① 备份补丁到仓库外(rebase 失败时可恢复;目录放仓库外避免污染工作树)
-git format-patch origin/main -o /e/github.com/lux-local-patches/
+git format-patch origin/main -o "$LUX/../lux-local-patches/"
 
 # ② fetch 官方
 git fetch origin
@@ -119,11 +149,11 @@ git rebase origin/main
 
 ```bash
 # 1) lux 自身能编译
-cd /e/github.com/lux
+cd "$LUX"
 cargo build -j 2
 
 # 2) rs-iot 集成(轻量 check,不编测试 binary,内存占用低)
-cd /e/github.com/rs-iot
+cd "$RSIOT"
 cargo check -j 2
 
 # 3) check 通过后,跑 clippy + 关键集成测(走 lux 读写)
@@ -155,10 +185,10 @@ git rebase --abort
 
 # 级别2:从干净官方重新应用全部补丁
 git reset --hard origin/main
-git am /e/github.com/lux-local-patches/*.patch
+git am "$LUX/../lux-local-patches/"*.patch
 
 # 级别3:am 也冲突 → 单独 cherry-pick 或手动重打补丁
-git cherry-pick 3068806       # 一个一个来
+git cherry-pick 206bc22       # 一个一个来(补丁 hash 见 §四)
 ```
 
 ## 十一、风险点总览
@@ -183,10 +213,10 @@ git cherry-pick 3068806       # 一个一个来
 ## 十三、速查(下次同步 3 步)
 
 ```bash
-cd /e/github.com/lux
+cd "$LUX"
 git fetch origin && git rebase origin/main     # 同步 + 重叠补丁(冲突按 §7)
 cargo build -j 2                                # lux 编译
-cd /e/github.com/rs-iot && cargo check -j 2     # rs-iot 集成
+cd "$RSIOT" && cargo check -j 2                # rs-iot 集成
 # 全绿后:git push mine main --force-with-lease  # 云备份
 ```
 
@@ -210,7 +240,7 @@ lux 若改以下符号的**字段 / 变体 / 方法签名**,rs-iot 需跟着改�
 排查命令:
 
 ```bash
-cd /e/github.com/rs-iot
+cd "$RSIOT"
 rg 'lux::' src/ tests/         # 全部 lux 引用一览
 cargo check -j 2               # 编译器精确定位 break 点
 ```
