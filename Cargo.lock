@@ -2210,6 +2210,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "num_threads"
+version = "0.1.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5c7398b9c8b70908f6371f47ed36737907c87c52af34c268fed0bf0ceb92ead9"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "once_cell"
 version = "1.21.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2810,6 +2819,7 @@ dependencies = [
  "rhai",
  "rumqttc",
  "rust-embed",
+ "rust-ethernet-ip",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -2950,6 +2960,64 @@ dependencies = [
 ]
 
 [[package]]
+name = "rust-ethernet-ip"
+version = "1.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ce6920bd22036f09e4f2ff3ba6b12b4829554eb0d52cc7943f61c772ff7c43a3"
+dependencies = [
+ "bytes",
+ "futures",
+ "regex",
+ "rust-ethernet-ip-protocol",
+ "rust-ethernet-ip-tag-path",
+ "rust-ethernet-ip-types",
+ "rust-ethernet-ip-udt",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.19",
+ "tokio",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
+ "vergen",
+]
+
+[[package]]
+name = "rust-ethernet-ip-protocol"
+version = "1.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "075df18690694ea9a9f5b7733b806a8b7ff8ef5d03dfa92a7e387a0c75d1b5f5"
+dependencies = [
+ "bytes",
+ "rust-ethernet-ip-types",
+]
+
+[[package]]
+name = "rust-ethernet-ip-tag-path"
+version = "1.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "760732bae414c67c211f057b34fd30492f63f3d461c5874751b37ab431f5b223"
+
+[[package]]
+name = "rust-ethernet-ip-types"
+version = "1.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "986386792cdc8b4d6cfc626c2227b56d226f70d0848b6511bab4ed603b99b967"
+dependencies = [
+ "bytes",
+ "serde",
+]
+
+[[package]]
+name = "rust-ethernet-ip-udt"
+version = "1.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "faffd12316b4a62d88da9dd248201fe66d0d18e46d26be60ebdde50d124f4029"
+dependencies = [
+ "rust-ethernet-ip-types",
+]
+
+[[package]]
 name = "rustc-hash"
 version = "2.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2974,7 +3042,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.4.15",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -3602,7 +3670,9 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cdb87b95ec50ddfa440816d227a17b2ccbdda963a316a727fda0fc4334f7d134"
 dependencies = [
  "deranged",
+ "libc",
  "num-conv",
+ "num_threads",
  "powerfmt",
  "serde_core",
  "time-core",
@@ -4091,6 +4161,18 @@ name = "valuable"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ba73ea9cf16a25df0c8caa16c51acb937d5712a8429db78a3ee29d5dcacd3a65"
+
+[[package]]
+name = "vergen"
+version = "8.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2990d9ea5967266ea0ccf413a4aa5c42a93dbcfda9cb49a97de6931726b12566"
+dependencies = [
+ "anyhow",
+ "cfg-if",
+ "rustversion",
+ "time",
+]
 
 [[package]]
 name = "version_check"

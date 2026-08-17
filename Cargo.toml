@@ -8,7 +8,8 @@ members = [".", "crates/rsiot-mcp", "crates/rsiot-gateway"]
 
 [workspace.package]
 edition = "2021"
-rust-version = "1.81"
+# MSRV 1.96：default feature eip 的 rust-ethernet-ip 1.2 要求（--no-default-features 裁剪后可降）。
+rust-version = "1.96"
 license = "MIT"
 repository = "https://github.com/viccom/rs-iot"
 
@@ -91,6 +92,10 @@ tokio-serial = "5.5"
 # Apache-2.0 与 MIT 兼容无传染；无 FFI/无系统库，跨平台编译零额外依赖）。
 tokio-s7 = { version = "0.1", optional = true }
 
+# EtherNet/IP 南向插件（eipClient：rust-ethernet-ip，罗克韦尔 AB CompactLogix/ControlLogix；
+# MIT；纯 TCP 无特殊驱动，跨平台；真实 PLC 硬件验证见 crate 1.2.0 validation docs）。
+rust-ethernet-ip = { version = "1.2", optional = true }
+
 # 外部插件 bridge（sidecarClient）：token hmac 校验 + 高熵 token 生成 + 长度前缀帧
 hmac = "0.12"
 rand = "0.8"
@@ -111,7 +116,7 @@ notify = { version = "8", optional = true }
 notify-debouncer-mini = { version = "0.7", optional = true }
 
 [features]
-default = ["transform", "lua", "lua-http", "opcua", "modbus", "s7"]
+default = ["transform", "lua", "lua-http", "opcua", "modbus", "s7", "eip"]
 # L2 数据转换（rhai 脚本，默认开启）
 transform = ["dep:rhai"]
 # Lua 动态脚本采集（luaClient，默认开启）
@@ -124,6 +129,7 @@ lua-http = ["lua", "dep:reqwest"]
 opcua = ["dep:async-opcua"]
 modbus = ["dep:tokio-modbus"]
 s7 = ["dep:tokio-s7"]
+eip = ["dep:rust-ethernet-ip"]
 # 预留（后续里程碑）：
 # local-broker = ["dep:rumqttd"]
 # analytics = ["dep:datafusion"]
