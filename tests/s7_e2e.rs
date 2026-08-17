@@ -691,3 +691,52 @@ async fn s7_return_code_partial_failure() {
 
     teardown(env).await;
 }
+
+/// 45 点分批采集（默认 20 项/PDU → 3 批：20+20+5）。
+///
+/// 库不自动分批（超 PDU 直接报错），插件按 `max_items_per_request` 分片——
+/// 本用例锁住该路径：45 点全量入库（首/中/尾三点抽查），无 PDU 错误。
+#[tokio::test]
+async fn s7_read_batching_over_20_items() {
+    // 45 个 i16 点：DB1.DBW0 / DBW2 / ... / DBW88（值 = 序号，便于断言）。
+    let children: Vec<ChildSpec> = (0..45)
+        .map(|i| ChildSpec {
+            label: format!("p{i:02}"),
+            value: format!("DB1.DBW{}", i * 2),
+            r#type: "i16".into(),
+        })
+        .collect();
+    let devices = vec![DeviceSpec {
+        label: "devS7".into(),
+        value: "devS7".into(),
+        children,
+        slave_id: None,
+    }];
+
+    let state = ServerState::new();
+    // 播种 DB1 字节 0..90：第 i 个 i16（偏移 2i）大端编码值 i。
+    {
+        let mut mem = state.mem.lock().expect("mem lock");
+        let mut bytes = Vec::with_capacity(90);
+        for i in 0..45u16 {
+            bytes.extend_from_slice(&i.to_be_bytes());
+        }
+        mem.write(S7Area::DataBlocks.code(), 1, 0, &bytes);
+    }
+    let env = setup("s7batch", devices, state).await;
+
+    tokio::time::sleep(Duration::from_millis(2500)).await;
+
+    // 首（第 1 批）/中（第 3 批开头附近）/尾（第 3 批末尾）抽查。
+    for (field, expect) in [("devS7.p00", "0"), ("devS7.p20", "20"), ("devS7.p44", "44")] {
+        let v = hget_cell(&env.client, "rtdata:devS7", field).await;
+        assert!(
+            v.contains(&format!("[{expect}]"))
+                || v.contains(&format!("Int({expect})"))
+                || v.contains(expect),
+            "分批采集 {field} 应入库为 {expect}，得到 '{v}'"
+        );
+    }
+
+    teardown(env).await;
+}

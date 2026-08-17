@@ -1,7 +1,8 @@
 //! `s7Client`：西门子 S7 南向采集插件（tokio-s7 0.1，纯 Rust，ISO-on-TCP :102）。
 //!
 //! 周期连接 S7-200/200Smart/300/400/1200/1500/Sinumerik828D PLC，按 `devices` 批量读取
-//! 变量，组装 `Sample` 推入 hub；同时消费下行命令（`cmd="write"`）写回 PLC。
+//! 变量（单请求超 `max_items_per_request` 项自动分片，多 PDU 顺序读），组装 `Sample`
+//! 推入 hub；同时消费下行命令（`cmd="write"`）写回 PLC。
 //!
 //! 配置（`InstConfig::app_config` JSON）：
 //! ```json
@@ -11,7 +12,9 @@
 //!   "rack": 0, "slot": 1,
 //!   "period": 2,
 //!   "timeout_ms": 5000,
-//!   "auto_reconnect": true
+//!   "auto_reconnect": true,
+//!   "connection_type": "pg",
+//!   "max_items_per_request": 20
 //! }
 //! ```
 //! - `endpoint`：PLC IP（端口默认 102，S7 标准 ISO-on-TCP；可用 `port` 覆盖——
@@ -21,6 +24,12 @@
 //! - `rack`/`slot`：可选；缺省按 `plc_type`（`with_plc_type` 自动填默认）
 //! - `period`：采集周期秒（缺省 2，最小 1）
 //! - `timeout_ms`/`auto_reconnect`：可选（缺省 5000 / true）
+//! - `connection_type`：`pg`/`pc`/`op`（缺省 `pg`）——COTP 连接资源类型，
+//!   部分 PLC 限制并发连接数时按需切换（PG=编程器 / PC=面板 / OP=操作站）
+//! - `max_items_per_request`：单 PDU 读请求最大项数（缺省 20，S7 协议上限即 20，
+//!   clamp 1-20）。**库不做自动分批**（超 PDU 直接报错），插件按此值分片多请求，
+//!   支持任意点数的设备（每项请求开销 12B，20 项 ≈ 240B 请求 + ≤240B 响应，
+//!   连 S7-300 的 480B PDU 都安全）。
 //!
 //! 变量映射（复用 `devices`，与 opcua/modbus 对齐）：
 //! - `DeviceSpec.value` = 设备 ID（`rtdata:<devid>` 的 key）
@@ -44,15 +53,21 @@
 //! | `i64`/`u64` | 8 字节 | `DB1.0` | 大端 |
 //! | `f32` | 4 字节 | `DB1.DBD0` | IEEE754 大端 |
 //! | `f64` | 8 字节 | `DB1.0` | IEEE754 大端 |
+//! | `string[N]` | N+2 字节 | `DB1.0` | S7 STRING（2B 头：max+actual；ISO-8859-1，N 缺省 254，须与 PLC 声明一致）。批量路径外单点读（同 eip string 模式） |
+//! | `wstring[N]` | 2N+4 字节 | `DB1.0` | S7 WSTRING（UTF-16BE，4B 头；N 缺省 254）。同上单点读 |
 //!
 //! 位地址（如 `M10.5`）必须配 `kind:"bool"`——配数值 kind 会读到 `M10`（位段被忽略）。
 //!
+//! 写命令 `data` JSON：`{"address":"DB1.DBD0","value":42.5,"kind":"f32"}`；string 写
+//! 加 `"max_len":254`（缺省 254，须与 PLC 声明一致——写入头的 max_len 字段）。
+//!
 //! # v1 边界
 //!
-//! - 读写均只支持上表数值/位类型（`bool`/`byte`/`i16`/`u16`/`i32`/`u32`/`i64`/`u64`/`f32`/`f64`）。
-//! - **string/wstring 后置**（S7 string 有 2 字节头，批量路径与数值不一致；v1.1 单点支持）。
-//! - 小端 `_le` 变体不暴露（S7 原生大端；非标设备后置）。
-//! - counter/timer（`C`/`T` 区）后置（需通用 read + area）。
+//! - 读写均只支持上表类型（数值/位/string/wstring）。
+//! - 小端 `_le` 变体不暴露（S7 原生大端；库支持 `*_le` 方法，非标设备后置）。
+//! - counter/timer（`C`/`T` 区）后置（需手工构造 RequestItem 的 Counter/Timer 变体）。
+//! - SZL 诊断（`szl_read`/`get_cpu_info`/`get_plc_status`）不暴露——属运维诊断非采集，
+//!   后续按需加 REST 端点而非插件配置。
 
 use crate::host::HostContext;
 use crate::plugin::traits::Source;
@@ -90,6 +105,10 @@ struct S7Cfg {
     timeout_ms: u64,
     /// 是否启用库内置自动重连。
     auto_reconnect: bool,
+    /// COTP 连接资源类型（PG=0x01 / PC=0x02 / OP=0x03，缺省 PG）。
+    connection_type: u8,
+    /// 单 PDU 读请求最大项数（S7 协议上限 20，缺省 20；库不自动分批，插件按此分片）。
+    max_items_per_request: usize,
 }
 
 /// S7 标准端口（ISO-on-TCP，RFC 1006）。
@@ -133,6 +152,23 @@ fn parse_cfg(app: &serde_json::Value) -> Result<S7Cfg, String> {
         .get("auto_reconnect")
         .and_then(|v| v.as_bool())
         .unwrap_or(true);
+    let connection_type = match app
+        .get("connection_type")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .map(str::to_lowercase)
+        .as_deref()
+    {
+        None | Some("") | Some("pg") => 0x01,
+        Some("pc") => 0x02,
+        Some("op") => 0x03,
+        Some(other) => return Err(format!("unsupported connection_type: {other} (pg/pc/op)")),
+    };
+    let max_items_per_request = app
+        .get("max_items_per_request")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(20)
+        .clamp(1, 20) as usize;
     Ok(S7Cfg {
         endpoint,
         port,
@@ -141,6 +177,8 @@ fn parse_cfg(app: &serde_json::Value) -> Result<S7Cfg, String> {
         period,
         timeout_ms,
         auto_reconnect,
+        connection_type,
+        max_items_per_request,
     })
 }
 
@@ -181,26 +219,59 @@ enum Kind {
     F32,
     /// 64 位浮点（IEEE754 大端）。
     F64,
+    /// S7 STRING（2B 头 + ISO-8859-1；单点读写路径，不进批量）。
+    String,
+    /// S7 WSTRING（4B 头 + UTF-16BE；单点读写路径，不进批量）。
+    WString,
 }
 
-/// kind 字符串 → `Kind`（大小写不敏感；接受常见别名）。
-fn parse_kind(s: &str) -> Result<Kind, String> {
-    match s.trim().to_lowercase().as_str() {
-        "bool" | "bit" => Ok(Kind::Bool),
-        "byte" | "i8" => Ok(Kind::Byte),
-        "i16" | "int16" => Ok(Kind::I16),
-        "u16" | "uint16" => Ok(Kind::U16),
-        "i32" | "int32" => Ok(Kind::I32),
-        "u32" | "uint32" => Ok(Kind::U32),
-        "i64" | "int64" => Ok(Kind::I64),
-        "u64" | "uint64" => Ok(Kind::U64),
-        "f32" | "float" | "float32" => Ok(Kind::F32),
-        "f64" | "double" | "float64" => Ok(Kind::F64),
-        other => Err(format!("unsupported kind: {other}")),
-    }
+/// string kind 的声明最大字符数缺省值（S7 常见 `String[254]`）。
+const DEFAULT_STRING_MAX_LEN: u16 = 254;
+
+/// 每设备点位分组（采集路径不同）：数值/位批量读 + string/wstring 单点读。
+struct DevPoints {
+    /// 设备 ID（`rtdata:<devid>` 的 key）。
+    devid: String,
+    /// 批量读点位：`(field, addr, kind)`。
+    batch: Vec<(String, String, Kind)>,
+    /// 单点 string 读点位：`(field, addr, kind, max_len)`。
+    strings: Vec<(String, String, Kind, u16)>,
+}
+
+/// kind 字符串 → `(Kind, max_len)`（大小写不敏感；string 支持 `string` / `string[64]`
+/// 语法，`[N]` 为 PLC 声明的最大字符数，须与声明一致——读写都依赖它定位头/长度）。
+fn parse_kind(s: &str) -> Result<(Kind, u16), String> {
+    let t = s.trim().to_lowercase();
+    // string[N] / wstring[N]：拆出方括号里的声明长度。
+    let (base, max_len) = match (t.find('['), t.ends_with(']')) {
+        (Some(i), true) => {
+            let n = t[i + 1..t.len() - 1]
+                .parse::<u16>()
+                .map_err(|_| format!("bad kind length in '{s}'"))?;
+            (t[..i].to_string(), n.max(1))
+        }
+        _ => (t, DEFAULT_STRING_MAX_LEN),
+    };
+    let kind = match base.as_str() {
+        "bool" | "bit" => Kind::Bool,
+        "byte" | "i8" => Kind::Byte,
+        "i16" | "int16" => Kind::I16,
+        "u16" | "uint16" => Kind::U16,
+        "i32" | "int32" => Kind::I32,
+        "u32" | "uint32" => Kind::U32,
+        "i64" | "int64" => Kind::I64,
+        "u64" | "uint64" => Kind::U64,
+        "f32" | "float" | "float32" => Kind::F32,
+        "f64" | "double" | "float64" => Kind::F64,
+        "string" => Kind::String,
+        "wstring" => Kind::WString,
+        other => return Err(format!("unsupported kind: {other}")),
+    };
+    Ok((kind, max_len))
 }
 
 /// kind → 批量 read 的 `RequestItem`（bool 走 `parse_bit`，其余 `parse_byte(count)`）。
+/// string/wstring 走单点读写路径（`read_string` 等），不进批量——返回错误防误用。
 fn build_request(addr: &str, kind: Kind) -> Result<RequestItem, S7Error> {
     match kind {
         Kind::Bool => RequestItem::parse_bit(addr),
@@ -208,16 +279,21 @@ fn build_request(addr: &str, kind: Kind) -> Result<RequestItem, S7Error> {
         Kind::I16 | Kind::U16 => RequestItem::parse_byte(addr, 2),
         Kind::I32 | Kind::U32 | Kind::F32 => RequestItem::parse_byte(addr, 4),
         Kind::I64 | Kind::U64 | Kind::F64 => RequestItem::parse_byte(addr, 8),
+        Kind::String | Kind::WString => {
+            Err(S7Error::Error("string/wstring not in batch path".into()))
+        }
     }
 }
 
 /// kind 所需的最小字节数（bool/byte=1，i16/u16=2，i32/u32/f32=4，i64/u64/f64=8）。
+/// string/wstring 不经 `decode_item`（单点 API 直接返回 String）。
 fn kind_byte_count(kind: Kind) -> usize {
     match kind {
         Kind::Bool | Kind::Byte => 1,
         Kind::I16 | Kind::U16 => 2,
         Kind::I32 | Kind::U32 | Kind::F32 => 4,
         Kind::I64 | Kind::U64 | Kind::F64 => 8,
+        Kind::String | Kind::WString => 0,
     }
 }
 
@@ -262,6 +338,8 @@ fn decode_item(kind: Kind, item: &DataItem) -> Option<SampleValue> {
         Kind::F64 => SampleValue::Float(f64::from_be_bytes([
             d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7],
         ])),
+        // string/wstring 走单点 API，不经此函数；0 字节防御分支已在 need 检查拦截。
+        Kind::String | Kind::WString => return None,
     })
 }
 
@@ -271,7 +349,8 @@ async fn connect(cfg: &S7Cfg) -> Result<S7Conn, String> {
         .with_plc_type(cfg.plc_type)
         .with_port(cfg.port)
         .with_timeout(cfg.timeout_ms)
-        .with_auto_reconnect(cfg.auto_reconnect);
+        .with_auto_reconnect(cfg.auto_reconnect)
+        .with_connection_type(cfg.connection_type);
     if let Some((rack, slot)) = cfg.rack_slot {
         s7 = s7.with_rack_slot(rack, slot);
     }
@@ -329,22 +408,28 @@ impl Source for S7Client {
                 return;
             }
         };
-        // 预解析所有设备的 (devid, [(field, addr, kind)])，采集循环内不再重复 parse。
-        let devices: Vec<(String, Vec<(String, String, Kind)>)> = inst
+        // 预解析所有设备的点位分组（采集循环内不再重复 parse）：
+        // 数值/位 → 批量读（按 max_items_per_request 分片）；string/wstring → 单点读。
+        let devices: Vec<DevPoints> = inst
             .devices
             .iter()
             .map(|dev| {
-                let pts: Vec<(String, String, Kind)> = dev
-                    .children
-                    .iter()
-                    .filter_map(|c| match parse_kind(&c.r#type) {
-                        Ok(kind) => {
+                let mut batch = Vec::new();
+                let mut strings = Vec::new();
+                for c in &dev.children {
+                    match parse_kind(&c.r#type) {
+                        Ok((kind, max_len)) => {
                             let field = if c.label.is_empty() {
                                 c.value.clone()
                             } else {
                                 c.label.clone()
                             };
-                            Some((field, c.value.clone(), kind))
+                            match kind {
+                                Kind::String | Kind::WString => {
+                                    strings.push((field, c.value.clone(), kind, max_len))
+                                }
+                                _ => batch.push((field, c.value.clone(), kind)),
+                            }
                         }
                         Err(e) => {
                             tracing::warn!(
@@ -353,11 +438,14 @@ impl Source for S7Client {
                                 c.r#type,
                                 e
                             );
-                            None
                         }
-                    })
-                    .collect();
-                (dev.value.clone(), pts)
+                    }
+                }
+                DevPoints {
+                    devid: dev.value.clone(),
+                    batch,
+                    strings,
+                }
             })
             .collect();
 
@@ -428,14 +516,49 @@ impl Source for S7Client {
                     };
                     let started = std::time::Instant::now();
                     let mut tick_ok = true;
-                    for (devid, pts) in &devices {
-                        if pts.is_empty() {
+                    // 连接丢失标志（借用结束后统一置 client=None——c 借用期间不能赋值）。
+                    let mut conn_lost = false;
+                    for dev in &devices {
+                        if dev.batch.is_empty() && dev.strings.is_empty() {
                             continue;
                         }
-                        // 构造 Vec<RequestItem>：地址解析失败的点 warn 跳过，不计入。
-                        let mut items: Vec<RequestItem> = Vec::with_capacity(pts.len());
-                        let mut ok_pts: Vec<&(String, String, Kind)> = Vec::with_capacity(pts.len());
-                        for p in pts {
+                        let mut values = BTreeMap::new();
+
+                        // ① string/wstring 单点读（per-item 容错；连接错误中断）。
+                        for (field, addr, kind, max_len) in &dev.strings {
+                            let r = if *kind == Kind::WString {
+                                c.read_wstring(addr, *max_len).await
+                            } else {
+                                c.read_string(addr, *max_len).await
+                            };
+                            match r {
+                                Ok(s) => {
+                                    values.insert(field.clone(), SampleValue::Str(s));
+                                }
+                                Err(e) => {
+                                    if e.is_connection_error() {
+                                        conn_lost = true;
+                                        tracing::warn!(
+                                            "[s7Client] inst {inst_id} string read lost connection: {e}"
+                                        );
+                                        break;
+                                    }
+                                    tracing::warn!(
+                                        "[s7Client] inst {inst_id} string '{addr}' read failed: {e}"
+                                    );
+                                }
+                            }
+                        }
+                        if conn_lost {
+                            break;
+                        }
+
+                        // ② 数值/位批量读：构造 items（坏地址 warn 跳过），按
+                        // max_items_per_request 分片多 PDU（库不自动分批，超限直接报错）。
+                        let mut items: Vec<RequestItem> = Vec::with_capacity(dev.batch.len());
+                        let mut ok_pts: Vec<&(String, String, Kind)> =
+                            Vec::with_capacity(dev.batch.len());
+                        for p in &dev.batch {
                             match build_request(&p.1, p.2) {
                                 Ok(it) => {
                                     items.push(it);
@@ -449,39 +572,56 @@ impl Source for S7Client {
                                 }
                             }
                         }
-                        if items.is_empty() {
-                            continue;
-                        }
-                        match c.read(items).await {
-                            Ok(data_items) => {
-                                let mut values = BTreeMap::new();
-                                for (p, di) in ok_pts.iter().zip(data_items.iter()) {
-                                    if let Some(v) = decode_item(p.2, di) {
-                                        values.insert(p.0.clone(), v);
+                        let mut read_failed = false;
+                        for (chunk_items, chunk_pts) in items
+                            .chunks(cfg.max_items_per_request)
+                            .zip(ok_pts.chunks(cfg.max_items_per_request))
+                        {
+                            match c.read(chunk_items.to_vec()).await {
+                                Ok(data_items) => {
+                                    for (p, di) in chunk_pts.iter().zip(data_items.iter()) {
+                                        if let Some(v) = decode_item(p.2, di) {
+                                            values.insert(p.0.clone(), v);
+                                        }
                                     }
                                 }
-                                let sample = Sample {
-                                    hwid: ctx.hwid.clone(),
-                                    devid: devid.clone(),
-                                    values,
-                                    timestamp: chrono::Local::now().timestamp(),
-                                };
-                                if tx.send(sample).await.is_err() {
+                                Err(e) => {
+                                    read_failed = true;
+                                    tracker.tick_fail(&format!("read failed: {e}"));
+                                    tracing::warn!(
+                                        "[s7Client] inst {inst_id} read failed: {e}"
+                                    );
+                                    // 连接类错误：drop 旧 client，下个 tick 重连（库的
+                                    // auto_reconnect 也可能在后台恢复，此处兜底）。
+                                    if e.is_connection_error() {
+                                        conn_lost = true;
+                                    }
                                     break;
                                 }
                             }
-                            Err(e) => {
-                                tick_ok = false;
-                                tracker.tick_fail(&format!("read failed: {e}"));
-                                tracing::warn!("[s7Client] inst {inst_id} read failed: {e}");
-                                // 连接类错误：drop 旧 client，下个 tick 重连（库的
-                                // auto_reconnect 也可能在后台恢复，此处兜底）。
-                                if e.is_connection_error() {
-                                    client = None;
-                                }
+                        }
+                        if read_failed {
+                            tick_ok = false;
+                            break;
+                        }
+
+                        if !values.is_empty() {
+                            let sample = Sample {
+                                hwid: ctx.hwid.clone(),
+                                devid: dev.devid.clone(),
+                                values,
+                                timestamp: chrono::Local::now().timestamp(),
+                            };
+                            if tx.send(sample).await.is_err() {
                                 break;
                             }
                         }
+                    }
+                    // c 借用已结束，此处统一拆连接（string/批量读路径共享）。
+                    if conn_lost {
+                        tick_ok = false;
+                        tracker.tick_fail("connection lost");
+                        client = None;
                     }
                     if tick_ok {
                         tracker.tick_ok(started.elapsed().as_millis() as u64);
@@ -507,7 +647,8 @@ impl Source for S7Client {
 /// 处理 write 命令：`data` = JSON `{"address":"DB1.DBD0","value":42.5,"kind":"f32"}`。
 ///
 /// `kind` 缺省时按 value 类型推断（bool→Bool、浮点→F64、整数→I64）。写方向用库 typed
-/// 单点方法（库内部处理大端编码），不批量——写命令单点语义清晰。
+/// 单点方法（库内部处理大端编码），不批量——写命令单点语义清晰。string 写额外支持
+/// `"max_len":254`（缺省 254，须与 PLC 声明一致——写入头的 max_len 字段）。
 async fn handle_write(client: &Option<S7Conn>, data: &str) {
     let c = match client {
         Some(c) => c,
@@ -537,23 +678,34 @@ async fn handle_write(client: &Option<S7Conn>, data: &str) {
             return;
         }
     };
-    let kind = match req.get("kind").and_then(|v| v.as_str()) {
+    let (kind, mut max_len) = match req.get("kind").and_then(|v| v.as_str()) {
         Some(k) => match parse_kind(k) {
-            Ok(k) => k,
+            Ok(p) => p,
             Err(e) => {
                 tracing::warn!("[s7Client] write bad kind: {e}");
                 return;
             }
         },
-        None => infer_kind(&value),
+        None => (infer_kind(&value), DEFAULT_STRING_MAX_LEN),
     };
-    if let Err(e) = write_typed(c, address, kind, &value).await {
+    // 显式 max_len 覆盖（string/wstring 写用；其余 kind 忽略）。
+    if let Some(n) = req.get("max_len").and_then(|v| v.as_u64()) {
+        max_len = u16::try_from(n).unwrap_or(DEFAULT_STRING_MAX_LEN);
+    }
+    if let Err(e) = write_typed(c, address, kind, max_len, &value).await {
         tracing::warn!("[s7Client] write failed: {e}");
     }
 }
 
-/// 按 kind 调库 typed write_* 方法。数值按目标类型截断；bool 接受 0/非零或布尔。
-async fn write_typed(c: &S7Conn, addr: &str, kind: Kind, v: &SampleValue) -> Result<(), S7Error> {
+/// 按 kind 调库 typed write_* 方法。数值按目标类型截断；bool 接受 0/非零或布尔；
+/// string/wstring 走专用写（库处理 2B/4B 头 + ISO-8859-1/UTF-16BE 编码）。
+async fn write_typed(
+    c: &S7Conn,
+    addr: &str,
+    kind: Kind,
+    max_len: u16,
+    v: &SampleValue,
+) -> Result<(), S7Error> {
     let as_i = || match v {
         SampleValue::Int(i) => *i,
         SampleValue::Float(f) => *f as i64,
@@ -584,6 +736,20 @@ async fn write_typed(c: &S7Conn, addr: &str, kind: Kind, v: &SampleValue) -> Res
         Kind::U64 => c.write_uint64(addr, as_u()).await,
         Kind::F32 => c.write_float32(addr, as_f() as f32).await,
         Kind::F64 => c.write_float64(addr, as_f()).await,
+        Kind::String => match v {
+            SampleValue::Str(s) => c.write_string(addr, max_len, s).await,
+            other => {
+                let _ = other;
+                Err(S7Error::Error("string write requires string value".into()))
+            }
+        },
+        Kind::WString => match v {
+            SampleValue::Str(s) => c.write_wstring(addr, max_len, s).await,
+            other => {
+                let _ = other;
+                Err(S7Error::Error("wstring write requires string value".into()))
+            }
+        },
     }
 }
 
@@ -618,19 +784,36 @@ mod tests {
 
     #[test]
     fn parse_kind_accepts_aliases() {
-        assert_eq!(parse_kind("bool").unwrap(), Kind::Bool);
-        assert_eq!(parse_kind("bit").unwrap(), Kind::Bool);
-        assert_eq!(parse_kind("byte").unwrap(), Kind::Byte);
-        assert_eq!(parse_kind("i16").unwrap(), Kind::I16);
-        assert_eq!(parse_kind("uint16").unwrap(), Kind::U16);
-        assert_eq!(parse_kind("int32").unwrap(), Kind::I32);
-        assert_eq!(parse_kind("f32").unwrap(), Kind::F32);
-        assert_eq!(parse_kind("float").unwrap(), Kind::F32);
-        assert_eq!(parse_kind("f64").unwrap(), Kind::F64);
-        assert_eq!(parse_kind("double").unwrap(), Kind::F64);
-        // string v1 不支持
-        assert!(parse_kind("string").is_err());
+        assert_eq!(parse_kind("bool").unwrap().0, Kind::Bool);
+        assert_eq!(parse_kind("bit").unwrap().0, Kind::Bool);
+        assert_eq!(parse_kind("byte").unwrap().0, Kind::Byte);
+        assert_eq!(parse_kind("i16").unwrap().0, Kind::I16);
+        assert_eq!(parse_kind("uint16").unwrap().0, Kind::U16);
+        assert_eq!(parse_kind("int32").unwrap().0, Kind::I32);
+        assert_eq!(parse_kind("f32").unwrap().0, Kind::F32);
+        assert_eq!(parse_kind("float").unwrap().0, Kind::F32);
+        assert_eq!(parse_kind("f64").unwrap().0, Kind::F64);
+        assert_eq!(parse_kind("double").unwrap().0, Kind::F64);
         assert!(parse_kind("").is_err());
+    }
+
+    #[test]
+    fn parse_kind_string_variants() {
+        // 缺省 max_len 254（S7 常见 String[254]）
+        assert_eq!(
+            parse_kind("string").unwrap(),
+            (Kind::String, DEFAULT_STRING_MAX_LEN)
+        );
+        // string[64] 显式声明长度
+        assert_eq!(parse_kind("STRING[64]").unwrap(), (Kind::String, 64));
+        assert_eq!(parse_kind("wstring").unwrap(), (Kind::WString, 254));
+        assert_eq!(parse_kind("WString[32]").unwrap(), (Kind::WString, 32));
+        // 坏长度报错
+        assert!(parse_kind("string[abc]").is_err());
+        // 0 clamp 到 1（不报错）
+        assert_eq!(parse_kind("string[0]").unwrap(), (Kind::String, 1));
+        // 无闭合括号
+        assert!(parse_kind("string[64").is_err());
     }
 
     #[test]
@@ -643,9 +826,14 @@ mod tests {
         assert_eq!(cfg.period, 2);
         assert_eq!(cfg.timeout_ms, 5000);
         assert!(cfg.auto_reconnect);
+        assert_eq!(cfg.connection_type, 0x01, "connection_type defaults to PG");
+        assert_eq!(
+            cfg.max_items_per_request, 20,
+            "batch size defaults to protocol max"
+        );
 
         let cfg2 = parse_cfg(
-            &serde_json::json!({"endpoint":"x","port":1025,"plc_type":"s300","rack":0,"slot":2,"period":0,"timeout_ms":1000,"auto_reconnect":false}),
+            &serde_json::json!({"endpoint":"x","port":1025,"plc_type":"s300","rack":0,"slot":2,"period":0,"timeout_ms":1000,"auto_reconnect":false,"connection_type":"op","max_items_per_request":10}),
         )
         .unwrap();
         assert_eq!(cfg2.plc_type, PlcType::S300);
@@ -654,12 +842,26 @@ mod tests {
         assert_eq!(cfg2.period, 1, "period 0 clamped to 1");
         assert_eq!(cfg2.timeout_ms, 1000);
         assert!(!cfg2.auto_reconnect);
+        assert_eq!(cfg2.connection_type, 0x03);
+        assert_eq!(cfg2.max_items_per_request, 10);
+
+        // 协议上限 clamp：>20 收敛到 20，0 收敛到 1
+        let over =
+            parse_cfg(&serde_json::json!({"endpoint":"x","max_items_per_request":100})).unwrap();
+        assert_eq!(over.max_items_per_request, 20);
+        let under =
+            parse_cfg(&serde_json::json!({"endpoint":"x","max_items_per_request":0})).unwrap();
+        assert_eq!(under.max_items_per_request, 1);
 
         assert!(
             parse_cfg(&serde_json::json!({})).is_err(),
             "missing endpoint errors"
         );
         assert!(parse_cfg(&serde_json::json!({"endpoint":"x","plc_type":"bad"})).is_err());
+        assert!(
+            parse_cfg(&serde_json::json!({"endpoint":"x","connection_type":"xxx"})).is_err(),
+            "bad connection_type errors"
+        );
     }
 
     #[test]
