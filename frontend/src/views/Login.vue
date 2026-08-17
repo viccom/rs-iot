@@ -6,25 +6,39 @@ import { useAuthStore } from '../stores/auth'
 import { api } from '../api/client'
 import { PREVIEW_AUTH_TOKEN } from '../lib/previewSession'
 
-const user_id = ref('admin')
-const pass = ref('admin')
+const user_id = ref('')
+const pass = ref('')
 const err = ref('')
+/** 登录请求进行中（按钮禁用 + 文案切换，防重复提交）。 */
+const logging = ref(false)
 const router = useRouter()
 const auth = useAuthStore()
 const isPreviewAvailable = import.meta.env.DEV
 
 async function login() {
+  if (logging.value) return
+  if (!user_id.value.trim() || !pass.value) {
+    err.value = '请输入用户名和密码'
+    return
+  }
+  logging.value = true
   err.value = ''
-  const r = await api('/api/gw/login', { method: 'POST', body: JSON.stringify({ user_id: user_id.value, pass: pass.value }) })
-  const j = await r.json().catch(() => null)
-  if (r.ok && j?.token) {
-    auth.setAuth(j.token, user_id.value)
-    router.push('/overview')
-  } else {
-    err.value = '登录失败: ' + (j?.status || r.status)
-    if (isPreviewAvailable) {
-      err.value += '。可使用下方“演示进入”直接预览主页面'
+  try {
+    const r = await api('/api/gw/login', { method: 'POST', body: JSON.stringify({ user_id: user_id.value, pass: pass.value }) })
+    const j = await r.json().catch(() => null)
+    if (r.ok && j?.token) {
+      auth.setAuth(j.token, user_id.value)
+      router.push('/overview')
+    } else {
+      err.value = '登录失败: ' + (j?.status || r.status)
+      if (isPreviewAvailable) {
+        err.value += '。可使用下方“演示进入”直接预览主页面'
+      }
     }
+  } catch {
+    err.value = '登录请求失败（网络不可达或网关未启动）'
+  } finally {
+    logging.value = false
   }
 }
 
@@ -58,9 +72,9 @@ async function enterPreview() {
       <p class="eyebrow">RS-IOT PREVIEW</p>
       <h2>rs-iot</h2>
       <p class="copy">登录后进入运维驾驶舱。开发预览环境可直接进入样例界面审阅布局与交互。</p>
-      <input v-model="user_id" placeholder="用户名">
+      <input v-model="user_id" placeholder="用户名" @keyup.enter="login">
       <input v-model="pass" type="password" placeholder="密码" @keyup.enter="login">
-      <button @click="login">登录</button>
+      <button :disabled="logging" @click="login">{{ logging ? '登录中…' : '登录' }}</button>
       <button v-if="isPreviewAvailable" class="preview-button" @click="enterPreview">演示进入</button>
       <p class="err" v-if="err">{{ err }}</p>
     </div>
@@ -169,6 +183,7 @@ button {
   font-weight: 700;
   box-shadow: var(--shadow-soft);
 }
+button:disabled { opacity: 0.6; cursor: not-allowed; }
 .preview-button {
   background: var(--card-bg);
   color: var(--color-ink);

@@ -27,7 +27,6 @@ const runningCollectors = computed(() =>
 const degradedCollectors = computed(() =>
   monitor.instances.filter(instance => instance.health?.status === 'degraded').length,
 )
-const latestLog = computed(() => monitor.logs[0]?.message ?? '暂无最新日志')
 const deviceCount = computed(() => Object.keys(monitor.rtdata).length)
 const tagCount = computed(() =>
   Object.values(monitor.rtdata).reduce((count, devicePoints) => count + Object.keys(devicePoints).length, 0),
@@ -57,6 +56,9 @@ onMounted(() => {
   clockTimer = setInterval(syncClock, 1000)
   applyTheme(currentTheme.value)
   monitor.start()
+  // 一次性补拉最近日志（REST，非 SSE 订阅——不违背"日志推送默认关闭、诊断页手动激活"）：
+  // 侧栏"连接态势"与总览"现场脉搏"读 logs 缓冲，否则默认恒空、显示误导。
+  void monitor.loadLogsRecent()
 })
 
 onUnmounted(() => {
@@ -122,18 +124,6 @@ function setThemeMode(nextTheme: ThemeName) {
         </RouterLink>
       </nav>
 
-      <section class="sidebar-panel">
-        <p class="panel-label">当前聚焦</p>
-        <strong>{{ monitor.selectedInstance || '未选中实例' }}</strong>
-        <span>{{ monitor.selectedDevice || '未选中设备' }}</span>
-      </section>
-
-      <section class="sidebar-panel">
-        <p class="panel-label">连接态势</p>
-        <strong>{{ monitor.offline ? '重连中' : '在线' }}</strong>
-        <span>{{ latestLog }}</span>
-      </section>
-
       <section class="sidebar-footer">
         <span>Design Mode</span>
         <strong>Industrial Refined</strong>
@@ -151,6 +141,15 @@ function setThemeMode(nextTheme: ThemeName) {
         </div>
 
         <div class="topbar-metrics">
+          <!-- 当前聚焦 + 连接状态：值守最关注的信息放顶栏首位（原在侧栏最下方，易被忽略）。 -->
+          <div class="topbar-chip focus" title="当前聚焦的实例/设备（诊断抓样与 AI 上下文联动）">
+            <span class="label">聚焦</span>
+            <strong>{{ monitor.selectedInstance || '—' }}<template v-if="monitor.selectedDevice"> / {{ monitor.selectedDevice }}</template></strong>
+          </div>
+          <div class="topbar-chip" :class="monitor.offline ? 'down' : 'up'" title="rs-iot SSE 数据连接状态">
+            <span class="label">连接</span>
+            <strong>{{ monitor.offline ? '重连中' : '在线' }}</strong>
+          </div>
           <div class="topbar-chip">
             <span class="label">DBSIZE</span>
             <strong>{{ dbSizeText }}</strong>
@@ -402,20 +401,6 @@ function setThemeMode(nextTheme: ThemeName) {
   grid-area: summary;
 }
 
-.sidebar-panel {
-  display: grid;
-  gap: 6px;
-  padding: 16px;
-  border-radius: 20px;
-  background: var(--shell-card-bg);
-  border: 1px solid var(--shell-card-border);
-  box-shadow: var(--shadow-glow);
-}
-
-.sidebar-panel strong {
-  font-size: 16px;
-}
-
 .shell-main {
   display: grid;
   grid-template-rows: auto auto auto 1fr;
@@ -494,6 +479,21 @@ function setThemeMode(nextTheme: ThemeName) {
   font-family: Consolas, monospace;
   font-size: 14px;
 }
+
+/* 聚焦 chip：实例/设备 ID 等宽展示，超长省略 */
+.topbar-chip.focus {
+  min-width: 120px;
+  max-width: 260px;
+}
+.topbar-chip.focus strong {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* 连接状态 chip：在线绿 / 断连红（与 offline 横幅一致语义） */
+.topbar-chip.up strong { color: var(--color-success); }
+.topbar-chip.down strong { color: var(--color-danger); }
 
 .topbar-chip.clock {
   min-width: 138px;

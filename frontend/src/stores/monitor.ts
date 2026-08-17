@@ -339,11 +339,12 @@ export const useMonitorStore = defineStore('monitor', () => {
     packetSubscribed.value = true
   }
 
-  /** 关闭报文 SSE 订阅。 */
+  /** 关闭报文 SSE 订阅。同时停当前实例的 trace 推送（后端 per-instance 注册表）。 */
   function unsubscribePacket() {
     packetSse?.close()
     packetSse = null
     packetSubscribed.value = false
+    if (selectedInstance.value) void stopPacketTrace(selectedInstance.value)
   }
 
   /** 标签页隐藏时暂停轮询，恢复时继续（省资源 + 防后台节流）。 */
@@ -403,9 +404,11 @@ export const useMonitorStore = defineStore('monitor', () => {
    *
    * 激活后该实例收发字节经 io_trace dump → EventBus Packet 帧 → SSE 推给本 store
    * （onPacket 填充 packets）。duration_secs 缺省 60（rs-iot 缺省同值）。
+   * 返回是否激活成功（实例须 Running，后端否则 404）——调用方据此决定是否启动
+   * 本地倒计时/提示，避免"假激活"误导现场排查。
    */
-  async function startPacketTrace(durationSecs = 60) {
-    if (!selectedInstance.value) return
+  async function startPacketTrace(durationSecs = 60): Promise<boolean> {
+    if (!selectedInstance.value) return false
     try {
       const r = await fetch('/api/rsiot/api/v1/inst/trace', {
         method: 'POST',
@@ -415,9 +418,30 @@ export const useMonitorStore = defineStore('monitor', () => {
         },
         body: JSON.stringify({ inst_id: selectedInstance.value, duration_secs: durationSecs }),
       })
+      if (r.status === 401) { handleUnauthorized(); return false }
+      if (!r.ok) {
+        console.warn('monitor: activate packet trace failed', r.status)
+        return false
+      }
+      return true
+    } catch { return false }
+  }
+
+  /**
+   * 关闭指定实例的报文 trace（DELETE /api/v1/inst/trace?inst_id=）。
+   * 后端 trace 是 per-instance 注册表（多实例可并存，deadline 自动过期）——
+   * 切换抓样目标时显式停旧实例推送（不等 60s 自然过期）；退订时同理。
+   */
+  async function stopPacketTrace(instId: string) {
+    if (!instId) return
+    try {
+      const r = await fetch(`/api/rsiot/api/v1/inst/trace?inst_id=${encodeURIComponent(instId)}`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${useAuthStore().token}` },
+      })
       if (r.status === 401) { handleUnauthorized(); return }
-      if (!r.ok) console.warn('monitor: activate packet trace failed', r.status)
-    } catch { /* 激活失败静默 */ }
+      if (!r.ok) console.warn('monitor: deactivate packet trace failed', r.status)
+    } catch { /* 关闭失败静默（deadline 兜底过期） */ }
   }
 
   /** SSE 帧 parse/handle 容错：畸形帧 warn 并跳过，不冒泡到 EventSource。 */
@@ -498,6 +522,7 @@ export const useMonitorStore = defineStore('monitor', () => {
     start,
     stop,
     startPacketTrace,
+    stopPacketTrace,
     selectInstance,
     selectDevice,
   }

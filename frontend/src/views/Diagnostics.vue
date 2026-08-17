@@ -3,7 +3,7 @@
 // 诊断页（模块 M3）：Tab 化（运行日志 / 链路抓样）+ 手动激活订阅。
 // 默认不推送——用户选实例 + 点激活才 subscribeLog/subscribePacket（store 层按需 SSE）。
 // 系统指标保留为下方常驻 panel。语义变化：原"登录即看日志"→"Tab 手动激活才看"。
-import { onUnmounted, ref } from 'vue'
+import { computed, onUnmounted, ref } from 'vue'
 import { useWorkspacePage } from '../composables/useWorkspacePage'
 import { useMonitorStore } from '../stores/monitor'
 import LogStream from '../components/monitor/LogStream.vue'
@@ -35,6 +35,17 @@ async function togglePacket() {
   else await monitor.subscribePacket()
 }
 
+/** 页内切换抓样目标实例（选择器直改 store 联动；PacketTrace watch 负责停旧实例
+ *  trace + 激活新实例）。 */
+function onInstChange(e: Event) {
+  monitor.selectInstance((e.target as HTMLSelectElement).value)
+}
+
+/** 选中实例是否运行中（抓样要求 Running，后端否则 404——按钮按此禁用防假激活）。 */
+const selectedRunning = computed(() =>
+  monitor.roster.find(i => i.inst_id === monitor.selectedInstance)?.state === 'running',
+)
+
 /** 离开页面时关闭诊断订阅（避免后台空跑 SSE）。rtdata 轮询由 store.start/stop 管。 */
 onUnmounted(() => {
   monitor.unsubscribeLog()
@@ -65,15 +76,26 @@ useWorkspacePage(() => ({
       <div class="activate-bar">
         <p class="activate-hint">
           <template v-if="tab === 'log'">
-            日志默认不推送。点击激活开始实时订阅运行日志。
+            日志为全进程流（含所有实例，经级别/target 过滤），默认不推送，点击激活开始订阅。
           </template>
           <template v-else>
-            报文抓样需选实例 + 激活（POST /inst/trace 60s 窗口）。未选实例时请在采集器页选择。
+            报文抓样按实例激活（60s 窗口）；切换实例将停止旧实例推送并激活新实例。
           </template>
         </p>
         <div class="activate-actions">
-          <span v-if="monitor.selectedInstance" class="inst-chip">实例: {{ monitor.selectedInstance }}</span>
-          <span v-else class="inst-chip warn">未选实例</span>
+          <!-- 页内实例选择器（此前须去采集器页选择，诊断流程被打断）。
+               名册含未启动实例（state 一并展示）；抓样激活要求实例运行中。 -->
+          <select
+            class="inst-select"
+            :value="monitor.selectedInstance"
+            title="选择抓样目标实例（日志流不受影响，为全进程推送）"
+            @change="onInstChange"
+          >
+            <option value="" disabled>选择实例</option>
+            <option v-for="inst in monitor.roster" :key="inst.inst_id" :value="inst.inst_id">
+              {{ inst.inst_id }}（{{ inst.state }}）
+            </option>
+          </select>
           <button
             v-if="tab === 'log'"
             class="activate-btn"
@@ -86,7 +108,8 @@ useWorkspacePage(() => ({
             v-else
             class="activate-btn"
             :class="{ on: monitor.packetSubscribed }"
-            :disabled="!monitor.selectedInstance"
+            :disabled="!monitor.selectedInstance || !selectedRunning"
+            :title="selectedRunning ? '激活抓样（60s 窗口）' : '实例未运行，先到采集器页启动'"
             @click="togglePacket"
           >
             {{ monitor.packetSubscribed ? '停止抓样' : '激活报文抓样' }}
@@ -179,6 +202,13 @@ useWorkspacePage(() => ({
   font-family: Consolas, monospace;
 }
 .inst-chip.warn { color: var(--color-warning); border-color: var(--color-warning); }
+/* 页内实例选择器 */
+.inst-select {
+  max-width: 240px; padding: 6px 10px; border-radius: 10px; font-size: 12px;
+  border: 1px solid var(--chip-border); background: var(--card-bg); color: var(--color-ink);
+  font-family: Consolas, monospace;
+}
+.inst-select:focus { outline: none; border-color: var(--color-primary); }
 .activate-btn {
   padding: 8px 16px; border-radius: 10px; cursor: pointer; font-size: 13px; font-weight: 500;
   border: 1px solid var(--color-primary); background: var(--color-primary); color: white; white-space: nowrap;

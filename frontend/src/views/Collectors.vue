@@ -36,6 +36,17 @@ const showForm = ref(false)
 const editing = ref<InstConfig | null>(null)
 const saving = ref(false)
 const opError = ref('')
+/** 操作进行中（启停/删除期间禁用全部操作按钮，防轮询间隙重复提交）。 */
+const opBusy = ref(false)
+/** 成功反馈（3s 自动清除；此前成功无任何提示，用户靠猜）。 */
+const opNotice = ref('')
+let noticeTimer: ReturnType<typeof setTimeout> | null = null
+
+function notify(msg: string) {
+  opNotice.value = msg
+  if (noticeTimer) clearTimeout(noticeTimer)
+  noticeTimer = setTimeout(() => { opNotice.value = '' }, 3000)
+}
 
 /** 打开新建表单。 */
 function onNew() {
@@ -49,8 +60,12 @@ function onEdit() {
   showForm.value = true
 }
 /** 保存（来自 InstanceForm）→ store.saveInstance 整包写。
- *  D 修复：period 改了且实例运行中 → 提示重启（period 无热加载，各插件 run 时一次性读取）。 */
+ *  D 修复：period 改了且实例运行中 → 提示重启（period 无热加载，各插件 run 时一次性读取）。
+ *  旧 period/运行态必须在 saveInstance **之前**捕获——saveInstance 内部重拉配置与状态，
+ *  之后 selectedConfig/selectedStat 已是新值，对比恒相等（重启提示永不触发的时序 bug）。 */
 async function onSave(cfg: InstConfig) {
+  const oldPeriod = selectedConfig.value?.app_config?.period
+  const wasRunning = selectedStat.value?.state === 'running'
   saving.value = true
   opError.value = ''
   const ok = await monitor.saveInstance(cfg)
@@ -60,27 +75,31 @@ async function onSave(cfg: InstConfig) {
     return
   }
   showForm.value = false
-  const oldPeriod = selectedConfig.value?.app_config?.period
+  notify('已保存')
   const newPeriod = cfg.app_config?.period
-  const running = selectedStat.value?.state === 'running'
-  if (oldPeriod !== undefined && oldPeriod !== newPeriod && running && monitor.selectedInstance) {
+  if (oldPeriod !== undefined && oldPeriod !== newPeriod && wasRunning && monitor.selectedInstance) {
     if (confirm('采集周期已修改，需重启实例才生效。是否立即重启？')) {
       const stopped = await monitor.stopInstance(monitor.selectedInstance)
       if (stopped) {
         await monitor.startInstance(monitor.selectedInstance)
+        notify('已重启（周期生效）')
       } else {
         opError.value = '重启失败（实例停止失败）'
       }
     }
   }
 }
-/** 删除选中实例（二次确认）。 */
+/** 删除选中实例（二次确认）。删后清选中（避免残留指向已删实例的幽灵选中）。 */
 async function onDelete() {
-  if (!monitor.selectedInstance) return
+  if (!monitor.selectedInstance || opBusy.value) return
   if (!confirm(`确定删除实例 ${monitor.selectedInstance}？此操作不可撤销。`)) return
+  opBusy.value = true
   opError.value = ''
   const ok = await monitor.deleteInstance(monitor.selectedInstance)
-  if (!ok) opError.value = '删除失败'
+  opBusy.value = false
+  if (!ok) { opError.value = '删除失败'; return }
+  monitor.selectInstance('')
+  notify('已删除')
 }
 /** 清空实时数据（scope=rtdata：清缓存保留实例配置，轻量）。 */
 async function onPurgeRtdata() {
@@ -88,6 +107,7 @@ async function onPurgeRtdata() {
   opError.value = ''
   const ok = await monitor.purge('rtdata')
   if (!ok) opError.value = '清空实时数据失败'
+  else notify('已清空实时数据')
 }
 /** 重置全部（scope=all：删所有实例 + 级联数据，保留登录账号。高危）。 */
 async function onPurgeAll() {
@@ -95,15 +115,26 @@ async function onPurgeAll() {
   opError.value = ''
   const ok = await monitor.purge('all')
   if (!ok) opError.value = '重置失败'
+  else notify('已重置全部')
 }
-/** 启动/停止。 */
+/** 启动/停止（busy 防重复提交 + 成功反馈）。 */
 async function onStart() {
-  if (!monitor.selectedInstance) return
-  opError.value = (await monitor.startInstance(monitor.selectedInstance)) ? '' : '启动失败'
+  if (!monitor.selectedInstance || opBusy.value) return
+  opBusy.value = true
+  opError.value = ''
+  const ok = await monitor.startInstance(monitor.selectedInstance)
+  opBusy.value = false
+  opError.value = ok ? '' : '启动失败'
+  if (ok) notify('启动指令已下发')
 }
 async function onStop() {
-  if (!monitor.selectedInstance) return
-  opError.value = (await monitor.stopInstance(monitor.selectedInstance)) ? '' : '停止失败'
+  if (!monitor.selectedInstance || opBusy.value) return
+  opBusy.value = true
+  opError.value = ''
+  const ok = await monitor.stopInstance(monitor.selectedInstance)
+  opBusy.value = false
+  opError.value = ok ? '' : '停止失败'
+  if (ok) notify('停止指令已下发')
 }
 
 useWorkspacePage(() => ({
@@ -213,11 +244,12 @@ useWorkspacePage(() => ({
 
         <!-- 操作按钮 -->
         <div class="ops">
-          <button class="op op-start" :disabled="selectedStat.state === 'running'" @click="onStart">启动</button>
-          <button class="op op-stop" :disabled="selectedStat.state === 'stopped'" @click="onStop">停止</button>
-          <button class="op op-edit" @click="onEdit">编辑</button>
-          <button class="op op-del" @click="onDelete">删除</button>
+          <button class="op op-start" :disabled="selectedStat.state === 'running' || opBusy" @click="onStart">启动</button>
+          <button class="op op-stop" :disabled="selectedStat.state === 'stopped' || opBusy" @click="onStop">停止</button>
+          <button class="op op-edit" :disabled="opBusy" @click="onEdit">编辑</button>
+          <button class="op op-del" :disabled="opBusy" @click="onDelete">删除</button>
         </div>
+        <p v-if="opNotice" class="op-ok">{{ opNotice }}</p>
         <p v-if="opError" class="op-error">{{ opError }}</p>
       </div>
 
@@ -362,6 +394,7 @@ useWorkspacePage(() => ({
 .op-edit { background: var(--color-primary); color: white; }
 .op-del { background: transparent; color: var(--color-danger); border-color: var(--color-danger); }
 .op-error { color: var(--color-danger); font-size: 12px; margin: 4px 0 0; }
+.op-ok { color: var(--color-success); font-size: 12px; margin: 4px 0 0; }
 
 @media (max-width: 960px) {
   .collectors-page, .detail-grid { grid-template-columns: 1fr; }

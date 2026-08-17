@@ -36,6 +36,8 @@ router.beforeEach(async (to) => {
     const { useMonitorStore } = await import('./stores/monitor')
     const { useAgentStore } = await import('./stores/agent')
     useMonitorStore().stop()
-    useAgentStore().stop()
+    // agent.stop(true)：登出同时取消进行中的 turn（会话留给下个用户前清理）。
+    // 关抽屉路径（AgentDrawer 卸载）用无参 stop()——只断 SSE，后台任务继续。
+    useAgentStore().stop(true)
   }
 })

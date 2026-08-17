@@ -34,6 +34,12 @@ const effortOptions = computed(() => {
 const goalDraftMode = ref(false)
 /** 目标状态轮询定时器（SSE 无 goal 事件，goalStatus 只在 /status 暴露，goal 运行期间轮询刷新）。 */
 let goalPollTimer: ReturnType<typeof setInterval> | null = null
+/** AskModal "稍后再说"后的关闭态：不清 agent.ask（serve 侧 turn 仍挂起等回答），
+ *  只折叠弹窗并保留重开入口——否则提问被丢弃后用户只能"停止"整个 turn。 */
+const askDismissed = ref(false)
+/** 新提问到达时自动重置关闭态（弹出新一轮提问）。 */
+watch(() => agent.ask?.id, id => { if (id) askDismissed.value = false })
+
 /** 本地错误提示（submit/会话/控件 失败等，非 agent 消息流的一部分——单独显示在输入区上方）。 */
 const errorMsg = ref('')
 const listRef = ref<HTMLElement | null>(null)
@@ -252,8 +258,13 @@ async function onAskAnswer(answers: { question_id: string; selected: string[] }[
   }
 }
 
-/** 新建会话（serve 单会话：旧的存盘，active 换新空会话）。 */
+/** 新建会话（serve 单会话：旧的存盘，active 换新空会话）。turn 运行中明确拒绝
+ *  （serve 语义：turn 中切会话混乱；原先静默 no-op，用户点了没反应）。 */
 async function onNewSession() {
+  if (agent.running) {
+    errorMsg.value = '任务进行中，请先停止或等待完成再新建会话'
+    return
+  }
   sessionMenuOpen.value = false
   errorMsg.value = ''
   try {
@@ -266,6 +277,10 @@ async function onNewSession() {
 
 /** 切换到历史会话（POST /resume）。 */
 async function onSwitchSession(path: string) {
+  if (agent.running) {
+    errorMsg.value = '任务进行中，请先停止或等待完成再切换会话'
+    return
+  }
   sessionMenuOpen.value = false
   errorMsg.value = ''
   try {
@@ -427,6 +442,12 @@ async function onApprovalModeChange(e: Event) {
     >↓ 最新</button>
 
     <div class="input-area">
+      <!-- 提问被"稍后再说"折叠后的重开入口（turn 挂起中，不回答 AI 无法继续）。 -->
+      <button
+        v-if="agent.ask && askDismissed"
+        class="ask-reopen"
+        @click="askDismissed = false"
+      >AI 在等待你的回答（任务挂起中），点击重新打开提问</button>
       <div v-if="errorMsg" class="error-banner" role="alert">
         <span>{{ errorMsg }}</span>
         <button class="btn-text" aria-label="关闭错误提示" @click="errorMsg = ''">✕</button>
@@ -548,10 +569,10 @@ async function onApprovalModeChange(e: Event) {
 
     <PermissionModal v-if="agent.approval" :approval="agent.approval" @approve="onApprove" />
     <AskModal
-      v-else-if="agent.ask"
+      v-else-if="agent.ask && !askDismissed"
       :ask="agent.ask"
       @answer="onAskAnswer"
-      @close="agent.ask = null"
+      @close="askDismissed = true"
     />
     <ProviderModal v-if="providerModalOpen" @close="providerModalOpen = false" />
     <WorkspacePicker v-if="workspacePickerOpen" @select="onWorkspaceSelect" @close="workspacePickerOpen = false" />
@@ -641,6 +662,16 @@ async function onApprovalModeChange(e: Event) {
   border-top: 1px solid var(--color-divider);
   background: var(--card-bg);
 }
+.ask-reopen {
+  display: block; width: 100%;
+  padding: 8px 12px;
+  font-size: 12px; font-family: inherit;
+  color: var(--color-warning);
+  background: rgba(254, 243, 199, 0.5);
+  border: none; border-bottom: 1px solid rgba(252, 211, 77, 0.4);
+  cursor: pointer; text-align: center;
+}
+.ask-reopen:hover { background: rgba(254, 243, 199, 0.8); }
 .error-banner {
   display: flex; align-items: center; justify-content: space-between; gap: 8px;
   padding: 6px 12px;

@@ -3,7 +3,8 @@
 // lua 脚本管理（模块 M4c）：双栏——左脚本列表 / 右编辑器 + 版本历史 + reload 关联实例。
 // 后端：GET /lua/scripts（列表）、GET /lua/script（内容）、POST /lua/script/save（存版本）、
 // GET /lua/script/versions（历史）、POST /lua/script/rollback（回滚）、POST /lua/reload（重载实例）。
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { onBeforeRouteLeave } from 'vue-router'
 import { useWorkspacePage } from '../composables/useWorkspacePage'
 import { useLuaStore } from '../stores/lua'
 import { useMonitorStore } from '../stores/monitor'
@@ -72,7 +73,7 @@ async function rollback(ts: number) {
   await lua.rollback(ts)
 }
 
-/** reload 关联此脚本的 lua 实例。 */
+/** reload 关联此脚本的 lua 实例。逐个检查响应，如实汇报成功/失败——失败也报"已重载"会误导现场。 */
 async function reloadInstances() {
   if (!lua.current) return
   const name = lua.current.name
@@ -83,10 +84,22 @@ async function reloadInstances() {
     alert(`无 luaClient 实例关联脚本「${name}」`)
     return
   }
+  let ok = 0
+  let firstErr = ''
   for (const cfg of targets) {
-    await api(`/api/rsiot/api/v1/lua/reload?inst_id=${encodeURIComponent(cfg.inst_id)}`, { method: 'POST' })
+    try {
+      const r = await api(`/api/rsiot/api/v1/lua/reload?inst_id=${encodeURIComponent(cfg.inst_id)}`, { method: 'POST' })
+      if (r.ok) ok++
+      else if (!firstErr) firstErr = `${cfg.inst_id}: HTTP ${r.status}`
+    } catch (e) {
+      if (!firstErr) firstErr = `${cfg.inst_id}: ${e instanceof Error ? e.message : '请求失败'}`
+    }
   }
-  alert(`已重载 ${targets.length} 个关联实例`)
+  if (ok === targets.length) {
+    alert(`已重载 ${ok} 个关联实例`)
+  } else {
+    alert(`重载 ${ok}/${targets.length} 个实例成功。首个失败：${firstErr}（实例需处于运行中才会重载）`)
+  }
 }
 
 /** 版本时间戳格式化。 */
@@ -96,7 +109,27 @@ function fmtTs(ts: number): string {
 
 onMounted(async () => {
   await Promise.all([lua.loadScripts(), monitor.loadInstanceConfigs()])
+  window.addEventListener('beforeunload', onBeforeUnload)
 })
+
+onUnmounted(() => {
+  window.removeEventListener('beforeunload', onBeforeUnload)
+})
+
+/** 路由级未保存守卫（页内切脚本已有 confirm，此前切路由静默丢编辑内容）。 */
+onBeforeRouteLeave(() => {
+  if (lua.dirty && lua.current) {
+    if (!confirm(`放弃对「${lua.current.name}」的未保存改动？`)) return false
+  }
+})
+
+/** 刷新/关标签同样拦一道（dirty 时浏览器原生确认）。 */
+function onBeforeUnload(e: BeforeUnloadEvent) {
+  if (lua.dirty) {
+    e.preventDefault()
+    e.returnValue = ''
+  }
+}
 
 useWorkspacePage(() => ({
   pageSummary: lua.current

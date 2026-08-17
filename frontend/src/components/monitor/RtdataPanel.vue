@@ -5,7 +5,7 @@
   - 类型不在 rtdata cell（lux 不存原始类型），从 ChildSpec 反查（同模块 2 后端决策）。
 -->
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useMonitorStore } from '../../stores/monitor'
 
 const monitor = useMonitorStore()
@@ -67,6 +67,7 @@ const rows = computed(() => {
   const all = monitor.rtdata
   const result: { dev: string; tag: string; value: string; ts: string; type: string; owner: string }[] = []
   for (const [dev, tags] of Object.entries(all)) {
+    if (!dev) continue  // 空 devId 数据（实例配置设备 ID 未填）不展示，入口处已加校验
     if (monitor.selectedDevice && dev !== monitor.selectedDevice) continue
     const devTypes = typeMap.value[dev] ?? {}
     const owner = devOwner.value[dev] || ''
@@ -102,10 +103,28 @@ function onScroll(e: Event) {
   scrollTop.value = el.scrollTop
 }
 
-/** 列表容器挂载时记录实际可视高度（响应窗口变化由 resize 监听，此处取初始）。 */
-function onMounted(el: HTMLElement | null) {
-  if (el) viewportH.value = el.clientHeight || 480
-}
+/** 滚动容器元素（模板 ref，挂载后取初始高度 + ResizeObserver 跟踪窗口变化）。 */
+const viewportEl = ref<HTMLElement | null>(null)
+/** ResizeObserver 句柄（卸载时断开）。 */
+let ro: ResizeObserver | null = null
+
+onMounted(() => {
+  const el = viewportEl.value
+  if (!el) return
+  viewportH.value = el.clientHeight || 480
+  // 窗口/布局变化时同步视口高度——虚拟滚动渲染行数依赖它，不同步则放大窗口后下方空白。
+  ro = new ResizeObserver(entries => {
+    for (const en of entries) {
+      if (en.contentRect.height > 0) viewportH.value = en.contentRect.height
+    }
+  })
+  ro.observe(el)
+})
+
+onUnmounted(() => {
+  ro?.disconnect()
+  ro = null
+})
 </script>
 
 <template>
@@ -120,8 +139,8 @@ function onMounted(el: HTMLElement | null) {
     </div>
 
     <div
+      ref="viewportEl"
       class="scroll-area"
-      :ref="(el) => onMounted(el as HTMLElement)"
       @scroll="onScroll"
     >
       <div class="spacer" :style="{ height: totalH + 'px', paddingTop: padTop + 'px', paddingBottom: padBottom + 'px' }">

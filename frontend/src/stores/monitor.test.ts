@@ -165,7 +165,7 @@ describe('monitor store', () => {
     )
     const s = useMonitorStore()
     s.selectInstance('mb-tcp-2002')
-    await s.startPacketTrace(60)
+    await expect(s.startPacketTrace(60)).resolves.toBe(true)
     // 验证意图：激活请求带正确 method/path/body（对标 routes_trace TraceReq）。
     const call = fetchSpy.mock.calls[0]
     expect(String(call[0])).toBe('/api/rsiot/api/v1/inst/trace')
@@ -174,6 +174,20 @@ describe('monitor store', () => {
     expect(init.headers).toMatchObject({ Authorization: 'Bearer tok', 'Content-Type': 'application/json' })
     const body = JSON.parse(String(init.body))
     expect(body).toEqual({ inst_id: 'mb-tcp-2002', duration_secs: 60 })
+    fetchSpy.mockRestore()
+  })
+
+  it('startPacketTrace 后端 404（实例未运行）返回 false——调用方据此不启动假倒计时', async () => {
+    // 锁的不变量：激活失败必须可被调用方感知（返回 false），否则前端倒计时照跑、
+    // 显示"已激活"误导现场排查（假激活 bug）。
+    const auth = useAuthStore()
+    auth.setAuth('tok', 'admin')
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async () =>
+      new Response('instance not running', { status: 404 }),
+    )
+    const s = useMonitorStore()
+    s.selectInstance('stopped-inst')
+    await expect(s.startPacketTrace(60)).resolves.toBe(false)
     fetchSpy.mockRestore()
   })
 

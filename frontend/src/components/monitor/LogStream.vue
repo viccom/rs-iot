@@ -10,10 +10,13 @@ const filtered = computed(() => {
   const lvRank: Record<string, number> = { error: 4, warn: 3, info: 2, debug: 1, trace: 0 }
   // 后端 tracing level 大写（"INFO"/"WARN"），比较前 lower()（对标 scada.html levelRank）。
   const want = lvRank[level.value] ?? undefined
+  // target 模糊匹配（大小写不敏感 includes）——target 是全限定名（如 rsiot::plugin::...），
+  // 全等匹配下输 "modbus" 会过滤不出任何行。
+  const kw = target.value.trim().toLowerCase()
   return monitor.logs.filter(l => {
     const lv = (l.level || '').toLowerCase()
     if (want !== undefined && (lvRank[lv] ?? 0) < want) return false
-    if (target.value && l.target !== target.value) return false
+    if (kw && !(l.target || '').toLowerCase().includes(kw)) return false
     return true
   })
 })
@@ -21,8 +24,8 @@ const filtered = computed(() => {
 <template>
   <div class="log-stream">
     <div class="filter">
-      <select v-model="level"><option value="">全部级别</option><option>error</option><option>warn</option><option>info</option><option>debug</option></select>
-      <input v-model="target" placeholder="target 过滤（如 io_trace）">
+      <select v-model="level"><option value="">全部级别</option><option>error</option><option>warn</option><option>info</option><option>debug</option><option>trace</option></select>
+      <input v-model="target" placeholder="target 过滤（模糊，如 modbus / io_trace）">
     </div>
     <div class="list">
       <div v-for="(l, i) in filtered" :key="i" class="entry" :class="(l.level || '').toLowerCase()">

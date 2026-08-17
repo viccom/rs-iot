@@ -22,8 +22,28 @@ const emit = defineEmits<{
 /** 工作副本（深拷贝，编辑不影响父组件原对象直到保存）。 */
 const form = ref<InstConfig>(cloneOrEmpty(props.modelValue))
 
+/** 兜底 JSON 编辑缓冲（无 schema 插件）：合法时同步进 form.app_config，非法时仅报错保留原文。
+ *  只在 app_code 切换 / modelValue 重置这两个外部时机重排版（resetJsonText），用户输入
+ *  过程中不 reformat——避免合法中间态触发 re-serialize 抢光标、非法中间态 JSON.parse 抛错。 */
+const jsonText = ref(JSON.stringify(form.value.app_config, null, 2))
+const jsonError = ref('')
+
+watch(jsonText, v => {
+  try {
+    form.value.app_config = JSON.parse(v || '{}')
+    jsonError.value = ''
+  } catch (e) {
+    jsonError.value = e instanceof Error ? e.message : 'JSON 解析失败'
+  }
+})
+
+function resetJsonText() {
+  jsonText.value = JSON.stringify(form.value.app_config, null, 2)
+  jsonError.value = ''
+}
+
 /** modelValue 变化（切换编辑实例）时重置工作副本。 */
-watch(() => props.modelValue, v => { form.value = cloneOrEmpty(v) })
+watch(() => props.modelValue, v => { form.value = cloneOrEmpty(v); resetJsonText() })
 
 function cloneOrEmpty(src: InstConfig | null): InstConfig {
   if (src) return JSON.parse(JSON.stringify(src)) as InstConfig
@@ -45,6 +65,7 @@ const fields = computed(() => schemaFor(form.value.app_code))
 /** app_code 切换时，重置 app_config 为该插件默认值（避免残留旧插件字段）。 */
 function onAppCodeChange() {
   form.value.app_config = defaultAppConfig(form.value.app_code)
+  resetJsonText()
 }
 
 /** app_config 字段取值（string/number/bool 统一字符串化供 v-model，select 同 string）。 */
@@ -85,9 +106,24 @@ function removeChild(dev: DeviceSpec, i: number) {
 /** 是否新建实例（inst_id 可编辑）。 */
 const isNew = computed(() => !props.modelValue)
 
-/** 保存校验：inst_id 非空 + app_code 必填字段。 */
+/** 点表校验错误（空串=合法）：devId 为空 → 无名设备（rtdata 空键、前端点位无法定位）；
+ *  同实例内重复 → rtdata 键互相覆盖。 */
+const devicesError = computed(() => {
+  const ids = new Set<string>()
+  for (const dev of form.value.devices) {
+    const id = dev.value.trim()
+    if (!id) return '存在设备 ID 为空的条目（会产生无名设备）'
+    if (ids.has(id)) return `设备 ID 重复：${id}`
+    ids.add(id)
+  }
+  return ''
+})
+
+/** 保存校验：inst_id 非空 + 点表合法（devId 非空不重复）+ app_code 必填字段 + JSON 兜底态无语法错误。 */
 function canSave(): boolean {
   if (!form.value.inst_id.trim()) return false
+  if (devicesError.value) return false
+  if (!fields.value.length && jsonError.value) return false
   for (const f of fields.value) {
     if (f.required && !form.value.app_config[f.key]) return false
   }
@@ -179,15 +215,11 @@ function submit() {
               </label>
             </label>
           </div>
-          <!-- 无 schema 的插件回退 JSON 文本框 -->
-          <textarea
-            v-else
-            class="json-area"
-            :value="JSON.stringify(form.app_config, null, 2)"
-            @input="form.app_config = JSON.parse(($event.target as HTMLTextAreaElement).value || '{}')"
-            rows="6"
-            placeholder="{}"
-          />
+          <!-- 无 schema 的插件回退 JSON 文本框（缓冲编辑：非法 JSON 只报错不丢内容） -->
+          <template v-else>
+            <textarea v-model="jsonText" class="json-area" rows="6" placeholder="{}" />
+            <p v-if="jsonError" class="json-err">JSON 语法错误：{{ jsonError }}（保存已禁用，修正后自动恢复）</p>
+          </template>
         </section>
 
         <!-- 采集点表（devices/children）-->
@@ -208,12 +240,11 @@ function submit() {
             </div>
             <table class="child-table">
               <thead>
-                <tr><th>变量名/tag</th><th>地址串</th><th>类型</th><th>标签</th><th></th></tr>
+                <tr><th>地址串 / 变量（value）</th><th>类型</th><th>显示名（label）</th><th></th></tr>
               </thead>
               <tbody>
                 <tr v-for="(c, ci) in dev.children" :key="ci">
-                  <td><input v-model="c.value" placeholder="如 temp / holding:0:f32" /></td>
-                  <td><input v-model="c.value" placeholder="地址或 tag" /></td>
+                  <td><input v-model="c.value" placeholder="如 holding:0:f32:ABCD / temp" /></td>
                   <td>
                     <select v-model="c.type">
                       <option>float</option><option>int</option><option>bool</option>
@@ -229,6 +260,7 @@ function submit() {
             <button class="btn-add-sm" @click="addChild(dev)">+ 采集点</button>
           </div>
           <p v-if="!form.devices.length" class="empty-hint">暂无设备，点「+ 设备」添加</p>
+          <p v-if="devicesError" class="json-err">{{ devicesError }}（保存已禁用）</p>
         </section>
       </div>
 
@@ -293,6 +325,7 @@ function submit() {
   border: 1px solid var(--card-border); background: var(--card-bg); color: var(--color-ink);
   resize: vertical;
 }
+.json-err { margin: 6px 0 0; font-size: 11px; color: var(--color-danger); word-break: break-all; }
 .device-block {
   padding: 12px; margin-bottom: 12px;
   border: 1px solid var(--card-border); border-radius: 10px;

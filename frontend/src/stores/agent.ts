@@ -186,7 +186,12 @@ export const useAgentStore = defineStore('agent', () => {
   const providerBusy = ref(false)
 
   let nextId = 1
+  /** SSE 连接（重连场景 start 前先关）。 */
   let sse: EventSource | null = null
+  /** 本次连接是否在 turn 进行中重连（start 时 /status.running=true 置位）。
+   *  置位期间关闭面板错过的事件（text 前缀/tool 槽位）无法经 SSE replay——
+   *  turn_done 后重拉 /history 自愈完整对话。 */
+  let resumedMidTurn = false
 
   /**
    * 处理 serve SSE 事件（无 `event:` 头，kind 在 JSON body）。
@@ -267,6 +272,7 @@ export const useAgentStore = defineStore('agent', () => {
       case 'turn_done':
         running.value = false
         ask.value = null  // turn 结束清残留提问（防御：未答即结束的 turn）
+        void maybeHealHistory()
         break
     }
   }
@@ -575,14 +581,28 @@ export const useAgentStore = defineStore('agent', () => {
     }
   }
 
+  /** 中途重连（关面板重开）后的 turn 完成自愈：重拉 /history 补全关面板期间
+   *  错过的流式内容（SSE 纯字节管道无 replay）。仅当尾消息是 assistant 时替换——
+   *  尾消息是 user 说明有新提交在途，替换会吞掉本地乐观气泡（竞态防护）。 */
+  async function maybeHealHistory() {
+    if (!resumedMidTurn) return
+    resumedMidTurn = false
+    if (messages.value.at(-1)?.role === 'assistant') await loadHistory()
+  }
+
   /** 启动 SSE 订阅 + 拉会话/历史/控件态（启动恢复）。
    *  登录后/打开抽屉时调用。token 走 query（EventSource 不能设 header）。
    *  SSE 建立后并行拉 sessions/status/models + 串行 history（回填 serve 在跑的会话，
    *  解决"重启后前端看不到"痛点）。拉取失败不阻塞 SSE（容错：serve 暂不可达时
-   *  SSE 重连自愈）。 */
+   *  SSE 重连自愈）。
+   *
+   *  重连恢复（关面板重开）：/status.running 是权威运行态——后台 turn 可能仍在
+   *  执行，据此恢复 running 并补一条空 assistant 占位消息，后续 text/reasoning/
+   *  tool 增量挂到它（历史里的 assistant 是已完成步骤，不能当作流式目标）。 */
   async function start() {
     if (sse) stop() // 重入守卫（如重连场景）
     const tok = useAuthStore().token
+    resumedMidTurn = false
     sse = new EventSource(`/api/agent/events?token=${encodeURIComponent(tok)}`)
     // onmessage 接全部帧（无 event: 头）→ safe 包 parse（畸形帧不让 onmessage 抛错，
     // 抛错后该 listener 被 EventSource 摘除）。parse 必须在 safe thunk 内执行
@@ -594,6 +614,15 @@ export const useAgentStore = defineStore('agent', () => {
     try {
       await Promise.all([loadSessions(), loadStatus(), loadModels()])
       await loadHistory()
+      // 重连恢复运行态：serve 是独立进程，关面板只断 SSE、turn 继续在后台执行。
+      running.value = !!status.value?.running
+      if (running.value) {
+        resumedMidTurn = true
+        const last = messages.value.at(-1)
+        if (!last || last.role !== 'assistant' || last.text || last.toolCalls?.length) {
+          messages.value.push({ id: nextId++, role: 'assistant', text: '', toolCalls: [] })
+        }
+      }
     } catch (e) {
       console.warn('agent: startup recovery failed', e)
     }
@@ -606,14 +635,19 @@ export const useAgentStore = defineStore('agent', () => {
 
   /** 停止 SSE（登出 / 路由切走 / 关抽屉时调用）。
    *
-   * 审查 Important 修复：running 时关抽屉（AgentDrawer onUnmounted → 本函数）断 SSE，
-   * 断线期间 serve 发出的 turn_done 永久丢失（纯字节管道无 replay）——重开抽屉后
-   * running 会永远卡 true、输入框禁用。此处语义收敛为「stop = 放弃当前 turn」：
-   * fire-and-forget cancel（fetch 不依赖 SSE）+ 本地兜底复位，不再等 turn_done。 */
-  function stop() {
+   * 双语义（serve 是独立进程，turn 生命周期不应随抽屉开合改变）：
+   * - `stop()`（默认，关抽屉）：**只断 SSE，不取消后台 turn**——Reasonix 继续执行，
+   *   重开抽屉时 start() 经 /status.running 恢复运行态并补占位消息接续流式。
+   * - `stop(true)`（登出）：同时取消进行中的 turn（会话留给下个用户前清理干净）。
+   *
+   * 历史：旧版 stop 无条件 cancel——"关面板看数据再回来"会静默杀掉正在执行的
+   * 任务（用户无感知且回不来）。旧注释担心的"running 永卡 true"已由 start() 的
+   * /status.running 权威恢复解决，不再需要靠 cancel 兜底复位。 */
+  function stop(cancelTurn = false) {
     sse?.close()
     sse = null
-    if (running.value) {
+    resumedMidTurn = false
+    if (cancelTurn && running.value) {
       running.value = false
       void cancel().catch(() => { /* cancel 失败静默：本地已复位，服务端 turn 自行结束 */ })
     }

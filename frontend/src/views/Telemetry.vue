@@ -6,9 +6,14 @@ import { useMonitorStore } from '../stores/monitor'
 
 const monitor = useMonitorStore()
 
-const visibleDevices = computed(() => Object.keys(monitor.rtdata).sort())
+/** 可见设备（过滤空 devId——实例配置中设备 ID 未填时 rtdata 会产生空键设备，
+ *  显示为无名 chip 且点位无法定位，属配置错误，入口处已加校验）。 */
+const visibleDevices = computed(() => Object.keys(monitor.rtdata).filter(d => d).sort())
 const selectedDeviceTags = computed(() => {
-  if (!monitor.selectedDevice) return []
+  if (!monitor.selectedDevice) {
+    // 全部设备：聚合所有设备的点位键（此前恒返回 []，点位数量永远显示 0）。
+    return Object.values(monitor.rtdata).flatMap(tags => Object.keys(tags))
+  }
   return Object.keys(monitor.rtdata[monitor.selectedDevice] || {})
 })
 

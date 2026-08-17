@@ -218,18 +218,62 @@ describe('agent store', () => {
     expect(body.input).toContain('可见点位 12 个')
   })
 
-  it('stop 在 running 时本地复位 + fire-and-forget cancel（审查 Important 修复）', async () => {
-    // 锁的不变量：关抽屉断 SSE 后 turn_done 可能永久丢失（纯字节管道无 replay），
-    // stop() 必须本地兜底复位 running（不再等 turn_done）+ 尽力 cancel 服务端 turn。
+  it('stop 双语义：默认只断 SSE 不取消（关面板），stop(true) 取消后台 turn', async () => {
+    // 锁的不变量：serve 是独立进程，turn 生命周期不随抽屉开合改变——
+    // 关抽屉（stop()）不得 cancel（否则"看一眼数据再回来"任务被静默杀掉）；
+    // 登出（stop(true)）需 cancel + 本地复位 running（SSE 断后 turn_done 不可达）。
     const s = useAgentStore()
     s.onEvent({ kind: 'turn_started' })
     expect(s.running).toBe(true)
-    s.stop()
-    // running 立即复位（不等异步 cancel 完成）。
+    vi.mocked(api).mockClear()
+    s.stop()  // 关面板：running 保持 true（后台继续）
+    expect(s.running).toBe(true)
+    await new Promise(r => setTimeout(r, 0))
+    expect(vi.mocked(api)).not.toHaveBeenCalled()  // 未发 cancel
+    s.stop(true)  // 登出：复位 + fire-and-forget cancel
     expect(s.running).toBe(false)
-    // cancel 被调（fire-and-forget，flush 微任务后断言）。
     await new Promise(r => setTimeout(r, 0))
     expect(vi.mocked(api)).toHaveBeenCalledWith('/api/agent/cancel', expect.objectContaining({ method: 'POST' }))
+  })
+
+  it('start 重连恢复：/status.running=true 恢复运行态 + 补空 assistant 占位接续流式', async () => {
+    // 关面板期间后台 turn 继续执行；重开抽屉时 /status.running 是权威运行态。
+    // 历史里的 assistant 是已完成步骤，不能作为流式追加目标——须补空占位。
+    class FakeEventSource {
+      onmessage: unknown = null
+      onerror: unknown = null
+      constructor(_url: string) {}
+      close() {}
+    }
+    // localStorage 桩（auth store 初始化读 token，同 monitor.test.ts 模式）
+    const ls: Record<string, string> = { rsiot_token: 't' }
+    ;(globalThis as { localStorage?: Storage }).localStorage = {
+      getItem: (k: string) => ls[k] ?? null,
+      setItem: (k: string, v: string) => { ls[k] = v },
+      removeItem: (k: string) => { delete ls[k] },
+      clear: () => { for (const k of Object.keys(ls)) delete ls[k] },
+      key: (i: number) => Object.keys(ls)[i] ?? null,
+      get length() { return Object.keys(ls).length },
+    } as Storage
+    ;(globalThis as { EventSource?: unknown }).EventSource = FakeEventSource
+    const s = useAgentStore()
+    vi.mocked(api).mockClear()
+    vi.mocked(api).mockImplementation(async (path: string) => {
+      if (String(path).includes('/status')) return new Response(JSON.stringify({ running: true }))
+      if (String(path).includes('/history')) return new Response(JSON.stringify([]))
+      return new Response('{}')
+    })
+    await s.start()
+    expect(s.running).toBe(true)
+    const last = s.messages.at(-1)
+    expect(last?.role).toBe('assistant')
+    expect(last?.text).toBe('')
+    // 后续流式增量挂到占位消息
+    s.onEvent({ kind: 'text', text: '后台继续输出' })
+    expect(s.messages.at(-1)?.text).toBe('后台继续输出')
+    // turn_done 复位（且触发 /history 自愈重拉）
+    s.onEvent({ kind: 'turn_done' })
+    expect(s.running).toBe(false)
   })
 
   it('ask_request 设置 ask 载荷，answer 调 /api/agent/answer 后清除（解卡死修复）', async () => {
@@ -399,7 +443,7 @@ describe('agent store', () => {
     s.onEvent({ kind: 'approval_request', approval: { id: 'x', tool: 't' } })
     expect(s.messages.length).toBeGreaterThan(0)
     expect(s.approval).not.toBeNull()
-    s.stop()  // 复位 running（关 SSE + 本地兜底）
+    s.stop(true)  // 复位 running（关 SSE + 取消后台 turn——会话切换前清理）
     expect(s.running).toBe(false)
     await s.newSession()
     expect(s.messages).toEqual([])
