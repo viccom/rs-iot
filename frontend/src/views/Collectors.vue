@@ -3,12 +3,15 @@
 // 采集器管理：左实例名册（三类型分组 + 新建）+ 右运行详情（编辑/启停/删除）。
 // M1：从只读卡片 → 可编辑实例（InstanceForm 整包读-改-写 POST /inst/set）。
 import { computed, nextTick, ref, watch } from 'vue'
+import { useRouter } from 'vue-router'
 import { useWorkspacePage } from '../composables/useWorkspacePage'
+import { useLuaStore } from '../stores/lua'
 import { useMonitorStore } from '../stores/monitor'
 import type { InstConfig, InstanceStat } from '../types'
 import InstanceForm from '../components/monitor/InstanceForm.vue'
 
 const monitor = useMonitorStore()
+const router = useRouter()
 
 /** 选中实例的 DOM（scrollIntoView 用——从脚本页等外部跳入时选中项滚进视野）。 */
 const activeItemEl = ref<HTMLElement | null>(null)
@@ -43,6 +46,23 @@ const selectedConfig = computed<InstConfig | null>(() => {
 const selectedStat = computed(() =>
   monitor.roster.find(i => i.inst_id === monitor.selectedInstance) ?? null,
 )
+
+/** lua 实例引用的脚本名（app_config.script；列表第 2 列与详情"脚本"卡数据源，
+ *  配置缺失/字段缺失回退 "luaClient" 占位——分组内 app_code 恒为 luaClient，是死信息）。 */
+function scriptOf(instId: string): string {
+  const s = monitor.instanceConfigs[instId]?.app_config?.script
+  return typeof s === 'string' && s ? s : 'luaClient'
+}
+
+/** 跳脚本页并直接打开该脚本（详情"脚本"卡：从实例直达代码，100 个脚本时定位靠它）。
+ *  dirty 守卫：脚本页有未保存编辑时先确认（与 Lua.vue 切脚本守卫同语义）。 */
+async function gotoScript(name: string) {
+  if (name === 'luaClient') return  // 占位值，无可跳转目标
+  const luaStore = useLuaStore()
+  if (luaStore.dirty && luaStore.current && !confirm(`放弃对「${luaStore.current.name}」的未保存改动？`)) return
+  await router.push('/lua')
+  await luaStore.loadScript(name)
+}
 
 /** 实例编辑弹窗显隐 + 编辑目标。 */
 const showForm = ref(false)
@@ -216,7 +236,7 @@ useWorkspacePage(() => ({
             >
               <span class="dot" />
               <span class="id">{{ inst.inst_id }}</span>
-              <span class="code">luaClient</span>
+              <span class="code script" :title="`脚本 ${scriptOf(inst.inst_id)}`">{{ scriptOf(inst.inst_id) }}</span>
               <span class="state">{{ inst.state }}</span>
             </button>
           </div>
@@ -255,6 +275,15 @@ useWorkspacePage(() => ({
       <div v-if="selectedStat" class="detail-body">
         <div class="detail-grid">
           <div class="detail-card"><span>插件</span><strong>{{ selectedStat.app_code }}</strong></div>
+          <!-- lua 实例：脚本卡（点击直达脚本页代码，实例→脚本追溯关键入口） -->
+          <div
+            v-if="selectedConfig?.app_code === 'luaClient'"
+            class="detail-card clickable"
+            title="打开脚本（跳转脚本页并加载该脚本代码）"
+            @click="gotoScript(scriptOf(selectedStat.inst_id))"
+          >
+            <span>脚本</span><strong class="script-name">{{ scriptOf(selectedStat.inst_id) }} ↗</strong>
+          </div>
           <div class="detail-card"><span>宿主类型</span><strong>{{ selectedStat.host_kind }}</strong></div>
           <div class="detail-card"><span>健康</span><strong>{{ selectedStat.health?.status || 'unknown' }}</strong></div>
           <div class="detail-card"><span>最近失败</span><strong class="err">{{ selectedStat.health?.last_err || '无' }}</strong></div>
@@ -410,6 +439,8 @@ useWorkspacePage(() => ({
 }
 .id { font-family: Consolas, monospace; }
 .code { color: var(--color-ink-muted); font-size: 11px; }
+/* lua 分组第 2 列：脚本名（app_code 恒为 luaClient 是死信息，换承载脚本追溯）。 */
+.code.script { font-family: Consolas, monospace; color: var(--color-primary); }
 .state {
   padding: 3px 8px; border-radius: 999px;
   background: var(--soft-overlay); color: var(--color-ink-dim);
@@ -437,6 +468,13 @@ useWorkspacePage(() => ({
 .detail-card span { color: var(--color-ink-dim); font-size: 11px; }
 .detail-card strong { font-family: Consolas, monospace; font-size: 13px; }
 .detail-card .err { color: var(--color-danger); font-size: 12px; word-break: break-all; }
+/* lua 脚本卡：可点击直达代码（hover 反馈 + 主题色强调）。 */
+.detail-card.clickable { cursor: pointer; transition: border-color 0.12s, background-color 0.12s; }
+.detail-card.clickable:hover {
+  border-color: var(--color-primary);
+  background: var(--color-surface-hover);
+}
+.script-name { color: var(--color-primary); }
 
 .cfg-preview { display: flex; flex-direction: column; gap: 6px; }
 .preview-label { margin: 0; font-size: 11px; color: var(--color-ink-muted); }
