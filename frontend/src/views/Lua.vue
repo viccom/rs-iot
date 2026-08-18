@@ -1,18 +1,20 @@
 <script setup lang="ts">
 // frontend/src/views/Lua.vue
-// lua 脚本管理（模块 M4c）：双栏——左脚本列表 / 右编辑器 + 版本历史 + reload 关联实例。
+// lua 脚本管理（模块 M4c）：双栏——左脚本列表（三级树：脚本 → 关联实例 → 设备）/ 右编辑器 + 版本历史 + reload 关联实例。
 // 后端：GET /lua/scripts（列表）、GET /lua/script（内容）、POST /lua/script/save（存版本）、
 // GET /lua/script/versions（历史）、POST /lua/script/rollback（回滚）、POST /lua/reload（重载实例）。
 import { computed, onMounted, onUnmounted, ref } from 'vue'
-import { onBeforeRouteLeave } from 'vue-router'
+import { onBeforeRouteLeave, useRouter } from 'vue-router'
 import { useWorkspacePage } from '../composables/useWorkspacePage'
 import { useLuaStore } from '../stores/lua'
 import { useMonitorStore } from '../stores/monitor'
 import { api } from '../api/client'
+import { instDeviceView, relatedLuaInstances } from '../lib/instRelations'
 import ScriptEditor from '../components/lua/ScriptEditor.vue'
 
 const lua = useLuaStore()
 const monitor = useMonitorStore()
+const router = useRouter()
 
 /** 新建脚本名输入（新建对话框简易态：列表下方输入框 + 按钮）。 */
 const newName = ref('')
@@ -21,6 +23,42 @@ const editContent = computed({
   get: () => lua.current?.content ?? '',
   set: (v: string) => { if (lua.current) lua.current.content = v },
 })
+
+/** 展开设备子列表的实例 ID（三级树第三级，页内状态：null=全收起）。 */
+const expandedInst = ref<string | null>(null)
+
+/** 当前选中脚本的关联实例名单（lib 纯函数派生：inst_id/state/设备数/运行时设备）。 */
+const relatedInstances = computed(() =>
+  lua.current ? relatedLuaInstances(monitor.instanceConfigs, monitor.roster, lua.current.name) : [],
+)
+
+/** 某实例的设备行（配置 ∪ 运行时并集 + 来源标注，第三级数据）。 */
+function devicesOf(instId: string) {
+  const cfg = monitor.instanceConfigs[instId]
+  if (!cfg) return []
+  const runtimeDevs = relatedInstances.value.find(i => i.inst_id === instId)?.runtimeDevices ?? []
+  return instDeviceView(cfg, monitor.rtdata, runtimeDevs)
+}
+
+/** 切换实例设备子列表展开态（再点收起）。 */
+function toggleInstDevices(instId: string) {
+  expandedInst.value = expandedInst.value === instId ? null : instId
+}
+
+/** 跳转采集器页并选中实例（[↗] 按钮：管理启停/编辑）。 */
+function gotoCollectors(instId: string) {
+  monitor.selectInstance(instId)
+  void router.push('/collectors')
+}
+
+/** 跳转数据页并选中设备（设备行：看该设备实时点位）。
+ *  同时聚焦来源实例——否则全局 selectedInstance 若是别的实例，数据页
+ *  "实例 AND 设备"双重过滤会组合出空表（审查 P1 修复）。 */
+function gotoTelemetry(devId: string, instId?: string) {
+  monitor.selectDevice(devId)
+  if (instId !== undefined) monitor.selectInstance(instId)
+  void router.push('/telemetry')
+}
 
 /** 脚本列表项（含关联实例数，前端从 instanceConfigs 反查 app_config.script==name）。 */
 const items = computed(() =>
@@ -37,9 +75,10 @@ function countInstances(name: string): number {
   ).length
 }
 
-/** 选中脚本：加载内容 + 历史。 */
+/** 选中脚本：加载内容 + 历史（切脚本收起设备子列表，三级树回第二级）。 */
 async function selectScript(name: string) {
   if (lua.dirty && lua.current && !confirm(`放弃对「${lua.current.name}」的未保存改动？`)) return
+  expandedInst.value = null
   await lua.loadScript(name)
 }
 
@@ -73,26 +112,24 @@ async function rollback(ts: number) {
   await lua.rollback(ts)
 }
 
-/** reload 关联此脚本的 lua 实例。逐个检查响应，如实汇报成功/失败——失败也报"已重载"会误导现场。 */
+/** reload 关联此脚本的 lua 实例。目标 = 展示名单（relatedInstances，与树形展示严格同源——
+ *  对着名单点重载，不存在"展示 A 实际重载 B"的漂移）。逐条检查响应，如实汇报成功/失败。 */
 async function reloadInstances() {
   if (!lua.current) return
-  const name = lua.current.name
-  const targets = Object.values(monitor.instanceConfigs).filter(
-    cfg => cfg.app_code === 'luaClient' && cfg.app_config?.script === name,
-  )
+  const targets = relatedInstances.value
   if (!targets.length) {
-    alert(`无 luaClient 实例关联脚本「${name}」`)
+    alert(`无 luaClient 实例关联脚本「${lua.current.name}」`)
     return
   }
   let ok = 0
   let firstErr = ''
-  for (const cfg of targets) {
+  for (const t of targets) {
     try {
-      const r = await api(`/api/rsiot/api/v1/lua/reload?inst_id=${encodeURIComponent(cfg.inst_id)}`, { method: 'POST' })
+      const r = await api(`/api/rsiot/api/v1/lua/reload?inst_id=${encodeURIComponent(t.inst_id)}`, { method: 'POST' })
       if (r.ok) ok++
-      else if (!firstErr) firstErr = `${cfg.inst_id}: HTTP ${r.status}`
+      else if (!firstErr) firstErr = `${t.inst_id}: HTTP ${r.status}`
     } catch (e) {
-      if (!firstErr) firstErr = `${cfg.inst_id}: ${e instanceof Error ? e.message : '请求失败'}`
+      if (!firstErr) firstErr = `${t.inst_id}: ${e instanceof Error ? e.message : '请求失败'}`
     }
   }
   if (ok === targets.length) {
@@ -157,16 +194,65 @@ useWorkspacePage(() => ({
       </div>
 
       <div class="script-list">
-        <button
-          v-for="it in items" :key="it.name"
-          class="script-item"
-          :class="{ active: lua.current?.name === it.name }"
-          @click="selectScript(it.name)"
-        >
-          <span class="name">{{ it.name }}</span>
-          <span v-if="it.instanceCount" class="inst-count">{{ it.instanceCount }} 实例</span>
-          <span v-else class="inst-count none">未关联</span>
-        </button>
+        <div v-for="it in items" :key="it.name" class="script-block">
+          <button
+            class="script-item"
+            :class="{ active: lua.current?.name === it.name }"
+            @click="selectScript(it.name)"
+          >
+            <span class="name">{{ it.name }}</span>
+            <span v-if="it.instanceCount" class="inst-count">{{ it.instanceCount }} 实例</span>
+            <span v-else class="inst-count none">未关联</span>
+          </button>
+
+          <!-- 三级树第二级：选中脚本的关联实例名单（点行展开设备，[↗] 跳采集器页管理） -->
+          <div v-if="lua.current?.name === it.name && relatedInstances.length" class="inst-list">
+            <div
+              v-for="inst in relatedInstances"
+              :key="inst.inst_id"
+              class="inst-row"
+              :class="[inst.state]"
+            >
+              <button class="inst-main" @click="toggleInstDevices(inst.inst_id)">
+                <span class="inst-dot" :title="inst.state"></span>
+                <span class="inst-id">{{ inst.inst_id }}</span>
+                <span class="inst-state">{{ inst.state }}</span>
+                <span class="inst-devs">{{ inst.deviceCount }} 设备</span>
+                <span
+                  class="inst-caret"
+                  :class="{ open: expandedInst === inst.inst_id }"
+                >▸</span>
+              </button>
+              <button
+                class="inst-goto"
+                title="到采集器页管理此实例（启停/编辑/删除）"
+                @click.stop="gotoCollectors(inst.inst_id)"
+              >↗</button>
+
+              <!-- 三级树第三级：实例设备（配置 ∪ 运行时上报 + 来源标注） -->
+              <div v-if="expandedInst === inst.inst_id" class="dev-list">
+                <button
+                  v-for="d in devicesOf(inst.inst_id)"
+                  :key="d.devId"
+                  class="dev-row"
+                  :class="{ nodata: !d.hasData }"
+                  :title="d.source === 'runtime-only' ? '运行时上报（未在实例配置中声明）' : '实例配置声明'"
+                  @click="gotoTelemetry(d.devId, inst.inst_id)"
+                >
+                  <span class="dev-id">{{ d.devId }}</span>
+                  <span class="dev-tags">{{ d.tagCount }} tags</span>
+                  <span v-if="d.source === 'runtime-only'" class="dev-badge rt">运行时</span>
+                  <span v-if="!d.hasData" class="dev-badge off">无数据</span>
+                </button>
+                <p v-if="!devicesOf(inst.inst_id).length" class="dev-empty">无设备（配置与运行时均空）</p>
+              </div>
+            </div>
+          </div>
+          <p
+            v-if="lua.current?.name === it.name && !relatedInstances.length"
+            class="inst-none"
+          >无 luaClient 实例引用此脚本</p>
+        </div>
         <p v-if="!lua.scripts.length" class="empty">暂无脚本</p>
       </div>
 
@@ -276,6 +362,68 @@ useWorkspacePage(() => ({
   background: var(--chip-bg); color: var(--chip-ink); white-space: nowrap;
 }
 .inst-count.none { color: var(--color-ink-muted); }
+
+/* ---- 三级树：脚本 → 实例 → 设备 ---- */
+.script-block { display: flex; flex-direction: column; gap: 6px; }
+
+.inst-list {
+  display: flex; flex-direction: column; gap: 6px;
+  padding-left: 12px; border-left: 2px solid var(--chip-border);
+  margin-left: 8px;
+  /* 实例多时不无限撑长左栏（与 .versions 的 480px 上限同款约束）。 */
+  max-height: 420px; overflow-y: auto;
+}
+.inst-row {
+  display: flex; align-items: stretch; gap: 4px;
+  border: 1px solid var(--card-border); border-radius: 10px;
+  background: var(--card-bg); overflow: hidden;
+}
+.inst-main {
+  flex: 1; display: flex; align-items: center; gap: 8px;
+  padding: 8px 10px; border: none; background: transparent; cursor: pointer;
+  text-align: left; font-size: 12px; min-width: 0;
+}
+.inst-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; background: var(--color-ink-muted); }
+.inst-row.running .inst-dot { background: var(--color-success); }
+.inst-row.failed .inst-dot { background: var(--color-danger); }
+.inst-row.starting .inst-dot, .inst-row.stopping .inst-dot { background: var(--color-warning); }
+.inst-id { font-family: Consolas, monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.inst-state {
+  font-size: 10px; color: var(--color-ink-muted);
+  letter-spacing: 0.06em; text-transform: uppercase; flex: none;
+}
+.inst-devs { font-size: 10px; color: var(--color-ink-muted); flex: none; }
+.inst-caret { margin-left: auto; color: var(--color-ink-muted); transition: transform 0.15s; flex: none; }
+.inst-caret.open { transform: rotate(90deg); }
+.inst-goto {
+  flex: none; width: 34px; border: none; border-left: 1px solid var(--card-border);
+  background: transparent; color: var(--color-ink-muted); cursor: pointer; font-size: 14px;
+}
+.inst-goto:hover { color: var(--color-primary); background: var(--color-surface-hover); }
+
+.dev-list {
+  display: flex; flex-direction: column; gap: 4px;
+  padding: 6px 0 6px 18px; border-top: 1px dashed var(--card-border);
+}
+.dev-row {
+  display: flex; align-items: center; gap: 8px;
+  padding: 5px 8px; border: none; border-radius: 8px;
+  background: transparent; cursor: pointer; text-align: left; font-size: 12px;
+}
+.dev-row:hover { background: var(--color-surface-hover); }
+.dev-row.nodata { opacity: 0.6; }
+.dev-id { font-family: Consolas, monospace; }
+.dev-tags { font-size: 10px; color: var(--color-ink-muted); }
+.dev-badge {
+  font-size: 10px; padding: 1px 6px; border-radius: 999px; white-space: nowrap;
+}
+.dev-badge.rt {
+  background: color-mix(in srgb, var(--color-primary) 14%, transparent);
+  color: var(--color-primary);
+}
+.dev-badge.off { background: var(--chip-bg); color: var(--color-ink-muted); }
+.dev-empty { margin: 0; padding: 4px 8px; font-size: 11px; color: var(--color-ink-muted); }
+.inst-none { margin: 0 0 0 20px; font-size: 11px; color: var(--color-ink-muted); }
 
 .new-row { display: flex; gap: 6px; margin-top: 12px; position: relative; z-index: 1; }
 .new-row input {

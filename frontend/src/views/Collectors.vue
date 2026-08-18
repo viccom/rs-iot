@@ -2,13 +2,26 @@
 // frontend/src/views/Collectors.vue
 // 采集器管理：左实例名册（三类型分组 + 新建）+ 右运行详情（编辑/启停/删除）。
 // M1：从只读卡片 → 可编辑实例（InstanceForm 整包读-改-写 POST /inst/set）。
-import { computed, ref } from 'vue'
+import { computed, nextTick, ref, watch } from 'vue'
 import { useWorkspacePage } from '../composables/useWorkspacePage'
 import { useMonitorStore } from '../stores/monitor'
 import type { InstConfig, InstanceStat } from '../types'
 import InstanceForm from '../components/monitor/InstanceForm.vue'
 
 const monitor = useMonitorStore()
+
+/** 选中实例的 DOM（scrollIntoView 用——从脚本页等外部跳入时选中项滚进视野）。 */
+const activeItemEl = ref<HTMLElement | null>(null)
+
+watch(
+  () => monitor.selectedInstance,
+  () => {
+    void nextTick(() => {
+      activeItemEl.value?.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
+    })
+  },
+  { immediate: true },
+)
 
 /** 实例类型分类（无独立 lua host_kind：app_code=="luaClient" → lua）。 */
 function kindOf(inst: InstanceStat): 'builtin' | 'lua' | 'external' {
@@ -181,6 +194,7 @@ useWorkspacePage(() => ({
           <div class="items">
             <button
               v-for="inst in builtinList" :key="inst.inst_id"
+              :ref="el => { if (monitor.selectedInstance === inst.inst_id) activeItemEl = el as HTMLElement | null }"
               class="item" :class="{ active: monitor.selectedInstance === inst.inst_id, [inst.state]: true }"
               @click="monitor.selectInstance(inst.inst_id)"
             >
@@ -196,6 +210,7 @@ useWorkspacePage(() => ({
           <div class="items">
             <button
               v-for="inst in luaList" :key="inst.inst_id"
+              :ref="el => { if (monitor.selectedInstance === inst.inst_id) activeItemEl = el as HTMLElement | null }"
               class="item lua" :class="{ active: monitor.selectedInstance === inst.inst_id, [inst.state]: true }"
               @click="monitor.selectInstance(inst.inst_id)"
             >
@@ -211,6 +226,7 @@ useWorkspacePage(() => ({
           <div class="items">
             <button
               v-for="inst in externalList" :key="inst.inst_id"
+              :ref="el => { if (monitor.selectedInstance === inst.inst_id) activeItemEl = el as HTMLElement | null }"
               class="item ext" :class="{ active: monitor.selectedInstance === inst.inst_id, [inst.state]: true }"
               @click="monitor.selectInstance(inst.inst_id)"
             >

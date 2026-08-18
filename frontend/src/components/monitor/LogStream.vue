@@ -39,7 +39,13 @@ const filtered = computed(() => {
   </div>
 </template>
 <style scoped>
-.log-stream { display: flex; flex-direction: column; height: 100%; }
+/* 确定高度（父级面板 auto 高使 height:100% 失效，列表随内容撑开、永不内滚——
+   与 RtdataPanel 同款断链，同款 clamp 修复）。 */
+.log-stream {
+  display: flex;
+  flex-direction: column;
+  height: clamp(320px, calc(100vh - 340px), 720px);
+}
 .filter { display: flex; gap: 8px; padding: 10px 0 14px; border-bottom: 1px solid var(--color-divider); }
 .filter select,
 .filter input {

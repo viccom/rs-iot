@@ -15,6 +15,7 @@ mod http;
 
 use crate::host::HostContext;
 use crate::plugin::builtin::lua_client::io_engine::IoEngine;
+use crate::plugin::builtin::lua_client::RuntimeDevs;
 use crate::types::{CtlMessage, InstConfig, InstId, Sample, SampleValue};
 use mlua::{Lua, LuaSerdeExt, LuaString, Value};
 use tokio::sync::mpsc;
@@ -23,14 +24,19 @@ use tokio::sync::mpsc;
 ///
 /// `values` 空 → 直接返回（无点不上报）。`tx.send` 失败（hub 关）→ warn（对标
 /// `run()` collect 推 hub 容错语义）。timestamp 取当前本地秒。
+/// 上报的 devid 记入 `runtime_devs`（运行时设备集，collect 与 L2 上报共用出口）。
 async fn push_sample(
     tx: &mpsc::Sender<Sample>,
     hwid: &crate::types::Hwid,
+    runtime_devs: &RuntimeDevs,
     devid: String,
     values: std::collections::BTreeMap<String, SampleValue>,
 ) {
     if values.is_empty() {
         return;
+    }
+    if let Ok(mut set) = runtime_devs.lock() {
+        set.insert(devid.clone());
     }
     let sample = Sample {
         hwid: hwid.clone(),
@@ -75,6 +81,7 @@ pub(super) fn register(
     inst: &InstConfig,
     io: IoEngine,
     tx: mpsc::Sender<Sample>,
+    runtime_devs: RuntimeDevs,
     transport: &'static str,
 ) -> mlua::Result<()> {
     let ctx = lua.create_table()?;
@@ -189,10 +196,12 @@ pub(super) fn register(
     // value 经 lua_value_to_sample 转 SampleValue；单点便捷，等价 set_values(devid,{[tag]=v})。
     let tx_set = tx.clone();
     let hwid_set = ctx_host.hwid.clone();
+    let rt_set = runtime_devs.clone();
     let set_value_fn = lua.create_async_function(
         move |_lua, (_self, devid, tag, v): (Value, LuaString, LuaString, Value)| {
             let tx = tx_set.clone();
             let hwid = hwid_set.clone();
+            let rt = rt_set.clone();
             async move {
                 let devid = devid.to_string_lossy().to_string();
                 let tag = tag.to_string_lossy().to_string();
@@ -200,7 +209,7 @@ pub(super) fn register(
                     .ok_or_else(|| mlua::Error::RuntimeError("set_value: 不支持的值类型".into()))?;
                 let mut values = std::collections::BTreeMap::new();
                 values.insert(tag, sv);
-                push_sample(&tx, &hwid, devid, values).await;
+                push_sample(&tx, &hwid, &rt, devid, values).await;
                 Ok(())
             }
         },
@@ -212,10 +221,12 @@ pub(super) fn register(
     // table 经 pairs 遍历 → BTreeMap；空 table 不上报。
     let tx_sv = tx.clone();
     let hwid_sv = ctx_host.hwid.clone();
+    let rt_sv = runtime_devs.clone();
     let set_values_fn = lua.create_async_function(
         move |_lua, (_self, devid, table): (Value, LuaString, mlua::Table)| {
             let tx = tx_sv.clone();
             let hwid = hwid_sv.clone();
+            let rt = rt_sv.clone();
             async move {
                 let devid = devid.to_string_lossy().to_string();
                 let mut values = std::collections::BTreeMap::new();
@@ -225,7 +236,7 @@ pub(super) fn register(
                         values.insert(k, sv);
                     }
                 }
-                push_sample(&tx, &hwid, devid, values).await;
+                push_sample(&tx, &hwid, &rt, devid, values).await;
                 Ok(())
             }
         },

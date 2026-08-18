@@ -51,7 +51,16 @@ async fn register_exposes_ctx_api() {
         }],
         host_kind: HostKind::Builtin,
     };
-    register(&lua, ctx_host, &inst, io, mock_hub_tx(), "tcp").expect("register");
+    register(
+        &lua,
+        ctx_host,
+        &inst,
+        io,
+        mock_hub_tx(),
+        RuntimeDevs::default(),
+        "tcp",
+    )
+    .expect("register");
     for api in [
         "request",
         "log_info",
@@ -102,7 +111,16 @@ async fn kv_set_get_roundtrip() {
         }],
         host_kind: HostKind::Builtin,
     };
-    register(&lua, ctx_host, &inst, io, mock_hub_tx(), "tcp").expect("register");
+    register(
+        &lua,
+        ctx_host,
+        &inst,
+        io,
+        mock_hub_tx(),
+        RuntimeDevs::default(),
+        "tcp",
+    )
+    .expect("register");
 
     // kv_set/kv_get 是 async function（底层落 lux），用 exec_async/eval_async 驱动。
     lua.load("ctx:kv_set('counter', 42)")
@@ -188,7 +206,16 @@ async fn send_command_routes_to_target() {
         }],
         host_kind: HostKind::Builtin,
     };
-    register(&lua, ctx_host, &inst, io, mock_hub_tx(), "tcp").expect("register");
+    register(
+        &lua,
+        ctx_host,
+        &inst,
+        io,
+        mock_hub_tx(),
+        RuntimeDevs::default(),
+        "tcp",
+    )
+    .expect("register");
 
     // 命中目标实例。
     let ok: bool = lua
@@ -259,7 +286,16 @@ async fn http_get_returns_status_and_body() {
         }],
         host_kind: HostKind::Builtin,
     };
-    register(&lua, ctx_host, &inst, io, mock_hub_tx(), "tcp").expect("register");
+    register(
+        &lua,
+        ctx_host,
+        &inst,
+        io,
+        mock_hub_tx(),
+        RuntimeDevs::default(),
+        "tcp",
+    )
+    .expect("register");
 
     let resp: mlua::Table = lua
         .load(format!("return ctx:http_get('http://127.0.0.1:{port}/x')"))
@@ -331,7 +367,7 @@ async fn set_value_pushes_sample_to_hub() {
         }],
         host_kind: HostKind::Builtin,
     };
-    register(&lua, ctx_host, &inst, io, tx, "tcp").expect("register");
+    register(&lua, ctx_host, &inst, io, tx, RuntimeDevs::default(), "tcp").expect("register");
 
     lua.load("ctx:set_value('devX', 'temp', 42.5)")
         .exec_async()
@@ -377,7 +413,7 @@ async fn set_values_pushes_multi_tag_sample() {
         }],
         host_kind: HostKind::Builtin,
     };
-    register(&lua, ctx_host, &inst, io, tx, "tcp").expect("register");
+    register(&lua, ctx_host, &inst, io, tx, RuntimeDevs::default(), "tcp").expect("register");
 
     lua.load("ctx:set_values('devX', { temp = 42.5, hum = 60 })")
         .exec_async()
@@ -435,7 +471,7 @@ async fn set_value_routes_by_devid() {
         ],
         host_kind: HostKind::Builtin,
     };
-    register(&lua, ctx_host, &inst, io, tx, "tcp").expect("register");
+    register(&lua, ctx_host, &inst, io, tx, RuntimeDevs::default(), "tcp").expect("register");
 
     lua.load("ctx:set_value('devB', 'v', 2)")
         .exec_async()
@@ -479,7 +515,16 @@ async fn get_value_reads_rtdata() {
     crate::db::rtdata::write(&ctx_host.lux, "it", "devX", &values, 1_700_000_000)
         .await
         .expect("rtdata write");
-    register(&lua, ctx_host, &inst, io, mock_hub_tx(), "tcp").expect("register");
+    register(
+        &lua,
+        ctx_host,
+        &inst,
+        io,
+        mock_hub_tx(),
+        RuntimeDevs::default(),
+        "tcp",
+    )
+    .expect("register");
 
     let v: String = lua
         .load("return ctx:get_value('devX', 'temp')")
@@ -527,7 +572,16 @@ async fn get_device_returns_rtdata_values() {
     crate::db::rtdata::write(&ctx_host.lux, "it", "devX", &values, 1_700_000_000)
         .await
         .expect("rtdata write");
-    register(&lua, ctx_host, &inst, io, mock_hub_tx(), "tcp").expect("register");
+    register(
+        &lua,
+        ctx_host,
+        &inst,
+        io,
+        mock_hub_tx(),
+        RuntimeDevs::default(),
+        "tcp",
+    )
+    .expect("register");
 
     let t: mlua::Table = lua
         .load("return ctx:get_device('devX')")
@@ -578,7 +632,16 @@ async fn list_devices_returns_inst_devices() {
         ],
         host_kind: HostKind::Builtin,
     };
-    register(&lua, ctx_host, &inst, io, mock_hub_tx(), "tcp").expect("register");
+    register(
+        &lua,
+        ctx_host,
+        &inst,
+        io,
+        mock_hub_tx(),
+        RuntimeDevs::default(),
+        "tcp",
+    )
+    .expect("register");
 
     // list_devices 是同步函数（create_function），用 eval（非 eval_async）。
     let t: mlua::Table = lua
@@ -620,7 +683,16 @@ async fn ctx_transport_returns_configured_kind() {
             }],
             host_kind: HostKind::Builtin,
         };
-        register(&lua, ctx_host, &inst, io, mock_hub_tx(), kind).expect("register");
+        register(
+            &lua,
+            ctx_host,
+            &inst,
+            io,
+            mock_hub_tx(),
+            RuntimeDevs::default(),
+            kind,
+        )
+        .expect("register");
         let got: String = lua
             .load("return ctx:transport()")
             .eval()

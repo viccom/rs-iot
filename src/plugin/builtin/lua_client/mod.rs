@@ -26,6 +26,24 @@ use io_engine::{spawn_io_task, IoBackend, SerialIo, TcpIo, UdpIo};
 use loader::SCRIPTS_ROOT;
 use script::{load_main, LoadCtx};
 
+/// 运行时设备集（本实例实际上报过数据的 devid，含配置外上报）。
+///
+/// 主循环（collect）与 ctx API（`set_value`/`set_values`）双出口写入，周期 flush
+/// 时经 `StatTracker::extra_insert("runtime_devices")` 落 lux stat:<inst>——前端
+/// "实例→实际采集设备"追溯的数据源。std Mutex：insert 瞬时无 await，无死锁面。
+pub(super) type RuntimeDevs = std::sync::Arc<std::sync::Mutex<std::collections::BTreeSet<String>>>;
+
+/// 把运行时设备集快照写进 tracker extra（每个 flush 点前调用，不留陈旧）。
+///
+/// BTreeSet 有序 → Vec 稳定，前端 diff 不抖动。
+fn sync_runtime_devs(tracker: &mut crate::plugin::stat_tracker::StatTracker, devs: &RuntimeDevs) {
+    let snapshot: Vec<String> = devs
+        .lock()
+        .map(|s| s.iter().cloned().collect())
+        .unwrap_or_default();
+    tracker.extra_insert("runtime_devices", serde_json::json!(snapshot));
+}
+
 /// 主循环事件（spec §5.4）：解耦 select! 与 `&lua` / `&mut lua` 借用，
 /// 使 `Evt::Reload` 的 `lua = new_lua`（&mut）与其他分支 `call_*(&lua)`（&）共存。
 enum Evt {
@@ -112,13 +130,15 @@ impl Source for LuaClient {
             ctx.trace_registry.clone(),
         );
 
-        // 4. 注册 ctx API。
+        // 4. 注册 ctx API（runtime_devs：L2 上报出口的设备记录，与 collect 出口共用）。
+        let runtime_devs: RuntimeDevs = Default::default();
         if let Err(e) = api::register(
             &lua,
             ctx.clone(),
             &inst,
             io_engine.clone(),
             tx.clone(),
+            runtime_devs.clone(),
             cfg.transport.as_str(),
         ) {
             tracing::warn!("[luaClient] inst {} ctx API 注册失败：{e}", inst.inst_id);
@@ -185,7 +205,7 @@ impl Source for LuaClient {
                 msg = cmd_rx.recv() => Evt::Cmd(msg),
                 Some(frame) = data_rx.recv() => Evt::Data(frame),
                 Some(()) = reload_rx.recv() => Evt::Reload, // None（watcher 退出/失败）忽略，不忙循环
-                _ = flush_ticker.tick() => { tracker.flush().await; continue; }
+                _ = flush_ticker.tick() => { sync_runtime_devs(&mut tracker, &runtime_devs); tracker.flush().await; continue; }
                 _ = ticker.tick() => Evt::Tick,
             };
             match evt {
@@ -221,6 +241,9 @@ impl Source for LuaClient {
                     {
                         Ok(samples) if !samples.is_empty() => {
                             for (devid, values) in samples {
+                                if let Ok(mut set) = runtime_devs.lock() {
+                                    set.insert(devid.clone());
+                                }
                                 let sample = Sample {
                                     hwid: ctx.hwid.clone(),
                                     devid,
@@ -252,6 +275,7 @@ impl Source for LuaClient {
                         consecutive_fail = 0;
                     }
                     if tracker.should_flush() {
+                        sync_runtime_devs(&mut tracker, &runtime_devs);
                         tracker.flush().await;
                     }
                 }
@@ -263,12 +287,18 @@ impl Source for LuaClient {
                         &inst,
                         io_engine.clone(),
                         tx.clone(),
+                        runtime_devs.clone(),
                     )
                     .await
                     {
                         Ok(new_lua) => {
                             lua = new_lua;
                             vm_restarts += 1;
+                            // 热加载清空运行时设备集：快照语义 = 当前脚本版本的上报
+                            // 行为——防脚本改了上报集后旧设备永久残留（下轮 collect 重新积累）。
+                            if let Ok(mut s) = runtime_devs.lock() {
+                                s.clear();
+                            }
                             tracker
                                 .extra_insert("vm_restart_count", serde_json::json!(vm_restarts));
                             tracker.extra_insert(
@@ -277,6 +307,7 @@ impl Source for LuaClient {
                             );
                             consecutive_fail = 0;
                             tracker.set_status("running");
+                            sync_runtime_devs(&mut tracker, &runtime_devs);
                             tracker.flush().await;
                             tracing::info!("[luaClient] inst {} 热加载成功", inst.inst_id);
                         }
@@ -289,8 +320,10 @@ impl Source for LuaClient {
             }
         }
 
-        // 退出标记 stopped（spec §13 status）。
+        // 退出标记 stopped（spec §13 status）。runtime_devices 保留最后一次运行的
+        // 设备清单（停止后仍可追溯"它上次采了什么"，诊断价值）。
         tracker.set_status("stopped");
+        sync_runtime_devs(&mut tracker, &runtime_devs);
         tracker.flush().await;
     }
 }
@@ -405,10 +438,19 @@ async fn reload_vm(
     inst: &InstConfig,
     io: io_engine::IoEngine,
     tx: mpsc::Sender<Sample>,
+    runtime_devs: RuntimeDevs,
 ) -> mlua::Result<mlua::Lua> {
     let lua = engine::new_vm(cfg)?;
     load_main(&lua, lctx)?;
-    api::register(&lua, ctx_host, inst, io, tx, cfg.transport.as_str())?;
+    api::register(
+        &lua,
+        ctx_host,
+        inst,
+        io,
+        tx,
+        runtime_devs,
+        cfg.transport.as_str(),
+    )?;
     // dry-run on_init（hook 兜底死循环；失败 → Err → 主循环回退旧 VM）。
     if lua.globals().get::<mlua::Function>("on_init").is_ok() {
         let r: mlua::Result<()> = lua.load("on_init()").eval_async().await;

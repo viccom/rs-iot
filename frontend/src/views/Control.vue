@@ -164,7 +164,7 @@ useWorkspacePage(() => ({
   color: var(--color-ink-dim);
 }
 
-@media (max-width: 1080px) {
+@media (max-width: 960px) {
   .control-page,
   .scope-grid {
     grid-template-columns: 1fr;

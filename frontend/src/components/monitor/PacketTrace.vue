@@ -95,7 +95,13 @@ onUnmounted(() => {
   </div>
 </template>
 <style scoped>
-.packet-trace { display: flex; flex-direction: column; height: 100%; }
+/* 确定高度（与 LogStream/RtdataPanel 同款断链修复：height:100% 在 auto 父级下
+   失效，clamp 恢复列表内滚）。 */
+.packet-trace {
+  display: flex;
+  flex-direction: column;
+  height: clamp(320px, calc(100vh - 340px), 720px);
+}
 .toolbar {
   display: flex;
   justify-content: space-between;

@@ -28,6 +28,8 @@ export interface InstanceHealth {
   last_activity_duration_ms: number
   /** 最近一次失败原因（成功时清空）。 */
   last_err: string
+  /** 运行时上报设备清单（luaClient stat extra；旧后端无此字段 → 前端按空集降级）。 */
+  runtime_devices?: string[]
 }
 
 /** SSE `log` 事件 payload（与 `/api/v1/logs/recent` 同构）。ts 为 ISO8601 字符串。 */

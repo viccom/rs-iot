@@ -278,7 +278,7 @@ useWorkspacePage(() => ({
   text-decoration: underline;
 }
 
-@media (max-width: 1080px) {
+@media (max-width: 960px) {
   .hero-grid,
   .content-grid,
   .packet-grid {

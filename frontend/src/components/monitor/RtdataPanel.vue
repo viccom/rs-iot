@@ -8,6 +8,7 @@
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { RouterLink } from 'vue-router'
 import { useMonitorStore } from '../../stores/monitor'
+import { buildDeviceOwnership } from '../../lib/instRelations'
 
 const monitor = useMonitorStore()
 
@@ -41,18 +42,9 @@ const typeMap = computed(() => {
   return m
 })
 
-/** devId → 归属实例 id 映射（C 修复：设备页展示设备归属哪个实例）。
- *  与 typeMap 同源遍历（instanceConfigs），同 dev 多实例引用时首个胜出。 */
-const devOwner = computed(() => {
-  const m: Record<string, string> = {}
-  for (const cfg of Object.values(monitor.instanceConfigs)) {
-    for (const dev of cfg.devices) {
-      if (!dev.value) continue
-      m[dev.value] ??= cfg.inst_id
-    }
-  }
-  return m
-})
+/** devId → 归属映射（配置声明 ∪ 运行时上报，多实例同 dev 为数组——修正"首个胜出"歧义）。
+ *  与 typeMap 同源遍历（instanceConfigs + roster），方向 2b 行过滤 + owner 列共用。 */
+const ownership = computed(() => buildDeviceOwnership(monitor.instanceConfigs, monitor.roster))
 
 /** 已知类型集合（类型下拉选项，从 typeMap 收集）。 */
 const knownTypes = computed(() => {
@@ -63,15 +55,17 @@ const knownTypes = computed(() => {
   return Array.from(s).sort()
 })
 
-/** 扁平化 + 过滤后的行（计算属性，依赖 rtdata/selectedDevice/tagFilter/typeFilter）。 */
+/** 扁平化 + 过滤后的行（计算属性，依赖 rtdata/selectedDevice/selectedInstance/tagFilter/typeFilter）。
+ *  过滤链：实例（owners 含选中实例，方向 2b）AND 设备 AND tag 模糊 AND 类型。 */
 const rows = computed(() => {
   const all = monitor.rtdata
-  const result: { dev: string; tag: string; value: string; ts: string; type: string; owner: string }[] = []
+  const result: { dev: string; tag: string; value: string; ts: string; type: string; owners: string[] }[] = []
   for (const [dev, tags] of Object.entries(all)) {
     if (!dev) continue  // 空 devId 数据（实例配置设备 ID 未填）不展示，入口处已加校验
+    if (monitor.selectedInstance && !(ownership.value[dev]?.owners.includes(monitor.selectedInstance))) continue
     if (monitor.selectedDevice && dev !== monitor.selectedDevice) continue
     const devTypes = typeMap.value[dev] ?? {}
-    const owner = devOwner.value[dev] || ''
+    const owners = ownership.value[dev]?.owners ?? []
     for (const [field, cell] of Object.entries(tags)) {
       // field 形如 <devid>.<tag>，取末段还原 tag。
       const tag = field.split('.').pop() || field
@@ -79,7 +73,7 @@ const rows = computed(() => {
       const type = devTypes[tag] || ''
       if (typeFilter.value && type !== typeFilter.value) continue
       const cellArr = cell as [number, string, string | number]
-      result.push({ dev, tag, value: String(cellArr[2]), ts: cellArr[1], type, owner })
+      result.push({ dev, tag, value: String(cellArr[2]), ts: cellArr[1], type, owners })
     }
   }
   return result
@@ -155,7 +149,10 @@ onUnmounted(() => {
               <td>{{ r.tag }}</td>
               <td class="val">{{ r.value }}</td>
               <td class="type">{{ r.type || '—' }}</td>
-              <td class="owner">{{ r.owner || '—' }}</td>
+              <td class="owner" :title="r.owners.length ? `归属：${r.owners.join('、')}` : '无归属（未声明，可能为已删实例残留）'">
+                <template v-if="r.owners.length">{{ r.owners[0] }}<span v-if="r.owners.length > 1" class="owner-extra">+{{ r.owners.length - 1 }}</span></template>
+                <template v-else>—</template>
+              </td>
               <td class="ts">{{ r.ts }}</td>
             </tr>
           </tbody>
@@ -164,13 +161,23 @@ onUnmounted(() => {
     </div>
 
     <p v-if="!rows.length" class="empty">
-      无数据——<RouterLink to="/collectors" class="empty-link">检查采集器是否运行</RouterLink>或调整过滤条件
+      无数据——<RouterLink to="/collectors" class="empty-link">检查采集器是否运行</RouterLink>、调整过滤条件，或查看左上方「未声明归属」分组（无法归属的缓存数据）
     </p>
   </div>
 </template>
 
 <style scoped>
-.rtdata { display: flex; flex-direction: column; height: 100%; overflow: hidden; }
+.rtdata {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  /* 确定高度是虚拟滚动的前提：父级 .page-panel 高度 auto（grid 自动行），
+     height:100% 失效为 auto 会让 scroll-area 随内容撑开、永不内滚——@scroll
+     不触发 + viewportH 退化为 480 初始值，行数超过 visibleCount 时只渲染首批
+     且底缘裁行（紧凑模式 padding 更窄，裁切更重）。clamp 随视口自适应并兜底：
+     100vh - 320px ≈ 视口减去顶栏/面板头/过滤条的固定开销。 */
+  height: clamp(320px, calc(100vh - 320px), 720px);
+}
 
 .filter {
   display: flex; gap: 10px; align-items: center;
@@ -220,6 +227,11 @@ th, td { text-align: left; padding: 0 10px; }
 .val { font-family: Consolas, monospace; color: var(--chip-ink); }
 .type { color: var(--color-ink-muted); font-size: 12px; }
 .owner { color: var(--color-primary); font-size: 12px; }
+/* 多归属角标：同 dev 被多实例引用（hover title 看全名单）——现场排查"数据互相覆盖"线索。 */
+.owner-extra {
+  margin-left: 4px; padding: 0 5px; border-radius: 999px;
+  background: var(--chip-bg); color: var(--color-ink-muted); font-size: 10px;
+}
 .ts { color: var(--color-ink-muted); font-family: Consolas, monospace; }
 
 .empty { color: var(--color-ink-muted); padding: 20px; text-align: center; }
