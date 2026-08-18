@@ -95,10 +95,7 @@ fn parse_cfg(app: &serde_json::Value) -> Result<EipCfg, String> {
             .get("health_check_secs")
             .and_then(|v| v.as_u64())
             .unwrap_or(0),
-        max_packet_size: app
-            .get("max_packet_size")
-            .and_then(|v| v.as_u64())
-            .map(v32),
+        max_packet_size: app.get("max_packet_size").and_then(|v| v.as_u64()).map(v32),
         batch_max_operations: app
             .get("batch_max_operations")
             .and_then(|v| v.as_u64())
