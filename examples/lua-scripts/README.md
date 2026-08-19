@@ -5,8 +5,12 @@ luaClient 脚本示例（配合 [`docs/guides/lua-script-guide.md`](../../docs/g
 ## 目录
 
 - **`modbus-like/`**：Modbus TCP 协议（MBAP + FC03 读 / FC06 写），一问一答（`collect` + `on_write`）。
+  头部带 manifest（`@role collector` / `@api_ver 1` / `@stdlib >=1.0`）——启动 dry-run 据此校验契约；
+  CRC16 用官方 stdlib：`local crc16 = require("algo.crc16")`（`scripts/_stdlib/` 同步文件优先，
+  离线回落宿主内嵌种子；依赖 stdlib ≥1.0，阶段 A 种子即满足）。
 - **`custom-on-data/`**：自定义协议 + `on_data` 被动广播上报（`set_value` + `kv_set` 持久化）。
 - **`multi-device/`**：单实例多设备（一条 RS485 总线多从站），`collect` 嵌套返回 `{[devid]={tag=v}}`（M2）。
+  手写 CRC16 仅为演示组帧，可直接换官方库 `require("algo.crc16")`（见脚本内注释）。
 
 ## 运行
 

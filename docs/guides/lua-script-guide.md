@@ -41,6 +41,10 @@ luaClient 是 rs-iot 的南向 `Source`（与 modbus/opcua/s7 同构，`inventor
 
 3. `POST /api/v1/startinst`（body `{"inst_id":"dev1"}`）→ `redis-cli -p 6390 HGETALL rtdata:dev1` 验采集。REST 端点全表见 [`rest-api.md`](../reference/rest-api.md)。
 
+脚本头部可选择性声明 manifest（`@role`/`@api_ver`/`@stdlib` 契约，启动 dry-run 校验，
+见「manifest 头部声明」）；需要复用库时经 `require` 四层路由取 json / 官方 stdlib / 共享库
+（见「require 与模块库」）。
+
 ## 回调函数
 
 `ctx` 是全局对象（回调不取 ctx 参数）。冒号语法 `ctx:request(...)`（隐式 self 由宿主吸收）。
@@ -68,12 +72,14 @@ luaClient 是 rs-iot 的南向 `Source`（与 modbus/opcua/s7 同构，`inventor
   同步）。脚本据此**选帧格式**——同一份脚本自适应不同链路：
 
   ```lua
+  local crc16 = require("algo.crc16")   -- 官方 stdlib（见「require 与模块库」）
+
   function collect()
       local pdu = string.pack(">BBHH", unit, 3, addr, qty)
-      -- serial/udp 走 RTU 帧（PDU + CRC16），tcp 走 MBAP 头（无 CRC）
+      -- serial/udp 走 RTU 帧（PDU + CRC16 小端附尾），tcp 走 MBAP 头（无 CRC）
       local frame
       if ctx:transport() == "serial" or ctx:transport() == "udp" then
-          frame = pdu .. string.pack("<H", crc16(pdu))
+          frame = pdu .. crc16.crc16(pdu)   -- 返回小端 2 字节串，直接拼帧尾
       else
           frame = string.pack(">I2I2I2BB", 1, 0, 6, unit, 3) .. string.pack(">I2I2", addr, qty)
       end
@@ -116,6 +122,128 @@ luaClient 是 rs-iot 的南向 `Source`（与 modbus/opcua/s7 同构，`inventor
 - `ctx:now() -> num`：当前本地毫秒时间戳（f64）。
 - `ctx:time() -> num`：当前本地秒时间戳（f64）。
 
+## require 与模块库
+
+沙箱内 `require` 按模块名**首段**路由四层（设计 §3.1）。判别顺序：违规拒绝 → builtin 名单 →
+单段/旧 `lib.` 前缀（私有）→ 官方保留段（stdlib）→ 其余 ≥2 段（站点共享）。
+
+### 命名空间路由表
+
+| require 名 | 层 | 解析位置 | 说明 |
+|---|---|---|---|
+| `json` | builtin | Rust 注册（不读盘） | builtin 名单优先于"单段=私有"判断；阶段 A 仅 `json` |
+| `algo.crc16`、`codec.basexx`、`cloud.onenet.token` | 官方 stdlib | `scripts/_stdlib/<路径>.lua` | 首段 ∈ 保留段（`algo`/`codec`/`proto`/`cloud`/`util`/`oo`）。`_stdlib/` 同步文件优先，miss 回落宿主内嵌种子，仍 miss 报"未同步"可行动错误——**永不回落共享/私有层**（防投毒核心规则） |
+| `viccom.calcex`、`viccom.calcex.poller` | 站点共享 | `scripts/_lib/<首段>/<余段>.lua` | 首段 = 作者/组织命名空间，**须 ≥2 段**——单段名结构上进不了共享层（见下违规示例） |
+| `myutil`、`lib.util`（旧前缀兼容） | 脚本私有 | `scripts/<script>/lib/<段>.lua` | 单段名或旧 `lib.` 前缀，现状语义不变 |
+
+违规与边界示例：
+
+```lua
+require("../evil")   -- 拒：穿越 / 绝对路径 / 反斜杠 / 内嵌斜杠 / 空段，一律报错
+require("lib")       -- 拒：裸 lib 前缀无模块名
+require("viccom")    -- 不拒但**进不了共享层**：单段名路由到私有 scripts/<script>/lib/viccom.lua；
+                    --   要进 _lib/ 须经 REST 保存（保存侧拒单段与保留段首段，见下）
+require("algo.evil") -- 保留段只查 _stdlib/ 与种子：不存在即报"未同步"，不会回落到任何第三方文件
+```
+
+### json 模块（builtin，C0）
+
+```lua
+local json = require("json")
+local s = json.encode({ a = 1, b = "x" })   -- table → JSON 字符串
+local t = json.decode('{"k":[1,2,3]}')      -- JSON 字符串 → table；t.k[2] == 2
+```
+
+- 输入上限 **1MB**（防 OOM）：`decode` 超限报 `json: 输入超 1MB`；非法 JSON 报解析失败。
+- encode/decode 与宿主 serde_json 同源，number/string/bool/table（数组/对象）往返无损。
+
+### 官方 stdlib（保留段命名空间）
+
+阶段 A 种子 4 库（vendored from freeioe@1398d47，MIT；随宿主内嵌，离线冷启动兜底）：
+
+| 模块 | 函数面 | 说明 |
+|---|---|---|
+| `algo.crc16` | `crc16.crc16(adu) -> str` | Modbus CRC16（多项式 0xA001 反射、初值 0xFFFF）；返回 `string.pack('I2', crc)` **小端 2 字节串**，可直接拼帧尾：`req .. crc16.crc16(req)` |
+| `codec.basexx` | `basexx.to_base64 / from_base64 / to_hex / from_hex / to_url64 / to_z85 / to_base32 / ...` | base2 / base16 / base32（RFC3548 + Crockford）/ base64 / url64 / z85 编解码 |
+| `util.retry` | `retry.retry(count, func, ...)` | 可重试调用：`func` 首返回值 falsy 时重试至多 `count` 次（透传全部返回值） |
+| `util.tablex` | `tablex.equals(a, b, ignore_mt?)` | 深度表相等比较（`__eq` 元方法短路 + 键集双向比对） |
+
+- 每库带 `selftest()`（已知向量/往返校验），宿主启动与 CI 冒烟全量跑（语法 + 语义闸门）。
+- **优先级**：`scripts/_stdlib/<路径>.lua` 存在 → 同步文件优先；否则回落 embed 种子。
+- 种子无独立版本轴（`stdlib.list()` 中 `ver=nil`）；sync 后以本地 index 为准。
+
+`stdlib` 全局表（本地清单只读视图，index 与种子合并、index 为准消歧）：
+
+```lua
+stdlib.list()   -- -> { {name="algo.crc16", path="algo/crc16.lua", ver=nil, source="seed"}, ... }
+                --    source: "seed"（内嵌兜底）| "synced"（index 安装，含 ver）
+stdlib.info("algo.crc16")   -- 点分模块名或文件路径（"algo/crc16.lua"）→ 单条 table | nil
+```
+
+**同步官方源/内网镜像**（ed25519 验签 + sha256 逐文件校验 + `_stdlib.tmp/` 原子替换 + 全实例 reload）：
+
+```bash
+# 清单（含版本与来源徽标）
+curl -H "Authorization: <token>" localhost:8790/api/v1/lua/stdlib
+# 同步：upstream/pin 均可省——upstream 缺省读 AppConfig.lua_stdlib_upstream（内网镜像改配置切换）
+curl -X POST -H "Authorization: <token>" -H 'Content-Type: application/json' \
+  -d '{"upstream":"https://rsiot.github.io/lualib/","pin":"1.0.0"}' \
+  localhost:8790/api/v1/lua/stdlib/sync
+```
+
+### 站点共享库（`scripts/_lib/`）
+
+第三方/站点级复用库经 REST 保存（`kind=lib`），require 按 `<org>.<库路径>` 引用：
+
+```bash
+# 保存（≥2 段、首段非保留段、防穿越；版本快照落 scripts/_lib/viccom/versions/）
+curl -X POST -H "Authorization: <token>" -H 'Content-Type: application/json' \
+  -d '{"kind":"lib","name":"viccom/hex.lua","content":"local M={} ... return M"}' \
+  localhost:8790/api/v1/lua/script/save
+# 列表 / 版本 / 回滚同族端点均支持 ?kind=lib（GET /api/v1/lua/scripts?kind=lib 等）
+```
+
+```lua
+local hex = require("viccom.hex")   -- → scripts/_lib/viccom/hex.lua
+```
+
+`_lib/` 由**全局 watcher** 监听（去抖 200ms）：任一共享库变更 → **全实例** reload（区别于
+main.lua 的 per-instance watcher）。保存侧拒绝单段（`foo.lua`）与撞保留段（`algo/evil.lua`）。
+
+## manifest 头部声明
+
+main.lua 顶部注释块可声明脚本契约（`-- @key value`，逐行扫至首个代码行；未知 `@key` 忽略——
+向前兼容）：
+
+```lua
+-- @role collector
+-- @api_ver 1
+-- @stdlib >=1.0
+-- @param period number 可选 上报周期秒 默认5 范围:1-3600
+-- @source local
+```
+
+| 键 | 含义 | 缺省 |
+|---|---|---|
+| `@role` | 脚本角色（v1 仅 `collector`） | 不声明（缺省语义 collector，但不强制契约，见下） |
+| `@api_ver` | 要求的宿主 API 版本（整数） | `1`（非法值报错，不静默放行） |
+| `@stdlib` | stdlib 版本范围：`>=1.0`、`>=1.0 <2`（空格组合，全部满足） | 不限 |
+| `@param` | 参数声明，可多行（B 阶段参数面板消费） | — |
+| `@source` | 来源徽标（`local` / `market` 等） | — |
+
+`@param` 后缀语法：`<name> <type> [可选] [描述...] [默认X] [枚举:a|b] [范围:a-b]`——
+`type` 为 `number`/`string`/`boolean`；出现「可选」token → 非必填；`默认X` 存默认值；
+首个 `枚举:`/`范围:` token 整体存为约束。
+
+**dry-run 校验**（启动与热加载 reload 均执行；失败启动放弃、reload 回退旧 VM）：
+
+- `api_ver` > 宿主当前（见兼容矩阵）→ 拒载，提示"请升级宿主"；< 宿主最低 → 拒载，提示"请升级脚本"。
+- **仅当显式声明 `@role collector`** 时强制全局 `collect` 存在（显式声明 = 作者签署契约 → 严格
+  校验；无 manifest 头的存量脚本豁免——可能只定义 `on_data`，向后兼容放行）。未知角色名拒载。
+- `@stdlib` 范围 vs 本地 index 版本，不满足提示"请 sync"；未 sync（种子兜底态）跳过比对——
+  内网冷启动不拒载。
+
+
 ## 配置（`app_config`）
 
 | 字段 | 类型 | 默认 | 说明 |
@@ -136,7 +264,23 @@ luaClient 是 rs-iot 的南向 `Source`（与 modbus/opcua/s7 同构，`inventor
 | `reconnect_secs` | num | — | 断连重连间隔（秒） |
 | `mem_limit_mb` | num | — | VM 内存限额（MB，防脚本泄漏） |
 | `hook_instr_limit` | num | — | 指令 hook 阈值（防死循环，spec §9.2） |
+| `callback_timeout_ms` | num | `10000` | 单次回调（collect/on_write/on_data）时长预算（毫秒，见护栏） |
 | `fail_threshold` | num | `10` | 连续 collect 失败 N 次标记 degraded |
+
+## 运行时护栏
+
+脚本错误不应拖垮实例或宿主——五项运行时护栏（参数与能力卡单一事实源一致）：
+
+| 护栏 | 参数 / 默认 | 超限行为 |
+|---|---|---|
+| 回调时长预算 | `callback_timeout_ms`（默认 10s，可配） | 本次回调被放弃（协程弃留，VM 不重建）、tick 记失败——连续超时照常走 `fail_threshold` → `degraded`，下一 tick 继续 |
+| HTTP 频控 | 20 次/s（`http_get`/`http_post` 共享一个出站窗口） | 向脚本返回错误 `rate limited（20/s）`（可感知退避） |
+| `ctx:request` 超时上限 | 脚本传值 clamp 至 30s（`0` → 1ms） | 防超大超时挂死等待 |
+| HTTP 超时上限 | `timeout` 参数 clamp 至 1-30s（缺省 5s） | 同上 |
+| hub 背压防反压 | 样本上送 `send` 超 2s | 丢弃该样本并累计计数——stat 扩展字段 `dropped_samples`（见状态监测）；hub 关闭时 warn |
+
+死循环由指令 hook 熔断（`hook_instr_limit`，见沙箱限制）、内存由 `mem_limit_mb` 封顶，与上表
+互补构成完整护栏面。
 
 ## 通讯链路抽象（必读）
 
@@ -182,6 +326,7 @@ backend 可解决。触发条件：现场出现明确的 server 侧协议需求�
 `examples/lua-scripts/`：
 
 - `modbus-like/`：Modbus TCP 协议（MBAP + FC03 读 / FC06 写），一问一答（`collect` + `on_write`）。
+  头部带 manifest 声明，CRC16 用 `require("algo.crc16")`（官方 stdlib，见上）。
 - `custom-on-data/`：自定义协议 + `on_data` 被动广播上报（`set_value` + `kv_set` 持久化）。
 - `multi-device/`：单实例多设备（一条 RS485 总线多从站），`collect` 嵌套返回（M2）。
 
@@ -193,12 +338,15 @@ backend 可解决。触发条件：现场出现明确的 server 侧协议需求�
 - **指令 hook**：超阈值（`hook_instr_limit`）中断死循环。
 - **内存限额**：`mem_limit_mb` 上限，超则 OOM 中断。
 - **不暴露**：lux client / 文件系统 / 原始 socket（通讯仅经 `ctx:request`）。
-- **本地模块**：`require "foo"` 解析 `scripts/<script>/?foo?.lua`（防 `..` 穿越仓库）。
+- **受控 require**：`require` 按首段命名空间路由四层（见「require 与模块库」），只读约定目录；
+  单段私有模块解析 `scripts/<script>/lib/<名>.lua`（防 `..` 穿越仓库）。
 
 ## 热加载
 
 改 `scripts/<name>/main.lua` → notify watcher（去抖 200ms）→ VM 重建（新 load + register +
-dry-run `on_init` 验证）。失败回退旧 VM（永不半生效）。
+dry-run：manifest 契约校验 + `on_init` 验证）。失败回退旧 VM（永不半生效）。
+
+共享库另有**全局 watcher**：`scripts/_lib/` 变更（去抖 200ms）→ 全实例 reload（见「站点共享库」）。
 
 兜底：`POST /api/v1/lua/reload?inst_id=<id>`（stop + start，IO 重连）。
 
@@ -211,7 +359,7 @@ lux `stat:<inst>` 存 `InstanceStat` JSON（`StatTracker` 周期 flush，每 col
 - `last_activity_ts` / `last_activity_duration_ms`：最近活动时间戳与耗时。
 - `last_err`：最近失败原因（成功时清空）。
 
-lua 专有扩展字段经 `extra` 透传：`vm_restart_count`（VM 重建次数）、`script_version`（main.lua sha256 前 8 hex）、`consecutive_fail`。
+lua 专有扩展字段经 `extra` 透传：`vm_restart_count`（VM 重建次数）、`script_version`（main.lua sha256 前 8 hex）、`consecutive_fail`、`dropped_samples`（hub 背压超 2s 累计丢样数，见护栏）。
 
 REST：`GET /api/v1/inst/stats?inst_id=<id>`（读 stat，M4 统一端点，**旧 `GET /api/v1/lua/stats` 已废弃移除**）/ `GET /api/v1/lua/scripts`（列脚本）。埋点约定详见 [`instrumentation-conventions.md`](../conventions/instrumentation-conventions.md)。
 
@@ -228,3 +376,14 @@ curl -H "Authorization: <token>" "localhost:8790/api/v1/logs/recent?target=io_tr
 ```
 
 激活后该实例 `ctx:request` 的 request TX/RX + `recv_idle` 被动 RX **三点**字节进 tracing target `io_trace`（抓包风格 hex）。**按设计只进内存 ring buffer（2000 条/实例，不落盘）**，惰性超时关闭。lua 走 io_engine direct dump（frame 已在手）；modbus 走 `TraceIo<T>` 拦截层。
+
+## 兼容矩阵
+
+脚本契约版本协商面（manifest `@api_ver`/`@stdlib` 与之对应；能力卡是单一事实源）：
+
+| 宿主版本 | API_VER（MIN / CUR） | STDLIB | builtin 模块 |
+|---|---|---|---|
+| 阶段 A（本版） | 1 / 1 | 种子 4 库（freeioe@1398d47 vendored，随宿主内嵌、无独立版本轴）；官方源 index 首发版本 **1.0.0**（sync 后本地 index 为准） | `json` |
+
+- 脚本 `@api_ver 1`（或缺省）在本版通过；宿主升级 CUR 后旧脚本不受影响（MIN 锁下界）。
+- `@stdlib >=1.0`：种子兜底态跳过比对（冷启动不拒载）；sync 1.0.0 后 `>=1.0 <2` 区间均满足。

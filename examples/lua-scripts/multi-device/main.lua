@@ -6,6 +6,8 @@
 local function read_req(unit, addr, qty)
     local pdu = string.pack(">BBHH", unit, 3, addr, qty)
     -- CRC16（Modbus）附尾——实际 RTU 传输需；本示例演示组帧。
+    -- 也可直接用官方库替代手写：local crc16 = require("algo.crc16")，
+    -- return pdu .. crc16.crc16(pdu)（返回小端 2 字节串）。
     local s = 0xFFFF
     for i = 1, #pdu do
         s = (s ~ pdu:byte(i)) & 0xFFFF
