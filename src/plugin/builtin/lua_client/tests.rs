@@ -245,7 +245,8 @@ async fn collect_budget_timeout_skips_round_and_vm_stays_usable() {
 /// 验证 VM 是否可继续用、脚本全局态是否"半途"。结论决定 T5 方案 a（接受半途态）/b（超时重建 VM）。
 #[tokio::test]
 async fn spike_timeout_drop_leaves_vm_usable() {
-    let mut c = crate::plugin::lua_core::config::parse_cfg(&json!({"script":"t","endpoint":"x"})).unwrap();
+    let mut c =
+        crate::plugin::lua_core::config::parse_cfg(&json!({"script":"t","endpoint":"x"})).unwrap();
     c.hook_instr_limit = 1_000_000;
     let lua = crate::plugin::lua_core::engine::new_vm(&c).unwrap();
     // 永不完成的宿主函数（模拟最慢的 await）。
@@ -253,8 +254,8 @@ async fn spike_timeout_drop_leaves_vm_usable() {
     lua.globals()
         .set(
             "hang",
-            lua.create_async_function(|_, _: mlua::Value| {
-                async move { std::future::pending::<mlua::Result<()>>().await }
+            lua.create_async_function(|_, _: mlua::Value| async move {
+                std::future::pending::<mlua::Result<()>>().await
             })
             .unwrap(),
         )
@@ -362,7 +363,9 @@ async fn bad_manifest_rejects_instance_load() {
     let run_token = token.child_token();
     let inst = lua_inst_config(&tmp, "devM");
     tokio::spawn(async move {
-        LuaClient.run(lua_host_ctx().await, inst, tx, cmd_rx, run_token).await;
+        LuaClient
+            .run(lua_host_ctx().await, inst, tx, cmd_rx, run_token)
+            .await;
     });
     let _ = cmd_tx; // 保留 sender，防 cmd_rx.recv() 立即 None
 
@@ -396,7 +399,9 @@ async fn good_manifest_with_role_collects() {
     let run_token = token.child_token();
     let inst = lua_inst_config(&tmp, "devM");
     tokio::spawn(async move {
-        LuaClient.run(lua_host_ctx().await, inst, tx, cmd_rx, run_token).await;
+        LuaClient
+            .run(lua_host_ctx().await, inst, tx, cmd_rx, run_token)
+            .await;
     });
     let _ = cmd_tx;
 
@@ -455,6 +460,9 @@ async fn reload_vm_rejects_bad_manifest() {
     .await
     .expect_err("坏 manifest 的 reload 应 Err（回退旧 VM）");
     let msg = e.to_string();
-    assert!(msg.contains("api_ver") && msg.contains("升级宿主"), "应含可行动提示：{msg}");
+    assert!(
+        msg.contains("api_ver") && msg.contains("升级宿主"),
+        "应含可行动提示：{msg}"
+    );
     let _ = std::fs::remove_dir_all(&tmp);
 }

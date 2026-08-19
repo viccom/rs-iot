@@ -8,8 +8,7 @@ use super::IoBackend;
 
 /// mock 响应闭包类型（frame 字节 → 响应字节 / Err）。拆 alias 规避 clippy type_complexity。
 #[allow(dead_code)]
-pub(crate) type MockResponder =
-    Box<dyn Fn(&[u8]) -> mlua::Result<Vec<u8>> + Send + Sync>;
+pub(crate) type MockResponder = Box<dyn Fn(&[u8]) -> mlua::Result<Vec<u8>> + Send + Sync>;
 
 /// mock IO backend：按闭包响应。用于无真实设备的单测/集成测。
 #[allow(dead_code)]

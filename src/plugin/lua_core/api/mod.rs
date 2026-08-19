@@ -41,10 +41,7 @@ pub(crate) enum SendOutcome {
 ///
 /// collect 分支（`builtin/lua_client/mod.rs`）与 `push_sample`（set_value(s)）共用；
 /// 丢样计数 `dropped` 由调用方持有并 fetch_add（flush 时落 stat `dropped_samples`）。
-pub(crate) async fn send_with_deadline(
-    tx: &mpsc::Sender<Sample>,
-    sample: Sample,
-) -> SendOutcome {
+pub(crate) async fn send_with_deadline(tx: &mpsc::Sender<Sample>, sample: Sample) -> SendOutcome {
     match tokio::time::timeout(std::time::Duration::from_secs(2), tx.send(sample)).await {
         Ok(Ok(())) => SendOutcome::Sent,
         Ok(Err(_)) => SendOutcome::Closed,
@@ -425,8 +422,10 @@ pub(crate) fn register(
 
     // --- 全局 stdlib 表（T9 §3.5）：stdlib.list()/info(mod) 只读清单 ---
     // 本地 index + embed 种子合并视图（读盘即时，sync 后 reload 即见新版）。
-    lua.globals()
-        .set("stdlib", crate::plugin::lua_core::stdlib_sync::stdlib_table(lua, scripts_root)?)?;
+    lua.globals().set(
+        "stdlib",
+        crate::plugin::lua_core::stdlib_sync::stdlib_table(lua, scripts_root)?,
+    )?;
 
     lua.globals().set("ctx", ctx)?;
     Ok(())

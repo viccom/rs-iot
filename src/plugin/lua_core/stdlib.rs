@@ -11,7 +11,8 @@
 struct Seed;
 
 /// 种子模块清单（selftest 冒烟遍历集，须与 `stdlib_seed/` 目录一一对应）。
-pub(crate) const SEED_MODULES: &[&str] = &["algo/crc16", "codec/basexx", "util/retry", "util/tablex"];
+pub(crate) const SEED_MODULES: &[&str] =
+    &["algo/crc16", "codec/basexx", "util/retry", "util/tablex"];
 
 /// 取种子源码：`path` 为点分模块名的 `/` 形式（`algo/crc16`），返回 `<path>.lua` 内容。
 pub(crate) fn seed_get(path: &str) -> Option<Vec<u8>> {
@@ -30,20 +31,27 @@ pub(crate) fn seed_get(path: &str) -> Option<Vec<u8>> {
 pub(crate) fn seed_selftest_all(lua: &mlua::Lua) -> mlua::Result<usize> {
     let mut ok = 0;
     for path in SEED_MODULES {
-        let bytes = seed_get(path)
-            .unwrap_or_else(|| panic!("stdlib 种子缺失：{path}.lua（embed 目录与 SEED_MODULES 不一致）"));
+        let bytes = seed_get(path).unwrap_or_else(|| {
+            panic!("stdlib 种子缺失：{path}.lua（embed 目录与 SEED_MODULES 不一致）")
+        });
         let src = String::from_utf8(bytes)
             .map_err(|_| mlua::Error::RuntimeError(format!("stdlib 种子 {path}.lua 非 UTF-8")))?;
         let m: mlua::Table = lua
             .load(src)
             .set_name(format!("={path}"))
             .eval()
-            .map_err(|e| mlua::Error::RuntimeError(format!("stdlib 种子 {path} 加载失败（语法闸门）: {e}")))?;
+            .map_err(|e| {
+                mlua::Error::RuntimeError(format!("stdlib 种子 {path} 加载失败（语法闸门）: {e}"))
+            })?;
         let f: mlua::Function = m.get("selftest").map_err(|_| {
-            mlua::Error::RuntimeError(format!("stdlib 种子 {path} 返回表缺 M.selftest（§3.3 约定）"))
+            mlua::Error::RuntimeError(format!(
+                "stdlib 种子 {path} 返回表缺 M.selftest（§3.3 约定）"
+            ))
         })?;
         if !f.call::<bool>(())? {
-            return Err(mlua::Error::RuntimeError(format!("stdlib 种子 {path} selftest=false")));
+            return Err(mlua::Error::RuntimeError(format!(
+                "stdlib 种子 {path} selftest=false"
+            )));
         }
         ok += 1;
     }

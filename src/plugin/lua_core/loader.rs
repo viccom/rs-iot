@@ -84,7 +84,9 @@ pub(crate) fn route(
     // ④ 官方保留段 → _stdlib/（只查官方镜像，miss 由 script.rs 报"未同步"——永不回落）
     if RESERVED_TOP.contains(&first) {
         return Ok(ModuleSource::Stdlib(
-            scripts_root.join("_stdlib").join(format!("{}.lua", parts.join("/"))),
+            scripts_root
+                .join("_stdlib")
+                .join(format!("{}.lua", parts.join("/"))),
         ));
     }
     // ⑤ 第三方共享：_lib/<作者>/<库路径>.lua（≥2 段已由 ③ 保证）
@@ -168,7 +170,10 @@ mod tests {
         assert!(route(root, "a", "a.").is_err(), "尾段空");
         assert!(route(root, "a", ".a").is_err(), "首段空");
         assert!(route(root, "a", "a..b").is_err(), "中段空");
-        assert!(route(root, "a", "../evil").is_err(), "防穿越（沿用现有规则）");
+        assert!(
+            route(root, "a", "../evil").is_err(),
+            "防穿越（沿用现有规则）"
+        );
         assert!(route(root, "a", "/etc/passwd").is_err(), "绝对路径");
         assert!(route(root, "a", "..\\x").is_err(), "反斜杠");
         assert!(route(root, "a", "a/b").is_err(), "内嵌斜杠（沿用现有规则）");

@@ -37,7 +37,8 @@ use mlua::Lua;
 /// `role` 存原始声明（None = 未声明；缺省 collector 语义由 [`dry_run`] 提供，
 /// 以区分"显式签署契约"与"存量无头脚本"——见模块文档兼容决策）。
 /// `api_ver` 解析期就给缺省 1（u32，非法值直接 Err）。
-#[allow(dead_code)] // source/params 阶段 A 无运行时读者（T12 文档/B 阶段参数面板消费），对标 capability.rs 先例
+#[allow(dead_code)]
+// source/params 阶段 A 无运行时读者（T12 文档/B 阶段参数面板消费），对标 capability.rs 先例
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Manifest {
     /// 脚本角色（§2.2；v1 唯一 collector）。None = 未声明。
@@ -169,8 +170,7 @@ pub(crate) fn dry_run(m: &Manifest, lua: &Lua, stdlib_ver: Option<&str>) -> Resu
         Some("collector") => {
             if lua.globals().get::<mlua::Function>("collect").is_err() {
                 return Err(
-                    "collector 角色缺少 collect()：显式 @role collector 需定义全局 collect"
-                        .into(),
+                    "collector 角色缺少 collect()：显式 @role collector 需定义全局 collect".into(),
                 );
             }
         }
@@ -193,7 +193,9 @@ pub(crate) fn dry_run(m: &Manifest, lua: &Lua, stdlib_ver: Option<&str>) -> Resu
 /// 数值段版本比较（"1.10" > "1.9"；短侧补 0："1.0" == "1.0.0"；非数值段按 0）。
 fn ver_cmp(a: &str, b: &str) -> std::cmp::Ordering {
     let seg = |v: &str| -> Vec<u64> {
-        v.split('.').map(|s| s.parse::<u64>().unwrap_or(0)).collect()
+        v.split('.')
+            .map(|s| s.parse::<u64>().unwrap_or(0))
+            .collect()
     };
     let (mut sa, mut sb) = (seg(a), seg(b));
     let n = sa.len().max(sb.len());
@@ -255,7 +257,10 @@ mod tests {
     fn defaults_when_absent() {
         let m = parse("-- hi").unwrap();
         assert_eq!(m.api_ver, 1, "缺省 1");
-        assert!(m.role.is_none(), "Option 存原始；缺省 collector 语义由 dry_run 提供");
+        assert!(
+            m.role.is_none(),
+            "Option 存原始；缺省 collector 语义由 dry_run 提供"
+        );
         assert!(m.stdlib.is_none());
         assert!(m.source.is_none());
         assert!(m.params.is_empty());
@@ -271,8 +276,7 @@ mod tests {
     /// 头部块在首个代码行终止：代码行后的 `-- @api_ver 99` 不读（防脚本体偶发匹配）。
     #[test]
     fn header_block_ends_at_first_code_line() {
-        let m = parse("-- @role collector\nlocal s = \"-- @api_ver 99\"\n-- @api_ver 99")
-            .unwrap();
+        let m = parse("-- @role collector\nlocal s = \"-- @api_ver 99\"\n-- @api_ver 99").unwrap();
         assert_eq!(m.api_ver, 1, "代码行后的 @key 不应生效");
     }
 

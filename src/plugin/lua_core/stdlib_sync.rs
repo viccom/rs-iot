@@ -339,7 +339,10 @@ pub(crate) fn stdlib_table(lua: &mlua::Lua, scripts_root: &Path) -> mlua::Result
     let info_fn = lua.create_function(move |lua, name: String| {
         let (_, entries) = inventory(&root_info);
         // 支持点分模块名（algo.crc16）或文件路径（algo/crc16.lua）两种写法
-        match entries.into_iter().find(|e| e.name == name || e.path == name) {
+        match entries
+            .into_iter()
+            .find(|e| e.name == name || e.path == name)
+        {
             Some(e) => Ok(mlua::Value::Table(entry_to_lua(lua, &e)?)),
             None => Ok(mlua::Value::Nil),
         }
@@ -468,10 +471,15 @@ mod tests {
 
     /// 本地目录 fetcher：URL `testup/<rel>` → 读 `base/<rel>`（reqwest 不支持
     /// file:// 的务实替代，见 [`sync_with_fetcher`] 文档）。
-    fn dir_fetcher(base: PathBuf) -> impl Fn(String) -> std::future::Ready<Result<Vec<u8>, String>> {
+    fn dir_fetcher(
+        base: PathBuf,
+    ) -> impl Fn(String) -> std::future::Ready<Result<Vec<u8>, String>> {
         move |url: String| {
             std::future::ready((|| -> Result<Vec<u8>, String> {
-                let rel = url.strip_prefix(UPSTREAM).and_then(|r| r.strip_prefix('/')).ok_or_else(|| format!("测试 fetcher 只认 {UPSTREAM}/ 前缀：{url}"))?;
+                let rel = url
+                    .strip_prefix(UPSTREAM)
+                    .and_then(|r| r.strip_prefix('/'))
+                    .ok_or_else(|| format!("测试 fetcher 只认 {UPSTREAM}/ 前缀：{url}"))?;
                 fs::read(base.join(rel)).map_err(|e| format!("读 {rel}: {e}"))
             })())
         }
@@ -498,7 +506,8 @@ mod tests {
     fn index_verifies_and_rejects_tamper() {
         let (sk, vk) = dev_keypair();
         use ed25519_dalek::Signer;
-        let bytes = br#"{"version":"1.0.0","files":{"algo/crc16.lua":{"sha256":"ab","ver":"1.0.0"}}}"#;
+        let bytes =
+            br#"{"version":"1.0.0","files":{"algo/crc16.lua":{"sha256":"ab","ver":"1.0.0"}}}"#;
         let sig = sk.sign(bytes).to_bytes();
         let idx = verify_index(bytes, &sig, &[vk.to_bytes()]).expect("正确签名应通过");
         assert_eq!(idx.version, "1.0.0");
@@ -555,7 +564,13 @@ mod tests {
         let root = fresh_scripts("swap", "marker = require('algo.demo').marker");
 
         // 首次：1.0.0
-        write_upstream(&up, "1.0.0", 1, &[("algo/demo.lua", "return { marker = 'v1' }")], None);
+        write_upstream(
+            &up,
+            "1.0.0",
+            1,
+            &[("algo/demo.lua", "return { marker = 'v1' }")],
+            None,
+        );
         let r1 = sync_with_fetcher(UPSTREAM, &root, None, dir_fetcher(up.clone()))
             .await
             .expect("首次 sync");
@@ -567,27 +582,37 @@ mod tests {
         assert!(!root.join("_stdlib.tmp").exists(), "不留 tmp");
 
         // 二次：2.0.0 内容变更 → Windows 上 rename 需先移走旧目录（两步换）
-        write_upstream(&up, "2.0.0", 1, &[("algo/demo.lua", "return { marker = 'v2' }")], None);
+        write_upstream(
+            &up,
+            "2.0.0",
+            1,
+            &[("algo/demo.lua", "return { marker = 'v2' }")],
+            None,
+        );
         let r2 = sync_with_fetcher(UPSTREAM, &root, None, dir_fetcher(up.clone()))
             .await
             .expect("二次 sync（目标已存在，两步换）");
         assert_eq!(r2.version, "2.0.0");
         assert!(r2.added.is_empty(), "无新增");
-        assert_eq!(r2.updated, vec!["algo/demo.lua".to_string()], "内容变更计 updated");
+        assert_eq!(
+            r2.updated,
+            vec!["algo/demo.lua".to_string()],
+            "内容变更计 updated"
+        );
         assert_eq!(
             read_index(&root).expect("index 应随目录原子替换").version,
             "2.0.0"
         );
-        assert!(
-            !root.join("_stdlib.tmp").exists(),
-            "两步换后不留 tmp"
-        );
+        assert!(!root.join("_stdlib.tmp").exists(), "两步换后不留 tmp");
         let old_dirs: Vec<_> = fs::read_dir(&root)
             .unwrap()
             .flatten()
             .filter(|e| e.file_name().to_string_lossy().starts_with("_stdlib.old"))
             .collect();
-        assert!(old_dirs.is_empty(), "两步换成功后应删备份，实得 {old_dirs:?}");
+        assert!(
+            old_dirs.is_empty(),
+            "两步换成功后应删备份，实得 {old_dirs:?}"
+        );
 
         // require 命中 `_stdlib/algo/demo.lua`（script.rs 文件优先于种子）
         let cfg = parse_cfg(&json!({"script":"devA","endpoint":"x"})).unwrap();

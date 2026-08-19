@@ -535,7 +535,10 @@ async fn capability_cards_match_registered_ctx() {
         checked += 1;
     }
     assert_eq!(checked, expected, "应校验全部在册 ctx 卡");
-    assert!(expected >= 16, "16 个无门控 ctx API 应全部在表（实 {expected}）");
+    assert!(
+        expected >= 16,
+        "16 个无门控 ctx API 应全部在表（实 {expected}）"
+    );
 
     let _ = crate::db::shutdown_lux(handle).await;
     let _ = std::fs::remove_dir_all(&data_dir);
@@ -551,12 +554,9 @@ async fn send_with_deadline_drops_on_full_channel() {
         crate::types::Sample {
             hwid: crate::types::Hwid::new("it"),
             devid: "d".into(),
-            values: [(
-                tag.to_string(),
-                crate::types::SampleValue::Int(1),
-            )]
-            .into_iter()
-            .collect(),
+            values: [(tag.to_string(), crate::types::SampleValue::Int(1))]
+                .into_iter()
+                .collect(),
             timestamp: 0,
         }
     }
@@ -647,8 +647,18 @@ async fn set_value_pushes_sample_to_hub() {
         }],
         host_kind: HostKind::Builtin,
     };
-    register(&lua, ctx_host, &inst, io, tx, RuntimeDevs::default(), zero_dropped(), "tcp", Path::new("scripts"))
-        .expect("register");
+    register(
+        &lua,
+        ctx_host,
+        &inst,
+        io,
+        tx,
+        RuntimeDevs::default(),
+        zero_dropped(),
+        "tcp",
+        Path::new("scripts"),
+    )
+    .expect("register");
 
     lua.load("ctx:set_value('devX', 'temp', 42.5)")
         .exec_async()
@@ -694,8 +704,18 @@ async fn set_values_pushes_multi_tag_sample() {
         }],
         host_kind: HostKind::Builtin,
     };
-    register(&lua, ctx_host, &inst, io, tx, RuntimeDevs::default(), zero_dropped(), "tcp", Path::new("scripts"))
-        .expect("register");
+    register(
+        &lua,
+        ctx_host,
+        &inst,
+        io,
+        tx,
+        RuntimeDevs::default(),
+        zero_dropped(),
+        "tcp",
+        Path::new("scripts"),
+    )
+    .expect("register");
 
     lua.load("ctx:set_values('devX', { temp = 42.5, hum = 60 })")
         .exec_async()
@@ -753,8 +773,18 @@ async fn set_value_routes_by_devid() {
         ],
         host_kind: HostKind::Builtin,
     };
-    register(&lua, ctx_host, &inst, io, tx, RuntimeDevs::default(), zero_dropped(), "tcp", Path::new("scripts"))
-        .expect("register");
+    register(
+        &lua,
+        ctx_host,
+        &inst,
+        io,
+        tx,
+        RuntimeDevs::default(),
+        zero_dropped(),
+        "tcp",
+        Path::new("scripts"),
+    )
+    .expect("register");
 
     lua.load("ctx:set_value('devB', 'v', 2)")
         .exec_async()

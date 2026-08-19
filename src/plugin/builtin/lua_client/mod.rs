@@ -117,17 +117,25 @@ impl Source for LuaClient {
         let stdlib_ver = core_::stdlib_sync::read_index(&scripts_root).map(|i| i.version);
         match manifest_dry_run(&lua, &lctx, stdlib_ver.as_deref()) {
             Ok(summary) => {
-                tracing::warn!("[luaClient] inst {} manifest dry-run 通过：{summary}", inst.inst_id)
+                tracing::warn!(
+                    "[luaClient] inst {} manifest dry-run 通过：{summary}",
+                    inst.inst_id
+                )
             }
             Err(e) => {
-                tracing::warn!("[luaClient] inst {} manifest dry-run 拒载：{e}", inst.inst_id);
+                tracing::warn!(
+                    "[luaClient] inst {} manifest dry-run 拒载：{e}",
+                    inst.inst_id
+                );
                 return;
             }
         }
 
         // 3. IO 引擎（按 transport 选 backend：tcp/serial/udp 三传输，spec §8）。
         let backend: Box<dyn IoBackend> = match cfg.transport {
-            core_::config::Transport::Tcp => Box::new(TcpIo::new(cfg.endpoint.clone(), cfg.recv_idle_ms)),
+            core_::config::Transport::Tcp => {
+                Box::new(TcpIo::new(cfg.endpoint.clone(), cfg.recv_idle_ms))
+            }
             core_::config::Transport::Serial => Box::new(SerialIo::new(
                 cfg.serial_port.clone().unwrap_or_default(),
                 cfg.baud_rate,
@@ -137,7 +145,9 @@ impl Source for LuaClient {
                 cfg.flow_control,
                 cfg.recv_idle_ms,
             )),
-            core_::config::Transport::Udp => Box::new(UdpIo::new(cfg.endpoint.clone(), cfg.recv_idle_ms)),
+            core_::config::Transport::Udp => {
+                Box::new(UdpIo::new(cfg.endpoint.clone(), cfg.recv_idle_ms))
+            }
         };
         // IO 引擎 + on_data 被动帧 channel（IO task 无在飞 request 时收到的帧 → 主循环）。
         let (data_tx, mut data_rx) = mpsc::channel::<Vec<u8>>(64);

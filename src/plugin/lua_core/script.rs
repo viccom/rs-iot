@@ -54,8 +54,9 @@ pub(crate) fn load_main(lua: &Lua, lctx: &LoadCtx) -> mlua::Result<()> {
                                 "官方库 {req} 未同步且不在种子集：请 sync 到 _stdlib/ 或检查模块名"
                             ))
                         })?;
-                        String::from_utf8(bytes)
-                            .map_err(|_| mlua::Error::RuntimeError(format!("种子 {rel}.lua 非 UTF-8")))?
+                        String::from_utf8(bytes).map_err(|_| {
+                            mlua::Error::RuntimeError(format!("种子 {rel}.lua 非 UTF-8"))
+                        })?
                     }
                 };
                 lua.load(&src).set_name(format!("={req}")).eval::<Value>()
@@ -63,13 +64,9 @@ pub(crate) fn load_main(lua: &Lua, lctx: &LoadCtx) -> mlua::Result<()> {
             // 共享层：_lib/<作者>/<库路径>.lua，miss 报不存在（REST 可安装，§3.6）
             Ok(loader::ModuleSource::Shared(p)) => {
                 let src = std::fs::read_to_string(&p).map_err(|e| {
-                    mlua::Error::RuntimeError(format!(
-                        "共享库 {req} 不存在（scripts/_lib/；{e}）"
-                    ))
+                    mlua::Error::RuntimeError(format!("共享库 {req} 不存在（scripts/_lib/；{e}）"))
                 })?;
-                lua.load(&src)
-                    .set_name(format!("={req}"))
-                    .eval::<Value>()
+                lua.load(&src).set_name(format!("={req}")).eval::<Value>()
             }
             // 违规名（穿越/空段等）强制拒绝
             Err(v) => Err(mlua::Error::RuntimeError(format!("require '{req}': {v}"))),
