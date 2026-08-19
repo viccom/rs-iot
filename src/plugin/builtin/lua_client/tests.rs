@@ -171,6 +171,76 @@ async fn watcher_exits_on_cancel() {
     );
 }
 
+/// T5 单回调时长预算（Q3/§4.5-1）——单元：pending future 在预算内未完成 → Elapsed 分支
+/// 映射为 `callback timeout` RuntimeError（含回调名与预算，供 warn/tick_err 记账），
+/// 且等满预算才切断；快路径（预算内完成）原样透传返回值。
+#[tokio::test]
+async fn with_budget_times_out_pending_future() {
+    let started = std::time::Instant::now();
+    let r: Result<(), mlua::Error> =
+        super::with_budget("collect", 200, std::future::pending::<()>()).await;
+    let e = r.expect_err("pending future 应在 200ms 预算耗尽时进 Elapsed 分支");
+    let msg = e.to_string();
+    assert!(msg.contains("callback timeout"), "消息应可辨识超时：{msg}");
+    assert!(
+        msg.contains("collect") && msg.contains("200"),
+        "应含回调名与预算：{msg}"
+    );
+    assert!(
+        started.elapsed() >= std::time::Duration::from_millis(190),
+        "应等满预算再切断（实测 {:?}）",
+        started.elapsed()
+    );
+}
+
+/// T5 时长预算——快路径透传：预算内完成的 future 返回值原样传出（不吞不错）。
+#[tokio::test]
+async fn with_budget_passes_through_completed_future() {
+    let r: Result<i32, mlua::Error> = super::with_budget("on_write", 200, async { 7 }).await;
+    assert_eq!(r.expect("快路径应透传"), 7);
+}
+
+/// T5 集成（spike-1 方案 a）：collect 内 await 永不返回的宿主函数，`with_budget`
+/// 以 `callback_timeout_ms`（此处 200ms 配置）切断后 VM 仍可用——重定义 collect 为
+/// 快路径再次 `call_collect` 成功出数（= 超时跳过本轮、下一 tick 仍响应；不重建 VM，
+/// 协程弃留在 await 点，要求脚本幂等）。
+#[tokio::test]
+async fn collect_budget_timeout_skips_round_and_vm_stays_usable() {
+    let c = crate::plugin::lua_core::config::parse_cfg(
+        &json!({"script":"t","endpoint":"x","callback_timeout_ms":200}),
+    )
+    .unwrap();
+    assert_eq!(c.callback_timeout_ms, 200);
+    let lua = crate::plugin::lua_core::engine::new_vm(&c).unwrap();
+    // 永不完成的宿主函数（spike-1 同款 hang 构造；生产接线即
+    // with_budget("collect", cfg.callback_timeout_ms, call_collect(...))）。
+    lua.globals()
+        .set(
+            "hang",
+            lua.create_async_function(|_, _: mlua::Value| async move {
+                std::future::pending::<mlua::Result<()>>().await
+            })
+            .unwrap(),
+        )
+        .unwrap();
+    lua.load("function collect() hang() end").exec().unwrap();
+    let r = super::with_budget(
+        "collect",
+        c.callback_timeout_ms,
+        super::call_collect(&lua, "d"),
+    )
+    .await;
+    assert!(r.is_err(), "挂起 collect 应在预算处被切断，实得 {r:?}");
+    // spike-1 验证点：切断后 VM 可用——下一轮（快路径 collect）正常出数。
+    lua.load("function collect() return { v = 1 } end")
+        .exec()
+        .unwrap();
+    let out = super::call_collect(&lua, "d")
+        .await
+        .expect("切断后下一轮 collect 应正常");
+    assert_eq!(out.len(), 1, "下一轮 collect 应正常出数");
+}
+
 /// spike-1（设计 §9 R1）：call_async future 被 timeout drop 后，协程停在 await 点，
 /// 验证 VM 是否可继续用、脚本全局态是否"半途"。结论决定 T5 方案 a（接受半途态）/b（超时重建 VM）。
 #[tokio::test]

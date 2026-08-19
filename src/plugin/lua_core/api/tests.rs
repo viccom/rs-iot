@@ -319,6 +319,104 @@ async fn http_get_returns_status_and_body() {
     let _ = std::fs::remove_dir_all(&data_dir);
 }
 
+/// T5 http 测试共用：裸 VM + 直接 `http::register`（无 lux/io 依赖——http 闭包只捕获
+/// inst_id 与频控器），供频控/clamp 行为断言用；完整 register 的场景测试见上文。
+#[cfg(feature = "lua-http")]
+fn http_only_vm() -> Lua {
+    let lua = Lua::new();
+    let inst = InstConfig {
+        inst_id: "it".into(),
+        inst_name: "it".into(),
+        app_code: PluginName::new("luaClient"),
+        app_type: AppType::South,
+        auto_start: false,
+        app_config: serde_json::json!({"script":"a","endpoint":"x"}),
+        devices: vec![DeviceSpec {
+            label: "d".into(),
+            value: "d".into(),
+            children: vec![],
+            slave_id: None,
+        }],
+        host_kind: HostKind::Builtin,
+    };
+    let ctx = lua.create_table().expect("ctx table");
+    super::http::register(&lua, &ctx, &inst).expect("http register");
+    lua.globals().set("ctx", ctx).expect("ctx 全局");
+    lua
+}
+
+/// R2 频控（Q3/§4.5-2/T5）：限值查能力卡 `rate_per_sec`（http_get/post 卡均 20/s，共享
+/// 一个每实例出站预算）；同一秒窗口内第 21 次调用被拒且错误含 `rate limited（20/s）`
+/// （脚本可感知退避）。URL 用非法值让放行的前 20 次在解析层即败（不触网、毫秒级），
+/// 保证 21 连发落在同一 1s 窗口内。
+#[cfg(feature = "lua-http")]
+#[tokio::test]
+async fn http_rate_limits_after_card_rate_per_sec() {
+    let lua = http_only_vm();
+    let mut rejected: Option<(usize, String)> = None;
+    for i in 0..25 {
+        let r: Result<mlua::Value, mlua::Error> = lua
+            .load("return ctx:http_get('http://')")
+            .eval_async()
+            .await;
+        match r {
+            Ok(_) => panic!("非法 URL 不应成功（第 {i} 次）"),
+            Err(e) => {
+                let msg = e.to_string();
+                if msg.contains("rate limited") {
+                    rejected = Some((i, msg));
+                    break;
+                }
+                // 前 20 次是 URL 解析错误（频控放行、请求本身失败）——预期路径。
+            }
+        }
+    }
+    let (at, msg) = rejected.expect("25 连发内应出现频控拒绝");
+    assert_eq!(at, 20, "第 21 次（索引 20）应被频控拒，实得第 {at} 次");
+    assert!(
+        msg.contains("rate limited（20/s）"),
+        "错误应带限值供脚本退避：{msg}"
+    );
+}
+
+/// T4 遗留 clamp 集成断言（附录 B 冻结面②）——下限行为级：`timeout=0` 应被宿主钳到 1s
+/// （静默 server 上等满 ~1s 才报超时错，而非 0s 立即失败）；上限 3600→30 行为级要等
+/// 30s 不进测试套，由 `clamp_timeout_secs` 单测锁边界。
+#[cfg(feature = "lua-http")]
+#[tokio::test]
+async fn http_timeout_clamped_lower_bound_to_1s() {
+    use tokio::net::TcpListener;
+    // 静默 server：bind 后不 accept 不响应，连接入 backlog、请求挂起等超时。
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let lua = http_only_vm();
+    let started = std::time::Instant::now();
+    let r: Result<mlua::Value, mlua::Error> = lua
+        .load(format!(
+            "return ctx:http_get('http://127.0.0.1:{port}/x', nil, 0)"
+        ))
+        .eval_async()
+        .await;
+    assert!(r.is_err(), "静默 server 应超时报错");
+    assert!(
+        started.elapsed() >= std::time::Duration::from_millis(900),
+        "timeout=0 应被 clamp 到 1s（实测 {:?}），宿主侧钳制生效",
+        started.elapsed()
+    );
+    drop(listener);
+}
+
+/// T4 遗留 clamp 单测锁：缺省 5s；下限 1（0→1）；上限 30（3600→30）。
+#[cfg(feature = "lua-http")]
+#[test]
+fn clamp_timeout_secs_bounds() {
+    assert_eq!(super::http::clamp_timeout_secs(None), 5);
+    assert_eq!(super::http::clamp_timeout_secs(Some(0)), 1);
+    assert_eq!(super::http::clamp_timeout_secs(Some(5)), 5);
+    assert_eq!(super::http::clamp_timeout_secs(Some(30)), 30);
+    assert_eq!(super::http::clamp_timeout_secs(Some(3600)), 30);
+}
+
 /// Q2 一致性锁（真注册断言）：每张 "ctx:" 能力卡必须真注册在 ctx 表上（mock VM）。
 ///
 /// 与 [`crate::plugin::lua_core::capability`] 常量表反向对齐——新增 ctx API 而不登卡

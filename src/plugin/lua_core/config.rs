@@ -89,6 +89,9 @@ pub(crate) struct LuaCfg {
     pub(crate) hook_instr_limit: u32,
     /// 连续 collect 失败 N 次标记 degraded（spec §9.6）。
     pub(crate) fail_threshold: u32,
+    /// 单回调时长预算（毫秒，Q3/§4.5-1：collect/on_write/on_data 每次调用包 timeout，
+    /// 超时跳过本轮 + tick_fail 计数，连续超限走 fail_threshold → degraded）。
+    pub(crate) callback_timeout_ms: u64,
     /// 脚本目录名（→ scripts/<script>/main.lua）。
     pub(crate) script: String,
 }
@@ -190,6 +193,12 @@ pub(crate) fn parse_cfg(app: &serde_json::Value) -> Result<LuaCfg, String> {
         .get("fail_threshold")
         .and_then(|v| v.as_u64())
         .unwrap_or(10) as u32;
+    // Q3/§4.5-1：缺省 10s；max(1) 钳下限（0 会把每个回调打成必超时）。
+    let callback_timeout_ms = app
+        .get("callback_timeout_ms")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(10_000)
+        .max(1);
 
     Ok(LuaCfg {
         transport,
@@ -208,6 +217,7 @@ pub(crate) fn parse_cfg(app: &serde_json::Value) -> Result<LuaCfg, String> {
         mem_limit_mb,
         hook_instr_limit,
         fail_threshold,
+        callback_timeout_ms,
         script,
     })
 }
@@ -290,5 +300,21 @@ mod tests {
             &json!({"script":"a","kind":"serial","serial_port":"COM3","parity":"x"})
         )
         .is_err());
+    }
+
+    /// T5：callback_timeout_ms 缺省 10s（Q3/§4.5-1 单回调时长预算），可配，越界钳制 >0。
+    #[test]
+    fn parse_callback_timeout_default_override_and_clamp() {
+        // 缺省 = 10_000ms。
+        let cfg = parse_cfg(&json!({"script":"devA","endpoint":"127.0.0.1:502"})).unwrap();
+        assert_eq!(cfg.callback_timeout_ms, 10_000);
+        // 显式覆盖。
+        let cfg =
+            parse_cfg(&json!({"script":"devA","endpoint":"x","callback_timeout_ms":200})).unwrap();
+        assert_eq!(cfg.callback_timeout_ms, 200);
+        // 0 钳到 1（防"预算为零=每回调必超时"的误配置把实例打死）。
+        let cfg =
+            parse_cfg(&json!({"script":"devA","endpoint":"x","callback_timeout_ms":0})).unwrap();
+        assert_eq!(cfg.callback_timeout_ms, 1);
     }
 }

@@ -219,15 +219,41 @@ impl Source for LuaClient {
             match evt {
                 Evt::Cmd(Some(m)) => {
                     if m.cmd == "write" {
-                        if let Err(e) = call_on_write(&lua, &m.data).await {
-                            tracing::warn!("[luaClient] on_write 失败：{e}");
+                        match with_budget(
+                            "on_write",
+                            cfg.callback_timeout_ms,
+                            call_on_write(&lua, &m.data),
+                        )
+                        .await
+                        {
+                            Ok(Ok(())) => {}
+                            Ok(Err(e)) => tracing::warn!("[luaClient] on_write 失败：{e}"),
+                            Err(e) => {
+                                // 时长预算超限（方案 a）：warn + stat 计一次；on_write 是
+                                // 事件驱动，不进 consecutive_fail（degrade 仅由周期
+                                // collect 的 tick_err 路径驱动，见 Evt::Tick）。
+                                tracing::warn!("[luaClient] on_write 超时长预算：{e}");
+                                tracker.tick_fail("callback timeout");
+                            }
                         }
                     }
                 }
                 Evt::Cmd(None) => break,
                 Evt::Data(frame) => {
-                    if let Err(e) = call_on_data(&lua, &frame).await {
-                        tracing::warn!("[luaClient] on_data 失败：{e}");
+                    match with_budget(
+                        "on_data",
+                        cfg.callback_timeout_ms,
+                        call_on_data(&lua, &frame),
+                    )
+                    .await
+                    {
+                        Ok(Ok(())) => {}
+                        Ok(Err(e)) => tracing::warn!("[luaClient] on_data 失败：{e}"),
+                        Err(e) => {
+                            // 同 on_write：超时计 stat，不进 consecutive_fail。
+                            tracing::warn!("[luaClient] on_data 超时长预算：{e}");
+                            tracker.tick_fail("callback timeout");
+                        }
                     }
                 }
                 Evt::Tick => {
@@ -241,13 +267,17 @@ impl Source for LuaClient {
                     // 副作用翻倍）；返回值按 spec §3.3 自动判定嵌套多设备 / 平铺单设备。
                     // 平铺模式归口 devices[0]（与 ctx:set_value 的 devices.first() 语义一致，
                     // spec §7 L2「自己当前 devid」）。
-                    match call_collect(
-                        &lua,
-                        inst.devices.first().map(|d| d.value.as_str()).unwrap_or(""),
+                    match with_budget(
+                        "collect",
+                        cfg.callback_timeout_ms,
+                        call_collect(
+                            &lua,
+                            inst.devices.first().map(|d| d.value.as_str()).unwrap_or(""),
+                        ),
                     )
                     .await
                     {
-                        Ok(samples) if !samples.is_empty() => {
+                        Ok(Ok(samples)) if !samples.is_empty() => {
                             for (devid, values) in samples {
                                 if let Ok(mut set) = runtime_devs.lock() {
                                     set.insert(devid.clone());
@@ -275,9 +305,17 @@ impl Source for LuaClient {
                                 }
                             }
                         }
-                        Ok(_) => {}
-                        Err(e) => {
+                        Ok(Ok(_)) => {}
+                        Ok(Err(e)) => {
                             tracing::warn!("[luaClient] collect 失败：{e}");
+                            tick_err = Some(e.to_string());
+                        }
+                        Err(e) => {
+                            // 时长预算超限（Q3/§4.5-1，spike-1 方案 a）：跳过本轮并并入
+                            // tick_err 同一记账路径（tick_fail + consecutive_fail →
+                            // fail_threshold → degraded，单次计数不重复）；不重建 VM，
+                            // 协程弃留在 await 点，要求脚本幂等。
+                            tracing::warn!("[luaClient] collect 超时长预算：{e}");
                             tick_err = Some(e.to_string());
                         }
                     }
@@ -449,6 +487,27 @@ async fn call_on_data(lua: &mlua::Lua, frame: &[u8]) -> mlua::Result<()> {
     let frame_str = lua.create_string(frame)?;
     let _: mlua::Value = f.call_async(frame_str).await?;
     Ok(())
+}
+
+/// 单回调时长预算包装（Q3/§4.5-1，T5）：collect/on_write/on_data 每次调用统一包
+/// `tokio::time::timeout(callback_timeout_ms)`；Elapsed → 外层 `Err(RuntimeError
+/// ("callback timeout: {kind} 超预算 {budget}ms，跳过本轮"))`——消息含回调名与预算，
+/// 供 warn 日志与 tick_err/tick_fail 记账。脚本自身的错误（内层 Result 的 Err）原样
+/// 透传，与超时严格区分。
+///
+/// spike-1 方案 a：超时仅跳过本轮 + 计数（连续超限走 collect 的 fail_threshold →
+/// degraded），不重建 VM——被 drop 的协程弃留在 await 点，全局态半途，要求脚本幂等。
+async fn with_budget<T>(
+    kind: &str,
+    budget_ms: u64,
+    f: impl std::future::Future<Output = T>,
+) -> Result<T, mlua::Error> {
+    match tokio::time::timeout(std::time::Duration::from_millis(budget_ms), f).await {
+        Ok(v) => Ok(v),
+        Err(_) => Err(mlua::Error::RuntimeError(format!(
+            "callback timeout: {kind} 超预算 {budget_ms}ms，跳过本轮"
+        ))),
+    }
 }
 
 /// 重建 VM：new_vm + load_main + register ctx + dry-run on_init（spec §5.3 热加载）。
