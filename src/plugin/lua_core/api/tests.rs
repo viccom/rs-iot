@@ -309,6 +309,71 @@ async fn http_get_returns_status_and_body() {
     let _ = std::fs::remove_dir_all(&data_dir);
 }
 
+/// Q2 一致性锁（真注册断言）：每张 "ctx:" 能力卡必须真注册在 ctx 表上（mock VM）。
+///
+/// 与 [`crate::plugin::lua_core::capability`] 常量表反向对齐——新增 ctx API 而不登卡
+/// （或登卡而不注册）此测试即红。feature 门控卡（lua-http）仅在 feature 开启时断言
+/// （关闭时 http::register 不编译，卡上 `feature` 字段即门控事实源）。
+#[tokio::test]
+async fn capability_cards_match_registered_ctx() {
+    let lua = Lua::new();
+    let io = spawn_mock_io();
+    let (ctx_host, handle, data_dir) = setup_ctx("cap").await;
+    let inst = InstConfig {
+        inst_id: "it".into(),
+        inst_name: "it".into(),
+        app_code: PluginName::new("luaClient"),
+        app_type: AppType::South,
+        auto_start: false,
+        app_config: serde_json::json!({"script":"a","endpoint":"x"}),
+        devices: vec![DeviceSpec {
+            label: "d".into(),
+            value: "d".into(),
+            children: vec![],
+            slave_id: None,
+        }],
+        host_kind: HostKind::Builtin,
+    };
+    register(
+        &lua,
+        ctx_host,
+        &inst,
+        io,
+        mock_hub_tx(),
+        RuntimeDevs::default(),
+        "tcp",
+    )
+    .expect("register");
+    let ctx: mlua::Table = lua.globals().get("ctx").expect("ctx 全局表");
+
+    // 期望校验数 = 当前构建实际注册的卡（无门控卡全算；lua-http 卡仅 feature 开时算）。
+    let expected = crate::plugin::lua_core::capability::CAPABILITIES
+        .iter()
+        .filter(|c| c.feature != Some("lua-http") || cfg!(feature = "lua-http"))
+        .filter(|c| c.name.starts_with("ctx:"))
+        .count();
+    let mut checked = 0;
+    for c in crate::plugin::lua_core::capability::CAPABILITIES {
+        if c.feature == Some("lua-http") && !cfg!(feature = "lua-http") {
+            continue; // 门控关闭：http::register 未编译，卡不参与断言
+        }
+        let Some(method) = c.name.strip_prefix("ctx:") else {
+            continue; // builtin 模块卡（json 等）不挂 ctx 表，T8 后另行断言
+        };
+        assert!(
+            ctx.get::<mlua::Function>(method).is_ok(),
+            "能力卡 {} 未注册在 ctx 表",
+            c.name
+        );
+        checked += 1;
+    }
+    assert_eq!(checked, expected, "应校验全部在册 ctx 卡");
+    assert!(expected >= 16, "16 个无门控 ctx API 应全部在表（实 {expected}）");
+
+    let _ = crate::db::shutdown_lux(handle).await;
+    let _ = std::fs::remove_dir_all(&data_dir);
+}
+
 /// 测试用：起独立 lux（端口 0 + 临时 data_dir）+ 标准 HostContext（hwid="it"，
 /// 空 registries）。返回 (ctx_host, handle, data_dir)——handle 供 `shutdown_lux`，
 /// data_dir 供清理。L2 数据测共用；L3 send_command 测自建 ctl_registry 不走此路径。
