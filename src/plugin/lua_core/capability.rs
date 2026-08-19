@@ -3,7 +3,8 @@
 //!
 //! 现登记 19 张卡：18 个 ctx 方法（与 [`crate::plugin::lua_core::api::register`] +
 //! `api/http.rs` 的 ctx.set 清单逐一对齐；设计 §4.1 表写的"17 项"实测为 18——
-//! `set_values`/`log_*` 按方法名单计数）+ builtin `json` 模块占位（T8 实现）。
+//! `set_values`/`log_*` 按方法名单计数）+ builtin `json` 模块（T8 实现，
+//! `api::tests::json_roundtrip_and_limit` 锁行为）。
 //! 一致性锁：本文件 tests（卡名格式/去重/数量）+ `api::tests::capability_cards_match_registered_ctx`
 //! （每张 "ctx:" 卡必须真注册在 mock VM 的 ctx 表上）。
 
@@ -265,7 +266,7 @@ pub(crate) static CAPABILITIES: &[CapabilityCard] = &[
         api_ver: 1,
         desc: "HTTP POST 出站",
     },
-    // --- C0 builtin 模块占位（T8 实现，§4.1/§3.1）---
+    // --- C0 builtin 模块（T8 实现，§4.1/§3.1/D5：serde_json 桥 + 1MB 输入上限）---
     CapabilityCard {
         name: "json",
         layer: Layer::C0,
@@ -274,7 +275,7 @@ pub(crate) static CAPABILITIES: &[CapabilityCard] = &[
         timeout_cap_ms: 0,
         rate_per_sec: 0,
         api_ver: 1,
-        desc: "JSON 编解码（T8）",
+        desc: "JSON 编解码（decode 输入 ≤1MB）",
     },
 ];
 

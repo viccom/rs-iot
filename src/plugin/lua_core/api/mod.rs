@@ -13,6 +13,8 @@ mod tests;
 #[cfg(feature = "lua-http")]
 mod http;
 
+mod json;
+
 use crate::host::HostContext;
 use crate::plugin::builtin::lua_client::lua_value_to_sample;
 use crate::plugin::builtin::lua_client::RuntimeDevs;
@@ -423,15 +425,12 @@ pub(crate) fn register(
 /// builtin 单段模块分发（§3.1 Builtin 层；`script.rs` require 路由的 Builtin 分支调用）。
 ///
 /// 返回模块值（Lua table 等）。名单 = [`crate::plugin::lua_core::capability::BUILTIN_MODULES`]
-///（route 已保证 `name` 在名单内）；json 实现在 T8（`api/json.rs`，capability 卡已占位）。
-pub(crate) fn builtin_module(_lua: &Lua, name: &str) -> mlua::Result<Value> {
+///（route 已保证 `name` 在名单内）；json 实现在 [`json`]（serde_json 桥 + 1MB 输入上限）。
+pub(crate) fn builtin_module(lua: &Lua, name: &str) -> mlua::Result<Value> {
     match name {
-        // TODO(T8): 改为 api::json::make_module(lua)?.into()
-        "json" => Err(mlua::Error::RuntimeError(
-            "builtin 模块 json 未实现（T8）".into(),
-        )),
+        "json" => json::make_module(lua).map(Value::Table),
         other => Err(mlua::Error::RuntimeError(format!(
-            "builtin 模块 {other} 未实现（T8）"
+            "builtin 模块 {other} 未注册（BUILTIN_MODULES 名单外）"
         ))),
     }
 }

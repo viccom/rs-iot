@@ -467,7 +467,7 @@ async fn capability_cards_match_registered_ctx() {
             continue; // 门控关闭：http::register 未编译，卡不参与断言
         }
         let Some(method) = c.name.strip_prefix("ctx:") else {
-            continue; // builtin 模块卡（json 等）不挂 ctx 表，T8 后另行断言
+            continue; // builtin 模块卡（json）不挂 ctx 表——行为由 json_roundtrip_and_limit 锁
         };
         assert!(
             ctx.get::<mlua::Function>(method).is_ok(),
@@ -886,6 +886,70 @@ async fn list_devices_returns_inst_devices() {
 
     let _ = crate::db::shutdown_lux(handle).await;
     let _ = std::fs::remove_dir_all(&data_dir);
+}
+
+/// T8 builtin json 模块（§4.1/D5，C0/R0）：经 `require("json")` 完整路径（script.rs
+/// Builtin 分发 → `api::builtin_module` → `api::json::make_module`）验证——
+/// 1) encode→decode roundtrip 取回字段（Lua 表键序不保证——不锁序列化字符串）；
+/// 2) 嵌套数组 `{"k":[1,2,3]}` → k[2]==2；
+/// 3) decode 超 1MB 输入 → RuntimeError "json: 输入超 1MB"（先拒后解析，§4.5）；
+/// 4) 非法 JSON → 错误含 "解析失败"。
+#[test]
+fn json_roundtrip_and_limit() {
+    let tmp = std::env::temp_dir().join(format!("lua-json8-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(tmp.join("devA/lib")).unwrap();
+    std::fs::write(
+        tmp.join("devA/main.lua"),
+        r#"
+local json = require("json")
+-- 1) roundtrip：encode 后 decode 取回字段（不锁 key 序）
+local back = json.decode(json.encode({ a = 1, b = "x" }))
+rt_ok = (back.a == 1 and back.b == "x")
+-- 2) 嵌套数组
+local d = json.decode('{"k":[1,2,3]}')
+arr_ok = (d.k[2] == 2)
+-- 3) 超 1MB 输入拒绝（pcall 捕错误信息）
+local _, over_err = pcall(json.decode, string.rep("x", 1024 * 1024 + 1))
+over_msg = tostring(over_err)
+-- 4) 非法 JSON → 解析失败
+local _, bad_err = pcall(json.decode, "{")
+bad_msg = tostring(bad_err)
+"#,
+    )
+    .unwrap();
+
+    let cfg = crate::plugin::lua_core::config::parse_cfg(&serde_json::json!({
+        "script": "devA", "endpoint": "x"
+    }))
+    .unwrap();
+    let lua = crate::plugin::lua_core::engine::new_vm(&cfg).unwrap();
+    let lctx = crate::plugin::lua_core::script::LoadCtx {
+        scripts_root: std::sync::Arc::from(tmp.as_path()),
+        script_name: std::sync::Arc::<str>::from("devA"),
+    };
+    crate::plugin::lua_core::script::load_main(&lua, &lctx).expect("load_main（含 require json）");
+
+    assert!(
+        lua.load("return rt_ok").eval::<bool>().unwrap(),
+        "encode→decode 应取回原字段（.a==1 且 .b=='x'）"
+    );
+    assert!(
+        lua.load("return arr_ok").eval::<bool>().unwrap(),
+        "嵌套数组 {{\"k\":[1,2,3]}} 解码后 k[2] 应为 2"
+    );
+    let over: String = lua.load("return over_msg").eval().unwrap();
+    assert!(
+        over.contains("超 1MB"),
+        "超 1MB 输入应先拒后解析（错误含 '超 1MB'），实得：{over}"
+    );
+    let bad: String = lua.load("return bad_msg").eval().unwrap();
+    assert!(
+        bad.contains("解析失败"),
+        "非法 JSON 错误应含 '解析失败'，实得：{bad}"
+    );
+
+    let _ = std::fs::remove_dir_all(&tmp);
 }
 
 /// `ctx:transport()` 返回 register 时传入的链路类型（tcp/serial/udp），脚本据此选帧格式

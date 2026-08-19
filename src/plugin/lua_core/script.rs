@@ -238,8 +238,9 @@ route_res = { sx = sx.v, ol = ol.v, pv = priv_val }
         let _ = fs::remove_dir_all(&tmp);
     }
 
-    /// T6 Builtin 分支接线：require("json") 分发到 api::builtin_module（T8 实现真身，
-    /// 当前为占位错误——T8 落地后本测试随 json roundtrip 测试更新）。
+    /// T6 Builtin 分支接线 + T8 真身：require("json") 经 `api::builtin_module` 分发到
+    /// `api::json::make_module`——取回模块表且 encode/decode 可 roundtrip（T8 前锁
+    /// 占位错误，T8 后改 roundtrip 断言；完整行为见 `api::tests::json_roundtrip_and_limit`）。
     #[test]
     fn require_builtin_json_dispatches_to_api() {
         let tmp = std::env::temp_dir().join(format!("lua-route6-builtin-{}", std::process::id()));
@@ -254,12 +255,20 @@ route_res = { sx = sx.v, ol = ol.v, pv = priv_val }
             script_name: Arc::<str>::from("devA"),
         };
         load_main(&lua, &lctx).unwrap();
-        let r: mlua::Result<mlua::Value> = lua.load(r#"return require("json")"#).eval();
-        let e = r.err().expect("json 未实现（T8）应报错");
+        let m: mlua::Table = lua
+            .load(r#"return require("json")"#)
+            .eval()
+            .expect("require json 应分发到 api::json 取回模块表");
         assert!(
-            e.to_string().contains("json 未实现"),
-            "Builtin 分支应分发到 api::builtin_module 占位错误，实得：{e}"
+            m.contains_key("encode").unwrap() && m.contains_key("decode").unwrap(),
+            "json 模块表应含 encode/decode"
         );
+        // roundtrip：分发到的真模块可用（.a 解码回 1）。
+        let a: i64 = lua
+            .load(r#"local j = require("json"); return j.decode(j.encode({a=1})).a"#)
+            .eval()
+            .expect("json encode/decode roundtrip");
+        assert_eq!(a, 1, "roundtrip 应取回原值");
 
         let _ = fs::remove_dir_all(&tmp);
     }
