@@ -2,10 +2,11 @@
 //!
 //! 沙箱 `new_with` 未装 package 库（require 本就不可用），这里手动注入一个受控
 //! require 全局函数：经 [`loader::route`] 按首段分发四层——builtin（Rust 注册）/
-//! stdlib（`_stdlib/` 官方镜像，miss 即错永不回落）/ shared（`_lib/<作者>/`）/
-//! private（`scripts/<name>/lib/`，现状语义）；违规名（穿越/空段）强制拒绝。
+//! stdlib（`_stdlib/` 官方镜像文件优先，miss 回落 embed 种子，§3.6 D5）/
+//! shared（`_lib/<作者>/`）/ private（`scripts/<name>/lib/`，现状语义）；
+//! 违规名（穿越/空段）强制拒绝。
 
-use crate::plugin::lua_core::{api, loader};
+use crate::plugin::lua_core::{api, loader, stdlib};
 use mlua::{Lua, Value};
 use std::path::Path;
 use std::sync::Arc;
@@ -39,17 +40,25 @@ pub(crate) fn load_main(lua: &Lua, lctx: &LoadCtx) -> mlua::Result<()> {
             }
             // builtin 层：Rust 注册模块（json 等，名单 BUILTIN_MODULES）
             Ok(loader::ModuleSource::Builtin(name)) => api::builtin_module(lua, &name),
-            // 官方层：只查 _stdlib/，miss 即"未同步"可行动错误——永不回落共享/私有
-            //（防投毒核心规则；_stdlib/ 空时的 embed 种子兜底在 T7 接线）
+            // 官方层：`_stdlib/<路径>.lua` 同步文件优先；miss 回落 embed 种子兜底
+            //（§3.6 D5 离线冷启动）；两者皆无 → 可行动错误——永不回落共享/私有
+            //（防投毒核心规则）
             Ok(loader::ModuleSource::Stdlib(p)) => {
-                let src = std::fs::read_to_string(&p).map_err(|e| {
-                    mlua::Error::RuntimeError(format!(
-                        "官方库 {req} 未同步：请 sync 或检查 _stdlib/（种子兜底在 T7 接线；{e}）"
-                    ))
-                })?;
-                lua.load(&src)
-                    .set_name(format!("={req}"))
-                    .eval::<Value>()
+                // route 已拒 `..`/`/`/`\`，点转斜杠后即种子内相对路径
+                let rel = req.replace('.', "/");
+                let src = match std::fs::read_to_string(&p) {
+                    Ok(s) => s,
+                    Err(_) => {
+                        let bytes = stdlib::seed_get(&rel).ok_or_else(|| {
+                            mlua::Error::RuntimeError(format!(
+                                "官方库 {req} 未同步且不在种子集：请 sync 到 _stdlib/ 或检查模块名"
+                            ))
+                        })?;
+                        String::from_utf8(bytes)
+                            .map_err(|_| mlua::Error::RuntimeError(format!("种子 {rel}.lua 非 UTF-8")))?
+                    }
+                };
+                lua.load(&src).set_name(format!("={req}")).eval::<Value>()
             }
             // 共享层：_lib/<作者>/<库路径>.lua，miss 报不存在（REST 可安装，§3.6）
             Ok(loader::ModuleSource::Shared(p)) => {
@@ -250,6 +259,79 @@ route_res = { sx = sx.v, ol = ol.v, pv = priv_val }
         assert!(
             e.to_string().contains("json 未实现"),
             "Builtin 分支应分发到 api::builtin_module 占位错误，实得：{e}"
+        );
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    /// T7 种子兜底（§3.6 D5 离线冷启动）：无 `_stdlib/` 目录时 `require("algo.crc16")`
+    /// 从 embed 种子取回模块且 `selftest()` 通过；种子也无的模块 → "未同步且不在种子集"。
+    #[test]
+    fn require_stdlib_falls_back_to_seed() {
+        let tmp = std::env::temp_dir().join(format!("lua-seed-fb-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(tmp.join("devA")).unwrap();
+        fs::write(
+            tmp.join("devA/main.lua"),
+            r#"
+local crc = require("algo.crc16")           -- 无 _stdlib/ → embed 种子兜底
+seed_ok = crc.selftest()
+local _, err = pcall(require, "algo.nope")   -- 种子也无 → 可行动错误
+seed_miss_msg = tostring(err)
+"#,
+        )
+        .unwrap();
+
+        let cfg = parse_cfg(&json!({"script":"devA","endpoint":"x"})).unwrap();
+        let lua = new_vm(&cfg).unwrap();
+        let lctx = LoadCtx {
+            scripts_root: Arc::from(tmp.as_path()),
+            script_name: Arc::<str>::from("devA"),
+        };
+        load_main(&lua, &lctx).unwrap();
+        assert!(
+            lua.load("return seed_ok").eval::<bool>().unwrap(),
+            "种子版 algo.crc16 的 selftest 应通过（沙箱 VM 上 string.pack 可用）"
+        );
+        let msg: String = lua.load("return seed_miss_msg").eval().unwrap();
+        assert!(
+            msg.contains("未同步且不在种子集"),
+            "种子也无应报可行动错误（永不回落其他层），实得：{msg}"
+        );
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    /// T7 优先级（§3.6）：`_stdlib/algo/crc16.lua` 存在时**文件优先**于种子——放置
+    /// 不同返回值的假文件断言取到文件版（sync 镜像可覆盖种子旧版本）。
+    #[test]
+    fn require_stdlib_file_takes_priority_over_seed() {
+        let tmp = std::env::temp_dir().join(format!("lua-seed-prio-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(tmp.join("devA")).unwrap();
+        fs::create_dir_all(tmp.join("_stdlib/algo")).unwrap();
+        fs::write(
+            tmp.join("_stdlib/algo/crc16.lua"),
+            "return { marker = 'file-version' }",
+        )
+        .unwrap();
+        fs::write(
+            tmp.join("devA/main.lua"),
+            "file_won = require('algo.crc16').marker",
+        )
+        .unwrap();
+
+        let cfg = parse_cfg(&json!({"script":"devA","endpoint":"x"})).unwrap();
+        let lua = new_vm(&cfg).unwrap();
+        let lctx = LoadCtx {
+            scripts_root: Arc::from(tmp.as_path()),
+            script_name: Arc::<str>::from("devA"),
+        };
+        load_main(&lua, &lctx).unwrap();
+        assert_eq!(
+            lua.load("return file_won").eval::<String>().unwrap(),
+            "file-version",
+            "_stdlib/ 文件应优先于 embed 种子"
         );
 
         let _ = fs::remove_dir_all(&tmp);

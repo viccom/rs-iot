@@ -9,3 +9,4 @@ pub(crate) mod io_engine;
 pub(crate) mod loader;
 pub(crate) mod ratelimit;
 pub(crate) mod script;
+pub(crate) mod stdlib;
