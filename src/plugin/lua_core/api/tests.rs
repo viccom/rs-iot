@@ -30,6 +30,12 @@ fn mock_hub_tx() -> tokio::sync::mpsc::Sender<crate::types::Sample> {
     tx
 }
 
+/// 测试用零值丢样计数（满足 register 的 dropped 参数；背压行为测试见
+/// `send_with_deadline_drops_on_full_channel`，其余测试只占位不计数）。
+fn zero_dropped() -> std::sync::Arc<std::sync::atomic::AtomicU64> {
+    std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0))
+}
+
 /// 冒烟测：register 成功 + ctx 暴露 request/log_info/now/time（且都是 function）。
 #[tokio::test]
 async fn register_exposes_ctx_api() {
@@ -58,6 +64,7 @@ async fn register_exposes_ctx_api() {
         io,
         mock_hub_tx(),
         RuntimeDevs::default(),
+        zero_dropped(),
         "tcp",
     )
     .expect("register");
@@ -118,6 +125,7 @@ async fn kv_set_get_roundtrip() {
         io,
         mock_hub_tx(),
         RuntimeDevs::default(),
+        zero_dropped(),
         "tcp",
     )
     .expect("register");
@@ -213,6 +221,7 @@ async fn send_command_routes_to_target() {
         io,
         mock_hub_tx(),
         RuntimeDevs::default(),
+        zero_dropped(),
         "tcp",
     )
     .expect("register");
@@ -293,6 +302,7 @@ async fn http_get_returns_status_and_body() {
         io,
         mock_hub_tx(),
         RuntimeDevs::default(),
+        zero_dropped(),
         "tcp",
     )
     .expect("register");
@@ -341,6 +351,7 @@ async fn capability_cards_match_registered_ctx() {
         io,
         mock_hub_tx(),
         RuntimeDevs::default(),
+        zero_dropped(),
         "tcp",
     )
     .expect("register");
@@ -372,6 +383,54 @@ async fn capability_cards_match_registered_ctx() {
 
     let _ = crate::db::shutdown_lux(handle).await;
     let _ = std::fs::remove_dir_all(&data_dir);
+}
+
+/// T4 防反压（Q3/附录 B 冻结面①）：hub channel 满且无消费者时，裸 `tx.send` 永挂
+/// （冻结实例事件循环，stop/reload/cmd 全失效）；`send_with_deadline` 应在 2s 背压
+/// 超时后返回 `Dropped` 丢样保实例，而非永挂。`start_paused = true` 虚拟时间加速：
+/// 2s 等待真实耗时近零（auto-advance 直跳下一 timer）。
+#[tokio::test(start_paused = true)]
+async fn send_with_deadline_drops_on_full_channel() {
+    fn sample(tag: &str) -> crate::types::Sample {
+        crate::types::Sample {
+            hwid: crate::types::Hwid::new("it"),
+            devid: "d".into(),
+            values: [(
+                tag.to_string(),
+                crate::types::SampleValue::Int(1),
+            )]
+            .into_iter()
+            .collect(),
+            timestamp: 0,
+        }
+    }
+
+    // 满 channel：容量 1 塞 1 条不消费 → 后续 send 无限期等容量。
+    let (tx, _rx) = tokio::sync::mpsc::channel::<crate::types::Sample>(1);
+    tx.send(sample("a")).await.expect("塞满容量");
+    let started = tokio::time::Instant::now();
+    let out = send_with_deadline(&tx, sample("b")).await;
+    assert!(
+        matches!(out, SendOutcome::Dropped),
+        "满 channel 应 2s 后 Dropped，实得 {out:?}"
+    );
+    assert!(
+        started.elapsed() >= std::time::Duration::from_secs(2),
+        "应等满 2s 背压预算再丢（虚拟时间实 elapsed={:?}）",
+        started.elapsed()
+    );
+
+    // hub 关闭（接收端 drop）→ Closed（非超时路径）。
+    let (tx2, rx2) = tokio::sync::mpsc::channel::<crate::types::Sample>(1);
+    drop(rx2);
+    let out2 = send_with_deadline(&tx2, sample("c")).await;
+    assert!(matches!(out2, SendOutcome::Closed), "hub 关应 Closed");
+
+    // 正常路径（有空位）→ Sent 且消费者可收。
+    let (tx3, mut rx3) = tokio::sync::mpsc::channel::<crate::types::Sample>(1);
+    let out3 = send_with_deadline(&tx3, sample("d")).await;
+    assert!(matches!(out3, SendOutcome::Sent), "有空位应 Sent");
+    assert!(rx3.recv().await.is_some(), "Sent 后消费者应能收到");
 }
 
 /// 测试用：起独立 lux（端口 0 + 临时 data_dir）+ 标准 HostContext（hwid="it"，
@@ -432,7 +491,8 @@ async fn set_value_pushes_sample_to_hub() {
         }],
         host_kind: HostKind::Builtin,
     };
-    register(&lua, ctx_host, &inst, io, tx, RuntimeDevs::default(), "tcp").expect("register");
+    register(&lua, ctx_host, &inst, io, tx, RuntimeDevs::default(), zero_dropped(), "tcp")
+        .expect("register");
 
     lua.load("ctx:set_value('devX', 'temp', 42.5)")
         .exec_async()
@@ -478,7 +538,8 @@ async fn set_values_pushes_multi_tag_sample() {
         }],
         host_kind: HostKind::Builtin,
     };
-    register(&lua, ctx_host, &inst, io, tx, RuntimeDevs::default(), "tcp").expect("register");
+    register(&lua, ctx_host, &inst, io, tx, RuntimeDevs::default(), zero_dropped(), "tcp")
+        .expect("register");
 
     lua.load("ctx:set_values('devX', { temp = 42.5, hum = 60 })")
         .exec_async()
@@ -536,7 +597,8 @@ async fn set_value_routes_by_devid() {
         ],
         host_kind: HostKind::Builtin,
     };
-    register(&lua, ctx_host, &inst, io, tx, RuntimeDevs::default(), "tcp").expect("register");
+    register(&lua, ctx_host, &inst, io, tx, RuntimeDevs::default(), zero_dropped(), "tcp")
+        .expect("register");
 
     lua.load("ctx:set_value('devB', 'v', 2)")
         .exec_async()
@@ -587,6 +649,7 @@ async fn get_value_reads_rtdata() {
         io,
         mock_hub_tx(),
         RuntimeDevs::default(),
+        zero_dropped(),
         "tcp",
     )
     .expect("register");
@@ -644,6 +707,7 @@ async fn get_device_returns_rtdata_values() {
         io,
         mock_hub_tx(),
         RuntimeDevs::default(),
+        zero_dropped(),
         "tcp",
     )
     .expect("register");
@@ -704,6 +768,7 @@ async fn list_devices_returns_inst_devices() {
         io,
         mock_hub_tx(),
         RuntimeDevs::default(),
+        zero_dropped(),
         "tcp",
     )
     .expect("register");
@@ -755,6 +820,7 @@ async fn ctx_transport_returns_configured_kind() {
             io,
             mock_hub_tx(),
             RuntimeDevs::default(),
+            zero_dropped(),
             kind,
         )
         .expect("register");

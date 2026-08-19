@@ -115,6 +115,11 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 notify = { version = "8", optional = true }
 notify-debouncer-mini = { version = "0.7", optional = true }
 
+[dev-dependencies]
+# tokio test-util（start_paused 虚拟时钟）：护栏超时类测试加速（如 lua send 2s 背压
+# 丢样），仅测试构建启用 feature，release 产物不含。
+tokio = { version = "1", features = ["test-util"] }
+
 [features]
 default = ["transform", "lua", "lua-http", "opcua", "modbus", "s7", "eip"]
 # L2 数据转换（rhai 脚本，默认开启）

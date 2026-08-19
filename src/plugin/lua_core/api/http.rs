@@ -29,7 +29,8 @@ pub(super) fn register(lua: &Lua, ctx: &mlua::Table, inst: &InstConfig) -> mlua:
             let inst = inst_get.clone();
             async move {
                 let url = url.to_string_lossy().to_string();
-                let timeout_secs = timeout.unwrap_or(5).max(1);
+                // Q3/附录 B 冻结面②：timeout（秒）宿主 clamp 1-30s（缺省 5s）。
+                let timeout_secs = timeout.unwrap_or(5).clamp(1, 30);
                 let hdrs = headers_to_vec(headers)?;
                 let (status, body) =
                     http_request(&inst, "GET", &url, None, hdrs, timeout_secs).await?;
@@ -56,7 +57,8 @@ pub(super) fn register(lua: &Lua, ctx: &mlua::Table, inst: &InstConfig) -> mlua:
             async move {
                 let url = url.to_string_lossy().to_string();
                 let body = body.to_string_lossy().to_string();
-                let timeout_secs = timeout.unwrap_or(5).max(1);
+                // Q3/附录 B 冻结面②：timeout（秒）宿主 clamp 1-30s（缺省 5s）。
+                let timeout_secs = timeout.unwrap_or(5).clamp(1, 30);
                 let hdrs = headers_to_vec(headers)?;
                 let (status, resp_body) =
                     http_request(&inst, "POST", &url, Some(body), hdrs, timeout_secs).await?;

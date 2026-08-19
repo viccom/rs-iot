@@ -21,15 +21,45 @@ use crate::types::{CtlMessage, InstConfig, InstId, Sample, SampleValue};
 use mlua::{Lua, LuaSerdeExt, LuaString, Value};
 use tokio::sync::mpsc;
 
+/// hub send 结果（`send_with_deadline` 调用方语义：丢样时计数、关闭时告警）。
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum SendOutcome {
+    /// 已入队（hub 正常消费中）。
+    Sent,
+    /// hub channel 已关（接收端 drop，实例停止/管道退出）。
+    Closed,
+    /// 背压超 2s 预算，样本被丢弃。
+    Dropped,
+}
+
+/// 带 2s 背压超时的 hub send（Q3/附录 B 冻结面①：控制面 stop/reload/cmd 永不被
+/// 数据面反压冻结）。满 channel 无消费者时 2s 后丢样返回 [`SendOutcome::Dropped`]，
+/// 而非裸 `tx.send` 的无限期挂起；hub 关闭返回 [`SendOutcome::Closed`]。
+///
+/// collect 分支（`builtin/lua_client/mod.rs`）与 `push_sample`（set_value(s)）共用；
+/// 丢样计数 `dropped` 由调用方持有并 fetch_add（flush 时落 stat `dropped_samples`）。
+pub(crate) async fn send_with_deadline(
+    tx: &mpsc::Sender<Sample>,
+    sample: Sample,
+) -> SendOutcome {
+    match tokio::time::timeout(std::time::Duration::from_secs(2), tx.send(sample)).await {
+        Ok(Ok(())) => SendOutcome::Sent,
+        Ok(Err(_)) => SendOutcome::Closed,
+        Err(_) => SendOutcome::Dropped,
+    }
+}
+
 /// 组 `Sample` 推 hub（`set_value`/`set_values` 共用，DRY）。
 ///
-/// `values` 空 → 直接返回（无点不上报）。`tx.send` 失败（hub 关）→ warn（对标
-/// `run()` collect 推 hub 容错语义）。timestamp 取当前本地秒。
-/// 上报的 devid 记入 `runtime_devs`（运行时设备集，collect 与 L2 上报共用出口）。
+/// `values` 空 → 直接返回（无点不上报）。send 经 [`send_with_deadline`]（2s 背压
+/// 超时，hub 关 → warn，超时 → 丢样 + `dropped` 计数；对标 `run()` collect 推 hub
+/// 容错语义）。timestamp 取当前本地秒。上报的 devid 记入 `runtime_devs`
+/// （运行时设备集，collect 与 L2 上报共用出口）。
 async fn push_sample(
     tx: &mpsc::Sender<Sample>,
     hwid: &crate::types::Hwid,
     runtime_devs: &RuntimeDevs,
+    dropped: &std::sync::atomic::AtomicU64,
     devid: String,
     values: std::collections::BTreeMap<String, SampleValue>,
 ) {
@@ -45,8 +75,16 @@ async fn push_sample(
         values,
         timestamp: chrono::Local::now().timestamp(),
     };
-    if tx.send(sample).await.is_err() {
-        tracing::warn!("[luaClient] set_value(s): hub 关闭，值未上报");
+    match send_with_deadline(tx, sample).await {
+        SendOutcome::Sent => {}
+        SendOutcome::Closed => tracing::warn!("[luaClient] set_value(s): hub 关闭，值未上报"),
+        SendOutcome::Dropped => {
+            dropped.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            tracing::warn!(
+                "[luaClient] set_value(s): hub 背压超 2s，丢样（累计 {}）",
+                dropped.load(std::sync::atomic::Ordering::Relaxed)
+            );
+        }
     }
 }
 
@@ -73,9 +111,14 @@ async fn push_sample(
 /// - L6 `now()`/`time()`：当前本地毫秒/秒时间戳（f64）。
 ///
 /// `tx` 为 hub [`mpsc::Sender`]（L2 `set_value` 推 [`Sample`]）；`ctx_host` 提供 lux
-/// （L2/L4 读写）+ `ctl_registry`（L3 路由）。`transport` 为底层链路类型字符串
+/// （L2/L4 读写）+ `ctl_registry`（L3 路由）。`dropped` 为丢样计数（`push_sample`
+/// 背压超时分支 fetch_add；与 collect 分支共享同一实例，flush 时落 stat
+/// `dropped_samples`）。`transport` 为底层链路类型字符串
 ///（`cfg.transport.as_str()`，"tcp"/"serial"/"udp"），供 `ctx:transport()` 暴露给脚本
 ///（脚本据此选帧格式：serial 加 CRC16、tcp 加 MBAP 头）。
+// 8 参为 T4 加 dropped（Q3 丢样计数）所致——组装型编排函数，参数各自独立语义，
+// 强行打包 struct 反增间接层；定点 allow。
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn register(
     lua: &Lua,
     ctx_host: HostContext,
@@ -83,6 +126,7 @@ pub(crate) fn register(
     io: IoEngine,
     tx: mpsc::Sender<Sample>,
     runtime_devs: RuntimeDevs,
+    dropped: std::sync::Arc<std::sync::atomic::AtomicU64>,
     transport: &'static str,
 ) -> mlua::Result<()> {
     let ctx = lua.create_table()?;
@@ -198,11 +242,13 @@ pub(crate) fn register(
     let tx_set = tx.clone();
     let hwid_set = ctx_host.hwid.clone();
     let rt_set = runtime_devs.clone();
+    let drop_set = dropped.clone();
     let set_value_fn = lua.create_async_function(
         move |_lua, (_self, devid, tag, v): (Value, LuaString, LuaString, Value)| {
             let tx = tx_set.clone();
             let hwid = hwid_set.clone();
             let rt = rt_set.clone();
+            let dropped = drop_set.clone();
             async move {
                 let devid = devid.to_string_lossy().to_string();
                 let tag = tag.to_string_lossy().to_string();
@@ -210,7 +256,7 @@ pub(crate) fn register(
                     .ok_or_else(|| mlua::Error::RuntimeError("set_value: 不支持的值类型".into()))?;
                 let mut values = std::collections::BTreeMap::new();
                 values.insert(tag, sv);
-                push_sample(&tx, &hwid, &rt, devid, values).await;
+                push_sample(&tx, &hwid, &rt, &dropped, devid, values).await;
                 Ok(())
             }
         },
@@ -223,11 +269,13 @@ pub(crate) fn register(
     let tx_sv = tx.clone();
     let hwid_sv = ctx_host.hwid.clone();
     let rt_sv = runtime_devs.clone();
+    let drop_sv = dropped.clone();
     let set_values_fn = lua.create_async_function(
         move |_lua, (_self, devid, table): (Value, LuaString, mlua::Table)| {
             let tx = tx_sv.clone();
             let hwid = hwid_sv.clone();
             let rt = rt_sv.clone();
+            let dropped = drop_sv.clone();
             async move {
                 let devid = devid.to_string_lossy().to_string();
                 let mut values = std::collections::BTreeMap::new();
@@ -237,7 +285,7 @@ pub(crate) fn register(
                         values.insert(k, sv);
                     }
                 }
-                push_sample(&tx, &hwid, &rt, devid, values).await;
+                push_sample(&tx, &hwid, &rt, &dropped, devid, values).await;
                 Ok(())
             }
         },

@@ -50,7 +50,11 @@ pub(crate) struct IoEngine {
 
 impl IoEngine {
     /// 发一次 request，等回执（带超时）。供 ctx:request 的 async fn 调用。
+    ///
+    /// timeout_ms 先经 [`crate::plugin::lua_core::capability::clamp_timeout_ms`]
+    /// 宿主 clamp（Q3/附录 B 冻结面②：1ms-30s）——脚本传超大超时不再冻结实例。
     pub(super) async fn request(&self, frame: &[u8], timeout_ms: u64) -> mlua::Result<Vec<u8>> {
+        let timeout_ms = crate::plugin::lua_core::capability::clamp_timeout_ms(timeout_ms);
         let (otx, orx) = oneshot::channel();
         self.tx
             .send(IoRequest {

@@ -37,6 +37,18 @@ fn sync_runtime_devs(tracker: &mut crate::plugin::stat_tracker::StatTracker, dev
     tracker.extra_insert("runtime_devices", serde_json::json!(snapshot));
 }
 
+/// 把丢样计数快照写进 tracker extra（每个 flush 点前调用，与 [`sync_runtime_devs`]
+/// 并排；Q3 护栏可观测：背压丢了几样一眼可见）。
+fn sync_dropped_samples(
+    tracker: &mut crate::plugin::stat_tracker::StatTracker,
+    dropped: &std::sync::atomic::AtomicU64,
+) {
+    tracker.extra_insert(
+        "dropped_samples",
+        serde_json::json!(dropped.load(std::sync::atomic::Ordering::Relaxed)),
+    );
+}
+
 /// 主循环事件（spec §5.4）：解耦 select! 与 `&lua` / `&mut lua` 借用，
 /// 使 `Evt::Reload` 的 `lua = new_lua`（&mut）与其他分支 `call_*(&lua)`（&）共存。
 enum Evt {
@@ -123,8 +135,10 @@ impl Source for LuaClient {
             ctx.trace_registry.clone(),
         );
 
-        // 4. 注册 ctx API（runtime_devs：L2 上报出口的设备记录，与 collect 出口共用）。
+        // 4. 注册 ctx API（runtime_devs：L2 上报出口的设备记录，与 collect 出口共用；
+        //    dropped：丢样计数，set_value(s) 与 collect 双出口共享，flush 落 stat）。
         let runtime_devs: RuntimeDevs = Default::default();
+        let dropped: std::sync::Arc<std::sync::atomic::AtomicU64> = Default::default();
         if let Err(e) = core_::api::register(
             &lua,
             ctx.clone(),
@@ -132,6 +146,7 @@ impl Source for LuaClient {
             io_engine.clone(),
             tx.clone(),
             runtime_devs.clone(),
+            dropped.clone(),
             cfg.transport.as_str(),
         ) {
             tracing::warn!("[luaClient] inst {} ctx API 注册失败：{e}", inst.inst_id);
@@ -198,7 +213,7 @@ impl Source for LuaClient {
                 msg = cmd_rx.recv() => Evt::Cmd(msg),
                 Some(frame) = data_rx.recv() => Evt::Data(frame),
                 Some(()) = reload_rx.recv() => Evt::Reload, // None（watcher 退出/失败）忽略，不忙循环
-                _ = flush_ticker.tick() => { sync_runtime_devs(&mut tracker, &runtime_devs); tracker.flush().await; continue; }
+                _ = flush_ticker.tick() => { sync_runtime_devs(&mut tracker, &runtime_devs); sync_dropped_samples(&mut tracker, &dropped); tracker.flush().await; continue; }
                 _ = ticker.tick() => Evt::Tick,
             };
             match evt {
@@ -243,8 +258,20 @@ impl Source for LuaClient {
                                     values,
                                     timestamp: now,
                                 };
-                                if tx.send(sample).await.is_err() {
-                                    tracing::warn!("[luaClient] hub 关闭，collect 值未上报");
+                                // 防反压（Q3/附录 B 冻结面①）：满 hub 时 2s 后丢样计数，
+                                // 控制面（stop/reload/cmd）永不被数据面冻结。
+                                match core_::api::send_with_deadline(&tx, sample).await {
+                                    core_::api::SendOutcome::Sent => {}
+                                    core_::api::SendOutcome::Closed => {
+                                        tracing::warn!("[luaClient] hub 关闭，collect 值未上报");
+                                    }
+                                    core_::api::SendOutcome::Dropped => {
+                                        dropped.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                        tracing::warn!(
+                                            "[luaClient] hub 背压超 2s，collect 丢样（累计 {}）",
+                                            dropped.load(std::sync::atomic::Ordering::Relaxed)
+                                        );
+                                    }
                                 }
                             }
                         }
@@ -269,6 +296,7 @@ impl Source for LuaClient {
                     }
                     if tracker.should_flush() {
                         sync_runtime_devs(&mut tracker, &runtime_devs);
+                        sync_dropped_samples(&mut tracker, &dropped);
                         tracker.flush().await;
                     }
                 }
@@ -281,6 +309,7 @@ impl Source for LuaClient {
                         io_engine.clone(),
                         tx.clone(),
                         runtime_devs.clone(),
+                        dropped.clone(),
                     )
                     .await
                     {
@@ -301,6 +330,7 @@ impl Source for LuaClient {
                             consecutive_fail = 0;
                             tracker.set_status("running");
                             sync_runtime_devs(&mut tracker, &runtime_devs);
+                            sync_dropped_samples(&mut tracker, &dropped);
                             tracker.flush().await;
                             tracing::info!("[luaClient] inst {} 热加载成功", inst.inst_id);
                         }
@@ -317,6 +347,7 @@ impl Source for LuaClient {
         // 设备清单（停止后仍可追溯"它上次采了什么"，诊断价值）。
         tracker.set_status("stopped");
         sync_runtime_devs(&mut tracker, &runtime_devs);
+        sync_dropped_samples(&mut tracker, &dropped);
         tracker.flush().await;
     }
 }
@@ -422,8 +453,11 @@ async fn call_on_data(lua: &mlua::Lua, frame: &[u8]) -> mlua::Result<()> {
 
 /// 重建 VM：new_vm + load_main + register ctx + dry-run on_init（spec §5.3 热加载）。
 ///
-/// IO engine / ctx_host 复用（不随 VM 替换）。dry-run 跑 on_init（hook 验证不死循环）；
-/// collect dry-run 跳过（真 collect 在下 tick，失败 warn）。失败返回 Err（主循环回退旧 VM）。
+/// IO engine / ctx_host / 丢样计数复用（不随 VM 替换——dropped 是实例生命周期累计值）。
+/// dry-run 跑 on_init（hook 验证不死循环）；collect dry-run 跳过（真 collect 在下 tick，
+/// 失败 warn）。失败返回 Err（主循环回退旧 VM）。
+// 8 参为 T4 加 dropped 所致——与 api::register 同由（透传其参数集），定点 allow。
+#[allow(clippy::too_many_arguments)]
 async fn reload_vm(
     cfg: &core_::config::LuaCfg,
     lctx: &LoadCtx,
@@ -432,6 +466,7 @@ async fn reload_vm(
     io: core_::io_engine::IoEngine,
     tx: mpsc::Sender<Sample>,
     runtime_devs: RuntimeDevs,
+    dropped: std::sync::Arc<std::sync::atomic::AtomicU64>,
 ) -> mlua::Result<mlua::Lua> {
     let lua = core_::engine::new_vm(cfg)?;
     load_main(&lua, lctx)?;
@@ -442,6 +477,7 @@ async fn reload_vm(
         io,
         tx,
         runtime_devs,
+        dropped,
         cfg.transport.as_str(),
     )?;
     // dry-run on_init（hook 兜底死循环；失败 → Err → 主循环回退旧 VM）。
