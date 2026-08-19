@@ -125,4 +125,4 @@ OPC DA 严格类型（类型不匹配 → `BadTypeMismatch`）。Go 插件按 `i
 
 - `--prog-id` / `--opc-host` / `--period` 经**命令行参数**传（PoC）。
 - OPC items 来自 rs-iot **ConfigPush**（`children.value`）。
-- 当前 ConfigPush 只下发 devices（不含 app_config），故 DA Server 连接信息走命令行。后续可扩展 ConfigPush 含 app_config，让 prog-id/opc-host 也集中在 rs-iot（需改 `sidecar_client.rs` ConfigPush 序列化，见 `docs/external-plugin-protocol.md`）。
+- 当前 ConfigPush 只下发 devices（不含 app_config），故 DA Server 连接信息走命令行。后续可扩展 ConfigPush 含 app_config，让 prog-id/opc-host 也集中在 rs-iot（需改 `sidecar_client.rs` ConfigPush 序列化，见 `docs/reference/external-plugin-protocol.md`）。

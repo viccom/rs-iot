@@ -1,6 +1,7 @@
 # API Gateway 技术选型（v3 P0-B1）
 
-> 本文服务于 [`plan-ai-agent-integration-v3.md`](./plan-ai-agent-integration-v3.md) §八 "Gateway 的技术选型（待 P0 调研）"。
+> **状态**：已定稿（结论已落地 rsiot-gateway B1）｜**日期**：2026-08-12｜**类型**：决策记录（技术选型调研）
+> 本文服务于 [`plan-ai-agent-integration-v3.md`](../designs/2026-08-11-ai-agent-integration-v3-design.md) §八 "Gateway 的技术选型（待 P0 调研）"。
 > 结论先行：**选 axum 0.8 + reqwest 手写反代**，印证 v3 §八的倾向并给出决定性证据。
 > 所有 API 签名均来自 axum 0.8 官方源 / Cargo 缓存源码 / context7 文档查询（已引证 file:line 或文档链接），不凭记忆。
 
@@ -20,7 +21,7 @@
 | H2 | **REST 反代**：`/api/agent/*` → serve:8787（POST submit/approve/cancel/answer/inbox） | v3 §3.2 | 前端 POST 经 gateway 到达 serve |
 | H3 | **SSE 透传 ×2**：`/api/rsiot/events`（rs-iot，有 `event:` 头）+ `/api/agent/events`（serve，**无 `event:` 头**，kind 在 JSON body 内） | v3 §3.4 + §七坑② | 两条独立流，前端两个 EventSource 各收完整帧 |
 | H4 | **层1 鉴权**：gateway 自有 `POST /api/gw/login`（复用 rs-iot `jwt_secret`）+ 中间件验 JWT | v3 §4 层1 | 前端登录 gateway 拿 JWT，无 JWT 调 `/api/*` 返 401 |
-| H5 | **层2 透传**：转发 rs-iot 时保留 `Authorization: Bearer <jwt>` | v3 §4 层2 | rs-iot `auth_middleware`（[rs-iot `src/api/auth.rs:49-92`](../src/api/auth.rs)）直读，零额外代码 |
+| H5 | **层2 透传**：转发 rs-iot 时保留 `Authorization: Bearer <jwt>` | v3 §4 层2 | rs-iot `auth_middleware`（[rs-iot `src/api/auth.rs:49-92`](../../src/api/auth.rs)）直读，零额外代码 |
 | H6 | **层3 cookie 注入**：转发 serve 时**伪造** `Cookie: reasonix_token=<token>`（serve 只认 cookie 不认 Bearer，证据 v1 §10.3 `auth.go:304-340`） | v3 §4 层3 | serve 端鉴权通过，前端不感知 token |
 | H7 | **gateway 自有业务端点**：`GET /api/gw/health`（聚合 rs-iot + serve + MCP 探针）、`GET /api/gw/auth/status` | v3 §3.3 | 非"反代"，是 gateway 自己的 handler |
 | H8 | **OS 服务化**：systemd unit / Windows service | v3 §九 B6 | gateway 作为 OS 服务启停 |
@@ -54,10 +55,10 @@
 | 反代（路径重写） | 4 | `axum::extract::Request` 拿 path，字符串替换剥前缀，`reqwest::RequestBuilder::send()` 转发。`tower::Service` / `axum::middleware::from_fn` 包成中间件。代码量小，无新框架。 |
 | SSE 透传 | 5 | **axum 官方示例钦定模式**：[axum `examples/reqwest-response/src/main.rs`](https://github.com/tokio-rs/axum/blob/main/examples/reqwest-response/src/main.rs) ——`response_builder.body(Body::from_stream(reqwest_response.bytes_stream()))`。`Body::from_stream` 签名要 `Stream<Item = Result<Bytes, E>> where E: Into<BoxError>`（[axum `axum-core/src/body.rs` StreamBody::poll_frame](https://github.com/tokio-rs/axum/blob/main/axum-core/src/body.rs)），reqwest `bytes_stream()` 产 `Result<Bytes, reqwest::Error>`，reqwest::Error 实现 `std::error::Error + Send + Sync`，**无缝匹配**。 |
 | 鉴权注入（层3 cookie） | 5 | reqwest `RequestBuilder::header(COOKIE, ...)` 一行注入。出站请求构造完全可控。 |
-| 鉴权中间件（层1 JWT） | 5 | `axum::middleware::from_fn_with_state` + 复用 rs-iot `verify_token`（[rs-iot `src/api/auth.rs:38-46`](../src/api/auth.rs)），与 rs-iot `auth_middleware`（[rs-iot `src/api/auth.rs:49-92`](../src/api/auth.rs)）几乎逐行可抄。 |
+| 鉴权中间件（层1 JWT） | 5 | `axum::middleware::from_fn_with_state` + 复用 rs-iot `verify_token`（[rs-iot `src/api/auth.rs:38-46`](../../src/api/auth.rs)），与 rs-iot `auth_middleware`（[rs-iot `src/api/auth.rs:49-92`](../../src/api/auth.rs)）几乎逐行可抄。 |
 | gateway 自有业务端点（H7） | 5 | axum 本来就是 web 框架，`/api/gw/health` 就是个普通 handler，`tokio::join!` 并发探 rs-iot/serve/MCP 返 JSON，天然顺手。 |
-| 学习曲线 | 5 | rs-iot 已用 axum 0.8（[rs-iot `Cargo.toml:56`](../Cargo.toml)），团队已验证栈，零新增心智。 |
-| 与 rs-iot 栈一致性 | 5 | axum 0.8 / reqwest 0.12 / tower 0.5 / hyper 1.x 与 rs-iot 同版本（gateway 复用同一栈，见 [rs-iot `Cargo.toml:56-58,92`](../Cargo.toml)）。注意 rs-iot 的 reqwest 是 `optional + lua-http`，gateway 独立 Cargo.toml 要自己拉 reqwest **并加 `stream` feature**（v1 §10.3 已标此坑，[rs-iot `Cargo.toml:92`](../Cargo.toml) 当前缺 stream feature）。 |
+| 学习曲线 | 5 | rs-iot 已用 axum 0.8（[rs-iot `Cargo.toml:56`(../../Cargo.toml)），团队已验证栈，零新增心智。 |
+| 与 rs-iot 栈一致性 | 5 | axum 0.8 / reqwest 0.12 / tower 0.5 / hyper 1.x 与 rs-iot 同版本（gateway 复用同一栈，见 [rs-iot `Cargo.toml:56-58,92`(../../Cargo.toml)）。注意 rs-iot 的 reqwest 是 `optional + lua-http`，gateway 独立 Cargo.toml 要自己拉 reqwest **并加 `stream` feature**（v1 §10.3 已标此坑，[rs-iot `Cargo.toml:92`(../../Cargo.toml) 当前缺 stream feature）。 |
 | 生产成熟度 | 4 | axum + hyper + reqwest 是 Rust async web 第一栈，生产广泛。反代长稳需自测（连接管理 / 背压 / 客户端断线探测），但比 Pingora 的可控性反而更高（自己掌握每个字节）。 |
 
 ### 选项 C：axum-reverse-proxy 等轻量库
@@ -89,7 +90,7 @@
 
 3. **`Event` 不调 `.event()` 时输出无 `event:` 头**——看似能用？但 `Event` 仍强制走 `data: <payload>\n\n` 包装。serve 的裸 NDJSON 是 `<json>\n\n`（无 `data:` 前缀），用 `Event::data(json)` 包装后前端收到的字节是 `data: <json>\n\n`，**前端 EventSource 的 `onmessage` 默认期望 `data:` 字段，但 serve 前端（reasonix 自带）按裸 NDJSON 解析**——若前端代码用 `eventSource.addEventListener('message', e => JSON.parse(e.data))` 尚可，但 reasonix 前端可能直接按裸 JSON 流解析（`eventwire/wire.go:16` 证实 serve 不写 `event:` 头，kind 在 JSON 内）。**注入 `data:` 前缀会破坏 reasonix 前端的裸 JSON 解析**。
 
-4. **rs-iot 自己的 SSE（[rs-iot `src/api/routes_events.rs:61-68`](../src/api/routes_events.rs)）用 `Event::default().event(kind).json_data(payload)`** —— 有 `event:` 头，前端按 `addEventListener(kind)` 分发。这条流经 gateway 透传时，若用 `Event` 包装会丢 `event:` 头语义（除非重新解析）。
+4. **rs-iot 自己的 SSE（[rs-iot `src/api/routes_events.rs:61-68`](../../src/api/routes_events.rs)）用 `Event::default().event(kind).json_data(payload)`** —— 有 `event:` 头，前端按 `addEventListener(kind)` 分发。这条流经 gateway 透传时，若用 `Event` 包装会丢 `event:` 头语义（除非重新解析）。
 
 **正解：绕过 axum `Sse`，裸字节流透传**（§五给出骨架代码）。
 
@@ -114,11 +115,11 @@
 
 2. **`Body::from_stream` 签名**（[axum `axum-core/src/body.rs` StreamBody](https://github.com/tokio-rs/axum/blob/main/axum-core/src/body.rs)）：接受 `Stream<Item = Result<impl Into<Bytes>, E>> where E: Into<BoxError>`。reqwest `bytes_stream()` 产 `impl Stream<Item = Result<Bytes, reqwest::Error>>`，`reqwest::Error: std::error::Error + Send + Sync + 'static` 满足 `Into<BoxError>`。**零适配**。
 
-3. **是否需要 `\n\n` 帧边界状态机？**——**不需要**。这是 v1/v3 文档（[v3 §七坑②](./plan-ai-agent-integration-v3.md)）的**最大认知修正**：
+3. **是否需要 `\n\n` 帧边界状态机？**——**不需要**。这是 v1/v3 文档（[v3 §七坑②](../designs/2026-08-11-ai-agent-integration-v3-design.md)）的**最大认知修正**：
    - **若 gateway 只透传不解析**：字节流原样转发，前端 EventSource 自解 `\n\n` 边界。gateway 只是个字节管道。**无需帧边界代码**。
    - **v1/v3 之所以认为要帧边界**，是因为 v1 设想"在反代层丢弃 `: ping` 注释帧 + axum KeepAlive 自保活"——这两件事都是**可选优化**，不是透传必需。
    - **真正要做的是 KeepAlive**：gateway 到前端若中间有 nginx 等代理，长无数据连接会被掐。但若 gateway 直接面向前端（v3 §二架构图，前端直连 gateway:8080），**只要上游（rs-iot/serve）自己在发心跳/KeepAlive，gateway 透传字节即可**。
-     - rs-iot SSE 自带 `KeepAlive::default()`（[rs-iot `src/api/routes_events.rs:68`](../src/api/routes_events.rs)，默认 15s `:\n\n` 注释帧）。
+     - rs-iot SSE 自带 `KeepAlive::default()`（[rs-iot `src/api/routes_events.rs:68`](../../src/api/routes_events.rs)，默认 15s `:\n\n` 注释帧）。
      - serve 心跳见 v1 §10.3 `: ping` / `: connected` 注释帧。
      - **两条上游都自带心跳，gateway 透传即可，无需自加 KeepAlive**。
 
@@ -161,7 +162,7 @@
 | H7 业务端点 | axum Router 原生 handler | Pingora `request_filter` + `respond_write` | health 聚合探针写 JSON，handler 比 respond_write 简单 10 倍 |
 | SSE 透传 | 裸字节流 `Body::from_stream` | axum `Sse` + `Event` 包装 | serve 无 `event:` 头裸 NDJSON，`Event::data` 拆 `\n` 破坏前端解析（§四悬念1） |
 | 帧边界状态机 | **不做**（透传字节流） | tokio_util::codec 状态机 | 上游（rs-iot/serve）自带心跳，gateway 只做字节管道，前端 EventSource 自解 `\n\n`（§四悬念2） |
-| reqwest feature | gateway 独立 Cargo.toml 加 `stream` feature | 复用 rs-iot 的 reqwest（无 stream feature） | rs-iot reqwest 是 `optional + lua-http` 无 stream（[rs-iot `Cargo.toml:92`](../Cargo.toml)），gateway 独立依赖 |
+| reqwest feature | gateway 独立 Cargo.toml 加 `stream` feature | 复用 rs-iot 的 reqwest（无 stream feature） | rs-iot reqwest 是 `optional + lua-http` 无 stream（[rs-iot `Cargo.toml:92`(../../Cargo.toml)），gateway 独立依赖 |
 | 层1鉴权 | 复用 rs-iot `verify_token` + `jwt_secret` | gateway 独立签发 | v3 §4 层1 推荐"复用"，前端一套 JWT 通吃 |
 | 库依赖 | 仅 axum/tower/reqwest/tower-http（与 rs-iot 同版本） | axum-reverse-proxy 第三方 crate | gateway 逻辑极简（v3 §一），手写 < 200 行，第三方库风险 > 收益 |
 
@@ -207,7 +208,7 @@ windows-service = "0.7"
 //!
 //! 关键：用 `Body::from_stream` 裸透传 reqwest 字节流，
 //! 绕过 axum `Sse`/`Event`（serve 无 event: 头裸 NDJSON，Event::data 会拆 \n 破坏前端解析，
-//! 见 docs/plan-gateway-tech-selection.md §四悬念1）。
+//! 见 docs/decisions/2026-08-12-gateway-tech-selection.md §四悬念1）。
 
 use axum::body::Body;
 use axum::extract::{Request, State};
@@ -236,7 +237,7 @@ pub struct GwState {
 /// `Body::from_stream(bytes_stream())` 原样吐字节，前端 EventSource 自解 `\n\n`。
 ///
 /// 不做帧边界状态机（上游 rs-iot/serve 自带心跳，gateway 是字节管道，
-/// 见 docs/plan-gateway-tech-selection.md §四悬念2）。
+/// 见 docs/decisions/2026-08-12-gateway-tech-selection.md §四悬念2）。
 pub async fn forward(
     State(st): State<Arc<GwState>>,
     req: Request,
@@ -439,7 +440,7 @@ async fn probe_upstream(client: &reqwest::Client, url: &str) -> bool {
 
 v3 §五"rs-iot 真正零改动"是**对 gateway 而言**（gateway 只透传，rs-iot 不知道 gateway 存在）。但 v3 同时要 rsiot-mcp 经 rs-iot REST 暴露工具给 agent——**rs-iot REST 现状能否喂饱 MCP 工具，是独立的另一回事**。诚实盘点：
 
-### rs-iot REST 现状（[rs-iot `src/api/mod.rs:96-151`](../src/api/mod.rs)）
+### rs-iot REST 现状（[rs-iot `src/api/mod.rs:96-151`](../../src/api/mod.rs)）
 
 | MCP 工具需求（v1 §10.5） | rs-iot 现有端点 | 缺口 |
 |---|---|---|
@@ -483,15 +484,15 @@ gateway 选型？
 
 ## 引证索引
 
-- v3 需求源：[docs/plan-ai-agent-integration-v3.md](./plan-ai-agent-integration-v3.md) §三/四/七/八
-- v1 复核证据：[docs/plan-ai-agent-integration.md](./plan-ai-agent-integration.md) §10.3（serve cookie/SSE 帧/csrfGuard）
+- v3 需求源：[2026-08-11-ai-agent-integration-v3-design.md](../designs/2026-08-11-ai-agent-integration-v3-design.md) §三/四/七/八
+- v1 复核证据：`plan-ai-agent-integration.md` §10.3（serve cookie/SSE 帧/csrfGuard；v1 已归档，git 历史 66945dd 可溯）
 - axum SSE 反模式证据：[tokio-rs/axum `axum/src/response/sse.rs` EventDataWriter::write_buf](https://github.com/tokio-rs/axum/blob/main/axum/axum/src/response/sse.rs)（memchr2 拆 \n）
 - axum 裸透传官方示例：[tokio-rs/axum `examples/reqwest-response/src/main.rs`](https://github.com/tokio-rs/axum/blob/main/examples/reqwest-response/src/main.rs)（`Body::from_stream(bytes_stream())`）
 - axum StreamBody 签名：[tokio-rs/axum `axum-core/src/body.rs`](https://github.com/tokio-rs/axum/blob/main/axum-core/src/body.rs)
 - Pingora request_filter / upstream_request_filter：[cloudflare/pingora `docs/user_guide/modify_filter.md` + `rate_limiter.md`](https://github.com/cloudflare/pingora/blob/main/docs/user_guide/modify_filter.md)
 - Pingora 请求生命周期：[cloudflare/pingora `docs/user_guide/internals.md`](https://github.com/cloudflare/pingora/blob/main/docs/user_guide/internals.md)
-- rs-iot SSE 实现对端：[rs-iot `src/api/routes_events.rs:49-69`](../src/api/routes_events.rs)
-- rs-iot auth 中间件（层2 复用）：[rs-iot `src/api/auth.rs:38-92`](../src/api/auth.rs)
-- rs-iot REST 路由清单：[rs-iot `src/api/mod.rs:96-151`](../src/api/mod.rs)
-- rs-iot 依赖栈：[rs-iot `Cargo.toml:56-58,92`](../Cargo.toml)
-- dbx 帧边界可借鉴实现：[dbx `crates/dbx-core/src/ai.rs:732-778`](file:///G:/AI_Agent/dbx/crates/dbx-core/src/ai.rs)（`drain_next_stream_line` + `stream_data_payload`，已处理无 event: 头裸 NDJSON，740-742 行 `if line.starts_with('{')`）
+- rs-iot SSE 实现对端：[rs-iot `src/api/routes_events.rs:49-69`](../../src/api/routes_events.rs)
+- rs-iot auth 中间件（层2 复用）：[rs-iot `src/api/auth.rs:38-92`](../../src/api/auth.rs)
+- rs-iot REST 路由清单：[rs-iot `src/api/mod.rs:96-151`](../../src/api/mod.rs)
+- rs-iot 依赖栈：[rs-iot `Cargo.toml:56-58,92`(../../Cargo.toml)
+- dbx 帧边界可借鉴实现：dbx `crates/dbx-core/src/ai.rs:732-778`（本机外部仓库 `G:/AI_Agent/dbx`）（`drain_next_stream_line` + `stream_data_payload`，已处理无 event: 头裸 NDJSON，740-742 行 `if line.starts_with('{')`）

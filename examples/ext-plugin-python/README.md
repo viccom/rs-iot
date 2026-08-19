@@ -91,7 +91,7 @@ curl -s -XPOST http://localhost:8780/api/v1/command/send \
 
 ## 移植到其他语言
 
-协议要点（详见 [`../../../docs/external-plugin-protocol.md`](../../../docs/external-plugin-protocol.md)）：
+协议要点（详见 [`../../docs/reference/external-plugin-protocol.md`](../../docs/reference/external-plugin-protocol.md)）：
 - 帧 = `[4B 大端 length][1B type][JSON body]`，`length = 1 + len(body)`
 - 握手必须先发 Hello（带 inst_id/token/ver），等 HelloAck{ok:true} + ConfigPush
 - 心跳/采集/命令接收并发处理

@@ -1,5 +1,6 @@
 # rs-iot REST API 文档
 
+> **状态**：活文档（API 变更同步）
 > 管理 API（axum）。默认端口 **8780**（`config.rs` 默认值；仓库 `config.toml` 改为 **8790** 避让本机占用，下文示例统一用 8790）。
 > 鉴权：JWT（24h）+ `X-Access-Key` + 白名单。业务前缀 `/api/v1`；`/metrics` 为顶层路径（免 JWT，Prometheus 抓取）。
 > 请求/响应体均为 JSON（`Content-Type: application/json`），唯 `/metrics` 返回 Prometheus 文本。
@@ -31,7 +32,7 @@
 - 签发：`POST /api/v1/user/login` 校验 bcrypt 密码 → 返回 `token`（body）+ `Set-Cookie: token=...; HttpOnly; Max-Age=86400`（24h）
 - Claims：`{ sub: userId, exp }`
 - 失效：自然过期（24h）；`logout` 仅清 cookie，**服务端无吊销/黑名单**
-- **当前无授权层（仅认证）**：中间件解析出 `userId` 但未注入上下文，任何持 token/accesskey 者可访问全部资源，`groups` 数据不参与权限判定。详见 [API 完备性评估](api-completeness-assessment.md)
+- **当前无授权层（仅认证）**：中间件解析出 `userId` 但未注入上下文，任何持 token/accesskey 者可访问全部资源，`groups` 数据不参与权限判定。详见 API 完备性评估（`api-completeness-assessment.md`，已归档，git 历史 66945dd 可溯）
 
 ## 3. 快速上手
 
@@ -149,7 +150,7 @@ curl -s -XPOST -H "Authorization: $TOKEN" -H 'Content-Type: application/json' \
 
 **重要限制**：
 - `user/set` **不写密码**（密码独立存 `passwords` Hash）——新建用户无密码无法 login
-- 无 `register` 端点（白名单悬空）；`changepass` 要求旧密码（新用户不可用）→ 首个账号只能靠 `identity::bootstrap` 种子（admin/admin），后续账号需带 token 调 `user/set` + 直写密码或先 login 再 changepass。详见 [API 完备性评估](api-completeness-assessment.md)
+- 无 `register` 端点（白名单悬空）；`changepass` 要求旧密码（新用户不可用）→ 首个账号只能靠 `identity::bootstrap` 种子（admin/admin），后续账号需带 token 调 `user/set` + 直写密码或先 login 再 changepass。详见 API 完备性评估（`api-completeness-assessment.md`，已归档，git 历史 66945dd 可溯）
 
 ### 4.5 用户组 / AccessKey（`routes_group.rs`）
 
@@ -246,4 +247,4 @@ CtlMessage { instance:InstId, devid, cmd, data:<JSON 文本> }
 
 ## 6. 已知限制与完备性
 
-当前 API 定位为**单管理员调试/运维**（对标 Lite_IOT）。要支撑「管理员 + 多用户前端系统」尚有缺口（无授权层、无用户自服务、无批量/分页/历史、命令无回执、无 `/healthz`、错误格式不统一等），详见 [`docs/api-completeness-assessment.md`](api-completeness-assessment.md)。**可观测性已具备**：`/metrics`（Prometheus）+ `/api/v1/inst/stats`（per-instance JSON）+ `/api/v1/inst/trace`（报文 trace）+ `/api/v1/logs/recent`（日志快照）四端点覆盖指标/诊断/日志三个维度。
+当前 API 定位为**单管理员调试/运维**（对标 Lite_IOT）。要支撑「管理员 + 多用户前端系统」尚有缺口（无授权层、无用户自服务、无批量/分页/历史、命令无回执、无 `/healthz`、错误格式不统一等），详见 API 完备性评估（`api-completeness-assessment.md`，已归档，git 历史 66945dd 可溯）。**可观测性已具备**：`/metrics`（Prometheus）+ `/api/v1/inst/stats`（per-instance JSON）+ `/api/v1/inst/trace`（报文 trace）+ `/api/v1/logs/recent`（日志快照）四端点覆盖指标/诊断/日志三个维度。

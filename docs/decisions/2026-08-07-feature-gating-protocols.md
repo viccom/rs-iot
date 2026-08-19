@@ -2,7 +2,7 @@
 
 > **状态**：✅ 已实施（README 里程碑 M11，`--no-default-features --features "lua,modbus"` 等组合可编译 + 优雅降级，CI minimal job 守护）
 > **日期**：2026-08-07（评估）/ 2026-08-08（实施落地）
-> **关联**：`docs/plugin-extension-strategy.md`（上层策略，本方案是其第 6/7 节"现场裁剪"的具体落地）
+> **关联**：`docs/decisions/2026-08-07-plugin-extension-strategy.md`（上层策略，本方案是其第 6/7 节"现场裁剪"的具体落地）
 > **目标**：把 `opcua_client` / `modbus_client` / `s7_client` 三个南向协议插件改为可选 Cargo feature，实现"现场按需编译 + 系统依赖可选 + 二进制体积裁剪"，**零运行时风险、零行为破坏**。
 
 ## 1. 现状分析
@@ -82,7 +82,7 @@
 | R4 | 裁剪组合编译失败无人发现（CI 缺口） | 中 | CI 新增 `minimal` job：`cargo build --no-default-features --features lua` | CI 矩阵见 §5 |
 | R5 | API 层硬编码协议名白名单导致 gate 后异常 | 低（架构未用白名单） | 实施时 `rg "opcuaClient\|modbusClient\|s7Client"` 在 `src/api/` 确认仅文档/示例 | grep 验证 |
 | R6 | `tokio-serial` 误 gate 导致 lua serial 编译失败 | 中 | B1 不动 `tokio-serial`，保持无条件 | lua 的 5 个 e2e 测试全绿 |
-| R7 | 文档/config 示例未说明 feature 依赖 | 低 | README + `docs/lua-script-guide.md` 补 feature 说明（可选） | 人工 review |
+| R7 | 文档/config 示例未说明 feature 依赖 | 低 | README + `docs/guides/lua-script-guide.md` 补 feature 说明（可选） | 人工 review |
 | R8 | `--all-features` 语义变化 | 无 | `test` job 仍 `--all-features`，三协议全开，行为不变 | CI test 全绿 |
 
 **整体风险评级：低**。核心得益于引用面干净 + 默认开启策略 + find_source 优雅降级。
@@ -171,4 +171,4 @@ pub mod sidecar_client;
 
 ## 7. 与上层策略的关系
 
-本方案是 `docs/plugin-extension-strategy.md` 第 6/7 节"现场裁剪"的具体落地，**不依赖** SDK crate 抽取或 sidecar 演进，可独立先行。其收益（系统依赖可选、二进制裁剪、编译加速）是动态库方案收益子集的**零风险版本**。
+本方案是 `docs/decisions/2026-08-07-plugin-extension-strategy.md` 第 6/7 节"现场裁剪"的具体落地，**不依赖** SDK crate 抽取或 sidecar 演进，可独立先行。其收益（系统依赖可选、二进制裁剪、编译加速）是动态库方案收益子集的**零风险版本**。

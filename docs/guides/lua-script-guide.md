@@ -1,5 +1,6 @@
 # Lua 脚本开发指南
 
+> **状态**：活文档（随 luaClient 演进同步）
 > rs-iot luaClient 动态脚本采集——覆盖长尾工业协议（自定义报文、串口/以太网、一问一答/广播推送）。
 > 随改随用、无需编译；沙箱护栏（库裁剪 + 指令 hook + 内存限额）挡脚本错误。
 
@@ -12,7 +13,7 @@ luaClient 是 rs-iot 的南向 `Source`（与 modbus/opcua/s7 同构，`inventor
 - **数据上行**：`collect` 返 table / `on_data` 调 `ctx:set_value` → hub → pipeline → lux `rtdata:<devid>`。
 - **控制下行**：写命令经 `CtlRegistry` → 实例 `cmd_rx` → `on_write(cmd)`。
 
-详见 `docs/superpowers/specs/2026-08-06-lua-script-collector-design.md`。
+详见 `docs/designs/2026-08-06-lua-script-collector-design.md`。
 
 ## 快速开始
 
@@ -38,7 +39,7 @@ luaClient 是 rs-iot 的南向 `Source`（与 modbus/opcua/s7 同构，`inventor
    }
    ```
 
-3. `POST /api/v1/startinst`（body `{"inst_id":"dev1"}`）→ `redis-cli -p 6390 HGETALL rtdata:dev1` 验采集。REST 端点全表见 [`rest-api.md`](rest-api.md)。
+3. `POST /api/v1/startinst`（body `{"inst_id":"dev1"}`）→ `redis-cli -p 6390 HGETALL rtdata:dev1` 验采集。REST 端点全表见 [`rest-api.md`](../reference/rest-api.md)。
 
 ## 回调函数
 
@@ -212,7 +213,7 @@ lux `stat:<inst>` 存 `InstanceStat` JSON（`StatTracker` 周期 flush，每 col
 
 lua 专有扩展字段经 `extra` 透传：`vm_restart_count`（VM 重建次数）、`script_version`（main.lua sha256 前 8 hex）、`consecutive_fail`。
 
-REST：`GET /api/v1/inst/stats?inst_id=<id>`（读 stat，M4 统一端点，**旧 `GET /api/v1/lua/stats` 已废弃移除**）/ `GET /api/v1/lua/scripts`（列脚本）。埋点约定详见 [`instrumentation-conventions.md`](instrumentation-conventions.md)。
+REST：`GET /api/v1/inst/stats?inst_id=<id>`（读 stat，M4 统一端点，**旧 `GET /api/v1/lua/stats` 已废弃移除**）/ `GET /api/v1/lua/scripts`（列脚本）。埋点约定详见 [`instrumentation-conventions.md`](../conventions/instrumentation-conventions.md)。
 
 ## 报文 trace（P1 #2）
 

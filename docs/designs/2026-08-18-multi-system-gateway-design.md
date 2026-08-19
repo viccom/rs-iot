@@ -3,7 +3,7 @@
 > 2026-08-18 brainstorming 定稿。前置评审：当前 `crates/rsiot-gateway` 传输核心（SSE 裸透传/凭证注入/JWT 复用）质量良好，
 > 问题是角色漂移——"纯无状态反代"长成了 reasonix 配置面/文件面宿主，业务专属逻辑与通用引擎混在同一 crate。
 > 本文档是本次改造的唯一权威设计；与代码冲突时以代码为准并回改本文。
-> 选型依据：`docs/plan-gateway-tech-selection.md`（v3 网关 axum 0.8 + reqwest 手写反代，结论不变，本次只动分层不动传输设计）。
+> 选型依据：`docs/decisions/2026-08-12-gateway-tech-selection.md`（v3 网关 axum 0.8 + reqwest 手写反代，结论不变，本次只动分层不动传输设计）。
 
 ## 一、定位与边界
 
@@ -85,7 +85,7 @@ workspace_dir = "<reasonix 工作区根>"
 ```
 
 - **不保留旧扁平格式（`rsiot_base`/`serve_base`/`serve_token`）兼容垫层**——项目"显式配置、缺失即失败"
-  文化；`field-kit/config/gateway.toml.example`、`field-kit/README.md`、`docs/deploy-gateway-and-mcp.md`、
+  文化；`field-kit/config/gateway.toml.example`、`field-kit/README.md`、`docs/ops/deploy-gateway-and-mcp.md`、
   CLAUDE.md 同步更新。
 - 启动校验：prefix 必须以 `/` 开头、互不冲突（一个是另一个前缀即冲突）、credential 字段完备
   （`static-cookie` 必带 name/value），失败即拒启。

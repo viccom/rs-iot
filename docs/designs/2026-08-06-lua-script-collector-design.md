@@ -1,7 +1,7 @@
 # rs-iot Lua 脚本采集系统 设计文档
 
 > 日期：2026-08-06
-> 状态：设计草案（已与用户逐点确认，待 writing-plans 拆分实现计划）
+> 状态：已实施（luaClient M10 落地，随 [2026-08-18-lua-script-system-evolution-design.md](2026-08-18-lua-script-system-evolution-design.md) 演进）
 > 流程：brainstorming → 本 spec → writing-plans → 实现
 
 ## 1. 背景与目标
@@ -88,7 +88,7 @@ src/db/identity.rs                    hash 清单注释新增 luakv:<inst_id>
 src/api/routes_lua.rs                 Lua 实例状态/重载 REST 端点（GET /api/v1/lua/<inst>/stats、POST .../reload）
 src/api/mod.rs                        build_router 注册 routes_lua
 scripts/<name>/main.lua               用户脚本（每协议一个独立文件夹）
-docs/lua-script-guide.md              脚本开发指南（API 参考 + 示例）
+docs/guides/lua-script-guide.md              脚本开发指南（API 参考 + 示例）
 examples/lua-scripts/                 示例脚本（含 mock 协议，配集成测试）
 ```
 

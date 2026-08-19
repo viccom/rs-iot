@@ -1,6 +1,6 @@
 //! 日志 ring buffer(P1 子系统 3):tracing layer 截获最近 N 条日志到内存。
 //!
-//! spec: `docs/superpowers/specs/2026-08-10-log-ringbuffer-design.md`。
+//! spec: `docs/designs/2026-08-10-log-ringbuffer-design.md`。
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;

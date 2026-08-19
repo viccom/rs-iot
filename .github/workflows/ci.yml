@@ -61,7 +61,7 @@ jobs:
 
   minimal:
     # 验证裁剪组合可编译：关掉三协议，覆盖最小现场部署（lua 脚本采集）。
-    # 防止 feature 化后裁剪组合悄悄编译失败却无人发现（docs/plan-feature-gating-protocols.md R4）。
+    # 防止 feature 化后裁剪组合悄悄编译失败却无人发现（docs/decisions/2026-08-07-feature-gating-protocols.md R4）。
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

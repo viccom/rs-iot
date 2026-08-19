@@ -1,6 +1,6 @@
 # 日志 ring buffer(P1 子系统 3)设计
 
-> **状态**:设计(spec)阶段,待 review → writing-plans。
+> **状态**:已实施（P1 子系统 3，`GET /api/v1/logs/recent` 已上线）。
 > **日期**:2026-08-10。
 > **范围**:tracing layer 截获最近 N 条日志到内存 ring buffer + `GET /api/v1/logs/recent` REST 快照。
 > **关联**:scenario-gap §3(故障定位诉求②"故障前日志")与 §8 #3(P1 可观测体系子系统 3);承接 `/metrics`(子系统 1)+ 报文 trace(子系统 2,target `io_trace` 经本层衔接)。
@@ -231,7 +231,7 @@ GET /api/v1/logs/recent?level=&target=&limit=  → 200 [{"ts","level","target","
 | 改 | 所有 `HostContext`/`AppState`/`init_tracing` 构造点 | 加字段/解构(类似报文 trace Task 3) |
 | 改 | `main.rs`/`service/` | `init_tracing` 返回类型改动的解构(R2) |
 | 新/改 | `tests/` | log ring buffer 集成测(扩 trace_e2e 或新 log_e2e) |
-| 改 | `CLAUDE.md` + `docs/scenario-gap-assessment.md` | 验证条目 + §3/§8 #3 状态 |
+| 改 | `CLAUDE.md` + `docs/scenario-gap-assessment.md`（已归档） | 验证条目 + §3/§8 #3 状态 |
 
 ## 13. 后续(不在本 spec)
 

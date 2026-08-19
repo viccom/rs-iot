@@ -1,7 +1,8 @@
 # AI Agent 集成设计 v3：独立 API Gateway 程序
 
-> 本文是 [`plan-ai-agent-integration.md`](./plan-ai-agent-integration.md)（v1，反代加进 rs-iot）的**演进方案**。
-> v1/v2 保留不删。v3 把"少破坏 rs-iot"推到极致——**rs-iot 真正零改动**，新写一个独立 Rust API Gateway 程序，
+> **状态**：已实施（rsiot-gateway；2026-08-18 起分层演进见 [2026-08-18-multi-system-gateway-design.md](2026-08-18-multi-system-gateway-design.md)）｜**日期**：2026-08-11｜**类型**：设计定稿
+> 本文是 `plan-ai-agent-integration.md`（v1，反代加进 rs-iot）的**演进方案**。v1/v2 已归档（git 历史 66945dd 可溯）。
+> v3 把"少破坏 rs-iot"推到极致——**rs-iot 真正零改动**，新写一个独立 Rust API Gateway 程序，
 > 统一反代 rs-iot + reasonix serve（+ 未来其他后端），前端只对接 gateway 一个入口。
 
 ## 一、核心思路
@@ -208,8 +209,8 @@ gateway 是独立 Rust 程序，技术选型三选一（P0 启动前建议派 ag
 
 | 方案 | 核心 | rs-iot 改动 | 文档 |
 |---|---|---|---|
-| **v1** | 反代加进 rs-iot（serve 独立常驻） | 反代路由+AppState（~400行） | `plan-ai-agent-integration.md` |
-| **v2** | rs-iot spawn 驱动 agent（按需 spawn） | AgentHost 模块（中） | `plan-ai-agent-integration-v2.md` |
-| **v3** | **独立 API Gateway 程序**（本文） | **真正零改动** | `plan-ai-agent-integration-v3.md` |
+| **v1** | 反代加进 rs-iot（serve 独立常驻） | 反代路由+AppState（~400行） | `plan-ai-agent-integration.md`（已归档） |
+| **v2** | rs-iot spawn 驱动 agent（按需 spawn） | AgentHost 模块（中） | `plan-ai-agent-integration-v2.md`（已归档） |
+| **v3** | **独立 API Gateway 程序**（本文） | **真正零改动** | 本文 |
 
 三者 MCP server 部分**完全相同**（照抄 dbx-mcp），差异只在"agent 如何接入"这一层。最终选哪个待 P0 验证产品形态后定——v3 在"rs-iot 零改动 + 职责分层"上最优，代价是多一个 gateway 程序。

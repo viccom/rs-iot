@@ -1,6 +1,6 @@
 //! 报文 trace:per-instance 运行时开关 + 字节 dump(裸报文调试)。
 //!
-//! spec: `docs/superpowers/specs/2026-08-10-packet-trace-design.md`。
+//! spec: `docs/designs/2026-08-10-packet-trace-design.md`。
 //!
 //! 分层:dump 层统一(所有插件一个 `dump` 函数);拦截层按协议二选一——
 //! modbus 用 `TraceIo<T>` 包装 transport(字节被 tokio-modbus 吞);lua 用 io_engine

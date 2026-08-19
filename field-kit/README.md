@@ -1,7 +1,7 @@
 # field-kit — Windows 端到端测试场套件
 
 > rs-iot "真实工厂级"端到端测试环境的**配置与脚本资产包**（不含二进制，见下方"二进制来源"）。
-> 完整搭建手册：[docs/field-e2e-windows.md](../docs/field-e2e-windows.md)（com0com 安装、
+> 完整搭建手册：[docs/ops/field-e2e-windows.md](../docs/ops/field-e2e-windows.md)（com0com 安装、
 > warden 配置管理、全流程测试命令、坑位记录）。
 
 ## 内容

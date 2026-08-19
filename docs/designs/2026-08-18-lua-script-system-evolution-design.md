@@ -115,7 +115,7 @@ stdlib/
 ### 3.3 版本与兼容
 
 - `STDLIB_VER` 语义化 MAJOR.MINOR，随宿主二进制发布；脚本 manifest 声明兼容范围，dry-run 校验。
-- **兼容矩阵**三轴：宿主版本 × API_VER × STDLIB_VER，维护于 `docs/lua-script-guide.md`。
+- **兼容矩阵**三轴：宿主版本 × API_VER × STDLIB_VER，维护于 `docs/guides/lua-script-guide.md`。
 - 弃用规程：API 标记 deprecated 后保留 ≥ 2 个 MINOR 版本，`stdlib/CHANGELOG.md` 记录替代品。
 - **每库自检约定**：`require("algo.crc16").selftest()` 返回 bool——宿主启动时或 CI 对全部 stdlib 冒烟（搬入 FreeIOE 代码的质量闸门，其库内有实锤语法错误先例：calc.lua:308、log.lua:119/125/131）。
 

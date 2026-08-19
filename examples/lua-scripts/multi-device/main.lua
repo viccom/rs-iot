@@ -1,6 +1,6 @@
 -- 单实例多设备示例：一条 RS485 总线挂多台从站（同协议、同参数、不同 unit id）。
 -- collect 嵌套返回 {[devid]={tag=v,...}} → 宿主为每 devid 各产一个 Sample（M2）。
--- 配合 docs/lua-script-guide.md「多设备」节。
+-- 配合 docs/guides/lua-script-guide.md「多设备」节。
 
 -- 构造 Modbus RTU 读保持寄存器请求（FC03）：unit + addr + qty + CRC16。
 local function read_req(unit, addr, qty)

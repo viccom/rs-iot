@@ -4,7 +4,7 @@
 //
 // 经 sidecarClient bridge 接入 rs-iot：连 OPC DA Server（如 Matrikon.OPC.Simulation.1），
 // 周期同步读 item → DataUp 推 rs-iot；收写命令 → opcda 写 item。
-// 协议详见 ../../../docs/external-plugin-protocol.md。
+// 协议详见 ../../docs/reference/external-plugin-protocol.md。
 //
 // 用法：
 //
@@ -33,7 +33,7 @@ import (
 	"github.com/huskar-t/opcda/com"
 )
 
-// bridge 协议帧类型（与 rs-iot docs/external-plugin-protocol.md 一致）。
+// bridge 协议帧类型（与 rs-iot docs/reference/external-plugin-protocol.md 一致）。
 const (
 	tHello      byte = 0x01
 	tHelloAck   byte = 0x02

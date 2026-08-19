@@ -1,6 +1,6 @@
 -- 自定义协议（STX/cmd/len/payload）+ on_data 被动广播上报示例。
 -- collect 主动查询；on_data 收被动广播帧 → set_value 上报 + kv 持久化。
--- 配合 docs/lua-script-guide.md。
+-- 配合 docs/guides/lua-script-guide.md。
 
 function collect()
     -- 主动查询：STX=0x02 cmd=0x01 len=0x03。

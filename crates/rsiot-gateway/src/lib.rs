@@ -1,7 +1,7 @@
 //! rsiot-gateway 库入口。
 //!
 //! v3 独立 API Gateway：纯无状态 HTTP 反代 rs-iot + reasonix serve。
-//! 设计见 `docs/plan-gateway-tech-selection.md`（axum 0.8 + reqwest 手写方案）。
+//! 设计见 `docs/decisions/2026-08-12-gateway-tech-selection.md`（axum 0.8 + reqwest 手写方案）。
 
 pub mod app;
 pub mod attachments;

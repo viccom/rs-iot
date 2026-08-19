@@ -1,6 +1,6 @@
 # 报文 trace 开关(阶段 1:裸报文主战场)设计
 
-> **状态**:设计(spec)阶段,待 review → writing-plans。
+> **状态**:已实施（阶段 1，`/api/v1/inst/trace` + ring buffer 衔接已上线；GET 报文拉取后置）。
 > **日期**:2026-08-10。
 > **范围**:阶段 1 —— lua + modbus 两个裸报文协议的 per-instance 运行时报文 trace。
 > **关联**:scenario-gap §5(报文输出)与 §8 #3(P1 可观测体系子系统 2);承接 `/metrics`(子系统 1,已完成)。
@@ -265,7 +265,7 @@ DELETE /api/v1/inst/trace?inst_id=...                       → 200 {"status":"o
 | 改 | `src/api/mod.rs` | 注册路由(`build_router`) |
 | 新 | `tests/trace_e2e.rs` | modbus + lua + REST 集成测 |
 | 改 | `CLAUDE.md` | 验证规则加报文 trace 条目 |
-| 改 | `docs/scenario-gap-assessment.md` | §5/§8 #3 状态更新(子系统 2 阶段 1 完成) |
+| 改 | `docs/scenario-gap-assessment.md`（已归档） | §5/§8 #3 状态更新(子系统 2 阶段 1 完成) |
 
 ## 12. 后续阶段(不在本 spec)
 

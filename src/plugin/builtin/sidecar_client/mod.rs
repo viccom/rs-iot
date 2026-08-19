@@ -13,7 +13,7 @@
 //! lux 不对外暴露（方案 C）：外部只连 bridge，认证/授权集中在 rs-iot。
 //!
 //! 协议帧：`[4B BE length][1B type][JSON body]`（`LengthDelimitedCodec` length 前缀）。
-//! 详见 `docs/external-plugin-protocol.md`。
+//! 详见 `docs/reference/external-plugin-protocol.md`。
 
 use crate::db::ext_token;
 use crate::host::{BridgeRegistry, HostContext};

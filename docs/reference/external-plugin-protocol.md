@@ -1,5 +1,7 @@
 # rs-iot 外部插件 Bridge 协议规约（v1）
 
+> **状态**：v1 已实施（sidecarClient，M7）
+
 rs-iot 通过 **sidecarClient bridge** 接入任意语言（C/C++/Go/Rust/Java/Python/Node…）的外部南向采集插件。外部插件是**纯运行时**：配置/数据/状态全在 rs-iot，本地仅缓存数据待补传。经 TCP 连 bridge，token 鉴权，lux 不对暴露（方案 C）。
 
 ## 1. 总览

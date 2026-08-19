@@ -1,7 +1,8 @@
 # 部署指南：rsiot-gateway + rsiot-mcp + reasonix
 
+> **状态**：implemented（注意：写于 2026-08-12，早于 2026-08-18 gateway-core 拆分，产物结构待核对更新）
 > v3 AI Agent 集成的现场部署。三件套：rsiot-mcp（MCP server 子进程）+ rsiot-gateway（API Gateway）+ reasonix serve（AI agent）。
-> 前置：rs-iot 主程序已部署运行（:8790）。设计见 `plan-ai-agent-integration-v3.md` + `plan-gateway-tech-selection.md`。
+> 前置：rs-iot 主程序已部署运行（:8790）。设计见 `../designs/2026-08-11-ai-agent-integration-v3-design.md` + `../decisions/2026-08-12-gateway-tech-selection.md`。
 
 ## 一、二进制构建
 

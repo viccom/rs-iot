@@ -1,6 +1,6 @@
 # Lua 脚本示例
 
-luaClient 脚本示例（配合 [`docs/lua-script-guide.md`](../../docs/lua-script-guide.md)）。
+luaClient 脚本示例（配合 [`docs/guides/lua-script-guide.md`](../../docs/guides/lua-script-guide.md)）。
 
 ## 目录
 
@@ -47,8 +47,8 @@ M2 起 `luaClient` 单实例支持一条链路多设备（如一条 RS485 总线
 - `ctx:set_values(devid, {tag=v,...})` 批量上报一个设备多点（一个 `Sample`，同时刻 timestamp）。
 - `ctx:set_value(devid, tag, v)` 单点（3 参，`devid` 显式传入）。
 
-平铺返回 `{tag=v}`（老脚本形态）仍归 `devices[0]`，向后兼容。详见 `docs/lua-script-guide.md`。
+平铺返回 `{tag=v}`（老脚本形态）仍归 `devices[0]`，向后兼容。详见 `docs/guides/lua-script-guide.md`。
 
 ## API 参考
 
-见 [`docs/lua-script-guide.md`](../../docs/lua-script-guide.md)（ctx API L1-L6 + 回调 + 配置 + 传输 + 沙箱）。
+见 [`docs/guides/lua-script-guide.md`](../../docs/guides/lua-script-guide.md)（ctx API L1-L6 + 回调 + 配置 + 传输 + 沙箱）。

@@ -1,7 +1,7 @@
 //! `luaClient`：Lua 5.4 动态脚本采集 Source（MVP：最小采集闭环）。
 //!
 //! 实例加载 `scripts/<name>/main.lua`，脚本定义 `collect(ctx)`/`on_write(ctx,cmd)`。
-//! 详见 `docs/superpowers/specs/2026-08-06-lua-script-collector-design.md`。
+//! 详见 `docs/designs/2026-08-06-lua-script-collector-design.md`。
 
 mod api;
 mod config;

@@ -85,7 +85,7 @@ tracing-appender = "0.2"
 # RTU over serial 单独依赖 tokio-serial（SerialStream 实现 tokio AsyncRead+AsyncWrite）。
 tokio-modbus = { version = "0.17", default-features = false, features = ["tcp", "rtu"], optional = true }
 # tokio-serial 保持无条件依赖：lua_client（默认开启）的串口 IO 也依赖它（B1 方案，
-# 详见 docs/plan-feature-gating-protocols.md §2.2）。仅随 modbus 一起 gate 会破坏 lua serial。
+# 详见 docs/decisions/2026-08-07-feature-gating-protocols.md §2.2）。仅随 modbus 一起 gate 会破坏 lua serial。
 tokio-serial = "5.5"
 
 # S7 南向插件（tokio-s7：纯 Rust async，ISO-on-TCP，西门子 S7-200/200Smart/300/400/1200/1500/Sinumerik828D；
@@ -125,7 +125,7 @@ lua = ["dep:mlua", "dep:notify", "dep:notify-debouncer-mini"]
 lua-http = ["lua", "dep:reqwest"]
 # 内置南向协议插件（默认全开，向后兼容）。现场可 `--no-default-features --features "..."` 按需裁剪
 # （减体积 / 省系统依赖）。关掉某协议后，该 app_code 建实例会返回 "source plugin not found"
-# （find_source 优雅降级，非崩溃）。详见 docs/plan-feature-gating-protocols.md。
+# （find_source 优雅降级，非崩溃）。详见 docs/decisions/2026-08-07-feature-gating-protocols.md。
 opcua = ["dep:async-opcua"]
 modbus = ["dep:tokio-modbus"]
 s7 = ["dep:tokio-s7"]

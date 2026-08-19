@@ -1,5 +1,6 @@
 # Windows 端到端测试环境搭建与测试手册（E:\rsiot-field 测试场）
 
+> **状态**：活文档（随测试场演进同步）
 > 本文是 rs-iot 在 Windows 下搭建"真实工厂级"端到端测试场的完整手册：
 > 设备模拟器（Modbus TCP / RTU 串口 / OPC UA）+ warden 进程监护 + rs-iot 三件套
 > + 北向 MQTT 公共 broker + Reasonix AI 助手全链路。

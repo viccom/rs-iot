@@ -1,6 +1,6 @@
 -- Modbus TCP 协议（MBAP + FC03 读 / FC06 写）脚本示例。
 -- ctx:request 一问一答；collect 主动读，on_write 处理写命令。
--- 配合 docs/lua-script-guide.md。
+-- 配合 docs/guides/lua-script-guide.md。
 
 local function crc16(buf)
     -- Modbus RTU CRC16（TCP 无 CRC，此处示范 helper；RTU 传输时附在帧尾）。

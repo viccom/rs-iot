@@ -1,10 +1,11 @@
 # rs-iot 外部插件开发指南
 
+> **状态**：活文档（随 bridge 协议与样例演进同步）
 > 面向**插件开发者**的"从零开发一个外部南向插件"总纲。协议二进制规范见
-> [`external-plugin-protocol.md`](external-plugin-protocol.md)；可运行样例见
-> [`examples/ext-plugin-python/`](../examples/ext-plugin-python/)（Python）与
-> [`examples/ext-plugin-opcda-go/`](../examples/ext-plugin-opcda-go/)（Go + OPC DA）。
-> REST 端点全表见 [`rest-api.md`](rest-api.md)。
+> [`external-plugin-protocol.md`](../reference/external-plugin-protocol.md)；可运行样例见
+> [`examples/ext-plugin-python/`](../../examples/ext-plugin-python/)（Python）与
+> [`examples/ext-plugin-opcda-go/`](../../examples/ext-plugin-opcda-go/)（Go + OPC DA）。
+> REST 端点全表见 [`rest-api.md`](../reference/rest-api.md)。
 
 ## 1. 何时用外部插件（选型）
 
@@ -94,7 +95,7 @@ curl -s -XPOST http://localhost:8790/api/v1/startinst \
 
 ## 4. 二进制协议要点
 
-帧 = `[4B 大端 length][1B type][JSON body]`，`length = 1 + len(body)`，最大 4 MiB。7 种帧（Hello/HelloAck/ConfigPush/DataUp/Command/CommandAck/Heartbeat）。**完整字段与方向见 [`external-plugin-protocol.md`](external-plugin-protocol.md)**，本文不重复。
+帧 = `[4B 大端 length][1B type][JSON body]`，`length = 1 + len(body)`，最大 4 MiB。7 种帧（Hello/HelloAck/ConfigPush/DataUp/Command/CommandAck/Heartbeat）。**完整字段与方向见 [`external-plugin-protocol.md`](../reference/external-plugin-protocol.md)**，本文不重复。
 
 ## 5. 外部进程实现要点
 
@@ -153,7 +154,7 @@ function main():
 
 - 当前 `ConfigPush` **只下发 `devices`**（含 children 的 label/value/type），**不含 `app_config`**
 - 因此协议连接参数（如 OPC DA 的 `prog-id`/`opc-host`、串口波特率等）当前经**外部进程自己的命令行参数 / 配置文件**传入
-- 后续可扩展 `ConfigPush` 含 `app_config`，让连接参数也集中在 rs-iot（需改 `sidecar_client.rs` 序列化，见 [`external-plugin-protocol.md`](external-plugin-protocol.md)）
+- 后续可扩展 `ConfigPush` 含 `app_config`，让连接参数也集中在 rs-iot（需改 `sidecar_client.rs` 序列化，见 [`external-plugin-protocol.md`](../reference/external-plugin-protocol.md)）
 
 ## 8. 调试技巧
 
@@ -175,7 +176,7 @@ function main():
 
 | 样例 | 语言 | 协议 | 平台 | 看点 |
 |---|---|---|---|---|
-| [`ext-plugin-python/`](../examples/ext-plugin-python/) | Python 3.10+（仅标准库） | 模拟采集 | 跨平台 | 最小闭环：Hello/ConfigPush/DataUp/Command/Ack/Heartbeat + 断连缓存补传 + 指数退避。**移植到其他语言的首选参照** |
-| [`ext-plugin-opcda-go/`](../examples/ext-plugin-opcda-go/) | Go（huskar-t/opcda） | OPC DA | Windows（COM） | 编译型语言 + 真实工业协议：SyncRead→DataUp、Command→item.Write（按 `GetCanonicalDataType` 自动转类型） |
+| [`ext-plugin-python/`](../../examples/ext-plugin-python/) | Python 3.10+（仅标准库） | 模拟采集 | 跨平台 | 最小闭环：Hello/ConfigPush/DataUp/Command/Ack/Heartbeat + 断连缓存补传 + 指数退避。**移植到其他语言的首选参照** |
+| [`ext-plugin-opcda-go/`](../../examples/ext-plugin-opcda-go/) | Go（huskar-t/opcda） | OPC DA | Windows（COM） | 编译型语言 + 真实工业协议：SyncRead→DataUp、Command→item.Write（按 `GetCanonicalDataType` 自动转类型） |
 
-> 协议要点（帧格式、握手顺序、并发处理、重连补传）见 [`external-plugin-protocol.md`](external-plugin-protocol.md) 第 11 节"参考实现"。
+> 协议要点（帧格式、握手顺序、并发处理、重连补传）见 [`external-plugin-protocol.md`](../reference/external-plugin-protocol.md) 第 11 节"参考实现"。

@@ -9,7 +9,7 @@ rs-iot 外部插件 Python 样例（sidecarClient bridge 协议 v1）。
     python main.py --inst ext1 --token <token> --host 127.0.0.1 --port 8781
 
 要求 Python 3.10+，无第三方依赖（仅标准库 asyncio + struct + json）。
-协议详见 ../../../docs/external-plugin-protocol.md。
+协议详见 ../../docs/reference/external-plugin-protocol.md。
 """
 import argparse
 import asyncio
@@ -18,7 +18,7 @@ import random
 import struct
 import time
 
-# 帧类型（与 docs/external-plugin-protocol.md 一致）
+# 帧类型（与 docs/reference/external-plugin-protocol.md 一致）
 T_HELLO = 0x01
 T_HELLO_ACK = 0x02
 T_CONFIG_PUSH = 0x03

@@ -1,11 +1,12 @@
 # rs-iot 插件开发指南
 
+> **状态**：活文档（权威规范，随插件体系演进同步）
 > 本文档是 rs-iot 插件体系的**权威开发规范**。内置 Source/Sink/Processor、外部 sidecar 插件、
 > 北向发布、命名约定、目录结构、测试与质量门槛均在此规定。新增插件前必读；review 插件 PR 时
 > 以本指南为准绳。
 >
-> 相关文档：外部插件二进制协议详见 [`external-plugin-protocol.md`](external-plugin-protocol.md)；
-> 工业协议库选型详见 [`RUST生态-工业协议研究报告/`](RUST生态-工业协议研究报告/)。
+> 相关文档：外部插件二进制协议详见 [`external-plugin-protocol.md`](../reference/external-plugin-protocol.md)；
+> 工业协议库选型详见外部资料《RUST生态-工业协议研究报告》（仓库外本地目录，未入库）。
 
 ## 目录
 
@@ -400,7 +401,7 @@ inventory::submit! {
 
 ### 4.12 运行指标与诊断（M4 + P1 已落地）
 
-> 本节是**已落地的统一规范**：M4 把"埋点"从 lua 专属提升为框架统一 + 全覆盖（`StatTracker` + `InstanceStat`），P1 补报文 trace（`io_trace`）+ `/metrics` Prometheus 端点。新增插件**直接接入**下列机制，无需"预留"。完整约定见 [`instrumentation-conventions.md`](instrumentation-conventions.md)。
+> 本节是**已落地的统一规范**：M4 把"埋点"从 lua 专属提升为框架统一 + 全覆盖（`StatTracker` + `InstanceStat`），P1 补报文 trace（`io_trace`）+ `/metrics` Prometheus 端点。新增插件**直接接入**下列机制，无需"预留"。完整约定见 [`instrumentation-conventions.md`](../conventions/instrumentation-conventions.md)。
 
 **指标埋点（M4，`StatTracker`）**：每个 Source task 持有一个 `StatTracker`（`src/plugin/stat_tracker.rs`），周期（`FLUSH_INTERVAL_SECS`）+ 阈值触发 flush 到 lux `stat:<inst_id>`（`db/stat.rs` `InstanceStat`）。核心 6 字段所有插件一致：
 - `status`：`running` / `degraded`（连续失败 ≥ 阈值）/ `stopped`
@@ -514,7 +515,7 @@ pub trait Processor: Send + Sync {
 ### 7.3 二进制协议
 
 帧格式 `[4B BE length][1B type][JSON body]`，7 种帧类型（Hello/HelloAck/ConfigPush/DataUp/
-Command/CommandAck/Heartbeat）。**完整规范见 [`external-plugin-protocol.md`](external-plugin-protocol.md)**。
+Command/CommandAck/Heartbeat）。**完整规范见 [`external-plugin-protocol.md`](../reference/external-plugin-protocol.md)**。
 
 实现：`src/plugin/builtin/sidecar_client.rs`（acceptor + task + codec）。集成测试：
 `tests/sidecar_e2e.rs`（进程内模拟客户端闭环）。
@@ -690,7 +691,7 @@ Rust 模块系统对 `foo.rs` vs `foo/mod.rs` 透明，迁移**零代码改动**
 - [ ] `README.md` 插件清单 + 里程碑更新
 - [ ] `CLAUDE.md` 模块表 + 验证规则段更新
 
-新增外部插件（sidecar）：无需写 rs-iot 代码，按 [`external-plugin-protocol.md`](external-plugin-protocol.md)
+新增外部插件（sidecar）：无需写 rs-iot 代码，按 [`external-plugin-protocol.md`](../reference/external-plugin-protocol.md)
 实现外部进程 + 经 REST 建实例（`host_kind=external`）。
 
 ---

@@ -3,7 +3,7 @@
 > **状态**：评估完成 / 决策记录（ADR 性质）
 > **日期**：2026-08-07
 > **相关代码**：`src/plugin/traits.rs`、`src/plugin/registry.rs`、`src/plugin/instance.rs`、`src/host.rs`、`src/plugin/builtin/`
-> **相关文档**：`docs/external-plugin-protocol.md`（sidecar 协议）、`docs/lua-script-guide.md`（Lua 脚本）
+> **相关文档**：`docs/reference/external-plugin-protocol.md`（sidecar 协议）、`docs/guides/lua-script-guide.md`（Lua 脚本）
 
 ## 1. 背景与诉求演进
 
@@ -74,7 +74,7 @@ pub trait Source: Send + Sync {
 
 真实收益在**系统依赖**：`tokio-serial`（Linux 需 `libudev-dev`）、`async-opcua`（密码学栈）。现场不跑该协议时可不装这些系统库——这是部署层真收益。真正省的是**二进制体积**（OTA 包变小）和**编译时间**，不是常驻内存。
 
-> 注：现场裁剪 + 系统依赖可选的收益，可由 **Cargo feature 裁剪**以极低成本获得，不必动态库。见 `docs/plan-feature-gating-protocols.md`。
+> 注：现场裁剪 + 系统依赖可选的收益，可由 **Cargo feature 裁剪**以极低成本获得，不必动态库。见 `docs/decisions/2026-08-07-feature-gating-protocols.md`。
 
 ### 4.2 "自动重载 + 灵活组合" —— 方向对，但 rs-iot 已有两条路覆盖
 
@@ -115,7 +115,7 @@ pub trait Source: Send + Sync {
 
 **动态库在三条诉求里都不是必需**。最高杠杆的动作是：
 1. 抽 `rs-iot-plugin-sdk` crate —— 生态契约基石（1–2 周，纯收益）
-2. Cargo feature 裁剪 —— 现场裁剪（1–2 天，见 `docs/plan-feature-gating-protocols.md`）
+2. Cargo feature 裁剪 —— 现场裁剪（1–2 天，见 `docs/decisions/2026-08-07-feature-gating-protocols.md`）
 3. 深化 sidecar —— 客户生态主力通路（已落地，投入在文档/样例/SDK）
 
 ## 7. 推荐分层策略
@@ -149,7 +149,7 @@ pub trait Source: Send + Sync {
 ## 9. 结论
 
 - **动态库（无论热加载还是重启加载）不是当前阶段的最优投入**：诉求 90% 由 SDK crate + sidecar + Cargo feature 满足，且零 ABI 风险。
-- **立即推进**：方案 B（Cargo feature 裁剪，`docs/plan-feature-gating-protocols.md`）—— 现场裁剪的最高性价比解法。
+- **立即推进**：方案 B（Cargo feature 裁剪，`docs/decisions/2026-08-07-feature-gating-protocols.md`）—— 现场裁剪的最高性价比解法。
 - **中期推进**：抽 `rs-iot-plugin-sdk` crate —— 生态契约基石。
 - **持续深化**：sidecar 文档/样例/SDK —— 客户生态主力通路。
 - **动态库**：留作未来确有进程内 hot-reload 硬需求时的选项，定位第三层小众补充。
