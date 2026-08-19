@@ -75,6 +75,13 @@ pub(crate) struct CapabilityCard {
 #[allow(dead_code)] // T6 loader 接线前仅本文件测试消费
 pub(crate) const BUILTIN_MODULES: &[&str] = &["json"];
 
+/// 宿主当前 ctx API 版本（设计 §4.4 API_VER 协商）。
+///
+/// 单一事实源：T9 stdlib sync 的上游 index `min_api_ver` 预检（超前版本拒装，§3.3
+/// 兼容矩阵）与 T11 manifest dry-run（脚本 `@api_ver` 上界校验）共用。B/C 阶段破坏性
+/// 变更时 +1。
+pub(crate) const CUR_API_VER: u32 = 1;
+
 /// 全部能力卡（单一事实源）。顺序与 `api/mod.rs` + `api/http.rs` 的注册顺序一致。
 #[allow(dead_code)] // 阶段 A 消费方为一致性测试与文档生成；T4/T5 护栏接线后转运行时读
 pub(crate) static CAPABILITIES: &[CapabilityCard] = &[

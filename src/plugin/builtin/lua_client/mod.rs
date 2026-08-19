@@ -148,6 +148,7 @@ impl Source for LuaClient {
             runtime_devs.clone(),
             dropped.clone(),
             cfg.transport.as_str(),
+            &scripts_root,
         ) {
             tracing::warn!("[luaClient] inst {} ctx API 注册失败：{e}", inst.inst_id);
             return;
@@ -538,6 +539,7 @@ async fn reload_vm(
         runtime_devs,
         dropped,
         cfg.transport.as_str(),
+        &lctx.scripts_root,
     )?;
     // dry-run on_init（hook 兜底死循环；失败 → Err → 主循环回退旧 VM）。
     if lua.globals().get::<mlua::Function>("on_init").is_ok() {

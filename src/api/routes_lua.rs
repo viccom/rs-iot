@@ -1,19 +1,21 @@
-//! Lua 实例状态/重载 REST 端点（spec §13）。默认 JWT 保护。
+//! Lua 实例状态/重载/stdlib REST 端点（spec §13 + 设计 §3.5/§3.6）。默认 JWT 保护。
 //!
 //! - `POST /api/v1/lua/reload?inst_id=<inst>` → 手动重载（stop+start，复用 InstanceManager；
 //!   与 notify 自动热加载结果一致，IO 重连——spec §5.3「VM 替换 ≈ 轻量重启 instance」）
 //! - `GET /api/v1/lua/scripts` → 列 `scripts/` 下有 `main.lua` 的目录名
+//! - `GET /api/v1/lua/stdlib` → 本地 stdlib 清单（index + 种子合并，来源徽标 seed/synced）
+//! - `POST /api/v1/lua/stdlib/sync` → 官方源/镜像验签同步（body `{upstream?, pin?}`；
+//!   成功后全实例 reload，Q11）
 //!
 //! 实例指标已迁至统一端点 `GET /api/v1/inst/stats`（M4，见 `routes_stat`）。
 //!
 //! v1 用 query 参数（与 `routes_inst::IdQuery` 一致，避 axum 0.8 路径参数语法歧义）。
 
-use crate::api::{str_from_value, AppState};
+use crate::api::{hget, hgetall, AppState};
 use crate::types::InstConfig;
 use axum::extract::{Query, State};
 use axum::response::IntoResponse;
 use axum::Json;
-use lux::EmbeddedValue;
 use serde::Deserialize;
 use std::path::{Component, Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -40,26 +42,71 @@ pub struct SaveScriptReq {
 /// 仅对 `app_code == "luaClient"` 实例生效（端点语义）。实例不在 lux `instances` 表 → 404；
 /// 非 lua 实例 → 400。
 pub async fn reload(State(st): State<AppState>, Query(q): Query<InstQuery>) -> Response {
-    let raw = match st
-        .lux
-        .execute_value("HGET", &["instances", &q.inst_id])
-        .await
-    {
-        Ok(v) if !matches!(v, EmbeddedValue::Nil) => str_from_value(&v),
-        _ => return err(StatusCode::NOT_FOUND, "instance not found"),
+    match reload_lua_inst(&st, &q.inst_id).await {
+        ReloadOutcome::Ok => Json(serde_json::json!({"status": "ok"})).into_response(),
+        ReloadOutcome::NotFound => err(StatusCode::NOT_FOUND, "instance not found"),
+        ReloadOutcome::BadRequest(m) => err(StatusCode::BAD_REQUEST, &m),
+        ReloadOutcome::StartFail(m) => err(StatusCode::INTERNAL_SERVER_ERROR, &m),
+    }
+}
+
+/// 单实例 reload 结果（`reload` 端点与 [`reload_all_lua_instances`] 共用核心
+/// [`reload_lua_inst`] 的分类出口，端点映射 HTTP 码、批量版映射 JSON）。
+enum ReloadOutcome {
+    /// 成功。
+    Ok,
+    /// 实例不在 lux `instances` 表。
+    NotFound,
+    /// 配置不可解析 / 非 luaClient 实例（消息随原因）。
+    BadRequest(String),
+    /// stop+start 启动失败（旧实例已停）。
+    StartFail(String),
+}
+
+/// reload 核心：读 lux `instances` 配置 → 校验 luaClient → stop + start（复用
+/// `InstanceManager`，与单实例端点/热加载同机制，spec §5.3）。
+async fn reload_lua_inst(st: &AppState, inst_id: &str) -> ReloadOutcome {
+    let Some(raw) = hget(&st.lux, "instances", inst_id).await else {
+        return ReloadOutcome::NotFound;
     };
     let cfg: InstConfig = match serde_json::from_str(&raw) {
         Ok(c) => c,
-        Err(e) => return err(StatusCode::BAD_REQUEST, &format!("invalid config: {e}")),
+        Err(e) => return ReloadOutcome::BadRequest(format!("invalid config: {e}")),
     };
     if cfg.app_code.as_ref() != "luaClient" {
-        return err(StatusCode::BAD_REQUEST, "not a luaClient instance");
+        return ReloadOutcome::BadRequest("not a luaClient instance".into());
     }
-    let _ = st.mgr.stop(&q.inst_id).await;
-    if let Err(e) = st.mgr.start_source(cfg).await {
-        return err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string());
+    let _ = st.mgr.stop(inst_id).await;
+    match st.mgr.start_source(cfg).await {
+        Ok(()) => ReloadOutcome::Ok,
+        Err(e) => ReloadOutcome::StartFail(e.to_string()),
     }
-    Json(serde_json::json!({"status": "ok"})).into_response()
+}
+
+/// 全实例 reload（Q11，设计 §3.6 D1「同步后引用实例自动 reload」）：遍历 lux
+/// `instances`，`app_code == "luaClient"` 的逐一 stop + start。
+///
+/// sync 换新 `_stdlib/` 后，运行中 VM 已加载的 stdlib 模块不会自动失效，须重启
+/// 实例重走 require；配置缺席/解析失败/非 lua 实例自然跳过（批量语义只管 lua）。
+/// 返回 `[{inst_id, result: "ok"|<错误>}]` 供 REST 响应与审计。
+///
+/// pub(crate)：T10 `_lib/` 全局 watcher 也走本 helper（Q15 全实例策略）。
+pub(crate) async fn reload_all_lua_instances(st: &AppState) -> Vec<serde_json::Value> {
+    let cfgs = hgetall(&st.lux, "instances").await;
+    let mut out = Vec::new();
+    if let Some(map) = cfgs.as_object() {
+        for inst_id in map.keys() {
+            match reload_lua_inst(st, inst_id).await {
+                ReloadOutcome::Ok => out.push(serde_json::json!({"inst_id": inst_id, "result": "ok"})),
+                ReloadOutcome::StartFail(m) => {
+                    out.push(serde_json::json!({"inst_id": inst_id, "result": m}))
+                }
+                // NotFound 不可达（键来自同一次 HGETALL）；BadRequest（非 lua/坏配置）跳过
+                _ => {}
+            }
+        }
+    }
+    out
 }
 
 /// `GET /api/v1/lua/scripts` → `{ "scripts": ["devA", ...] }`（cwd/scripts 下有 main.lua 的目录）。
@@ -337,6 +384,77 @@ fn scan_scripts(root: &Path) -> Vec<String> {
     names
 }
 
+// ---- stdlib 清单/同步（设计 §3.5/§3.6 D1；lua_core 依赖故 feature 门控）----
+
+/// `GET /api/v1/lua/stdlib` → `{version, files: [{name, path, ver, source}]}`。
+///
+/// 本地 index（`scripts/_stdlib/.index.json`）与 embed 种子的合并视图（index 为准
+/// 消歧，§3.6 D5）；`source` = 来源徽标 "synced"（验签安装）/ "seed"（内网冷启动
+/// 兜底），`version` = 本地安装版本轴（无 index → null，§3.7）。scripts 根与
+/// save/scan 端点一致取 cwd 相对 `scripts`。
+#[cfg(feature = "lua")]
+pub async fn stdlib_list(State(_st): State<AppState>) -> Json<serde_json::Value> {
+    Json(stdlib_list_payload(Path::new("scripts")))
+}
+
+/// [`stdlib_list`] 的纯函数主体（无 AppState 依赖，便于单测——本仓无 REST
+/// router 级测试基建，逻辑收敛于此做函数级覆盖）。
+#[cfg(feature = "lua")]
+fn stdlib_list_payload(scripts_root: &Path) -> serde_json::Value {
+    let (version, files) = crate::plugin::lua_core::stdlib_sync::inventory(scripts_root);
+    let files: Vec<serde_json::Value> = files
+        .iter()
+        .map(|e| serde_json::to_value(e).unwrap_or(serde_json::Value::Null))
+        .collect();
+    serde_json::json!({ "version": version, "files": files })
+}
+
+/// `POST /api/v1/lua/stdlib/sync` 请求体（两字段均可省；body 亦可省——不带 JSON
+/// content-type 的请求整体取缺省值）。
+#[derive(Deserialize, Default)]
+pub struct SyncReq {
+    /// upstream 基址（省 = `AppConfig::lua_stdlib_upstream`，内网镜像改配置切 D2）。
+    pub upstream: Option<String>,
+    /// 锁定版本（省 = 跟随 upstream 最新，§3.3 默认 pin 策略由调用方显式传）。
+    pub pin: Option<String>,
+}
+
+/// `POST /api/v1/lua/stdlib/sync` → 验签同步官方源/镜像（§3.6 D1）+ 全实例 reload（Q11）。
+///
+/// 流程：拉 index+sig → ed25519 验签 → min_api_ver/pin 预检 → 逐文件 sha256 →
+/// `_stdlib.tmp/` → 原子替换 → 返回 `SyncReport`，随后 [`reload_all_lua_instances`]
+/// 重启全部 luaClient 实例加载新库。任一步失败 → 502（upstream/验签域错误，本地
+/// `_stdlib/` 未动）。需要 reqwest（feature lua-http 门控，无此 feature 端点缺席）。
+#[cfg(feature = "lua-http")]
+pub async fn stdlib_sync(
+    State(st): State<AppState>,
+    body: Option<Json<SyncReq>>,
+) -> Response {
+    let Json(req) = body.unwrap_or_default();
+    let upstream = req
+        .upstream
+        .unwrap_or_else(|| st.config.lua_stdlib_upstream.clone());
+    match crate::plugin::lua_core::stdlib_sync::sync(
+        &upstream,
+        Path::new("scripts"),
+        req.pin.as_deref(),
+    )
+    .await
+    {
+        Ok(report) => {
+            let reloaded = reload_all_lua_instances(&st).await;
+            Json(serde_json::json!({
+                "status": "ok",
+                "upstream": upstream,
+                "report": report,
+                "reloaded": reloaded,
+            }))
+            .into_response()
+        }
+        Err(e) => err(StatusCode::BAD_GATEWAY, &e),
+    }
+}
+
 // ---- 局部类型/工具 ----
 type StatusCode = axum::http::StatusCode;
 type Response = axum::response::Response;
@@ -480,6 +598,55 @@ mod tests {
         let vers = list_version_files(&vd);
         let ts: Vec<u64> = vers.iter().filter_map(|v| v["ts"].as_u64()).collect();
         assert_eq!(ts, vec![200, 100], "降序 + 只认数字.lua");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // ---- stdlib 清单载荷（GET /api/v1/lua/stdlib 的纯函数主体；本仓无 REST
+    //      router 级测试基建，端点逻辑收敛于此做函数级覆盖）----
+
+    /// 验证意图（§3.6 D5/§3.7 徽标）：无 index → 全种子 "seed"、version null；
+    /// 有 index → index 条目 "synced"（含 ver），种子差集仍 "seed"，同名让位 index。
+    #[cfg(feature = "lua")]
+    #[test]
+    fn stdlib_list_payload_seed_and_synced_badges() {
+        let seeds = crate::plugin::lua_core::stdlib::SEED_MODULES.len();
+        let tmp = fresh_tmp("stdlib-list");
+
+        // 冷启动：无 _stdlib/.index.json → 纯种子视图
+        let payload = stdlib_list_payload(&tmp);
+        assert_eq!(payload["version"], serde_json::Value::Null);
+        let files = payload["files"].as_array().unwrap();
+        assert_eq!(files.len(), seeds, "全部 embed 种子");
+        assert!(files.iter().all(|f| f["source"] == "seed"));
+        assert!(
+            files.iter().all(|f| f["ver"].is_null()),
+            "种子无版本轴 → ver null"
+        );
+
+        // 有 index：algo/crc16.lua 转 synced（种子同名让位），其余仍 seed
+        std::fs::create_dir_all(tmp.join("_stdlib/algo")).unwrap();
+        std::fs::write(
+            tmp.join("_stdlib/.index.json"),
+            r#"{"version":"1.0.0","min_api_ver":1,"files":{"algo/crc16.lua":{"sha256":"ab","ver":"1.0.0"}}}"#,
+        )
+        .unwrap();
+        let payload = stdlib_list_payload(&tmp);
+        assert_eq!(payload["version"], "1.0.0");
+        let files = payload["files"].as_array().unwrap();
+        assert_eq!(files.len(), seeds, "1 synced + 种子差集");
+        let crc = files
+            .iter()
+            .find(|f| f["path"] == "algo/crc16.lua")
+            .expect("index 条目应在列");
+        assert_eq!(crc["source"], "synced");
+        assert_eq!(crc["ver"], "1.0.0");
+        assert_eq!(crc["name"], "algo.crc16");
+        assert_eq!(
+            files.iter().filter(|f| f["source"] == "seed").count(),
+            seeds - 1,
+            "同名种子让位 index（消歧）"
+        );
 
         let _ = std::fs::remove_dir_all(&tmp);
     }

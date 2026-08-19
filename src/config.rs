@@ -20,6 +20,10 @@ pub struct AppConfig {
     pub bridge: BridgeConfig,
     /// pipeline 数据面配置（worker 数等）。
     pub pipeline: PipelineConfig,
+    /// Lua stdlib 官方源/镜像 upstream 基址（设计 §3.6 D1/D2）。
+    /// `POST /api/v1/lua/stdlib/sync` body 未传 upstream 时用它；内网镜像 =
+    /// 官方静态目录完整拷贝，改此键指向镜像即切换。v1 占位官方 Pages URL（T13 建置）。
+    pub lua_stdlib_upstream: String,
 }
 
 /// lux ServerConfig 的子集映射（仅暴露我们关心的字段）。
@@ -62,6 +66,7 @@ impl Default for AppConfig {
             log: LogConfig::default(),
             bridge: BridgeConfig::default(),
             pipeline: PipelineConfig::default(),
+            lua_stdlib_upstream: "https://rsiot.github.io/lualib/".into(),
         }
     }
 }
@@ -250,5 +255,15 @@ ring_buffer_capacity = 500"#,
         // 显式 [pipeline] workers=N 覆盖默认;锁 partial-default 契约:用户只设 workers,缺字段仍走 Default
         let cfg: AppConfig = toml::from_str("[pipeline]\nworkers = 4").unwrap();
         assert_eq!(cfg.pipeline.workers, 4);
+    }
+
+    #[test]
+    fn lua_stdlib_upstream_default_and_override() {
+        // 缺省官方源占位（T13 建置）；内网镜像改此键切换（§3.6 D2）
+        let cfg: AppConfig = toml::from_str("").unwrap();
+        assert_eq!(cfg.lua_stdlib_upstream, "https://rsiot.github.io/lualib/");
+        let cfg: AppConfig =
+            toml::from_str(r#"lua_stdlib_upstream = "http://mirror.local/lualib/""#).unwrap();
+        assert_eq!(cfg.lua_stdlib_upstream, "http://mirror.local/lualib/");
     }
 }

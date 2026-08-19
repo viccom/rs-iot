@@ -21,6 +21,7 @@ use crate::plugin::builtin::lua_client::RuntimeDevs;
 use crate::plugin::lua_core::io_engine::IoEngine;
 use crate::types::{CtlMessage, InstConfig, InstId, Sample, SampleValue};
 use mlua::{Lua, LuaSerdeExt, LuaString, Value};
+use std::path::Path;
 use tokio::sync::mpsc;
 
 /// hub send 结果（`send_with_deadline` 调用方语义：丢样时计数、关闭时告警）。
@@ -111,15 +112,18 @@ async fn push_sample(
 ///   `serde_json::Value` 中转（Lua value <-> JSON 文本）。
 /// - L6 `log_info/warn/err/debug(msg)`：tracing，前缀 `[lua:<inst>]`。
 /// - L6 `now()`/`time()`：当前本地毫秒/秒时间戳（f64）。
+/// - 全局 `stdlib` 表（T9 §3.5）：`stdlib.list()/info(mod)` 只读清单——本地 index
+///   与 embed 种子合并视图（`scripts_root` 参数即为其数据源）。
 ///
 /// `tx` 为 hub [`mpsc::Sender`]（L2 `set_value` 推 [`Sample`]）；`ctx_host` 提供 lux
 /// （L2/L4 读写）+ `ctl_registry`（L3 路由）。`dropped` 为丢样计数（`push_sample`
 /// 背压超时分支 fetch_add；与 collect 分支共享同一实例，flush 时落 stat
 /// `dropped_samples`）。`transport` 为底层链路类型字符串
 ///（`cfg.transport.as_str()`，"tcp"/"serial"/"udp"），供 `ctx:transport()` 暴露给脚本
-///（脚本据此选帧格式：serial 加 CRC16、tcp 加 MBAP 头）。
-// 8 参为 T4 加 dropped（Q3 丢样计数）所致——组装型编排函数，参数各自独立语义，
-// 强行打包 struct 反增间接层；定点 allow。
+///（脚本据此选帧格式：serial 加 CRC16、tcp 加 MBAP 头）。`scripts_root` 为脚本根
+/// 目录（全局 `stdlib` 表读 `scripts/_stdlib/.index.json` 合并种子，T9 §3.5）。
+// 9 参为 T4 加 dropped、T9 加 scripts_root 所致——组装型编排函数，参数各自独立
+// 语义，强行打包 struct 反增间接层；定点 allow。
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn register(
     lua: &Lua,
@@ -130,6 +134,7 @@ pub(crate) fn register(
     runtime_devs: RuntimeDevs,
     dropped: std::sync::Arc<std::sync::atomic::AtomicU64>,
     transport: &'static str,
+    scripts_root: &Path,
 ) -> mlua::Result<()> {
     let ctx = lua.create_table()?;
 
@@ -417,6 +422,11 @@ pub(crate) fn register(
     // 实现移 http.rs（守 <500）；此处委托 http::register 注册到同一 ctx 表。
     #[cfg(feature = "lua-http")]
     http::register(lua, &ctx, inst)?;
+
+    // --- 全局 stdlib 表（T9 §3.5）：stdlib.list()/info(mod) 只读清单 ---
+    // 本地 index + embed 种子合并视图（读盘即时，sync 后 reload 即见新版）。
+    lua.globals()
+        .set("stdlib", crate::plugin::lua_core::stdlib_sync::stdlib_table(lua, scripts_root)?)?;
 
     lua.globals().set("ctx", ctx)?;
     Ok(())

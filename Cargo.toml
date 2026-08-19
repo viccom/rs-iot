@@ -115,6 +115,10 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 notify = { version = "8", optional = true }
 notify-debouncer-mini = { version = "0.7", optional = true }
 
+# Lua stdlib 官方源 index 验签（lua feature，设计 §3.5/§3.7 供应链对策）：
+# ed25519-dalek 2 默认特性带 rand_core/zeroize，裁掉只留 std（sync 一次验一签，无需 fast 后端）。
+ed25519-dalek = { version = "2", default-features = false, features = ["std"], optional = true }
+
 [dev-dependencies]
 # tokio test-util（start_paused 虚拟时钟）：护栏超时类测试加速（如 lua send 2s 背压
 # 丢样），仅测试构建启用 feature，release 产物不含。
@@ -124,8 +128,8 @@ tokio = { version = "1", features = ["test-util"] }
 default = ["transform", "lua", "lua-http", "opcua", "modbus", "s7", "eip"]
 # L2 数据转换（rhai 脚本，默认开启）
 transform = ["dep:rhai"]
-# Lua 动态脚本采集（luaClient，默认开启）
-lua = ["dep:mlua", "dep:notify", "dep:notify-debouncer-mini"]
+# Lua 动态脚本采集（luaClient，默认开启）；ed25519-dalek = stdlib sync index 验签（T9）
+lua = ["dep:mlua", "dep:notify", "dep:notify-debouncer-mini", "dep:ed25519-dalek"]
 # Lua HTTP 出站（ctx:http_get/http_post，默认随 lua 开；独立可关以裁 release / 减出站风险面）
 lua-http = ["lua", "dep:reqwest"]
 # 内置南向协议插件（默认全开，向后兼容）。现场可 `--no-default-features --features "..."` 按需裁剪

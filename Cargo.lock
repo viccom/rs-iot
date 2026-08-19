@@ -2805,6 +2805,7 @@ dependencies = [
  "chrono",
  "clap",
  "dashmap",
+ "ed25519-dalek",
  "futures-util",
  "hmac",
  "inventory",

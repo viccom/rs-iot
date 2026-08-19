@@ -167,6 +167,16 @@ pub fn build_router(state: AppState) -> axum::Router {
         .route("/scada", get(frontend::scada_terminal))
         .route("/", get(frontend::root_redirect));
 
+    // Lua stdlib 清单/同步（设计 §3.5/§3.6 D1）：handler 依赖 lua_core → lua 门控；
+    // sync 另需 reqwest → lua-http 门控。裁剪 feature 时端点随编译缺席（handler 同名
+    // cfg 门控，路由注册须对应缺席，否则链不到 handler）。
+    #[cfg(feature = "lua")]
+    let app = app.route("/api/v1/lua/stdlib", get(routes_lua::stdlib_list));
+    #[cfg(feature = "lua-http")]
+    let app = app.route("/api/v1/lua/stdlib/sync", post(routes_lua::stdlib_sync));
+    #[cfg(not(feature = "lua"))]
+    let app = app;
+
     app.layer(axum::middleware::from_fn_with_state(
         state.clone(),
         auth::auth_middleware,

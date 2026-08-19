@@ -219,14 +219,14 @@ route_res = { sx = sx.v, ol = ol.v, pv = priv_val }
 
         // 防投毒核心：保留段缺官方文件 → "未同步"，不回落任何诱饵层
         let r1: mlua::Result<mlua::Value> = lua.load(r#"return require("algo.evil")"#).eval();
-        let e1 = r1.err().expect("algo.evil 无 _stdlib 文件应报错");
+        let e1 = r1.expect_err("algo.evil 无 _stdlib 文件应报错");
         assert!(
             e1.to_string().contains("未同步"),
             "应给未同步可行动错误（不回落），实得：{e1}"
         );
         // D11：单段名进不了共享层——viccom 走私有层，无私有文件即报错
         let r2: mlua::Result<mlua::Value> = lua.load(r#"return require("viccom")"#).eval();
-        let e2 = r2.err().expect("共享单段应报错（D11：第三方须 ≥2 段）");
+        let e2 = r2.expect_err("共享单段应报错（D11：第三方须 ≥2 段）");
         assert!(
             e2.to_string().contains("私有"),
             "错误应指向私有层（单段名走 scripts/<name>/lib/），实得：{e2}"

@@ -66,6 +66,7 @@ async fn register_exposes_ctx_api() {
         RuntimeDevs::default(),
         zero_dropped(),
         "tcp",
+        Path::new("scripts"),
     )
     .expect("register");
     for api in [
@@ -95,6 +96,59 @@ async fn register_exposes_ctx_api() {
     // 优雅关闭 lux（先 SAVE 再 shutdown），并清理临时 data_dir。
     let _ = crate::db::shutdown_lux(handle).await;
     let _ = std::fs::remove_dir_all(&data_dir);
+}
+
+/// T9 接线：register 末尾挂全局 `stdlib` 表——脚本侧 `stdlib.list()/info()` 可用。
+/// scripts_root 指向全新临时目录（无 `_stdlib/.index.json`）→ 纯种子视图，确定性。
+#[tokio::test]
+async fn register_exposes_stdlib_table() {
+    let lua = Lua::new();
+    let io = spawn_mock_io();
+    let (ctx_host, handle, data_dir) = setup_ctx("stdlib-tbl").await;
+    let inst = InstConfig {
+        inst_id: "it".into(),
+        inst_name: "it".into(),
+        app_code: PluginName::new("luaClient"),
+        app_type: AppType::South,
+        auto_start: false,
+        app_config: serde_json::json!({"script":"a","endpoint":"x"}),
+        devices: vec![DeviceSpec {
+            label: "d".into(),
+            value: "d".into(),
+            children: vec![],
+            slave_id: None,
+        }],
+        host_kind: HostKind::Builtin,
+    };
+    let tmp = std::env::temp_dir().join(format!("lua-stdlib-reg-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+    register(
+        &lua,
+        ctx_host,
+        &inst,
+        io,
+        mock_hub_tx(),
+        RuntimeDevs::default(),
+        zero_dropped(),
+        "tcp",
+        &tmp,
+    )
+    .expect("register");
+    let n: i64 = lua
+        .load("return #stdlib.list()")
+        .eval()
+        .expect("stdlib.list 应可用");
+    assert_eq!(n as usize, 4, "纯种子视图应列 4 库（algo/codec/util×2）");
+    let src: String = lua
+        .load(r#"return stdlib.info("algo.crc16").source"#)
+        .eval()
+        .expect("stdlib.info 应可用");
+    assert_eq!(src, "seed", "无 index 时徽标应为 seed");
+
+    let _ = crate::db::shutdown_lux(handle).await;
+    let _ = std::fs::remove_dir_all(&data_dir);
+    let _ = std::fs::remove_dir_all(&tmp);
 }
 
 /// kv_set 后 kv_get 命中；类型 round-trip（number/string/bool）；缺省返回 nil。
@@ -127,6 +181,7 @@ async fn kv_set_get_roundtrip() {
         RuntimeDevs::default(),
         zero_dropped(),
         "tcp",
+        Path::new("scripts"),
     )
     .expect("register");
 
@@ -223,6 +278,7 @@ async fn send_command_routes_to_target() {
         RuntimeDevs::default(),
         zero_dropped(),
         "tcp",
+        Path::new("scripts"),
     )
     .expect("register");
 
@@ -304,6 +360,7 @@ async fn http_get_returns_status_and_body() {
         RuntimeDevs::default(),
         zero_dropped(),
         "tcp",
+        Path::new("scripts"),
     )
     .expect("register");
 
@@ -451,6 +508,7 @@ async fn capability_cards_match_registered_ctx() {
         RuntimeDevs::default(),
         zero_dropped(),
         "tcp",
+        Path::new("scripts"),
     )
     .expect("register");
     let ctx: mlua::Table = lua.globals().get("ctx").expect("ctx 全局表");
@@ -589,7 +647,7 @@ async fn set_value_pushes_sample_to_hub() {
         }],
         host_kind: HostKind::Builtin,
     };
-    register(&lua, ctx_host, &inst, io, tx, RuntimeDevs::default(), zero_dropped(), "tcp")
+    register(&lua, ctx_host, &inst, io, tx, RuntimeDevs::default(), zero_dropped(), "tcp", Path::new("scripts"))
         .expect("register");
 
     lua.load("ctx:set_value('devX', 'temp', 42.5)")
@@ -636,7 +694,7 @@ async fn set_values_pushes_multi_tag_sample() {
         }],
         host_kind: HostKind::Builtin,
     };
-    register(&lua, ctx_host, &inst, io, tx, RuntimeDevs::default(), zero_dropped(), "tcp")
+    register(&lua, ctx_host, &inst, io, tx, RuntimeDevs::default(), zero_dropped(), "tcp", Path::new("scripts"))
         .expect("register");
 
     lua.load("ctx:set_values('devX', { temp = 42.5, hum = 60 })")
@@ -695,7 +753,7 @@ async fn set_value_routes_by_devid() {
         ],
         host_kind: HostKind::Builtin,
     };
-    register(&lua, ctx_host, &inst, io, tx, RuntimeDevs::default(), zero_dropped(), "tcp")
+    register(&lua, ctx_host, &inst, io, tx, RuntimeDevs::default(), zero_dropped(), "tcp", Path::new("scripts"))
         .expect("register");
 
     lua.load("ctx:set_value('devB', 'v', 2)")
@@ -749,6 +807,7 @@ async fn get_value_reads_rtdata() {
         RuntimeDevs::default(),
         zero_dropped(),
         "tcp",
+        Path::new("scripts"),
     )
     .expect("register");
 
@@ -807,6 +866,7 @@ async fn get_device_returns_rtdata_values() {
         RuntimeDevs::default(),
         zero_dropped(),
         "tcp",
+        Path::new("scripts"),
     )
     .expect("register");
 
@@ -868,6 +928,7 @@ async fn list_devices_returns_inst_devices() {
         RuntimeDevs::default(),
         zero_dropped(),
         "tcp",
+        Path::new("scripts"),
     )
     .expect("register");
 
@@ -984,6 +1045,7 @@ async fn ctx_transport_returns_configured_kind() {
             RuntimeDevs::default(),
             zero_dropped(),
             kind,
+            Path::new("scripts"),
         )
         .expect("register");
         let got: String = lua
