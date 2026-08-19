@@ -133,7 +133,10 @@ pub fn build_router(state: AppState) -> axum::Router {
         .route("/api/v1/usergroup/remove", post(routes_group::remove))
         .route("/api/v1/accesskey/set", post(routes_group::set_accesskey))
         // Lua 实例重载/脚本（spec §13，默认 JWT 保护；实例指标走 /api/v1/inst/stats）
-        .route("/api/v1/lua/reload", post(routes_lua::reload))
+        // /lua/reload 的 handler 依赖 lua_core::reload（T10 移入）→ lua 门控，
+        // 注册移下方 cfg 块；scripts/save 等纯 fs 端点不门控。
+        // Lua 脚本写入（AI 写脚本入口：MCP save_script 工具 / 浮动面板；路径白名单
+        // scripts/<name>；?kind=lib → scripts/_lib/<org>/<name>.lua，T10）
         .route("/api/v1/lua/scripts", get(routes_lua::list_scripts))
         // Lua 脚本写入（AI 写脚本入口：MCP save_script 工具 / 浮动面板；路径白名单 scripts/<name>）
         .route("/api/v1/lua/script/save", post(routes_lua::save_script))
@@ -169,12 +172,15 @@ pub fn build_router(state: AppState) -> axum::Router {
 
     // Lua stdlib 清单/同步（设计 §3.5/§3.6 D1）：handler 依赖 lua_core → lua 门控；
     // sync 另需 reqwest → lua-http 门控。裁剪 feature 时端点随编译缺席（handler 同名
-    // cfg 门控，路由注册须对应缺席，否则链不到 handler）。
+    // cfg 门控，路由注册须对应缺席，否则链不到 handler）。/lua/reload 同理（T10：
+    // 核心移 lua_core::reload 后 handler 依赖 lua_core）。
     #[cfg(feature = "lua")]
-    let app = app.route("/api/v1/lua/stdlib", get(routes_lua::stdlib_list));
+    let app = app
+        .route("/api/v1/lua/reload", post(routes_lua::reload))
+        .route("/api/v1/lua/stdlib", get(routes_lua::stdlib_list));
     #[cfg(feature = "lua-http")]
     let app = app.route("/api/v1/lua/stdlib/sync", post(routes_lua::stdlib_sync));
-    #[cfg(not(feature = "lua"))]
+    #[cfg(not(feature = "lua-http"))]
     let app = app;
 
     app.layer(axum::middleware::from_fn_with_state(

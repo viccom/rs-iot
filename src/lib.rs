@@ -254,6 +254,19 @@ pub async fn run_app_with_shutdown(
         tracing::info!("started {started} source instance(s) from lux");
     }
 
+    // `_lib/` 站点共享库全局 watcher（T10/Q15）：`_lib/` 变更影响**所有** luaClient
+    // 实例 → watcher 全局唯一，编排层单点启动一次（单例由唯一调用点保证，无需
+    // OnceLock），随进程 shutdown token 存活；变更去抖后全实例 reload
+    // （hotload::spawn_global_lib_watcher → lua_core::reload）。scripts_root 取
+    // 默认 SCRIPTS_ROOT（与 REST save 同基）。
+    #[cfg(feature = "lua")]
+    crate::plugin::lua_core::hotload::spawn_global_lib_watcher(
+        std::path::PathBuf::from(crate::plugin::lua_core::loader::SCRIPTS_ROOT),
+        client.clone(),
+        mgr.clone(),
+        shutdown.clone(),
+    );
+
     // REST :api_port（bind 失败仅告警，不中断数据流）
     let state = api::AppState {
         lux: client.clone(),

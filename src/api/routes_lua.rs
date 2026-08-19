@@ -3,16 +3,22 @@
 //! - `POST /api/v1/lua/reload?inst_id=<inst>` → 手动重载（stop+start，复用 InstanceManager；
 //!   与 notify 自动热加载结果一致，IO 重连——spec §5.3「VM 替换 ≈ 轻量重启 instance」）
 //! - `GET /api/v1/lua/scripts` → 列 `scripts/` 下有 `main.lua` 的目录名
+//!   （`?kind=lib` → 列 `scripts/_lib/` 下共享库相对路径，T10/Q13）
+//! - `POST /api/v1/lua/script/save`（`kind` 缺省 `script` / `lib`）→ 写脚本 main.lua
+//!   或站点共享库 `scripts/_lib/<org>/<...>.lua`（D11 保留段拒绝）
+//! - `GET /api/v1/lua/script/versions` / `POST /api/v1/lua/script/rollback`（同 `kind`）
 //! - `GET /api/v1/lua/stdlib` → 本地 stdlib 清单（index + 种子合并，来源徽标 seed/synced）
 //! - `POST /api/v1/lua/stdlib/sync` → 官方源/镜像验签同步（body `{upstream?, pin?}`；
 //!   成功后全实例 reload，Q11）
+//!
+//! 实例 reload 核心在 `plugin::lua_core::reload`（T10 移入：`_lib/` 全局 watcher
+//! 与本层端点共用，保持 api → lua_core 单向依赖）。
 //!
 //! 实例指标已迁至统一端点 `GET /api/v1/inst/stats`（M4，见 `routes_stat`）。
 //!
 //! v1 用 query 参数（与 `routes_inst::IdQuery` 一致，避 axum 0.8 路径参数语法歧义）。
 
-use crate::api::{hget, hgetall, AppState};
-use crate::types::InstConfig;
+use crate::api::AppState;
 use axum::extract::{Query, State};
 use axum::response::IntoResponse;
 use axum::Json;
@@ -30,19 +36,27 @@ pub struct InstQuery {
 /// `POST /api/v1/lua/script/save` 请求体。
 #[derive(Deserialize)]
 pub struct SaveScriptReq {
-    /// 脚本目录名（如 `"devA"`），写入 `scripts/<name>/main.lua`。
-    /// 仅允许字母/数字/下划线/短横，拒路径分隔符与 `..`（防逃逸）。
+    /// kind=script（缺省）：脚本目录名（如 `"devA"`），写入 `scripts/<name>/main.lua`；
+    /// kind=lib：共享库相对路径 `<org>/<...>/<file>.lua`，写入 `scripts/_lib/...`
+    /// （T10/Q13）。script 侧仅允许字母/数字/下划线/短横；lib 侧另有
+    /// ≥2 段 + 保留段拒绝 + `.lua` 后缀校验（见 [`parse_lib_segments`]）。
     pub name: String,
-    /// main.lua 文件内容。
+    /// 资产类型：`"script"`（缺省）| `"lib"`（站点共享库，D11 保留段拒绝）。
+    pub kind: Option<String>,
+    /// 文件内容（main.lua 或库 .lua）。
     pub content: String,
 }
 
 /// `POST /api/v1/lua/reload?inst_id=<inst>` → 手动重载（stop + start，spec §5.3）。
 ///
 /// 仅对 `app_code == "luaClient"` 实例生效（端点语义）。实例不在 lux `instances` 表 → 404；
-/// 非 lua 实例 → 400。
+/// 非 lua 实例 → 400。核心在 [`crate::plugin::lua_core::reload::reload_lua_inst`]
+/// （T10 移入 lua_core：`_lib/` 全局 watcher 共用，端点只做 HTTP 映射）；
+/// handler 依赖 lua_core → lua feature 门控（路由注册同门控，见 `build_router`）。
+#[cfg(feature = "lua")]
 pub async fn reload(State(st): State<AppState>, Query(q): Query<InstQuery>) -> Response {
-    match reload_lua_inst(&st, &q.inst_id).await {
+    use crate::plugin::lua_core::reload::{reload_lua_inst, ReloadOutcome};
+    match reload_lua_inst(&st.lux, &st.mgr, &q.inst_id).await {
         ReloadOutcome::Ok => Json(serde_json::json!({"status": "ok"})).into_response(),
         ReloadOutcome::NotFound => err(StatusCode::NOT_FOUND, "instance not found"),
         ReloadOutcome::BadRequest(m) => err(StatusCode::BAD_REQUEST, &m),
@@ -50,129 +64,97 @@ pub async fn reload(State(st): State<AppState>, Query(q): Query<InstQuery>) -> R
     }
 }
 
-/// 单实例 reload 结果（`reload` 端点与 [`reload_all_lua_instances`] 共用核心
-/// [`reload_lua_inst`] 的分类出口，端点映射 HTTP 码、批量版映射 JSON）。
-enum ReloadOutcome {
-    /// 成功。
-    Ok,
-    /// 实例不在 lux `instances` 表。
-    NotFound,
-    /// 配置不可解析 / 非 luaClient 实例（消息随原因）。
-    BadRequest(String),
-    /// stop+start 启动失败（旧实例已停）。
-    StartFail(String),
+/// `?kind=script|lib` 查询参数（资产类型，缺省 script）。
+#[derive(Deserialize)]
+pub struct ListQuery {
+    /// `script`（缺省，列 scripts/ 有 main.lua 的目录）| `lib`（列 `_lib/` 共享库）。
+    pub kind: Option<String>,
 }
 
-/// reload 核心：读 lux `instances` 配置 → 校验 luaClient → stop + start（复用
-/// `InstanceManager`，与单实例端点/热加载同机制，spec §5.3）。
-async fn reload_lua_inst(st: &AppState, inst_id: &str) -> ReloadOutcome {
-    let Some(raw) = hget(&st.lux, "instances", inst_id).await else {
-        return ReloadOutcome::NotFound;
-    };
-    let cfg: InstConfig = match serde_json::from_str(&raw) {
-        Ok(c) => c,
-        Err(e) => return ReloadOutcome::BadRequest(format!("invalid config: {e}")),
-    };
-    if cfg.app_code.as_ref() != "luaClient" {
-        return ReloadOutcome::BadRequest("not a luaClient instance".into());
-    }
-    let _ = st.mgr.stop(inst_id).await;
-    match st.mgr.start_source(cfg).await {
-        Ok(()) => ReloadOutcome::Ok,
-        Err(e) => ReloadOutcome::StartFail(e.to_string()),
+/// `GET /api/v1/lua/scripts` → `{ "scripts": ["devA", ...] }`（cwd/scripts 下有
+/// main.lua 的目录）；`?kind=lib` → `{ "libs": ["viccom/hex.lua", ...] }`
+/// （`scripts/_lib/` 下 .lua 相对路径，Recursive，T10/Q13）。
+pub async fn list_scripts(State(_st): State<AppState>, Query(q): Query<ListQuery>) -> Response {
+    match q.kind.as_deref() {
+        None | Some("script") => Json(serde_json::json!({
+            "scripts": scan_scripts(Path::new("scripts"))
+        }))
+        .into_response(),
+        Some("lib") => Json(serde_json::json!({
+            "libs": scan_libs(&Path::new("scripts").join("_lib"))
+        }))
+        .into_response(),
+        Some(_) => err(
+            StatusCode::BAD_REQUEST,
+            "kind must be \"script\" or \"lib\"",
+        ),
     }
 }
 
-/// 全实例 reload（Q11，设计 §3.6 D1「同步后引用实例自动 reload」）：遍历 lux
-/// `instances`，`app_code == "luaClient"` 的逐一 stop + start。
-///
-/// sync 换新 `_stdlib/` 后，运行中 VM 已加载的 stdlib 模块不会自动失效，须重启
-/// 实例重走 require；配置缺席/解析失败/非 lua 实例自然跳过（批量语义只管 lua）。
-/// 返回 `[{inst_id, result: "ok"|<错误>}]` 供 REST 响应与审计。
-///
-/// pub(crate)：T10 `_lib/` 全局 watcher 也走本 helper（Q15 全实例策略）。
-pub(crate) async fn reload_all_lua_instances(st: &AppState) -> Vec<serde_json::Value> {
-    let cfgs = hgetall(&st.lux, "instances").await;
-    let mut out = Vec::new();
-    if let Some(map) = cfgs.as_object() {
-        for inst_id in map.keys() {
-            match reload_lua_inst(st, inst_id).await {
-                ReloadOutcome::Ok => out.push(serde_json::json!({"inst_id": inst_id, "result": "ok"})),
-                ReloadOutcome::StartFail(m) => {
-                    out.push(serde_json::json!({"inst_id": inst_id, "result": m}))
-                }
-                // NotFound 不可达（键来自同一次 HGETALL）；BadRequest（非 lua/坏配置）跳过
-                _ => {}
-            }
-        }
-    }
-    out
-}
-
-/// `GET /api/v1/lua/scripts` → `{ "scripts": ["devA", ...] }`（cwd/scripts 下有 main.lua 的目录）。
-pub async fn list_scripts(State(_st): State<AppState>) -> Json<serde_json::Value> {
-    Json(serde_json::json!({ "scripts": scan_scripts(Path::new("scripts")) }))
-}
-
-/// `POST /api/v1/lua/script/save` → 写 `scripts/<name>/main.lua`（自动建目录）。
+/// `POST /api/v1/lua/script/save` → 写 `scripts/<name>/main.lua`（kind=script 缺省）
+/// 或 `scripts/_lib/<org>/<...>.lua`（kind=lib，T10/Q13），自动建目录。
 ///
 /// AI 写脚本入口（MCP `save_script` 工具 + 浮动面板"写脚本并运行"都走此）。
-/// **路径白名单**：`name` 仅允许 `[A-Za-z0-9_-]`，拒路径分隔符/`..`/绝对路径
-/// （对标 v1 §六安全边界 + zacp `resolveInWorkspace`）。
-/// **版本管理**：覆盖 main.lua 前，若旧文件存在则 copy 到
-/// `scripts/<name>/versions/<unix_ts>.lua`（保留历史版本，支持回滚）。写后**不自动
-/// reload**——调用方按需 `POST /lua/reload?inst_id=` 或靠 notify 热加载（luaClient
-/// 监听 scripts/；versions/ 子目录放历史快照，不触发 main.lua 重载）。
+/// **路径白名单**：script 侧 `name` 仅允许 `[A-Za-z0-9_-]`；lib 侧 ≥2 段、首段
+/// 非保留段（D11）、段白名单同规则（拒路径分隔符/`..`/绝对路径——对标 v1 §六
+/// 安全边界 + zacp `resolveInWorkspace`）。
+/// **版本管理**：覆盖前若旧文件存在则 copy 到 `<目标父目录>/versions/<unix_ts>.lua`
+/// （script → `scripts/<name>/versions/`；lib → org 直下文件为
+/// `scripts/_lib/<org>/versions/`，嵌套库为其所在目录，对齐快照目录惯例）。
+/// 写后**不自动 reload**——script 靠 per-instance notify 热加载或手动 reload；
+/// lib 由 `_lib/` 全局 watcher 触发全实例 reload（Q15，计划 T10）。
 pub async fn save_script(State(_st): State<AppState>, Json(req): Json<SaveScriptReq>) -> Response {
-    match resolve_script_path(&req.name) {
-        Ok(dir) => {
-            if let Err(e) = std::fs::create_dir_all(&dir) {
-                return err(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    &format!("create dir: {e}"),
-                );
-            }
-            let main_lua = dir.join("main.lua");
-            // 版本管理：覆盖前存历史快照（旧文件存在才存，首存不存）。
-            let version_archived = match archive_version(&main_lua) {
-                Ok(true) => true,   // 已存历史版本
-                Ok(false) => false, // 首存（无旧文件）
-                Err(e) => {
-                    tracing::warn!("[lua] archive version failed (继续覆盖): {e}");
-                    false
-                }
-            };
-            if let Err(e) = std::fs::write(&main_lua, &req.content) {
-                return err(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    &format!("write main.lua: {e}"),
-                );
-            }
-            Json(serde_json::json!({
+    match req.kind.as_deref() {
+        None | Some("script") => match resolve_script_path(&req.name) {
+            Ok(dir) => match write_with_versioning(&dir.join("main.lua"), &req.content) {
+                Ok(version_archived) => Json(serde_json::json!({
+                    "status": "ok",
+                    "kind": "script",
+                    "path": dir.join("main.lua").display().to_string(),
+                    "version_archived": version_archived,
+                }))
+                .into_response(),
+                Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, &e),
+            },
+            Err(msg) => err(StatusCode::BAD_REQUEST, msg),
+        },
+        Some("lib") => match save_lib_under(Path::new("scripts"), &req.name, &req.content) {
+            Ok((path, version_archived)) => Json(serde_json::json!({
                 "status": "ok",
-                "path": main_lua.display().to_string(),
+                "kind": "lib",
+                "path": path.display().to_string(),
                 "version_archived": version_archived,
             }))
-            .into_response()
-        }
-        Err(msg) => err(StatusCode::BAD_REQUEST, msg),
+            .into_response(),
+            Err(SaveLibError::Invalid(msg)) => err(StatusCode::BAD_REQUEST, msg),
+            Err(SaveLibError::Io(e)) => err(StatusCode::INTERNAL_SERVER_ERROR, &e),
+        },
+        Some(_) => err(
+            StatusCode::BAD_REQUEST,
+            "kind must be \"script\" or \"lib\"",
+        ),
     }
 }
 
-/// `?name=<n>` 查询参数（脚本目录名）。
+/// `?name=<n>` 查询参数（脚本目录名 / lib 相对路径）。
 #[derive(Deserialize)]
 pub struct NameQuery {
-    /// 脚本目录名（仅 `[A-Za-z0-9_-]`，白名单同 save）。
+    /// kind=script（缺省）：脚本目录名（仅 `[A-Za-z0-9_-]`，白名单同 save）；
+    /// kind=lib：共享库相对路径 `<org>/<...>/<file>.lua`（校验同 save）。
     pub name: String,
+    /// 资产类型：`"script"`（缺省）| `"lib"`。
+    pub kind: Option<String>,
 }
 
 /// `POST /api/v1/lua/script/rollback` 请求体。
 #[derive(Deserialize)]
 pub struct RollbackReq {
-    /// 脚本目录名。
+    /// 脚本目录名（kind=script）或共享库相对路径（kind=lib）。
     pub name: String,
     /// 历史版本时间戳（unix 秒，对应 versions/<ts>.lua 文件名）。
     pub ts: u64,
+    /// 资产类型：`"script"`（缺省）| `"lib"`。
+    pub kind: Option<String>,
 }
 
 /// `GET /api/v1/lua/script?name=<n>` → `{name, content, size, mtime?}`（回读脚本内容）。
@@ -207,66 +189,102 @@ pub async fn get_script(State(_st): State<AppState>, Query(q): Query<NameQuery>)
 
 /// `GET /api/v1/lua/script/versions?name=<n>` → `{versions: [{ts, size}]}`（列历史版本）。
 ///
-/// 扫 `scripts/<n>/versions/` 下 `<unix_ts>.lua` 文件，按 ts 降序（新→旧）。无目录或空 → 空数组。
+/// kind=script（缺省）扫 `scripts/<n>/versions/`；kind=lib 扫目标库文件父目录下
+/// `versions/`。按 ts 降序（新→旧）。无目录或空 → 空数组。
 pub async fn list_versions(State(_st): State<AppState>, Query(q): Query<NameQuery>) -> Response {
-    match resolve_script_path(&q.name) {
-        Ok(dir) => {
-            let versions = list_version_files(&dir.join("versions"));
-            Json(serde_json::json!({ "versions": versions })).into_response()
+    let versions_dir = match q.kind.as_deref() {
+        None | Some("script") => match resolve_script_path(&q.name) {
+            Ok(dir) => dir.join("versions"),
+            Err(msg) => return err(StatusCode::BAD_REQUEST, msg),
+        },
+        Some("lib") => match resolve_lib_path(&q.name) {
+            Ok(p) => match p.parent() {
+                Some(d) => d.join("versions"),
+                None => return err(StatusCode::BAD_REQUEST, "lib path has no parent"),
+            },
+            Err(msg) => return err(StatusCode::BAD_REQUEST, msg),
+        },
+        Some(_) => {
+            return err(
+                StatusCode::BAD_REQUEST,
+                "kind must be \"script\" or \"lib\"",
+            )
         }
-        Err(msg) => err(StatusCode::BAD_REQUEST, msg),
-    }
+    };
+    Json(serde_json::json!({ "versions": list_version_files(&versions_dir) })).into_response()
 }
 
-/// `POST /api/v1/lua/script/rollback` → 复制 `versions/<ts>.lua` → main.lua（不自动 reload）。
+/// `POST /api/v1/lua/script/rollback` → 复制 `versions/<ts>.lua` → 目标文件
+/// （script：`scripts/<n>/main.lua`；lib：`scripts/_lib/...`。不自动 reload——
+/// script 靠热加载/手动，lib 靠 `_lib/` 全局 watcher，同 save）。
 ///
-/// 回滚前，当前 main.lua 同样先存一个版本快照（保留回滚点，可再回滚回去）。
+/// 回滚前，当前文件同样先存一个版本快照（保留回滚点，可再回滚回去）。
 /// 版本文件不存在 → 404。
 pub async fn rollback_script(
     State(_st): State<AppState>,
     Json(req): Json<RollbackReq>,
 ) -> Response {
-    match resolve_script_path(&req.name) {
-        Ok(dir) => {
-            let ver = dir.join("versions").join(format!("{}.lua", req.ts));
-            if !ver.exists() {
-                return err(StatusCode::NOT_FOUND, "version file not found");
-            }
-            let main_lua = dir.join("main.lua");
-            // 审查 Important 修复：先读目标版本内容，再 archive 当前版本。原顺序
-            // （先 archive 后 read）在「同一秒内 save 后立即 rollback」场景自毁——
-            // archive 用整秒时间戳生成同名 versions/<ts>.lua 覆盖掉回滚源，读到
-            // 的是自己，回滚静默无效且目标快照永久丢失。顺序对调确定性消除。
-            let content = match std::fs::read_to_string(&ver) {
-                Ok(c) => c,
-                Err(e) => {
-                    return err(
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        &format!("read version: {e}"),
-                    );
-                }
-            };
-            // 回滚也存当前版本快照（保留回滚点，可再回滚回去）。
-            // archive 失败仅 warn 不中断——回滚主流程不受快照失败影响（快照丢失
-            // 只意味着本次回滚点无法再回滚回去，主回滚仍应完成）。
-            if let Err(e) = archive_version(&main_lua) {
-                tracing::warn!("[lua] rollback archive version failed (回滚点快照丢失): {e}");
-            }
-            if let Err(e) = std::fs::write(&main_lua, &content) {
-                return err(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    &format!("write main.lua: {e}"),
-                );
-            }
-            Json(serde_json::json!({
-                "status": "ok",
-                "rolled_back_to": req.ts,
-                "path": main_lua.display().to_string(),
-            }))
-            .into_response()
+    let target = match req.kind.as_deref() {
+        None | Some("script") => match resolve_script_path(&req.name) {
+            Ok(dir) => dir.join("main.lua"),
+            Err(msg) => return err(StatusCode::BAD_REQUEST, msg),
+        },
+        Some("lib") => match resolve_lib_path(&req.name) {
+            Ok(p) => p,
+            Err(msg) => return err(StatusCode::BAD_REQUEST, msg),
+        },
+        Some(_) => {
+            return err(
+                StatusCode::BAD_REQUEST,
+                "kind must be \"script\" or \"lib\"",
+            )
         }
-        Err(msg) => err(StatusCode::BAD_REQUEST, msg),
+    };
+    match rollback_target(&target, req.ts) {
+        Ok(()) => Json(serde_json::json!({
+            "status": "ok",
+            "kind": req.kind.unwrap_or_else(|| "script".into()),
+            "rolled_back_to": req.ts,
+            "path": target.display().to_string(),
+        }))
+        .into_response(),
+        Err(RollbackErr::NotFound) => err(StatusCode::NOT_FOUND, "version file not found"),
+        Err(RollbackErr::Io(e)) => err(StatusCode::INTERNAL_SERVER_ERROR, &e),
     }
+}
+
+/// 回滚核心（script/lib 两 kind 共用，T10 抽出）：`<target 父>/versions/<ts>.lua`
+/// → target。
+///
+/// 顺序（Important 修复保持，见 git 史 rollback_script）：**先读目标版本内容，再
+/// archive 当前版本**——原顺序（先 archive 后 read）在「同一秒内 save 后立即
+/// rollback」场景自毁（archive 用整秒时间戳生成同名 versions/<ts>.lua 覆盖掉回滚
+/// 源，读到的是自己，回滚静默无效且目标快照永久丢失）。archive 失败仅 warn 不
+/// 中断（快照丢失只意味着本次回滚点无法再回滚回去，主回滚仍应完成）。
+fn rollback_target(target: &Path, ts: u64) -> Result<(), RollbackErr> {
+    let Some(parent) = target.parent() else {
+        return Err(RollbackErr::Io("target has no parent dir".into()));
+    };
+    let ver = parent.join("versions").join(format!("{ts}.lua"));
+    if !ver.exists() {
+        return Err(RollbackErr::NotFound);
+    }
+    let content =
+        std::fs::read_to_string(&ver).map_err(|e| RollbackErr::Io(format!("read version: {e}")))?;
+    if let Err(e) = archive_version(target) {
+        tracing::warn!("[lua] rollback archive version failed (回滚点快照丢失): {e}");
+    }
+    std::fs::write(target, &content).map_err(|e| RollbackErr::Io(format!("write file: {e}")))?;
+    Ok(())
+}
+
+/// 回滚错误分类：NotFound → 404；Io → 500。
+#[derive(Debug)]
+enum RollbackErr {
+    /// 版本文件不存在。
+    NotFound,
+    /// 文件系统错误（消息随原因）。
+    Io(String),
 }
 
 /// 校验脚本名合法性并解析为 `scripts/<name>` 绝对路径。
@@ -295,6 +313,173 @@ fn resolve_script_path(name: &str) -> Result<PathBuf, &'static str> {
         return Err("script name must not escape scripts/ directory");
     }
     Ok(dir)
+}
+
+// ---- T10：kind=lib 站点共享库路径校验与保存核心（Q13/D11，函数级可测）----
+
+/// lib 路径段字符白名单（与 script 名同规则：结构性排除 `..`/`.`/分隔符/空格）。
+fn lib_seg_ok(s: &str) -> bool {
+    !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
+/// 保留段判定（D11 封闭集，单一事实源 `loader::RESERVED_TOP`）。lua feature 关闭时
+/// require 路由层整体缺席、保留段语义无从谈起 → false（kind=lib 退化为纯文件
+/// 管理不拒保留段；标准构建 lua 默认开启，拒绝路径有测试锁定）。
+fn is_reserved_lib_top(seg: &str) -> bool {
+    #[cfg(feature = "lua")]
+    {
+        crate::plugin::lua_core::loader::RESERVED_TOP.contains(&seg)
+    }
+    #[cfg(not(feature = "lua"))]
+    {
+        // lua 关闭时无路由层，seg 不参与判定；显式消耗防 unused 警告。
+        let _ = seg;
+        false
+    }
+}
+
+/// 校验 kind=lib 相对路径并解析为段列表（T10/Q13，等价 script 侧
+/// `resolve_script_path` 的白名单角色；即计划所称 `validate_lib_path`）。
+///
+/// 形态 `<org>/<...>/<file>.lua`：
+/// - **≥2 段**（D11：单段名是私有层命名，进不了共享层）；
+/// - 首段=作者/组织，**∉ 官方保留段**（`RESERVED_TOP`——防第三方投毒与 `_stdlib/`
+///   命名空间混淆，loader 同源封闭集）；
+/// - 防穿越同 script 规则：段字符白名单 `[A-Za-z0-9_-]`（结构性排除 `..`/`\`/空段
+///   /空格），仅末段带 `.lua` 后缀；
+/// - 返回段列表（含末段扩展名），调用方 join 到 `<scripts_root>/_lib/` 下。
+fn parse_lib_segments(name: &str) -> Result<Vec<&str>, &'static str> {
+    if name.is_empty() {
+        return Err("lib path must not be empty");
+    }
+    if name.contains('\\') {
+        return Err("lib path may not contain backslash");
+    }
+    let segs: Vec<&str> = name.split('/').collect();
+    if segs.len() < 2 {
+        return Err("lib path must have >= 2 segments: <org>/<name>.lua");
+    }
+    let first = segs[0];
+    if !lib_seg_ok(first) {
+        return Err("lib org segment may only contain [A-Za-z0-9_-]");
+    }
+    if is_reserved_lib_top(first) {
+        return Err("lib org segment collides with reserved stdlib namespace");
+    }
+    // 中间段（嵌套库子目录）：纯白名单，无扩展名。
+    for s in &segs[1..segs.len() - 1] {
+        if !lib_seg_ok(s) {
+            return Err("lib path segment may only contain [A-Za-z0-9_-]");
+        }
+    }
+    // 末段：stem + .lua 后缀（stem 同白名单）。
+    let last = segs[segs.len() - 1];
+    let Some(stem) = last.strip_suffix(".lua") else {
+        return Err("lib path must end with .lua");
+    };
+    if !lib_seg_ok(stem) {
+        return Err("lib file name may only contain [A-Za-z0-9_-]");
+    }
+    Ok(segs)
+}
+
+/// kind=lib 路径解析（端点用，cwd 相对 `scripts` 基）：`<org>/<...>.lua` →
+/// `scripts/_lib/<org>/<...>.lua`。
+fn resolve_lib_path(name: &str) -> Result<PathBuf, &'static str> {
+    lib_path_under(Path::new("scripts"), name)
+}
+
+/// [`resolve_lib_path`] 的可注入根版本（`scripts_root` 参数化，供单测用临时目录，
+/// 不污染仓库 cwd/scripts）。
+fn lib_path_under(scripts_root: &Path, name: &str) -> Result<PathBuf, &'static str> {
+    let segs = parse_lib_segments(name)?;
+    // 双保险：段白名单已结构性排除 `..`/分隔符，components 复核防 future regression
+    // （同 resolve_script_path——检查对象是 name 派生的相对部分；scripts_root 可为
+    // 注入的绝对临时根，其 Prefix/RootDir 前缀属调用方可控输入，不在防逃逸范围）。
+    let mut rel = PathBuf::from("_lib");
+    for s in &segs {
+        rel = rel.join(s);
+    }
+    if rel
+        .components()
+        .any(|c| matches!(c, Component::ParentDir | Component::RootDir))
+    {
+        return Err("lib path must not escape scripts/_lib directory");
+    }
+    Ok(scripts_root.join(rel))
+}
+
+/// kind=lib 保存错误分类：Invalid → 400（路径校验）；Io → 500（文件系统）。
+#[derive(Debug)]
+enum SaveLibError {
+    /// 路径校验失败（白名单/保留段/形态）。
+    Invalid(&'static str),
+    /// 文件系统错误（消息随原因）。
+    Io(String),
+}
+
+/// 保存核心（script/lib 两 kind 共用，T10 抽出）：建父目录 → 旧文件存版本快照
+/// （archive 失败仅 warn 继续，防版本失败阻塞保存——同原 save_script 语义）→
+/// 写新内容。返回是否存了快照。
+fn write_with_versioning(target: &Path, content: &str) -> Result<bool, String> {
+    let parent = target
+        .parent()
+        .ok_or_else(|| "target has no parent dir".to_string())?;
+    std::fs::create_dir_all(parent).map_err(|e| format!("create dir: {e}"))?;
+    let archived = match archive_version(target) {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::warn!("[lua] archive version failed (继续覆盖): {e}");
+            false
+        }
+    };
+    std::fs::write(target, content).map_err(|e| format!("write file: {e}"))?;
+    Ok(archived)
+}
+
+/// kind=lib 保存核心（纯 fs，`scripts_root` 参数化便于单测；save 端点 lib 分支的
+/// 函数级主体）：路径校验 → 建目录 → 版本快照 → 写入。
+/// 返回 `(目标路径, 是否存了快照)`。校验先于任何 fs 副作用（拒绝时不建 `_lib/`）。
+fn save_lib_under(
+    scripts_root: &Path,
+    name: &str,
+    content: &str,
+) -> Result<(PathBuf, bool), SaveLibError> {
+    let target = lib_path_under(scripts_root, name).map_err(SaveLibError::Invalid)?;
+    let archived = write_with_versioning(&target, content).map_err(SaveLibError::Io)?;
+    Ok((target, archived))
+}
+
+/// 扫描 `lib_root`（`scripts/_lib/`）下全部 `.lua` 文件，返回相对路径
+/// `"<org>/<...>/<file>.lua"`（排序）。Recursive（共享库可多级子目录）；
+/// **排除 versions/ 目录**（版本快照不是库资产，对齐 scan_scripts 排除惯例）。
+/// 纯函数便于单测（不依赖 cwd）。
+fn scan_libs(lib_root: &Path) -> Vec<String> {
+    fn walk(dir: &Path, prefix: &str, out: &mut Vec<String>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for e in entries.flatten() {
+            let p = e.path();
+            let Some(name) = p.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            if p.is_dir() {
+                if name == "versions" {
+                    continue;
+                }
+                walk(&p, &format!("{prefix}{name}/"), out);
+            } else if name.ends_with(".lua") {
+                out.push(format!("{prefix}{name}"));
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(lib_root, "", &mut out);
+    out.sort();
+    out
 }
 
 /// 当前 unix 秒（版本文件名 + 前端展示用）。SystemTime 单机单调，足够。
@@ -422,14 +607,12 @@ pub struct SyncReq {
 /// `POST /api/v1/lua/stdlib/sync` → 验签同步官方源/镜像（§3.6 D1）+ 全实例 reload（Q11）。
 ///
 /// 流程：拉 index+sig → ed25519 验签 → min_api_ver/pin 预检 → 逐文件 sha256 →
-/// `_stdlib.tmp/` → 原子替换 → 返回 `SyncReport`，随后 [`reload_all_lua_instances`]
-/// 重启全部 luaClient 实例加载新库。任一步失败 → 502（upstream/验签域错误，本地
+/// `_stdlib.tmp/` → 原子替换 → 返回 `SyncReport`，随后全实例 reload
+/// （`lua_core::reload::reload_all_lua_instances`，T10 移入的公共 helper）重启全部
+/// luaClient 实例加载新库。任一步失败 → 502（upstream/验签域错误，本地
 /// `_stdlib/` 未动）。需要 reqwest（feature lua-http 门控，无此 feature 端点缺席）。
 #[cfg(feature = "lua-http")]
-pub async fn stdlib_sync(
-    State(st): State<AppState>,
-    body: Option<Json<SyncReq>>,
-) -> Response {
+pub async fn stdlib_sync(State(st): State<AppState>, body: Option<Json<SyncReq>>) -> Response {
     let Json(req) = body.unwrap_or_default();
     let upstream = req
         .upstream
@@ -442,7 +625,8 @@ pub async fn stdlib_sync(
     .await
     {
         Ok(report) => {
-            let reloaded = reload_all_lua_instances(&st).await;
+            let reloaded =
+                crate::plugin::lua_core::reload::reload_all_lua_instances(&st.lux, &st.mgr).await;
             Json(serde_json::json!({
                 "status": "ok",
                 "upstream": upstream,
@@ -647,6 +831,175 @@ mod tests {
             seeds - 1,
             "同名种子让位 index（消歧）"
         );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // ---- T10：kind=lib 站点共享库（Q13/Q15，D11 保留段拒绝）----
+    // 本仓无 REST router 级测试基建（T9 先例）：端点逻辑收敛为纯函数在此做函数级
+    // 覆盖，端点层为编译级 + clippy；四断言对应计划 Task 10 Step 1。
+
+    /// 四断言之「合法路径」：`<org>/<name>.lua` ≥2 段 → `scripts/_lib/<org>/<name>.lua`；
+    /// 第三段起任意深度（§3.1 共享层嵌套库）。
+    #[test]
+    fn lib_path_accepts_org_slash_name() {
+        assert_eq!(
+            resolve_lib_path("viccom/hex.lua").unwrap(),
+            PathBuf::from("scripts/_lib/viccom/hex.lua")
+        );
+        assert_eq!(
+            resolve_lib_path("viccom/calcex/poller.lua").unwrap(),
+            PathBuf::from("scripts/_lib/viccom/calcex/poller.lua")
+        );
+    }
+
+    /// 四断言之「保留段拒绝」（D11 封闭集）：首段撞官方保留段必须拒——否则第三方可
+    /// 写入与 `_stdlib/` 同名的假命名空间，require 语义混淆。遍历封闭集全量断言，
+    /// 与 loader::RESERVED_TOP 单一事实源联动。
+    #[cfg(feature = "lua")]
+    #[test]
+    fn lib_path_rejects_reserved_top() {
+        for r in crate::plugin::lua_core::loader::RESERVED_TOP {
+            assert!(
+                resolve_lib_path(&format!("{r}/evil.lua")).is_err(),
+                "保留段首段应被拒：{r}"
+            );
+        }
+    }
+
+    /// 四断言之「单段拒绝」（D11 共享层 ≥2 段）：单段 `foo.lua` 是私有层命名，
+    /// 进不了 `_lib/`。
+    #[test]
+    fn lib_path_rejects_single_segment() {
+        assert!(resolve_lib_path("foo.lua").is_err());
+    }
+
+    /// 四断言之「防穿越/形态」：`..`、反斜杠、绝对路径、非 `.lua` 后缀、空段、
+    /// 空格、段内点号——与 script 侧白名单同规则。
+    #[test]
+    fn lib_path_rejects_traversal_and_bad_forms() {
+        for bad in [
+            "",
+            "../evil.lua",
+            "viccom/../evil.lua",
+            "..\\evil.lua",
+            "viccom\\hex.lua",
+            "/abs/hex.lua",
+            "viccom/.lua",
+            "viccom/hex.txt",
+            "viccom/hex",
+            "viccom/",
+            "viccom/a.b/c.lua",
+            "vi ccom/hex.lua",
+        ] {
+            assert!(resolve_lib_path(bad).is_err(), "应拒绝：{bad:?}");
+        }
+    }
+
+    /// 四断言之「保存落位 + 版本快照」（save_lib_under，函数级等价 save 端点 lib 分支）：
+    /// 文件落 `scripts/_lib/<org>/<name>.lua`；覆盖前旧内容进
+    /// `_lib/<org>/versions/<ts>.lua`（对齐 script 快照目录惯例）。
+    #[test]
+    fn lib_save_writes_file_and_archives_version() {
+        let tmp = fresh_tmp("lib-save");
+        let root = tmp.join("scripts");
+
+        // 首存：落位 + 不产生版本
+        let (path, archived) = save_lib_under(&root, "viccom/hex.lua", "V1").unwrap();
+        assert_eq!(path, root.join("_lib/viccom/hex.lua"));
+        assert!(!archived, "首存（无旧文件）不存版本");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "V1");
+
+        // 二存：旧内容进 _lib/<org>/versions/，新内容落位
+        let (_, archived) = save_lib_under(&root, "viccom/hex.lua", "V2").unwrap();
+        assert!(archived, "覆盖应存版本快照");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "V2");
+        let vers = list_version_files(&root.join("_lib/viccom/versions"));
+        assert_eq!(vers.len(), 1, "应产生 1 个版本快照");
+        let ts = vers[0]["ts"].as_u64().unwrap();
+        assert_eq!(
+            std::fs::read_to_string(root.join("_lib/viccom/versions").join(format!("{ts}.lua")))
+                .unwrap(),
+            "V1",
+            "快照应是覆盖前的旧内容"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// 非法 lib 名在保存核心同门被拒（校验先于任何 fs 副作用）。
+    #[test]
+    fn lib_save_rejects_invalid_names() {
+        let tmp = fresh_tmp("lib-save-reject");
+        for bad in ["foo.lua", "algo/evil.lua", "../evil.lua"] {
+            assert!(save_lib_under(&tmp, bad, "x").is_err(), "应拒绝：{bad}");
+        }
+        assert!(!tmp.join("_lib").exists(), "拒绝的保存不应建 _lib 目录");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// T10 kind=lib 列表（scan_libs）：Recursive 收集 `.lua` 相对路径（排序），
+    /// 排除 versions/ 快照目录与非 lua 文件。
+    #[test]
+    fn scan_libs_lists_lua_files_excluding_versions() {
+        let tmp = fresh_tmp("lib-scan");
+        let lib = tmp.join("_lib");
+        std::fs::create_dir_all(lib.join("viccom/deep")).unwrap();
+        std::fs::write(lib.join("viccom/hex.lua"), "x").unwrap();
+        std::fs::write(lib.join("viccom/deep/mod.lua"), "x").unwrap();
+        std::fs::create_dir_all(lib.join("acme/versions")).unwrap();
+        std::fs::write(lib.join("acme/versions/123.lua"), "old").unwrap(); // 快照不列
+        std::fs::write(lib.join("acme/notes.txt"), "x").unwrap(); // 非 lua 不列
+
+        let got = scan_libs(&lib);
+        assert_eq!(
+            got,
+            vec![
+                "viccom/deep/mod.lua".to_string(),
+                "viccom/hex.lua".to_string()
+            ],
+            "字典序 + 排除 versions/快照与非 lua"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// scan_libs 缺目录 → 空（站点无共享库是常态）。
+    #[test]
+    fn scan_libs_missing_root_is_empty() {
+        assert!(scan_libs(Path::new("/no/such/rs-iot-lua-libs-xyz")).is_empty());
+    }
+
+    /// T10 kind=lib 回滚核心（rollback_target，script/lib 两 kind 共用）：
+    /// `versions/<ts>.lua` → 目标文件；回滚前当前内容存快照（保留回滚点）；
+    /// 版本不存在 → NotFound。
+    #[test]
+    fn rollback_target_restores_lib_version() {
+        let tmp = fresh_tmp("lib-rollback");
+        let target = tmp.join("_lib/viccom/hex.lua");
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::write(&target, "OLD").unwrap();
+        std::fs::create_dir_all(tmp.join("_lib/viccom/versions")).unwrap();
+        std::fs::write(tmp.join("_lib/viccom/versions/100.lua"), "ANCIENT").unwrap();
+
+        rollback_target(&target, 100).unwrap();
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "ANCIENT");
+
+        // 回滚点：OLD 应作为新快照存在（可再回滚回去）
+        let vers = list_version_files(&tmp.join("_lib/viccom/versions"));
+        let newest = vers[0]["ts"].as_u64().unwrap(); // 降序，最新在前
+        let snap = std::fs::read_to_string(
+            tmp.join("_lib/viccom/versions")
+                .join(format!("{newest}.lua")),
+        )
+        .unwrap();
+        assert_eq!(snap, "OLD", "回滚前当前内容应存快照");
+
+        // 版本不存在 → NotFound 分类（端点映射 404）
+        assert!(matches!(
+            rollback_target(&target, 999),
+            Err(RollbackErr::NotFound)
+        ));
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
