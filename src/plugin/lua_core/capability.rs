@@ -82,6 +82,12 @@ pub(crate) const BUILTIN_MODULES: &[&str] = &["json"];
 /// 变更时 +1。
 pub(crate) const CUR_API_VER: u32 = 1;
 
+/// 宿主接受的最低脚本 API 版本（§4.4 API_VER 协商下界；T11 manifest dry-run 消费）。
+///
+/// 脚本 `@api_ver` 低于此值 → 拒载（提示升级脚本）。B/C 阶段弃用旧 API 时才上调；
+/// 与 [`CUR_API_VER`] 同处（版本协商常量单一事实源）。
+pub(crate) const MIN_API_VER: u32 = 1;
+
 /// 全部能力卡（单一事实源）。顺序与 `api/mod.rs` + `api/http.rs` 的注册顺序一致。
 #[allow(dead_code)] // 阶段 A 消费方为一致性测试与文档生成；T4/T5 护栏接线后转运行时读
 pub(crate) static CAPABILITIES: &[CapabilityCard] = &[

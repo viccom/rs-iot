@@ -7,6 +7,7 @@ pub(crate) mod engine;
 pub(crate) mod hotload;
 pub(crate) mod io_engine;
 pub(crate) mod loader;
+pub(crate) mod manifest;
 pub(crate) mod ratelimit;
 pub(crate) mod reload;
 pub(crate) mod script;

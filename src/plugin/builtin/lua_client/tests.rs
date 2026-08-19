@@ -303,3 +303,158 @@ async fn mock_lux() -> lux::EmbeddedClient {
     let handle = lux::run_with_config(lux_cfg).await.expect("lux");
     handle.client()
 }
+
+// --- T11 manifest dry-run 集成（Q1/§2.2/§4.4）---
+
+/// T11 集成共用：最小 luaClient 实例配置（scripts_root 指向临时目录）。
+fn lua_inst_config(tmp: &std::path::Path, script: &str) -> InstConfig {
+    InstConfig {
+        inst_id: "lua-manifest-it".into(),
+        inst_name: "it".into(),
+        app_code: PluginName::new("luaClient"),
+        app_type: AppType::South,
+        auto_start: false,
+        app_config: json!({
+            "script": script, "endpoint": "127.0.0.1:1", "period": 1,
+            "scripts_root": tmp.to_str().unwrap()
+        }),
+        devices: vec![DeviceSpec {
+            label: "d".into(),
+            value: "devM".into(),
+            children: vec![],
+            slave_id: None,
+        }],
+        host_kind: HostKind::Builtin,
+    }
+}
+
+/// T11 集成共用：最小 HostContext（mock lux + dummy 事件总线）。
+async fn lua_host_ctx() -> HostContext {
+    HostContext {
+        lux: mock_lux().await,
+        hwid: Hwid::new("it"),
+        shutdown: CancellationToken::new(),
+        ctl_registry: CtlRegistry::new(std::sync::Arc::new(
+            crate::process_metrics::ProcessMetrics::new(),
+        )),
+        bridge_registry: BridgeRegistry::new(),
+        metrics: std::sync::Arc::new(crate::process_metrics::ProcessMetrics::new()),
+        trace_registry: crate::io_trace::TraceRegistry::new(),
+        event_tx: crate::event_bus::EventBus::dummy(),
+    }
+}
+
+/// T11 集成：坏 manifest（@api_ver 99 > 宿主）→ run() 拒载（warn + return，
+/// 3s 内无 Sample 产出——脚本本身有 collect，排除"脚本没写好"的干扰）。
+#[tokio::test]
+async fn bad_manifest_rejects_instance_load() {
+    let tmp = std::env::temp_dir().join(format!("lua-mani-bad-{}", std::process::id()));
+    std::fs::create_dir_all(tmp.join("devM")).unwrap();
+    std::fs::write(
+        tmp.join("devM/main.lua"),
+        "-- @api_ver 99\nfunction collect() return { temp = 42.5 } end",
+    )
+    .unwrap();
+
+    let (tx, mut rx) = mpsc::channel::<crate::types::Sample>(8);
+    let (cmd_tx, cmd_rx) = mpsc::channel::<CtlMessage>(1);
+    let token = CancellationToken::new();
+    let run_token = token.child_token();
+    let inst = lua_inst_config(&tmp, "devM");
+    tokio::spawn(async move {
+        LuaClient.run(lua_host_ctx().await, inst, tx, cmd_rx, run_token).await;
+    });
+    let _ = cmd_tx; // 保留 sender，防 cmd_rx.recv() 立即 None
+
+    // 拒载 = 无 Sample：Ok(None)（run 提前 return → tx drop → channel 关闭，
+    // 拒载的最直接证据）或 Err(Elapsed)（run 未退出但 3s 无出数）皆可；
+    // 未接线时该脚本 period=1 会正常出数（Ok(Some(..))）。
+    let r = tokio::time::timeout(std::time::Duration::from_secs(3), rx.recv()).await;
+    token.cancel();
+    let _ = std::fs::remove_dir_all(&tmp);
+    assert!(
+        !matches!(r, Ok(Some(_))),
+        "坏 manifest（@api_ver 99）应拒载无 Sample，实得 {r:?}"
+    );
+}
+
+/// T11 集成：好 manifest（@role collector + @api_ver 1 + collect 定义）→ 正常出数
+///（显式契约签署后不误伤——dry-run 通过路径）。
+#[tokio::test]
+async fn good_manifest_with_role_collects() {
+    let tmp = std::env::temp_dir().join(format!("lua-mani-good-{}", std::process::id()));
+    std::fs::create_dir_all(tmp.join("devM")).unwrap();
+    std::fs::write(
+        tmp.join("devM/main.lua"),
+        "-- @role collector\n-- @api_ver 1\nfunction collect() return { temp = 42.5 } end",
+    )
+    .unwrap();
+
+    let (tx, mut rx) = mpsc::channel::<crate::types::Sample>(8);
+    let (cmd_tx, cmd_rx) = mpsc::channel::<CtlMessage>(1);
+    let token = CancellationToken::new();
+    let run_token = token.child_token();
+    let inst = lua_inst_config(&tmp, "devM");
+    tokio::spawn(async move {
+        LuaClient.run(lua_host_ctx().await, inst, tx, cmd_rx, run_token).await;
+    });
+    let _ = cmd_tx;
+
+    let s = tokio::time::timeout(std::time::Duration::from_secs(3), rx.recv())
+        .await
+        .expect("好 manifest 应正常出数")
+        .expect("Sample 非 None");
+    assert_eq!(s.devid, "devM");
+    assert!(format!("{:?}", s.values).contains("42.5"));
+    token.cancel();
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// T11 单元（reload 接线）：reload_vm 对坏 manifest 返回 Err（主循环既有回退分支
+/// 依赖此 Err 保旧 VM）——直接调 reload_vm 锁拒载路径，不依赖 watcher 真实事件。
+#[tokio::test]
+async fn reload_vm_rejects_bad_manifest() {
+    let tmp = std::env::temp_dir().join(format!("lua-mani-reload-{}", std::process::id()));
+    std::fs::create_dir_all(tmp.join("devM")).unwrap();
+    std::fs::write(
+        tmp.join("devM/main.lua"),
+        "-- @role collector\n-- @api_ver 99\nfunction collect() return { temp = 42.5 } end",
+    )
+    .unwrap();
+
+    let cfg = crate::plugin::lua_core::config::parse_cfg(&json!({
+        "script": "devM", "endpoint": "127.0.0.1:1", "period": 1
+    }))
+    .unwrap();
+    let lctx = crate::plugin::lua_core::script::LoadCtx {
+        scripts_root: std::sync::Arc::from(tmp.as_path()),
+        script_name: std::sync::Arc::<str>::from("devM"),
+    };
+    let (data_tx, _data_rx) = mpsc::channel::<Vec<u8>>(1);
+    let io = crate::plugin::lua_core::io_engine::spawn_io_task(
+        Box::new(crate::plugin::lua_core::io_engine::TcpIo::new(
+            "127.0.0.1:1".into(),
+            cfg.recv_idle_ms,
+        )),
+        data_tx,
+        "reload-it".to_string(),
+        crate::io_trace::TraceRegistry::new(),
+    );
+    let (tx, _rx) = mpsc::channel::<crate::types::Sample>(8);
+
+    let e = super::reload_vm(
+        &cfg,
+        &lctx,
+        lua_host_ctx().await,
+        &lua_inst_config(&tmp, "devM"),
+        io,
+        tx,
+        Default::default(),
+        Default::default(),
+    )
+    .await
+    .expect_err("坏 manifest 的 reload 应 Err（回退旧 VM）");
+    let msg = e.to_string();
+    assert!(msg.contains("api_ver") && msg.contains("升级宿主"), "应含可行动提示：{msg}");
+    let _ = std::fs::remove_dir_all(&tmp);
+}

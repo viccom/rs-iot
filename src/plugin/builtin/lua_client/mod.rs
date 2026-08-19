@@ -111,6 +111,19 @@ impl Source for LuaClient {
             tracing::warn!("[luaClient] inst {} 脚本加载失败：{e}", inst.inst_id);
             return;
         }
+        // manifest dry-run（T11，Q1/§2.2/§4.4）：api_ver 协商 / role 契约 / stdlib
+        // 范围任一不满足 → 拒载（warn + return）；通过也打一行摘要（现场诊断）。
+        // stdlib 版本源 = 本地 index（无 index 的种子兜底态 → None，跳过版本比对）。
+        let stdlib_ver = core_::stdlib_sync::read_index(&scripts_root).map(|i| i.version);
+        match manifest_dry_run(&lua, &lctx, stdlib_ver.as_deref()) {
+            Ok(summary) => {
+                tracing::warn!("[luaClient] inst {} manifest dry-run 通过：{summary}", inst.inst_id)
+            }
+            Err(e) => {
+                tracing::warn!("[luaClient] inst {} manifest dry-run 拒载：{e}", inst.inst_id);
+                return;
+            }
+        }
 
         // 3. IO 引擎（按 transport 选 backend：tcp/serial/udp 三传输，spec §8）。
         let backend: Box<dyn IoBackend> = match cfg.transport {
@@ -530,6 +543,11 @@ async fn reload_vm(
 ) -> mlua::Result<mlua::Lua> {
     let lua = core_::engine::new_vm(cfg)?;
     load_main(&lua, lctx)?;
+    // manifest dry-run（T11）：坏契约 → Err → 主循环回退旧 VM（Q1/§2.2）。
+    let stdlib_ver = core_::stdlib_sync::read_index(&lctx.scripts_root).map(|i| i.version);
+    let summary =
+        manifest_dry_run(&lua, lctx, stdlib_ver.as_deref()).map_err(mlua::Error::RuntimeError)?;
+    tracing::warn!("[luaClient] 热加载 manifest dry-run 通过：{summary}");
     core_::api::register(
         &lua,
         ctx_host,
@@ -547,6 +565,34 @@ async fn reload_vm(
         r?;
     }
     Ok(lua)
+}
+
+/// 读 main.lua 源 → manifest parse → dry_run（T11，Q1/§2.2/§4.4）。
+///
+/// Ok 返回一行摘要（role/api_ver/stdlib 协商结果，含本机 stdlib 版本——现场
+/// 诊断"为何拒载/放行"一眼可见）；Err 为可行动错误消息。
+/// 源读取失败按空源处理（全缺省 manifest → 通过）：load_main 刚读过同一文件，
+/// 此处仅竞态兜底，拒载语义由 load_main 承担。
+fn manifest_dry_run(
+    lua: &mlua::Lua,
+    lctx: &LoadCtx,
+    stdlib_ver: Option<&str>,
+) -> Result<String, String> {
+    let path = core_::loader::main_lua_path(&lctx.scripts_root, &lctx.script_name);
+    let src = std::fs::read_to_string(&path).unwrap_or_default();
+    let m = core_::manifest::parse(&src)?;
+    core_::manifest::dry_run(&m, lua, stdlib_ver)?;
+    let stdlib_desc = match (&m.stdlib, stdlib_ver) {
+        (Some(spec), Some(local)) => format!("{spec}（本机 {local}）"),
+        (Some(spec), None) => format!("{spec}（本机无 index，种子态未比对）"),
+        (None, Some(local)) => format!("不限（本机 {local}）"),
+        (None, None) => "不限".into(),
+    };
+    Ok(format!(
+        "role={} api_ver={} stdlib={stdlib_desc}",
+        m.role.as_deref().unwrap_or("collector(缺省)"),
+        m.api_ver
+    ))
 }
 
 /// mlua::Value → SampleValue（对标 transform/rhai.rs 的类型映射）。
