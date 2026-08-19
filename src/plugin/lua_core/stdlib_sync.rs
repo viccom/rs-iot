@@ -37,12 +37,13 @@ use std::path::Path;
 
 /// 内置验签公钥（§3.5/§3.7：ed25519 公钥编译进 rs-iot，支持多公钥轮换预留）。
 ///
-/// v1 放确定性 dev 公钥（= `SigningKey::from_bytes(&[7u8;32])` 的 verifying key，
-/// 测试 `verify_keys_contain_dev_key` 同源锁）。
-// TODO(T13): 官方源仓建置后替换为官方公钥（32 字节 raw），私钥入 CI secret 绝不入仓。
+/// v1 = 官方源仓 rsiot-lualib 的发布公钥（T13 回填；私钥仓外保管 + CI
+/// secret，绝不入任何仓）。测试 `verify_keys_official_v1_locked` 以 hex
+/// 常量锁字节防手误。
+// 官方钥 v1 (2026-08-19)，轮换走双钥过渡（Q17）：新钥追加进数组，全网升级后移除旧钥。
 pub(crate) const VERIFY_KEYS: &[[u8; 32]] = &[[
-    0xea, 0x4a, 0x6c, 0x63, 0xe2, 0x9c, 0x52, 0x0a, 0xbe, 0xf5, 0x50, 0x7b, 0x13, 0x2e, 0xc5, 0xf9,
-    0x95, 0x47, 0x76, 0xae, 0xbe, 0xbe, 0x7b, 0x92, 0x42, 0x1e, 0xea, 0x69, 0x14, 0x46, 0xd2, 0x2c,
+    0x51, 0xdb, 0x92, 0x80, 0xde, 0xbf, 0x69, 0x53, 0x7f, 0xdb, 0xed, 0xa8, 0xdf, 0x7a, 0xca, 0x3e,
+    0xa9, 0x71, 0x4b, 0x11, 0x77, 0xac, 0x10, 0x44, 0x38, 0xa1, 0x99, 0x6f, 0xcf, 0xcd, 0xd9, 0x5a,
 ]];
 
 /// index 单文件条目。
@@ -128,7 +129,9 @@ pub(crate) fn verify_index(
     serde_json::from_slice(bytes).map_err(|e| format!("index.json 解析失败: {e}"))
 }
 
-/// sync 主体（fetcher 注入点）：生产 [`sync`] 用 reqwest，测试用本地目录闭包。
+/// sync 主体（fetcher 与验签公钥双注入点）：生产 [`sync`] 用 reqwest +
+/// [`VERIFY_KEYS`]，测试注入本地目录闭包与 dev key（官方私钥在仓外，测试
+/// 无法用它签名——参数化 keys 是唯一不把 dev 钥留在生产信任锚里的走法）。
 ///
 /// 步骤（§3.6 D1）：拉 index+sig → 验签 → `min_api_ver` 预检 → pin 校验 →
 /// 逐文件 sha 对比（本地已符则复拷，否则下载+校验）→ 写 `_stdlib.tmp/`（含
@@ -141,6 +144,7 @@ pub(crate) async fn sync_with_fetcher<F, Fut>(
     upstream_base: &str,
     scripts_root: &Path,
     pin: Option<&str>,
+    keys: &[[u8; 32]],
     fetch: F,
 ) -> Result<SyncReport, String>
 where
@@ -154,7 +158,7 @@ where
     let sig_bytes = fetch(format!("{base}/index.json.sig"))
         .await
         .map_err(|e| format!("拉取 index.json.sig: {e}"))?;
-    let index = verify_index(&idx_bytes, &sig_bytes, VERIFY_KEYS)?;
+    let index = verify_index(&idx_bytes, &sig_bytes, keys)?;
 
     // 兼容矩阵预检（§3.3）：宿主过旧拒装，保持旧版继续运行
     if index.min_api_ver > CUR_API_VER {
@@ -246,7 +250,7 @@ pub(crate) async fn sync(
     scripts_root: &Path,
     pin: Option<&str>,
 ) -> Result<SyncReport, String> {
-    sync_with_fetcher(upstream_base, scripts_root, pin, http_fetch).await
+    sync_with_fetcher(upstream_base, scripts_root, pin, VERIFY_KEYS, http_fetch).await
 }
 
 /// reqwest GET（feature lua-http；无 lua-http 编译时 sync 端点一并缺席）。
@@ -424,11 +428,18 @@ mod tests {
     /// 测试 upstream 基址（假 scheme：dir_fetcher 按前缀映射到本地目录）。
     const UPSTREAM: &str = "testup";
 
-    /// 确定性 dev keypair（与 VERIFY_KEYS 占位同源，计划 T9）。
+    /// 确定性 dev keypair（测试签名用；官方钥 v1 已回填 VERIFY_KEYS，dev 钥
+    /// 只在测试里经注入的 keys 参数使用，绝不进生产信任锚——它能被任何人
+    /// 重derive，留在 VERIFY_KEYS 里等于供应链后门）。
     fn dev_keypair() -> (ed25519_dalek::SigningKey, ed25519_dalek::VerifyingKey) {
         let sk = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
         let vk = sk.verifying_key();
         (sk, vk)
+    }
+
+    /// 测试注入的验签公钥集（dev key 单钥，喂 [`sync_with_fetcher`] 的 keys 参数）。
+    fn dev_keys() -> [[u8; 32]; 1] {
+        [dev_keypair().1.to_bytes()]
     }
 
     fn sha256_hex(bytes: &[u8]) -> String {
@@ -524,15 +535,18 @@ mod tests {
         assert!(verify_index(bytes, b"short", &[vk.to_bytes()]).is_err());
     }
 
-    /// VERIFY_KEYS 占位 = dev 公钥（同源锁；T13 替换官方钥时此测试同步更新）。
+    /// T13 官方钥回填锁：VERIFY_KEYS[0] = rsiot-lualib v1 发布公钥（hex 常量与
+    /// 源仓 pub.key 同源；轮换时追加新钥并同步更新此锁，Q17 双钥过渡）。
     #[test]
-    fn verify_keys_contain_dev_key() {
-        let (_, vk) = dev_keypair();
-        assert!(
-            VERIFY_KEYS.contains(&vk.to_bytes()),
-            "VERIFY_KEYS 应含 dev 公钥 {:?}",
-            vk.to_bytes().map(|b| format!("{b:02x}")).join("")
+    fn verify_keys_official_v1_locked() {
+        const OFFICIAL_V1_HEX: &str =
+            "51db9280debf69537fdbeda8df7aca3ea9714b1177ac104438a1996fcfcdd95a";
+        let got: String = VERIFY_KEYS[0].iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(
+            got, OFFICIAL_V1_HEX,
+            "官方钥 v1 字节被改动须两侧同步（rsiot-lualib pub.key）"
         );
+        assert_eq!(VERIFY_KEYS.len(), 1, "v1 期单钥；追加钥须走 Q17 双钥过渡");
     }
 
     /// T9 计划 Step1-2：index 声明 sha 与文件实际不符 → Err 含 "sha256"（供应链闸门）。
@@ -547,7 +561,8 @@ mod tests {
             Some("algo/demo.lua"),
         );
         let root = fresh_scripts("badsha", "");
-        let r = sync_with_fetcher(UPSTREAM, &root, None, dir_fetcher(up.clone())).await;
+        let r =
+            sync_with_fetcher(UPSTREAM, &root, None, &dev_keys(), dir_fetcher(up.clone())).await;
         let e = r.expect_err("坏 sha 应拒");
         assert!(e.contains("sha256"), "错误应含 sha256，实得：{e}");
         assert!(!root.join("_stdlib.tmp").exists(), "失败后应清理 tmp 目录");
@@ -571,7 +586,7 @@ mod tests {
             &[("algo/demo.lua", "return { marker = 'v1' }")],
             None,
         );
-        let r1 = sync_with_fetcher(UPSTREAM, &root, None, dir_fetcher(up.clone()))
+        let r1 = sync_with_fetcher(UPSTREAM, &root, None, &dev_keys(), dir_fetcher(up.clone()))
             .await
             .expect("首次 sync");
         assert_eq!(r1.version, "1.0.0");
@@ -589,7 +604,7 @@ mod tests {
             &[("algo/demo.lua", "return { marker = 'v2' }")],
             None,
         );
-        let r2 = sync_with_fetcher(UPSTREAM, &root, None, dir_fetcher(up.clone()))
+        let r2 = sync_with_fetcher(UPSTREAM, &root, None, &dev_keys(), dir_fetcher(up.clone()))
             .await
             .expect("二次 sync（目标已存在，两步换）");
         assert_eq!(r2.version, "2.0.0");
@@ -638,13 +653,26 @@ mod tests {
         let up = fresh_scripts("up-pin", "");
         write_upstream(&up, "1.0.0", 1, &[("algo/demo.lua", "return {}")], None);
         let root = fresh_scripts("pin", "");
-        let r = sync_with_fetcher(UPSTREAM, &root, Some("9.9.9"), dir_fetcher(up.clone())).await;
+        let r = sync_with_fetcher(
+            UPSTREAM,
+            &root,
+            Some("9.9.9"),
+            &dev_keys(),
+            dir_fetcher(up.clone()),
+        )
+        .await;
         let e = r.expect_err("pin 不匹配应拒");
         assert!(e.contains("pin 版本不匹配"), "实得：{e}");
         // pin 匹配则放行
-        sync_with_fetcher(UPSTREAM, &root, Some("1.0.0"), dir_fetcher(up.clone()))
-            .await
-            .expect("pin 匹配应成功");
+        sync_with_fetcher(
+            UPSTREAM,
+            &root,
+            Some("1.0.0"),
+            &dev_keys(),
+            dir_fetcher(up.clone()),
+        )
+        .await
+        .expect("pin 匹配应成功");
         let _ = fs::remove_dir_all(&root);
         let _ = fs::remove_dir_all(&up);
     }
@@ -655,7 +683,8 @@ mod tests {
         let up = fresh_scripts("up-apiver", "");
         write_upstream(&up, "1.0.0", 99, &[("algo/demo.lua", "return {}")], None);
         let root = fresh_scripts("apiver", "");
-        let r = sync_with_fetcher(UPSTREAM, &root, None, dir_fetcher(up.clone())).await;
+        let r =
+            sync_with_fetcher(UPSTREAM, &root, None, &dev_keys(), dir_fetcher(up.clone())).await;
         let e = r.expect_err("超前 min_api_ver 应拒装");
         assert!(e.contains("拒装"), "实得：{e}");
         assert!(read_index(&root).is_none(), "拒装不留 index");
@@ -674,7 +703,8 @@ mod tests {
         bad[10] ^= 1;
         fs::write(up.join("index.json"), &bad).unwrap();
         let root = fresh_scripts("tamper", "");
-        let r = sync_with_fetcher(UPSTREAM, &root, None, dir_fetcher(up.clone())).await;
+        let r =
+            sync_with_fetcher(UPSTREAM, &root, None, &dev_keys(), dir_fetcher(up.clone())).await;
         assert!(r.is_err(), "篡改 index 应被验签拒");
         assert!(!root.join("_stdlib").exists(), "拒后不落 _stdlib");
         let _ = fs::remove_dir_all(&root);
@@ -695,7 +725,7 @@ mod tests {
         // sync 后：algo/crc16.lua 转 synced（种子同名让位），其余仍 seed
         let up = fresh_scripts("up-inv", "");
         write_upstream(&up, "1.0.0", 1, &[("algo/crc16.lua", "return {}")], None);
-        sync_with_fetcher(UPSTREAM, &root, None, dir_fetcher(up.clone()))
+        sync_with_fetcher(UPSTREAM, &root, None, &dev_keys(), dir_fetcher(up.clone()))
             .await
             .expect("sync");
         let (v1, e1) = inventory(&root);
@@ -718,7 +748,7 @@ mod tests {
         let root = fresh_scripts("tbl", "");
         let up = fresh_scripts("up-tbl", "");
         write_upstream(&up, "1.0.0", 1, &[("algo/crc16.lua", "return {}")], None);
-        sync_with_fetcher(UPSTREAM, &root, None, dir_fetcher(up.clone()))
+        sync_with_fetcher(UPSTREAM, &root, None, &dev_keys(), dir_fetcher(up.clone()))
             .await
             .expect("sync");
 
@@ -748,5 +778,89 @@ mod tests {
 
         let _ = fs::remove_dir_all(&root);
         let _ = fs::remove_dir_all(&up);
+    }
+
+    /// T13 端到端验收（本地手工跑，默认 ignore）：真实官方 dist（rsiot-lualib
+    /// 仓 `./gen_index.sh && ./sign_index.sh` 产物，官方 v1 私钥签名）经本机
+    /// 静态 HTTP 服务 → **生产 reqwest 路径** [`sync`]（内置 VERIFY_KEYS 验签）
+    /// 全链路落 `_stdlib/`。跑法：
+    ///
+    /// ```text
+    /// cd rsiot-lualib && ./gen_index.sh && ./sign_index.sh
+    /// python -m http.server 8765 -d dist &          # 或任意静态服务
+    /// cargo test -p rs-iot --features lua,lua-http -- --ignored e2e_sync
+    /// ```
+    ///
+    /// 篡改场景（镜像劫持，§3.7）：改 dist/ 任一 .lua 一字节后重跑，本测试
+    /// 应在 sha256 闸门失败并输出「内容被篡改，拒装」——失败输出即验收证据。
+    ///
+    /// 依赖外部资源（源仓 dist + 本机端口）故 ignore，不进默认套件/CI。
+    #[cfg(feature = "lua-http")]
+    #[tokio::test]
+    #[ignore = "需本地 rsiot-lualib dist + 静态 HTTP 服务（见测试文档注释）"]
+    async fn e2e_sync_official_dist_over_http() {
+        let upstream = std::env::var("RSIOT_E2E_UPSTREAM")
+            .unwrap_or_else(|_| "http://127.0.0.1:8765".to_string());
+        let root = fresh_scripts("e2e-official", "crcm = require('algo.crc16')");
+
+        let report = sync(&upstream, &root, None)
+            .await
+            .expect("官方 dist 全链路同步（验签→逐文件 sha→原子落盘）");
+        assert_eq!(report.version, "1.0.0");
+        assert_eq!(report.added.len(), 5, "首发全量新增：{report:?}");
+
+        // a) _stdlib/ 落位 + 本地 index 版本
+        for p in [
+            "algo/crc16.lua",
+            "codec/basexx.lua",
+            "util/retry.lua",
+            "util/tablex.lua",
+            "scripts/modbus-like/main.lua",
+        ] {
+            assert!(root.join("_stdlib").join(p).exists(), "_stdlib 缺 {p}");
+        }
+        assert_eq!(read_index(&root).expect("read_index").version, "1.0.0");
+
+        // b) inventory 徽标：crc16 转 synced（其余仍 seed）
+        let (ver, entries) = inventory(&root);
+        assert_eq!(ver.as_deref(), Some("1.0.0"));
+        let crc = entries
+            .iter()
+            .find(|e| e.path == "algo/crc16.lua")
+            .expect("inventory 应含 crc16");
+        assert_eq!(crc.source, "synced");
+        assert_eq!(crc.ver.as_deref(), Some("1.0.0"));
+
+        // c) require("algo.crc16") 取同步文件版（非种子）——行为证明：给本地
+        //    _stdlib 文件追加种子没有的字段，新 VM require 应可见（文件优先）
+        let p = root.join("_stdlib/algo/crc16.lua");
+        let src = fs::read_to_string(&p).unwrap();
+        let patched = src.replacen(
+            "\nreturn M",
+            "\nM.e2e_synced_file = true -- e2e 注入：种子无此字段\nreturn M",
+            1,
+        );
+        assert_ne!(patched, src, "crc16.lua 应恰含一处 \\nreturn M 供注入");
+        fs::write(&p, patched).unwrap();
+        let cfg = parse_cfg(&json!({"script":"devA","endpoint":"x"})).unwrap();
+        let lua = new_vm(&cfg).unwrap();
+        let lctx = LoadCtx {
+            scripts_root: Arc::from(root.as_path()),
+            script_name: Arc::<str>::from("devA"),
+        };
+        load_main(&lua, &lctx).unwrap();
+        assert!(
+            lua.load("return crcm.e2e_synced_file == true")
+                .eval::<bool>()
+                .unwrap(),
+            "require 应读到 _stdlib/ 文件版（种子无 e2e_synced_file 字段）"
+        );
+        // 同步文件版行为完好：官方 selftest 向量仍过
+        assert!(
+            lua.load("return crcm.selftest()").eval::<bool>().unwrap(),
+            "同步下来的 crc16 应通过官方 selftest"
+        );
+
+        let _ = fs::remove_dir_all(&root);
     }
 }
