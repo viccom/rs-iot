@@ -171,6 +171,51 @@ async fn watcher_exits_on_cancel() {
     );
 }
 
+/// spike-1（设计 §9 R1）：call_async future 被 timeout drop 后，协程停在 await 点，
+/// 验证 VM 是否可继续用、脚本全局态是否"半途"。结论决定 T5 方案 a（接受半途态）/b（超时重建 VM）。
+#[tokio::test]
+async fn spike_timeout_drop_leaves_vm_usable() {
+    let mut c = super::config::parse_cfg(&json!({"script":"t","endpoint":"x"})).unwrap();
+    c.hook_instr_limit = 1_000_000;
+    let lua = super::engine::new_vm(&c).unwrap();
+    // 永不完成的宿主函数（模拟最慢的 await）。
+    // 注：create_async_function 要求 future Output=Result<R>，故 pending 单态化为 mlua::Result<()>。
+    lua.globals()
+        .set(
+            "hang",
+            lua.create_async_function(|_, _: mlua::Value| {
+                async move { std::future::pending::<mlua::Result<()>>().await }
+            })
+            .unwrap(),
+        )
+        .unwrap();
+    lua.load("t = {}; function work() t.a = 1; hang(); t.b = 2 end")
+        .exec()
+        .unwrap();
+    let f: mlua::Function = lua.globals().get("work").unwrap();
+    // 100ms 超时包裹 call_async → drop future
+    let r: Result<mlua::Value, _> = tokio::time::timeout(
+        std::time::Duration::from_millis(100),
+        f.call_async(mlua::Value::Nil),
+    )
+    .await
+    .map_err(|_| mlua::Error::RuntimeError("timeout".into()))
+    .and_then(|x| x);
+    assert!(r.is_err(), "应超时");
+    // 验证点 1：VM 仍可执行新代码
+    let v: i64 = lua.load("return 1 + 1").eval().unwrap();
+    assert_eq!(v, 2);
+    // 验证点 2：半途态可见（t.a 已写、t.b 未写）——记录实际值
+    let a: i64 = lua.load("return t.a").eval().unwrap();
+    let has_b: bool = lua.load("return t.b ~= nil").eval().unwrap();
+    // 验证点 3：work 可再次调用（协程未锁死 VM）——用短路径版本
+    lua.load("function work2() return 7 end").exec().unwrap();
+    let f2: mlua::Function = lua.globals().get("work2").unwrap();
+    let v2: i64 = f2.call_async(mlua::Value::Nil).await.unwrap();
+    assert_eq!(v2, 7);
+    println!("SPIKE1: a={a} has_b={has_b}"); // 预期 a=1, has_b=false → 半途态证实
+}
+
 async fn mock_lux() -> lux::EmbeddedClient {
     let cfg = crate::config::AppConfig {
         lux: crate::config::LuxConfig {

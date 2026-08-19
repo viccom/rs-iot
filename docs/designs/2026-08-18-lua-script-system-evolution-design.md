@@ -258,7 +258,7 @@ api_ver:   1
 
 现有：库裁剪（禁 io/os/debug/package）、指令 hook（死循环熔断）、内存限额（默认 32MB）。补充（Q3 定案，含附录 B 性能评估的修复项）：
 
-1. **单回调时长预算**：每次回调调用包 `tokio::timeout`，`callback_timeout_ms` 可配（默认 10s）；超限**跳过本轮 + stat 计数**，连续超限走既有 `fail_threshold` → degraded。超时后该次 call_async future 被 drop、协程停在 await 点——VM 保留但本次半途而废，依赖脚本幂等；连续超限触发 degraded 后由 supervisor 决定是否重建 VM（VM 状态残留语义见 §9 风险 R1）。
+1. **单回调时长预算**：每次回调调用包 `tokio::timeout`，`callback_timeout_ms` 可配（默认 10s）；超限**跳过本轮 + stat 计数**，连续超限走既有 `fail_threshold` → degraded。超时后该次 call_async future 被 drop、协程停在 await 点——VM 保留但本次半途而废，依赖脚本幂等；连续超限触发 degraded 后由 supervisor 决定是否重建 VM（VM 状态残留语义见 §9 风险 R1）。spike-1 实测（2026-08-19）：协程 await 中被 drop 后 VM 仍可执行新代码、全局半途态确定可见（t.a=1 已写、t.b 未写）、新回调可正常再调，VM 可复用且状态可预期，取方案 a（接受半途态 + 要求回调幂等）。
 2. **R2 频控**：每实例 token bucket（默认 20 次/s，能力卡声明），超限**向脚本返回错误** `nil, "rate limited"`（可感知可退避）。
 3. **超时宿主 clamp**：`ctx:request(frame, timeout_ms)` 与 `ctx:http_*(timeout)` 的脚本侧超时一律 `min(脚本值, 30s)`——脚本写错一个超大超时不再冻结实例事件循环（附录 B 冻结面②）。
 4. **hub send 防反压**：collect/set_value 的 `tx.send` 包 2s 超时，超限丢样 + 计数——控制面（stop/reload/cmd）永不被数据面反压冻结（附录 B 冻结面①）。
