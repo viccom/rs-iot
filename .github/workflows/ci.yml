@@ -93,6 +93,17 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libudev-dev
       - run: cargo doc --no-deps
 
+  docs:
+    # 文档体系校验：头部状态块/实施块字段/索引登记与状态对齐/相对链接有效性。
+    # 规则见 docs/conventions/documentation.md；不依赖 lux/rust，秒级完成。
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python scripts/check_docs.py
+
   audit:
     runs-on: ubuntu-latest
     # 信息性：传递依赖（rustls TLS 链，经 rumqttc/lux 引入）当前有已知 advisory

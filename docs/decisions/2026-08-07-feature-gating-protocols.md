@@ -1,7 +1,11 @@
 # 方案 B：内置协议 Cargo feature 裁剪 —— 评估与风险控制
 
-> **状态**：✅ 已实施（README 里程碑 M11，`--no-default-features --features "lua,modbus"` 等组合可编译 + 优雅降级，CI minimal job 守护）
+> **状态**：implemented（README 里程碑 M11，CI minimal job 守护）
 > **日期**：2026-08-07（评估）/ 2026-08-08（实施落地）
+> **实施**：2026-08-07 `2a9787a` 优雅降级集成测试 + CI minimal job；2026-08-17 `1f522e8` eip 纳入裁剪
+> **代码**：`Cargo.toml`（features 定义）、`src/plugin/registry.rs`（find_source 优雅降级）
+> **测试**：`tests/feature_gate_e2e.rs`、CI `minimal` job
+> **遗留**：无
 > **关联**：`docs/decisions/2026-08-07-plugin-extension-strategy.md`（上层策略，本方案是其第 6/7 节"现场裁剪"的具体落地）
 > **目标**：把 `opcua_client` / `modbus_client` / `s7_client` 三个南向协议插件改为可选 Cargo feature，实现"现场按需编译 + 系统依赖可选 + 二进制体积裁剪"，**零运行时风险、零行为破坏**。
 

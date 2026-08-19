@@ -1,5 +1,12 @@
 # 多系统 API Gateway 分层设计（gateway-core 泛化）
 
+> **状态**：accepted（定稿待实施）
+> **日期**：2026-08-18（定稿）
+> **实施**：未开始
+> **代码**：目标 `crates/gateway-core/`（新建通用引擎）+ `crates/rsiot-gateway/`（改薄组装）
+> **测试**：随实施建立（现有 gateway 单测迁移守护）
+> **遗留**：全部（workspace 拆 crate / 配置 v2 上游表 / ext 扩展边界）
+>
 > 2026-08-18 brainstorming 定稿。前置评审：当前 `crates/rsiot-gateway` 传输核心（SSE 裸透传/凭证注入/JWT 复用）质量良好，
 > 问题是角色漂移——"纯无状态反代"长成了 reasonix 配置面/文件面宿主，业务专属逻辑与通用引擎混在同一 crate。
 > 本文档是本次改造的唯一权威设计；与代码冲突时以代码为准并回改本文。

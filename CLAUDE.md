@@ -213,8 +213,9 @@ cargo build --no-default-features --features "lua,modbus,opcua"      # 选装部
 
 - **六类分域**：`docs/guides/`（怎么用/怎么开发）、`docs/reference/`（API/协议是什么）、`docs/conventions/`（必须遵守的约束）、`docs/decisions/`（ADR：为什么选 X）、`docs/designs/`（设计定稿）、`docs/ops/`（部署/现场/维护）。新文档先选域再落笔。
 - **命名**：活文档（指南/参考/规范/运维）用语义名 kebab-case；一次性文档（designs/decisions）用 `YYYY-MM-DD-<topic>[-design].md` 日期前缀。
-- **头部元数据**：新文档必须有 Status（draft/in-review/accepted/implemented/archived）+ 日期 + 类型。
-- **索引义务**：新增/移动/归档文档必须同步更新 `docs/README.md` 索引与本文件（项目地图）中的引用。
+- **头部元数据与实施块**：新文档必须有状态块；designs/decisions 用完整块（状态/日期/实施 commit/代码/测试/遗留）——`implemented`/`partially-implemented` 必填实施与代码字段，部分实施必列遗留。
+- **索引义务**：新增/移动/归档文档必须同步更新 `docs/README.md`（主题链路视图 + 分域索引）与本文件（项目地图）中的引用。
+- **校验**：改文档后跑 `python scripts/check_docs.py`（CI `docs` job 强制）——状态块/实施块/索引对齐/链接有效性，红了按报错修。
 - **归档**：过时文档 `git rm`（git 历史即归档），提交注明 `chore(docs): 归档…`；**归档/移动前必须清理全部引用**（CLAUDE.md、README.md、docs/README.md、源码 `//!`、examples、Cargo.toml 注释）。
 
 ## 安全边界

@@ -1,7 +1,11 @@
 # rs-iot Lua 脚本采集系统 设计文档
 
 > 日期：2026-08-06
-> 状态：已实施（luaClient M10 落地，随 [2026-08-18-lua-script-system-evolution-design.md](2026-08-18-lua-script-system-evolution-design.md) 演进）
+> **状态**：implemented（luaClient，README 里程碑 M10）
+> **实施**：2026-08-07 `a9e8e41` 骨架 → 2026-08-10 `9afb74b` 收尾（多设备/热加载/stat/三传输）
+> **代码**：`src/plugin/builtin/lua_client/`
+> **测试**：`tests/lua_*_e2e.rs`（11 个）+ `examples/lua-scripts/`
+> **遗留**：无（演进方向见 [2026-08-18-lua-script-system-evolution-design.md](2026-08-18-lua-script-system-evolution-design.md)）
 > 流程：brainstorming → 本 spec → writing-plans → 实现
 
 ## 1. 背景与目标

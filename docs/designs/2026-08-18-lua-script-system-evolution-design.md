@@ -2,7 +2,9 @@
 
 > 日期：2026-08-18
 > 版本：v0.1（设计草案，已含三轮调研依据，待逐章深化为需求规格书）
-> 状态：讨论中 —— 后续按「版本演进记录」迭代，Open Questions 为下一轮议程
+> **状态**：draft（讨论中）
+> **实施**：未开始（前置 [2026-08-06-lua-script-collector-design.md](2026-08-06-lua-script-collector-design.md) 已实施）
+> **遗留**：全部（Open Questions 为下一轮议程）
 > 流程：调研（mlua 生态 / FreeIOE / IIoT 趋势）→ 本 spec → 分章深化 → writing-plans → 分阶段实施
 > 前置：`2026-08-06-lua-script-collector-design.md`（luaClient 采集系统，已落地，本文是其演进）
 

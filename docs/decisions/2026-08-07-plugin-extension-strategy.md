@@ -1,8 +1,11 @@
 # 插件扩展策略评估：动态库 vs SDK crate vs sidecar
 
-> **状态**：评估完成 / 决策记录（ADR 性质）
-> **日期**：2026-08-07
-> **相关代码**：`src/plugin/traits.rs`、`src/plugin/registry.rs`、`src/plugin/instance.rs`、`src/host.rs`、`src/plugin/builtin/`
+> **状态**：implemented（决策已落地：sidecar + lua 路线，动态库/SDK crate 明确不做）
+> **日期**：2026-08-07（决策）
+> **实施**：2026-08-06 `7ef65a0` sidecarClient bridge + luaClient（[2026-08-06-lua-script-collector-design.md](../designs/2026-08-06-lua-script-collector-design.md)）+ 2026-08-07 `2a9787a` feature 裁剪
+> **代码**：`src/plugin/builtin/sidecar_client/`、`src/plugin/builtin/lua_client/`
+> **测试**：`tests/sidecar_e2e.rs`、`tests/lua_*_e2e.rs`
+> **遗留**：bridge TLS / 北向外部插件 / 批量导入 API（README v2 路线）
 > **相关文档**：`docs/reference/external-plugin-protocol.md`（sidecar 协议）、`docs/guides/lua-script-guide.md`（Lua 脚本）
 
 ## 1. 背景与诉求演进

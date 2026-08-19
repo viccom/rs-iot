@@ -31,33 +31,49 @@
 - **一次性文档**（designs / decisions，定稿后基本不改）：`YYYY-MM-DD-<topic>[-design].md` 日期前缀，如 `2026-08-17-eip-client-design.md`。日期 = 定稿日；版本迭代（v1→v2→v3）新开文件，旧版归档。
 - 禁止再使用无日期的 `plan-*.md` 平铺命名（2026-08-19 重组前的旧形态，已全部迁移）。
 
-## 3. 头部元数据
+## 3. 头部元数据与实施块
 
-每个文档标题下必须有状态块（blockquote 风格）：
+每个文档标题下必须有状态块（blockquote 风格）。**designs / decisions（一次性文档）用完整块**——实施块字段是"单看文档即知实施状态"的关键，也是 `scripts/check_docs.py` 的校验对象：
 
 ```markdown
-> **状态**：<状态>（一句话说明）
-> **日期**：YYYY-MM-DD（一次性文档必填；活文档可省）
-> **类型**：design / decision / guide / reference / convention / ops
+> **状态**：implemented / partially-implemented / accepted / in-review / draft（+ 一句话说明）
+> **日期**：YYYY-MM-DD（定稿）
+> **实施**：YYYY-MM-DD `commit-hash` 说明（→ `hash` 收尾）；未实施写"未开始"
+> **代码**：落地代码位置（`src/...` / `crates/...`）
+> **测试**：测试位置（`tests/...` / crate 内单测）
+> **遗留**：未实施部分；全部实施写"无"
 ```
 
-状态取值与流转：
+**guides / reference / conventions / ops（活文档）用简块**：
 
-| 状态 | 含义 | 适用 |
+```markdown
+> **状态**：活文档 / 有效 / implemented（+ 随什么演进/待什么核对的一句话）
+```
+
+状态取值与流转（designs / decisions 受控，scripts 校验）：
+
+| 状态 | 含义 | 实施块要求 |
 |---|---|---|
-| `draft` | 起草中，结论未定 | designs / decisions |
-| `in-review` | 待评审 | designs / decisions |
-| `accepted` | 定稿待实施 | designs / decisions |
-| `implemented` | 已落地代码 | designs / decisions（落地后**回写**此状态） |
-| `活文档` | 持续维护，随代码同步 | guides / reference / conventions / ops |
-| `有效` / `已废止` | 规范类生效 / 停用 | conventions |
-| `archived` | 过时归档（归档即 git rm，通常不再出现在仓库） | 全部 |
+| `draft` | 起草/讨论中，结论未定 | 实施写"未开始" |
+| `in-review` | 待评审 | 同上 |
+| `accepted` | 定稿待实施 | 同上 + **遗留**写"全部（…）" |
+| `partially-implemented` | 部分落地（最常见形态：分阶段设计走完第一阶段） | 必填实施/代码 + **遗留列明未实施部分** |
+| `implemented` | 已全部落地（落地后**回写**此状态 + 实施 commit） | 必填实施/代码；遗留写"无" |
+| `活文档` / `有效` / `已废止` | 活文档持续维护 / 规范生效、停用 | 不适用（简块） |
+| `archived` | 过时归档（git rm，不在仓库出现） | 不适用 |
+
+**实施凭证挖法**：`git log --format="%h %ad %s" --date=short --grep="<关键词>"` 或 `--diff-filter=A -- <代码路径>`。挖不到精确 commit 的用里程碑号（M10/P1#2）代替，但优先 commit——它可点击追溯。
 
 与代码冲突时以代码为准，并回改文档（既有约定，见 designs 文档）。
 
 ## 4. 索引义务
 
-`docs/README.md` 是文档体系的唯一索引。**新增、移动、改名、归档任何文档，必须同一次提交内更新索引**；同时检查 `CLAUDE.md`（项目地图引用了多篇文档）与根 `README.md` 是否需要同步。
+`docs/README.md` 是文档体系的唯一索引，含两个视图：
+
+- **主题链路视图**（表 1）：按功能主题串起 决策 → 设计 → 代码 → 测试 → 指南，每环带实施状态。这是团队成员"一眼看清哪些已实现/未实现、链路在哪"的入口。**新设计文档定稿或实施状态变化时，必须同 PR 更新对应主题行**；出现新主题（如新南向协议成体系）时加行。
+- **分域索引**（表 2+）：六个域的文件级清单，新增/移动/改名/归档必须同步。
+
+索引更新与 `CLAUDE.md`（项目地图）、根 `README.md` 的同步检查在同一次提交内完成；`scripts/check_docs.py` 会校验索引登记与状态标记对齐。
 
 ## 5. 引用规则
 
@@ -65,6 +81,7 @@
 - 禁止链接仓库外绝对路径（`E:\MyCode\...`）——外部资料以文字注明出处（如 eip 设计引用《RUST生态-工业协议研究报告》）。
 - **单一权威源**：一个主题一个权威文档，其他文档只链接不复制。协议细节以 `reference/external-plugin-protocol.md` 为准，指南不复述字段表。
 - 引用已归档文档时写明「已归档，git 历史 66945dd 可溯」式标注，不留死链接。
+- **文档 ↔ 代码双向链接**：设计文档头部 `**代码**` 字段指向落地代码（doc → code）；落地代码的模块头 `//!` doc 注释注明设计文档路径（code → doc，如 `src/io_trace.rs:3`）。新模块/子系统落地时必须补反向链接，让追溯双向可走。
 
 ## 6. 生命周期与归档
 
@@ -87,7 +104,18 @@
 
 验证：`rg '<旧路径>'` 全仓库零残留 + 索引链接逐一可解析。
 
-## 8. 提交规范
+## 8. 校验（scripts/check_docs.py）
+
+`python scripts/check_docs.py`（仓库根执行，CI `docs` job 强制）校验：
+
+1. docs/ 全部文档（索引除外）必有头部状态块；designs/decisions 状态词受控；
+2. `implemented` / `partially-implemented` 必填 **实施** + **代码** 字段，部分实施必列 **遗留**；
+3. designs/decisions 每篇在 `docs/README.md` 登记，且索引行状态标记与头部一致；
+4. 全部 git 跟踪 md 的相对链接目标存在。
+
+改文档后本地先跑一遍再提交；CI 红了按报错逐条修（规范 §3/§4/§5）。
+
+## 9. 提交规范
 
 沿用 Conventional Commits + 中文（与仓库一致）：
 

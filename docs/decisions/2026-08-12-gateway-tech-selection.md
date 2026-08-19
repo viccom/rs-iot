@@ -1,6 +1,12 @@
 # API Gateway 技术选型（v3 P0-B1）
 
-> **状态**：已定稿（结论已落地 rsiot-gateway B1）｜**日期**：2026-08-12｜**类型**：决策记录（技术选型调研）
+> **状态**：implemented（选型结论已落地 rsiot-gateway）
+> **日期**：2026-08-12（调研定稿）
+> **类型**：决策记录（技术选型调研）
+> **实施**：2026-08-12 `ad95a5b` crate 建立 → `c39a7c9` B1 收尾（SSE 裸透传 + cookie 注入 + health 聚合）
+> **代码**：`crates/rsiot-gateway/src/`（`proxy.rs`、`auth.rs`）
+> **测试**：`crates/rsiot-gateway` 内单测（B1-1 SSE 裸透传决定性验证）
+> **遗留**：无（分层演进另立 [2026-08-18-multi-system-gateway-design.md](../designs/2026-08-18-multi-system-gateway-design.md)）
 > 本文服务于 [`plan-ai-agent-integration-v3.md`](../designs/2026-08-11-ai-agent-integration-v3-design.md) §八 "Gateway 的技术选型（待 P0 调研）"。
 > 结论先行：**选 axum 0.8 + reqwest 手写反代**，印证 v3 §八的倾向并给出决定性证据。
 > 所有 API 签名均来自 axum 0.8 官方源 / Cargo 缓存源码 / context7 文档查询（已引证 file:line 或文档链接），不凭记忆。

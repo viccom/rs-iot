@@ -1,6 +1,11 @@
 # AI Agent 集成设计 v3：独立 API Gateway 程序
 
-> **状态**：已实施（rsiot-gateway；2026-08-18 起分层演进见 [2026-08-18-multi-system-gateway-design.md](2026-08-18-multi-system-gateway-design.md)）｜**日期**：2026-08-11｜**类型**：设计定稿
+> **状态**：implemented（rsiot-gateway B1）
+> **日期**：2026-08-11（定稿）
+> **实施**：2026-08-12 `ad95a5b` workspace 转换 + 双 crate 骨架 → `c39a7c9` B1 收尾（SSE 裸透传 + health 聚合）
+> **代码**：`crates/rsiot-gateway/`、`crates/rsiot-mcp/`
+> **测试**：`crates/rsiot-gateway` 内单测（25 个，B1-1 SSE 决定性验证）
+> **遗留**：gateway OS 服务化；分层演进另立 [2026-08-18-multi-system-gateway-design.md](2026-08-18-multi-system-gateway-design.md)
 > 本文是 `plan-ai-agent-integration.md`（v1，反代加进 rs-iot）的**演进方案**。v1/v2 已归档（git 历史 66945dd 可溯）。
 > v3 把"少破坏 rs-iot"推到极致——**rs-iot 真正零改动**，新写一个独立 Rust API Gateway 程序，
 > 统一反代 rs-iot + reasonix serve（+ 未来其他后端），前端只对接 gateway 一个入口。

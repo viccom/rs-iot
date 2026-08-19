@@ -1,7 +1,11 @@
 # 日志 ring buffer(P1 子系统 3)设计
 
-> **状态**:已实施（P1 子系统 3，`GET /api/v1/logs/recent` 已上线）。
-> **日期**:2026-08-10。
+> **状态**：implemented（P1 子系统 3）
+> **日期**：2026-08-10（定稿）
+> **实施**：2026-08-10 `9994056` ring buffer 基础 + `c5bd32f` REST 端点
+> **代码**：`src/log_ringbuffer.rs`、`src/api/routes_logs.rs`
+> **测试**：`tests/log_e2e.rs`
+> **遗留**：无
 > **范围**:tracing layer 截获最近 N 条日志到内存 ring buffer + `GET /api/v1/logs/recent` REST 快照。
 > **关联**:scenario-gap §3(故障定位诉求②"故障前日志")与 §8 #3(P1 可观测体系子系统 3);承接 `/metrics`(子系统 1)+ 报文 trace(子系统 2,target `io_trace` 经本层衔接)。
 > **不在范围**:`tail -f`/SSE 推送、错误聚合/限流、per-target buffer、落盘持久化。

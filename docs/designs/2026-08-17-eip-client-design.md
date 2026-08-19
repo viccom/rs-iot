@@ -1,5 +1,12 @@
 # eipClient 设计文档（EtherNet/IP 南向采集插件）
 
+> **状态**：implemented（协议链路 CI 覆盖；真机专项待验）
+> **日期**：2026-08-17（定稿）
+> **实施**：2026-08-17 `1f522e8`
+> **代码**：`src/plugin/builtin/eip_client/`
+> **测试**：`tests/eip_client_e2e.rs`（mock TCP EIP server）
+> **遗留**：真机专项（route path 多跳 / 拔网线重连 / 自定义 STRING / UDT，见本文 §六）
+>
 > 2026-08-17 brainstorming 定稿。依赖库选型结论见 `E:\MyCode\RUST生态-工业协议研究报告\rust-eip-ethernet-ip-library-research.md`：
 > `rust-ethernet-ip` 1.2.0（MIT，production-ready，真实 CompactLogix/ControlLogix 硬件验证）。
 > 本文档是实现的唯一权威设计；与代码冲突时以代码为准并回改本文。
