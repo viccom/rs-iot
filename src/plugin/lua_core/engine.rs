@@ -1,6 +1,6 @@
 //! Lua VM 创建：库裁剪 + 指令 hook + 内存限额（spec §9 三层护栏）。
 
-use crate::plugin::builtin::lua_client::config::LuaCfg;
+use crate::plugin::lua_core::config::LuaCfg;
 use mlua::{Error, HookTriggers, Lua, LuaOptions, StdLib};
 
 /// 创建一个沙箱化的 Lua 5.4 VM。
@@ -9,7 +9,7 @@ use mlua::{Error, HookTriggers, Lua, LuaOptions, StdLib};
 /// - 指令 hook：每 `hook_instr_limit` 条指令触发，回调返回 Err 中断死循环。
 /// - 内存限额：超 `mem_limit_mb` 触发 MemoryError。
 /// - catch_rust_panics(true)：Rust callback panic 转 RuntimeError。
-pub(super) fn new_vm(cfg: &LuaCfg) -> mlua::Result<Lua> {
+pub(crate) fn new_vm(cfg: &LuaCfg) -> mlua::Result<Lua> {
     let lua = Lua::new_with(
         StdLib::TABLE | StdLib::STRING | StdLib::MATH | StdLib::COROUTINE,
         LuaOptions::new().catch_rust_panics(true),
@@ -35,7 +35,7 @@ pub(super) fn new_vm(cfg: &LuaCfg) -> mlua::Result<Lua> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::plugin::builtin::lua_client::config::parse_cfg;
+    use crate::plugin::lua_core::config::parse_cfg;
     use serde_json::json;
 
     fn cfg() -> LuaCfg {

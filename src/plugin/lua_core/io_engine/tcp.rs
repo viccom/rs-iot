@@ -7,7 +7,7 @@ use super::IoBackend;
 /// spec §8 不变式：连接生命周期（connect/reconnect）由 IO task 管，Lua 只感知 request
 /// 成功/失败。重连频率受 collect period 天然限速（period=3s → 最多每 3s 重连一次），
 /// 故不在 request 内 sleep 退避（避免阻塞 IO task 串行处理）。
-pub(in crate::plugin::builtin::lua_client) struct TcpIo {
+pub(crate) struct TcpIo {
     /// 当前连接（None = 断连，下次 request 前 ensure_connected 重连）。
     stream: Option<tokio::net::TcpStream>,
     endpoint: String,
@@ -16,7 +16,7 @@ pub(in crate::plugin::builtin::lua_client) struct TcpIo {
 
 impl TcpIo {
     /// 懒连接构造：不立即连，首次 request 才连（spec §5.4「ensure io task connected」）。
-    pub(in crate::plugin::builtin::lua_client) fn new(endpoint: String, recv_idle_ms: u64) -> Self {
+    pub(crate) fn new(endpoint: String, recv_idle_ms: u64) -> Self {
         Self {
             stream: None,
             endpoint,

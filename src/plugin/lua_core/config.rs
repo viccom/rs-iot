@@ -7,7 +7,7 @@
 
 /// 传输模式（Plan 1 仅实现 tcp；serial/udp 框架预留，Task 7 接入）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum Transport {
+pub(crate) enum Transport {
     /// TCP 连接（`ip:port`）。
     Tcp,
     /// 串口直连（RS-485/RS-232）。
@@ -20,7 +20,7 @@ impl Transport {
     /// lua `ctx:transport()` / 日志用的字符串形式（与 `app_config.kind` 一致）。
     ///
     /// 脚本据此选帧格式（serial → PDU+CRC16、tcp → MBAP 头、udp → 裸 RTU/自定义）。
-    pub(super) fn as_str(&self) -> &'static str {
+    pub(crate) fn as_str(&self) -> &'static str {
         match self {
             Transport::Tcp => "tcp",
             Transport::Serial => "serial",
@@ -38,7 +38,7 @@ pub(super) enum RecvMode {
 
 /// 串口校验（对标 modbus_client `ParityKind`）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum Parity {
+pub(crate) enum Parity {
     /// 无校验。
     None,
     /// 偶校验。
@@ -49,7 +49,7 @@ pub(super) enum Parity {
 
 /// 串口流控（对标 modbus_client `FlowKind`）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum FlowControl {
+pub(crate) enum FlowControl {
     /// 无流控。
     None,
     /// 软件流控（XON/XOFF）。
@@ -61,40 +61,40 @@ pub(super) enum FlowControl {
 /// 从 `app_config` 解析的插件配置。
 #[allow(dead_code)]
 #[derive(Debug)]
-pub(super) struct LuaCfg {
-    pub(super) transport: Transport,
+pub(crate) struct LuaCfg {
+    pub(crate) transport: Transport,
     /// tcp/udp 的 `ip:port`（serial 时为空）。
-    pub(super) endpoint: String,
+    pub(crate) endpoint: String,
     /// serial 串口名。
-    pub(super) serial_port: Option<String>,
+    pub(crate) serial_port: Option<String>,
     /// serial 波特率（默认 9600）。
-    pub(super) baud_rate: u32,
+    pub(crate) baud_rate: u32,
     /// serial 数据位（5/6/7/8，默认 8）。
-    pub(super) data_bits: u8,
+    pub(crate) data_bits: u8,
     /// serial 校验（默认 None）。
-    pub(super) parity: Parity,
+    pub(crate) parity: Parity,
     /// serial 停止位（1/2，默认 1）。
-    pub(super) stop_bits: u8,
+    pub(crate) stop_bits: u8,
     /// serial 流控（默认 None）。
-    pub(super) flow_control: FlowControl,
-    pub(super) period: u64,
+    pub(crate) flow_control: FlowControl,
+    pub(crate) period: u64,
     /// ctx:request 默认超时（毫秒）。
     pub(super) timeout_ms: u64,
     pub(super) recv_mode: RecvMode,
-    pub(super) recv_idle_ms: u64,
+    pub(crate) recv_idle_ms: u64,
     pub(super) reconnect_secs: u64,
     /// VM 内存限额（MB）。
     pub(super) mem_limit_mb: usize,
     /// 指令 hook 阈值（spec §9.2）。
-    pub(super) hook_instr_limit: u32,
+    pub(crate) hook_instr_limit: u32,
     /// 连续 collect 失败 N 次标记 degraded（spec §9.6）。
-    pub(super) fail_threshold: u32,
+    pub(crate) fail_threshold: u32,
     /// 脚本目录名（→ scripts/<script>/main.lua）。
-    pub(super) script: String,
+    pub(crate) script: String,
 }
 
 /// 解析 `app_config`。tcp 默认；period=0 表示纯被动（仅 on_data，Plan 1 不用，保留）。
-pub(super) fn parse_cfg(app: &serde_json::Value) -> Result<LuaCfg, String> {
+pub(crate) fn parse_cfg(app: &serde_json::Value) -> Result<LuaCfg, String> {
     let script = app
         .get("script")
         .and_then(|v| v.as_str())

@@ -7,7 +7,7 @@ use super::IoBackend;
 /// UDP datagram 边界天然保帧（一 send 一 recv = 整包响应），无 tcp/serial 的 idle 累积。
 /// `request`：send frame → recv 一个 datagram（整包响应）。`recv_idle`：recv 被动 datagram。
 /// connected socket（bind 0.0.0.0:0 + connect endpoint），对标 modbus rtu_udp（spec §8）。
-pub(in crate::plugin::builtin::lua_client) struct UdpIo {
+pub(crate) struct UdpIo {
     /// 当前 socket（None = 未 connect/err，下次 request 前 ensure_connected 重 connect）。
     sock: Option<tokio::net::UdpSocket>,
     endpoint: String,
@@ -16,7 +16,7 @@ pub(in crate::plugin::builtin::lua_client) struct UdpIo {
 
 impl UdpIo {
     /// 构造（不立即 connect，首次 request 才 connect）。
-    pub(in crate::plugin::builtin::lua_client) fn new(endpoint: String, recv_idle_ms: u64) -> Self {
+    pub(crate) fn new(endpoint: String, recv_idle_ms: u64) -> Self {
         Self {
             sock: None,
             endpoint,

@@ -3,15 +3,8 @@
 //! 实例加载 `scripts/<name>/main.lua`，脚本定义 `collect(ctx)`/`on_write(ctx,cmd)`。
 //! 详见 `docs/designs/2026-08-06-lua-script-collector-design.md`。
 
-mod api;
-mod config;
-mod engine;
-mod hotload;
-mod io_engine;
-mod loader;
-mod script;
-
 use crate::host::HostContext;
+use crate::plugin::lua_core as core_;
 use crate::plugin::traits::Source;
 use crate::types::{CtlMessage, InstConfig, Sample, SampleValue};
 use async_trait::async_trait;
@@ -21,17 +14,17 @@ use std::collections::BTreeMap;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use config::parse_cfg;
-use io_engine::{spawn_io_task, IoBackend, SerialIo, TcpIo, UdpIo};
-use loader::SCRIPTS_ROOT;
-use script::{load_main, LoadCtx};
+use core_::config::parse_cfg;
+use core_::io_engine::{spawn_io_task, IoBackend, SerialIo, TcpIo, UdpIo};
+use core_::loader::SCRIPTS_ROOT;
+use core_::script::{load_main, LoadCtx};
 
 /// 运行时设备集（本实例实际上报过数据的 devid，含配置外上报）。
 ///
 /// 主循环（collect）与 ctx API（`set_value`/`set_values`）双出口写入，周期 flush
 /// 时经 `StatTracker::extra_insert("runtime_devices")` 落 lux stat:<inst>——前端
 /// "实例→实际采集设备"追溯的数据源。std Mutex：insert 瞬时无 await，无死锁面。
-pub(super) type RuntimeDevs = std::sync::Arc<std::sync::Mutex<std::collections::BTreeSet<String>>>;
+pub(crate) type RuntimeDevs = std::sync::Arc<std::sync::Mutex<std::collections::BTreeSet<String>>>;
 
 /// 把运行时设备集快照写进 tracker extra（每个 flush 点前调用，不留陈旧）。
 ///
@@ -91,7 +84,7 @@ impl Source for LuaClient {
         let scripts_root = std::path::Path::new(scripts_root).to_path_buf();
 
         // 2. 建 VM + 加载脚本。
-        let lua = match engine::new_vm(&cfg) {
+        let lua = match core_::engine::new_vm(&cfg) {
             Ok(l) => l,
             Err(e) => {
                 tracing::warn!("[luaClient] inst {} VM 创建失败：{e}", inst.inst_id);
@@ -109,8 +102,8 @@ impl Source for LuaClient {
 
         // 3. IO 引擎（按 transport 选 backend：tcp/serial/udp 三传输，spec §8）。
         let backend: Box<dyn IoBackend> = match cfg.transport {
-            config::Transport::Tcp => Box::new(TcpIo::new(cfg.endpoint.clone(), cfg.recv_idle_ms)),
-            config::Transport::Serial => Box::new(SerialIo::new(
+            core_::config::Transport::Tcp => Box::new(TcpIo::new(cfg.endpoint.clone(), cfg.recv_idle_ms)),
+            core_::config::Transport::Serial => Box::new(SerialIo::new(
                 cfg.serial_port.clone().unwrap_or_default(),
                 cfg.baud_rate,
                 cfg.data_bits,
@@ -119,7 +112,7 @@ impl Source for LuaClient {
                 cfg.flow_control,
                 cfg.recv_idle_ms,
             )),
-            config::Transport::Udp => Box::new(UdpIo::new(cfg.endpoint.clone(), cfg.recv_idle_ms)),
+            core_::config::Transport::Udp => Box::new(UdpIo::new(cfg.endpoint.clone(), cfg.recv_idle_ms)),
         };
         // IO 引擎 + on_data 被动帧 channel（IO task 无在飞 request 时收到的帧 → 主循环）。
         let (data_tx, mut data_rx) = mpsc::channel::<Vec<u8>>(64);
@@ -132,7 +125,7 @@ impl Source for LuaClient {
 
         // 4. 注册 ctx API（runtime_devs：L2 上报出口的设备记录，与 collect 出口共用）。
         let runtime_devs: RuntimeDevs = Default::default();
-        if let Err(e) = api::register(
+        if let Err(e) = core_::api::register(
             &lua,
             ctx.clone(),
             &inst,
@@ -158,7 +151,7 @@ impl Source for LuaClient {
         // notify watcher 监听 scripts/<name>/ 改动 → reload_tx（热加载，spec §5.3）。
         // watcher 随 token 终止（实例 stop 不泄漏线程）；见 hotload::spawn_watcher。
         let script_dir = scripts_root.join(cfg.script.as_str());
-        hotload::spawn_watcher(script_dir, reload_tx, token.clone());
+        core_::hotload::spawn_watcher(script_dir, reload_tx, token.clone());
         let period = std::time::Duration::from_secs(cfg.period.max(1));
         // jitter 相位：FNV-1a(inst_id) % period，多实例首次 tick 散布，削整点脉冲。
         let phase = std::time::Duration::from_millis(crate::plugin::ticker::phase_ms(
@@ -432,17 +425,17 @@ async fn call_on_data(lua: &mlua::Lua, frame: &[u8]) -> mlua::Result<()> {
 /// IO engine / ctx_host 复用（不随 VM 替换）。dry-run 跑 on_init（hook 验证不死循环）；
 /// collect dry-run 跳过（真 collect 在下 tick，失败 warn）。失败返回 Err（主循环回退旧 VM）。
 async fn reload_vm(
-    cfg: &config::LuaCfg,
+    cfg: &core_::config::LuaCfg,
     lctx: &LoadCtx,
     ctx_host: HostContext,
     inst: &InstConfig,
-    io: io_engine::IoEngine,
+    io: core_::io_engine::IoEngine,
     tx: mpsc::Sender<Sample>,
     runtime_devs: RuntimeDevs,
 ) -> mlua::Result<mlua::Lua> {
-    let lua = engine::new_vm(cfg)?;
+    let lua = core_::engine::new_vm(cfg)?;
     load_main(&lua, lctx)?;
-    api::register(
+    core_::api::register(
         &lua,
         ctx_host,
         inst,
@@ -460,7 +453,7 @@ async fn reload_vm(
 }
 
 /// mlua::Value → SampleValue（对标 transform/rhai.rs 的类型映射）。
-fn lua_value_to_sample(v: &mlua::Value) -> Option<SampleValue> {
+pub(crate) fn lua_value_to_sample(v: &mlua::Value) -> Option<SampleValue> {
     match v {
         mlua::Value::Integer(i) => Some(SampleValue::Int(*i)),
         mlua::Value::Number(n) => Some(SampleValue::Float(*n)),
@@ -474,7 +467,7 @@ fn lua_value_to_sample(v: &mlua::Value) -> Option<SampleValue> {
 ///
 /// 文件读失败返回 `"unknown"`（不阻塞启动；`load_main` 会报真正的加载错误）。
 fn script_version(scripts_root: &std::path::Path, name: &str) -> String {
-    let path = loader::main_lua_path(scripts_root, name);
+    let path = core_::loader::main_lua_path(scripts_root, name);
     match std::fs::read(&path) {
         Ok(bytes) => {
             let mut h = sha2::Sha256::new();

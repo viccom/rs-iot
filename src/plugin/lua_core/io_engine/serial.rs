@@ -9,7 +9,7 @@ use tokio_serial::SerialPortBuilderExt;
 /// 对标 `TcpIo`（spec §8 不变式：连接生命周期由 IO task 管）。serial 无"对端关闭"，
 /// read/write err（设备拔插/线缆）→ 置 None，下次 request 重 open（reopen 失败报错）。
 /// read 用 idle 累积成帧（同 tcp，串口流式）；recv_idle 读被动帧。
-pub(in crate::plugin::builtin::lua_client) struct SerialIo {
+pub(crate) struct SerialIo {
     /// 当前串口流（None = 未 open/err，下次 request 前 ensure_connected 重 open）。
     stream: Option<tokio_serial::SerialStream>,
     port: String,
@@ -23,7 +23,7 @@ pub(in crate::plugin::builtin::lua_client) struct SerialIo {
 
 impl SerialIo {
     /// 构造（不立即 open，首次 request 才 open）。
-    pub(in crate::plugin::builtin::lua_client) fn new(
+    pub(crate) fn new(
         port: String,
         baud_rate: u32,
         data_bits: u8,

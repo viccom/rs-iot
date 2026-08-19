@@ -21,7 +21,7 @@ use tokio_util::sync::CancellationToken;
 ///
 /// `Debouncer<RecommendedWatcher>: Send` 已核实（notify-debouncer-mini 0.7 auto trait），
 /// 可 `move` 进要求 `Future: Send` 的 `tokio::spawn` task。
-pub(super) fn spawn_watcher(
+pub(crate) fn spawn_watcher(
     script_dir: PathBuf,
     reload_tx: mpsc::Sender<()>,
     token: CancellationToken,

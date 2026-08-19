@@ -3,22 +3,22 @@
 //! 沙箱 `new_with` 未装 package 库（require 本就不可用），这里手动注入一个受控
 //! require 全局函数，路径限定在脚本目录的 lib/ 下，防穿越逃逸。
 
-use crate::plugin::builtin::lua_client::loader;
+use crate::plugin::lua_core::loader;
 use mlua::Lua;
 use std::path::Path;
 use std::sync::Arc;
 
 /// 加载上下文：脚本根 + 脚本名（供 require 闭包解析模块路径）。
 #[derive(Clone)]
-pub(super) struct LoadCtx {
+pub(crate) struct LoadCtx {
     /// 脚本根目录（`scripts`）。
-    pub(super) scripts_root: Arc<Path>,
+    pub(crate) scripts_root: Arc<Path>,
     /// 脚本目录名（如 `devA`）。
-    pub(super) script_name: Arc<str>,
+    pub(crate) script_name: Arc<str>,
 }
 
 /// 在 `lua` 上注入受控 require（限定 `scripts/<name>/lib/`）并加载 main.lua 入口。
-pub(super) fn load_main(lua: &Lua, lctx: &LoadCtx) -> mlua::Result<()> {
+pub(crate) fn load_main(lua: &Lua, lctx: &LoadCtx) -> mlua::Result<()> {
     let lctx2 = lctx.clone();
     let require_fn = lua.create_function(move |lua, req: String| -> mlua::Result<()> {
         let lctx = lctx2.clone();
@@ -48,8 +48,8 @@ pub(super) fn load_main(lua: &Lua, lctx: &LoadCtx) -> mlua::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::plugin::builtin::lua_client::config::parse_cfg;
-    use crate::plugin::builtin::lua_client::engine::new_vm;
+    use crate::plugin::lua_core::config::parse_cfg;
+    use crate::plugin::lua_core::engine::new_vm;
     use serde_json::json;
     use std::fs;
 

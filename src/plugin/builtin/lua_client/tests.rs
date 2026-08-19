@@ -157,7 +157,7 @@ async fn watcher_exits_on_cancel() {
     // 使 reload_rx 收到 Some(()) 而非期望的 None（task 退出 → reload_tx drop）。
     let dir = std::env::temp_dir().join(format!("lua-watcher-{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("mkdir");
-    super::hotload::spawn_watcher(dir.clone(), reload_tx, token.clone());
+    crate::plugin::lua_core::hotload::spawn_watcher(dir.clone(), reload_tx, token.clone());
     // 等 watcher task 启动（debouncer 创建 + watch 注册）。
     tokio::time::sleep(Duration::from_millis(200)).await;
     token.cancel();
@@ -175,9 +175,9 @@ async fn watcher_exits_on_cancel() {
 /// 验证 VM 是否可继续用、脚本全局态是否"半途"。结论决定 T5 方案 a（接受半途态）/b（超时重建 VM）。
 #[tokio::test]
 async fn spike_timeout_drop_leaves_vm_usable() {
-    let mut c = super::config::parse_cfg(&json!({"script":"t","endpoint":"x"})).unwrap();
+    let mut c = crate::plugin::lua_core::config::parse_cfg(&json!({"script":"t","endpoint":"x"})).unwrap();
     c.hook_instr_limit = 1_000_000;
-    let lua = super::engine::new_vm(&c).unwrap();
+    let lua = crate::plugin::lua_core::engine::new_vm(&c).unwrap();
     // 永不完成的宿主函数（模拟最慢的 await）。
     // 注：create_async_function 要求 future Output=Result<R>，故 pending 单态化为 mlua::Result<()>。
     lua.globals()

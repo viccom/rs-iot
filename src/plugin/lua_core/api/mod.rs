@@ -14,8 +14,9 @@ mod tests;
 mod http;
 
 use crate::host::HostContext;
-use crate::plugin::builtin::lua_client::io_engine::IoEngine;
+use crate::plugin::builtin::lua_client::lua_value_to_sample;
 use crate::plugin::builtin::lua_client::RuntimeDevs;
+use crate::plugin::lua_core::io_engine::IoEngine;
 use crate::types::{CtlMessage, InstConfig, InstId, Sample, SampleValue};
 use mlua::{Lua, LuaSerdeExt, LuaString, Value};
 use tokio::sync::mpsc;
@@ -75,7 +76,7 @@ async fn push_sample(
 /// （L2/L4 读写）+ `ctl_registry`（L3 路由）。`transport` 为底层链路类型字符串
 ///（`cfg.transport.as_str()`，"tcp"/"serial"/"udp"），供 `ctx:transport()` 暴露给脚本
 ///（脚本据此选帧格式：serial 加 CRC16、tcp 加 MBAP 头）。
-pub(super) fn register(
+pub(crate) fn register(
     lua: &Lua,
     ctx_host: HostContext,
     inst: &InstConfig,
@@ -205,7 +206,7 @@ pub(super) fn register(
             async move {
                 let devid = devid.to_string_lossy().to_string();
                 let tag = tag.to_string_lossy().to_string();
-                let sv = super::lua_value_to_sample(&v)
+                let sv = lua_value_to_sample(&v)
                     .ok_or_else(|| mlua::Error::RuntimeError("set_value: 不支持的值类型".into()))?;
                 let mut values = std::collections::BTreeMap::new();
                 values.insert(tag, sv);
@@ -232,7 +233,7 @@ pub(super) fn register(
                 let mut values = std::collections::BTreeMap::new();
                 for pair in table.pairs::<String, Value>() {
                     let (k, v) = pair?;
-                    if let Some(sv) = super::lua_value_to_sample(&v) {
+                    if let Some(sv) = lua_value_to_sample(&v) {
                         values.insert(k, sv);
                     }
                 }

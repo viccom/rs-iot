@@ -5,7 +5,7 @@
 
 use super::*;
 use crate::host::{BridgeRegistry, CtlRegistry, HostContext};
-use crate::plugin::builtin::lua_client::io_engine::{spawn_io_task, IoEngine, MockIoTask};
+use crate::plugin::lua_core::io_engine::{spawn_io_task, IoEngine, MockIoTask};
 use crate::types::{AppType, DeviceSpec, HostKind, InstConfig, PluginName};
 use tokio_util::sync::CancellationToken;
 

@@ -5,12 +5,12 @@ use std::path::{Path, PathBuf};
 /// 脚本根目录（相对于进程工作目录）。生产可由 app_config 覆盖，Plan 1 固定。
 ///
 /// `run` 用此常量构造默认 `LoadCtx::scripts_root`（可被 `app_config.scripts_root` 覆盖）。
-pub(super) const SCRIPTS_ROOT: &str = "scripts";
+pub(crate) const SCRIPTS_ROOT: &str = "scripts";
 
 /// 解析脚本入口路径：scripts/<name>/main.lua。
 ///
 /// `name` 已在 `config::parse_cfg` 校验为 [A-Za-z0-9_-]，这里再做一次防御性断言。
-pub(super) fn main_lua_path(scripts_root: &Path, name: &str) -> PathBuf {
+pub(crate) fn main_lua_path(scripts_root: &Path, name: &str) -> PathBuf {
     debug_assert!(
         name.chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'),

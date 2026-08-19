@@ -15,9 +15,9 @@ use tokio::time::timeout;
 #[allow(unused_imports)]
 // MockIoTask：luaClient run 不再用（Task 4 去占位）；io_engine/api tests 用，dual-build
 pub(super) use mock::MockIoTask;
-pub(super) use serial::SerialIo;
-pub(super) use tcp::TcpIo;
-pub(super) use udp::UdpIo;
+pub(crate) use serial::SerialIo;
+pub(crate) use tcp::TcpIo;
+pub(crate) use udp::UdpIo;
 
 /// 一次 request：帧字节 + 回执通道。
 pub(super) struct IoRequest {
@@ -27,7 +27,7 @@ pub(super) struct IoRequest {
 
 /// IO 后端 trait：IO task 持有一个，处理 request + 被动帧（on_data）。
 #[async_trait::async_trait]
-pub(super) trait IoBackend: Send + 'static {
+pub(crate) trait IoBackend: Send + 'static {
     /// 处理一次 request：发 frame、收响应、返回字节（或 Err）。
     async fn request(&mut self, frame: &[u8]) -> mlua::Result<Vec<u8>>;
 
@@ -44,7 +44,7 @@ pub(super) trait IoBackend: Send + 'static {
 
 /// IO 引擎句柄：Lua 侧通过它发 request（经 channel 送 IO task）。
 #[derive(Clone)]
-pub(super) struct IoEngine {
+pub(crate) struct IoEngine {
     tx: mpsc::Sender<IoRequest>,
 }
 
@@ -72,7 +72,7 @@ impl IoEngine {
 /// 启动 IO task（独占 backend）。`on_data_tx` 接被动帧（无在飞 request 时 recv_idle 收到）。
 /// 返回 IoEngine 句柄（Lua 侧 request 用）。`inst_id` + `trace_registry` 用于报文 trace
 /// （request TX/RX + recv_idle 被动 RX 三点 dump；trace 关闭时 dump 快速路径跳过）。
-pub(super) fn spawn_io_task(
+pub(crate) fn spawn_io_task(
     mut backend: Box<dyn IoBackend>,
     on_data_tx: mpsc::Sender<Vec<u8>>,
     inst_id: String,
