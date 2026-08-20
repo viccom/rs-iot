@@ -7,23 +7,20 @@
 
 /// mqtt-north 实例配置（`app_config` 解析产物）。
 ///
-/// struct 级 `#[allow(dead_code)]`（对标 `config::LuaCfg` 先例）：`subscribe`/
-/// `password`/`callback_timeout_ms` 等的运行时消费方是 T7 连接序列与回调契约，
-/// 本 task（T6）骨架只消费组装 VM 所需子集；`secrets` 由 register 期
-/// `ctx:secret_get` 经 `app_config` 原文消费（T5 接线，字段保留契约可见性）。
-#[allow(dead_code)]
+/// 连接序列与回调契约（T7）已消费全部连接/批量字段；`secrets` 例外——register 期
+/// `ctx:secret_get` 经 `app_config` 原文消费（T5 接线），本字段仅保留契约可见性。
 #[derive(Debug)]
 pub(crate) struct NorthCfg {
     /// 脚本目录名（→ `scripts/<script>/main.lua`，与 collector 同校验规则）。
     pub(crate) script: String,
-    /// broker 主机（T7 连接序列消费；本 task 校验非空）。
+    /// broker 主机（连接序列消费；parse 校验非空）。
     pub(crate) host: String,
     /// broker 端口（默认 1883）。
     pub(crate) port: u16,
     /// 用户名（可选）。
     pub(crate) username: Option<String>,
-    /// 密码（可选；支持 `secret:<ref>` 引用——运行前经 lux secrets 表解析，
-    /// 解析点在 T7 连接序列，[`NorthCfg::resolve_password`] 为解析框架）。
+    /// 密码（可选；支持 `secret:<ref>` 引用——连接序列经
+    /// [`super::contract::resolve_password_opt`] 解析 lux secrets 表）。
     pub(crate) password: Option<String>,
     /// MQTT client id（缺省 `hwid-<inst_id>`——缺省值运行期才知道，见
     /// [`NorthCfg::client_id_or_default`]）。
@@ -34,11 +31,13 @@ pub(crate) struct NorthCfg {
     pub(crate) batch_max_secs: u64,
     /// 收拢周期秒（默认 5）。
     pub(crate) period: u64,
-    /// down() 订阅 topic 列表（默认空；T7 连接序列消费）。
+    /// down() 订阅 topic 列表（默认空；ConnAck 后订阅）。
     pub(crate) subscribe: Vec<String>,
-    /// secret 授权清单（R3；register 期 `ctx:secret_get` 消费——T5 已接线）。
+    /// secret 授权清单（R3；register 期 `ctx:secret_get` 消费的是 `app_config`
+    /// 原文——本字段无运行时读者，保留契约可见性与 parse 校验）。
+    #[allow(dead_code)]
     pub(crate) secrets: Vec<String>,
-    /// 单回调时长预算毫秒（Q3/§4.5-1，照 lua_client 缺省 10s；T7 auth/up 消费）。
+    /// 单回调时长预算毫秒（Q3/§4.5-1，照 lua_client 缺省 10s；auth/up/down 等回调消费）。
     pub(crate) callback_timeout_ms: u64,
     /// VM 内存限额 MB（沙箱参数，照 collector 缺省 32）。
     pub(crate) mem_limit_mb: usize,
@@ -153,38 +152,11 @@ impl NorthCfg {
             .unwrap_or_else(|| format!("{hwid}-{inst_id}"))
     }
 
-    /// 密码解析框架（T7 连接序列接线；T6 只立框架 + 单测）：
-    /// - 未配置 → `Ok(None)`；
-    /// - 字面值 → 原样（`secret:` 前缀是保留引用形态——见下）；
-    /// - `secret:<ref>` 引用 → 与 `ctx:secret_get` 同规则校验 ref 后读 lux
-    ///   secrets 表：读到 → 明文；在引用但 lux 未写 → `Ok(None)`（连接序列按
-    ///   认证失败处理，不静默改用无密码连接）；lux 错误 / ref 非法 → `Err`。
-    ///
-    /// 注意：north 的 `secret:<ref>` 引用**不受**实例 `secrets` 授权清单约束
-    ///（清单管脚本侧 `ctx:secret_get`；password 引用是宿主侧连接配置，由
-    /// 管理员写进 app_config 即视为授权）。
-    #[allow(dead_code)] // T6 框架 + 单测；T7 连接序列接线
-    pub(crate) async fn resolve_password(
-        &self,
-        lux: &lux::EmbeddedClient,
-    ) -> Result<Option<String>, String> {
-        let Some(p) = &self.password else {
-            return Ok(None);
-        };
-        let Some(r) = p.strip_prefix(crate::db::secrets::REF_PREFIX) else {
-            return Ok(Some(p.clone()));
-        };
-        let full = format!("{}{r}", crate::db::secrets::REF_PREFIX);
-        crate::db::secrets::validate_ref(&full).map_err(|e| e.to_string())?;
-        crate::db::secrets::get(lux, &full)
-            .await
-            .map_err(|e| format!("password secret 读取失败：{e}"))
-    }
-
-    /// cfg 全局表数据（globals.cfg / T7 `auth(cfg)` 参数，Q5「宿主另注入全局
-    /// cfg 表」）：脚本业务相关的有效配置子集（client_id 缺省已物化；沙箱参数/
+    /// cfg 全局表数据（globals.cfg / `auth(cfg)` 参数，Q5「宿主另注入全局 cfg
+    /// 表」）：脚本业务相关的有效配置子集（client_id 缺省已物化；沙箱参数/
     /// 授权清单等宿主内部项不暴露）。password 保持原始形态——`secret:` 引用
-    /// 在 T7 连接前一刻才解析（解析后明文不长期驻留 VM globals）。
+    /// 在连接前一刻经 contract::resolve_password_opt 解析（解析后明文不长期驻留
+    /// VM globals）。
     pub(crate) fn to_script_cfg(&self, hwid: &str, inst_id: &str) -> serde_json::Value {
         serde_json::json!({
             "script": self.script,
@@ -284,7 +256,7 @@ mod tests {
         assert_eq!(cfg.client_id_or_default("hw-1", "north-1"), "fixed");
     }
 
-    /// cfg 全局表数据：有效子集 + client_id 物化 + password 原始形态（T7 才解析）。
+    /// cfg 全局表数据：有效子集 + client_id 物化 + password 原始形态（连接前才解析）。
     #[test]
     fn to_script_cfg_shape() {
         let cfg = parse_north_cfg(&json!({
@@ -295,70 +267,12 @@ mod tests {
         assert_eq!(v["host"], "127.0.0.1");
         assert_eq!(v["port"], 1883);
         assert_eq!(v["client_id"], "hw-9-north-9", "缺省已物化");
-        assert_eq!(v["password"], "secret:k1", "引用原样保留（T7 连接前解析）");
+        assert_eq!(v["password"], "secret:k1", "引用原样保留（连接前解析）");
         assert_eq!(v["batch_max_count"], 50);
         assert_eq!(v["batch_max_secs"], 1);
         assert!(
             v.get("secrets").is_none() && v.get("callback_timeout_ms").is_none(),
             "宿主内部项（授权清单/沙箱参数）不进脚本 cfg"
         );
-    }
-
-    /// password 解析框架（T7 接线）：字面值原样 / 引用读 lux / 未写 → None /
-    /// 非法 ref → Err。需真实 lux（secrets 表在 lux Hash）。
-    #[tokio::test]
-    async fn resolve_password_framework() {
-        let data_dir = std::env::temp_dir()
-            .join(format!("lua-north-pw-{}", std::process::id()))
-            .to_str()
-            .unwrap()
-            .to_string();
-        let cfg_lux = crate::config::AppConfig {
-            lux: crate::config::LuxConfig {
-                port: 0,
-                data_dir: data_dir.clone(),
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        let handle = lux::run_with_config(crate::db::build_lux_config(&cfg_lux))
-            .await
-            .expect("lux");
-        let client = handle.client();
-
-        // 未配置 → None。
-        let cfg = parse_north_cfg(&json!({"script":"s","host":"h"})).unwrap();
-        assert_eq!(cfg.resolve_password(&client).await.unwrap(), None);
-
-        // 字面值 → 原样。
-        let cfg = parse_north_cfg(&json!({"script":"s","host":"h","password":"plain"})).unwrap();
-        assert_eq!(
-            cfg.resolve_password(&client).await.unwrap(),
-            Some("plain".into())
-        );
-
-        // 引用且已写 → 明文。
-        crate::db::secrets::set(&client, "secret:broker_pw", "real-pw")
-            .await
-            .expect("预写 secret");
-        let cfg = parse_north_cfg(&json!({"script":"s","host":"h","password":"secret:broker_pw"}))
-            .unwrap();
-        assert_eq!(
-            cfg.resolve_password(&client).await.unwrap(),
-            Some("real-pw".into())
-        );
-
-        // 引用但未写 → Ok(None)（连接序列按认证失败处理，不静默无密码）。
-        let cfg =
-            parse_north_cfg(&json!({"script":"s","host":"h","password":"secret:absent"})).unwrap();
-        assert_eq!(cfg.resolve_password(&client).await.unwrap(), None);
-
-        // 非法 ref（大写）→ Err（与 ctx:secret_get 同规则）。
-        let cfg =
-            parse_north_cfg(&json!({"script":"s","host":"h","password":"secret:Bad_Ref"})).unwrap();
-        assert!(cfg.resolve_password(&client).await.is_err());
-
-        let _ = crate::db::shutdown_lux(handle).await;
-        let _ = std::fs::remove_dir_all(&data_dir);
     }
 }
