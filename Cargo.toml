@@ -123,6 +123,11 @@ ed25519-dalek = { version = "2", default-features = false, features = ["std"], o
 # tokio test-util（start_paused 虚拟时钟）：护栏超时类测试加速（如 lua send 2s 背压
 # 丢样），仅测试构建启用 feature，release 产物不含。
 tokio = { version = "1", features = ["test-util"] }
+# 集成测试（e2e_modbus_full_e2e 等）直接用 reqwest 打 REST——lib 侧 reqwest 是
+# lua-http optional 依赖，裁剪组合（--no-default-features --features lua）下若无
+# dev-dep 兜底，测试目标编译失败（CI minimal job 存量红，2026-08-20 修复）。
+# dev-deps 只进测试构建，不影响 release feature 面；lua-http 开启时与 lib 依赖同源合并。
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 
 [features]
 default = ["transform", "lua", "lua-http", "opcua", "modbus", "s7", "eip"]

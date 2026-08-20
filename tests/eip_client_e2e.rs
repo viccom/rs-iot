@@ -8,6 +8,7 @@
 //! ① 多 devid 批量采集入库（read_tags_batch 一次往返，跨 dev 分组）
 //! ② 写命令闭环（send_ctl → WriteTag 帧 → mock tag 表更新 → 下轮采集值变化）
 //! ③ string tag 独立路径（read_string_tag，标准 STRING handle 0x0FCE）。
+#![cfg(feature = "eip")] // 整文件依赖 eipClient 插件：裁剪组合下跳过（CI minimal 组合回归保护）
 
 mod common;
 

@@ -8,6 +8,7 @@
 //! ④ 旧单 slave 配置兼容（devices 无 slave_id，回退 app_config.slave_id）。
 //!
 //! 编排照搬 `tests/sidecar_e2e.rs` / `tests/dataflow.rs`（已验证可用）。
+#![cfg(feature = "modbus")] // 整文件依赖 modbusClient：裁剪组合（CI minimal）下跳过
 
 mod common;
 

@@ -23,8 +23,10 @@
 
 mod common;
 
+#[cfg(feature = "modbus")]
 use rs_iot::api::AppState;
 use rs_iot::host::{BridgeRegistry, CtlRegistry, HostContext};
+#[cfg(feature = "modbus")] // 顶层导入仅 modbus 编排 helper 用；lua 测试在自己函数内局部导入
 use rs_iot::plugin::instance::InstanceManager;
 use rs_iot::types::{
     AppType, ChildSpec, DeviceSpec, HostKind, Hwid, InstConfig, PluginName, Sample,
@@ -39,6 +41,7 @@ use tokio_util::sync::CancellationToken;
 
 /// 全局 COM3 互斥：物理串口对，同进程内不能并行打开 COM3。
 /// cargo test 默认多线程运行多测试函数，故全局锁保护。
+#[cfg(feature = "modbus")] // 仅 modbus RTU 串口测试使用（ignored，需真机）
 static COM3_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// 构造一个 device spec：devid + slave_id + 点位列表 `[(label, addr)]`。
@@ -70,6 +73,7 @@ fn mk_dev(devid: &str, slave_id: u8, points: Vec<(&str, &str)>) -> DeviceSpec {
 /// - unit 1 F=04 (input)
 /// - unit 2 F=03 (holding)
 /// - unit 3 F=01 (coil)
+#[cfg(feature = "modbus")] // 依赖 modbusClient 插件（裁剪组合下编译保留、运行不可达）
 async fn collect_via_serial(
     inst_id: &str,
     devices: Vec<DeviceSpec>,
@@ -166,6 +170,7 @@ async fn collect_via_serial(
 /// （3 slave：unit1/FC04 input、unit2/FC03 holding、unit3/FC01 coil）。
 /// **CI 不跑**（`#[ignore]`）——CLAUDE.md 约定现场测试依赖真机，CI 守协议正确性、
 /// 现场守物理与时序正确性。手动跑：`cargo test --test e2e_modbus_full_e2e modbus_rtu_serial -- --ignored`。
+#[cfg(feature = "modbus")]
 #[tokio::test]
 #[ignore]
 async fn modbus_rtu_serial_com2_collects_3_slaves_multi_fc() {
@@ -222,6 +227,7 @@ async fn modbus_rtu_serial_com2_collects_3_slaves_multi_fc() {
 /// Mock TCP modbus server：MBAP 头，路由 unit→slave_data。
 /// - unit 1 F=04 → i16 [1010, 1020, 1030, 1040]
 /// - unit 2 F=03 → f32 ABCD [12.5, 25.0, 37.5, 50.0]
+#[cfg(feature = "modbus")]
 async fn spawn_mock_tcp_server() -> (u16, tokio::task::JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
@@ -237,6 +243,7 @@ async fn spawn_mock_tcp_server() -> (u16, tokio::task::JoinHandle<()>) {
     (port, handle)
 }
 
+#[cfg(feature = "modbus")]
 async fn handle_conn(mut sock: TcpStream) {
     let mut hdr = [0u8; 7];
     loop {
@@ -292,6 +299,7 @@ async fn handle_conn(mut sock: TcpStream) {
     }
 }
 
+#[cfg(feature = "modbus")] // 同上：modbusClient 专属编排
 async fn collect_via_tcp(
     inst_id: &str,
     endpoint: String,
@@ -359,6 +367,7 @@ async fn collect_via_tcp(
     got
 }
 
+#[cfg(feature = "modbus")]
 #[tokio::test]
 async fn modbus_tcp_2_slaves_mixed_types() {
     let (port, _server) = spawn_mock_tcp_server().await;
@@ -558,6 +567,7 @@ end
 // ============================================================================
 
 /// 启 axum（含 metrics + logs + trace routes），用 oneshot 测客户端 + JWT 直连。
+#[cfg(feature = "modbus")]
 async fn spawn_axum(state: AppState) -> (String, tokio::task::JoinHandle<()>) {
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
@@ -590,6 +600,7 @@ async fn spawn_axum(state: AppState) -> (String, tokio::task::JoinHandle<()>) {
     (base_url, handle)
 }
 
+#[cfg(feature = "modbus")]
 fn make_jwt(secret: &str, username: &str, ttl_secs: u64) -> String {
     use jsonwebtoken::{encode, EncodingKey, Header};
     let exp = (chrono::Utc::now().timestamp() as u64).saturating_add(ttl_secs);
@@ -605,6 +616,7 @@ fn make_jwt(secret: &str, username: &str, ttl_secs: u64) -> String {
     .unwrap()
 }
 
+#[cfg(feature = "modbus")]
 #[tokio::test]
 async fn p1_three_subsystems_metrics_logs_trace() {
     let data_dir = common::test_data_dir("e2e-p1-subsystems");
