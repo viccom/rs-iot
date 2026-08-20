@@ -160,12 +160,13 @@ impl Source for LuaClient {
         // dropped_frames：IO task 侧满通道丢帧计数（附录 B P3，flush 落 stat）。
         let (data_tx, mut data_rx) = mpsc::channel::<Vec<u8>>(64);
         let dropped_frames: std::sync::Arc<std::sync::atomic::AtomicU64> = Default::default();
-        let io_engine = spawn_io_task(
+        let (io_engine, io_join) = spawn_io_task(
             backend,
             data_tx,
             inst.inst_id.to_string(),
             ctx.trace_registry.clone(),
             dropped_frames.clone(),
+            token.clone(),
         );
 
         // 4. 注册 ctx API（runtime_devs：L2 上报出口的设备记录，与 collect 出口共用；
@@ -435,6 +436,9 @@ impl Source for LuaClient {
 
         // 退出标记 stopped（spec §13 status）。runtime_devices 保留最后一次运行的
         // 设备清单（停止后仍可追溯"它上次采了什么"，诊断价值）。
+        // IO task 双保险退出（现场实测 2026-08-20：backend wedged 时句柄不释放）：
+        // token 分支覆盖 select 层，abort 兜底 backend 内部不可取消的卡死。
+        io_join.abort();
         tracker.set_status("stopped");
         sync_runtime_devs(&mut tracker, &runtime_devs);
         sync_dropped_samples(&mut tracker, &dropped, &dropped_frames);

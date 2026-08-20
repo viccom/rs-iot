@@ -436,7 +436,7 @@ async fn reload_vm_rejects_bad_manifest() {
         script_name: std::sync::Arc::<str>::from("devM"),
     };
     let (data_tx, _data_rx) = mpsc::channel::<Vec<u8>>(1);
-    let io = crate::plugin::lua_core::io_engine::spawn_io_task(
+    let (io, _io_join) = crate::plugin::lua_core::io_engine::spawn_io_task(
         Box::new(crate::plugin::lua_core::io_engine::TcpIo::new(
             "127.0.0.1:1".into(),
             cfg.recv_idle_ms,
@@ -445,6 +445,7 @@ async fn reload_vm_rejects_bad_manifest() {
         "reload-it".to_string(),
         crate::io_trace::TraceRegistry::new(),
         std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        tokio_util::sync::CancellationToken::new(),
     );
     let (tx, _rx) = mpsc::channel::<crate::types::Sample>(8);
 
@@ -566,7 +567,7 @@ async fn reload_vm_on_init_budget_timeout_falls_back() {
         script_name: std::sync::Arc::<str>::from("devM"),
     };
     let (data_tx, _data_rx) = mpsc::channel::<Vec<u8>>(1);
-    let io = crate::plugin::lua_core::io_engine::spawn_io_task(
+    let (io, _io_join) = crate::plugin::lua_core::io_engine::spawn_io_task(
         Box::new(crate::plugin::lua_core::io_engine::TcpIo::new(
             "127.0.0.1:1".into(),
             cfg.recv_idle_ms,
@@ -575,6 +576,7 @@ async fn reload_vm_on_init_budget_timeout_falls_back() {
         "oninit-reload-it".to_string(),
         crate::io_trace::TraceRegistry::new(),
         std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        tokio_util::sync::CancellationToken::new(),
     );
     // 满 hub（容量 1 预填 + 接收端保活不消费）→ on_init 的 set_value 挂起
     let (tx, _rx_keepalive) = mpsc::channel::<crate::types::Sample>(1);

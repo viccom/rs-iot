@@ -12,7 +12,7 @@ use tokio_util::sync::CancellationToken;
 /// 测试用：spawn_io_task 配丢弃被动帧的 on_data channel（api 单测不测 on_data）。
 fn spawn_mock_io() -> IoEngine {
     let (tx, _rx) = tokio::sync::mpsc::channel::<Vec<u8>>(8);
-    spawn_io_task(
+    let (engine, _join) = spawn_io_task(
         Box::new(MockIoTask {
             responder: Box::new(|_| Ok(vec![])),
         }),
@@ -20,7 +20,9 @@ fn spawn_mock_io() -> IoEngine {
         "test-inst".into(),
         crate::io_trace::TraceRegistry::new(),
         std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
-    )
+        tokio_util::sync::CancellationToken::new(),
+    );
+    engine
 }
 
 /// 测试用 mock hub tx（满足 ApiCtx.tx 字段；接收端立即丢弃，不验接收）。

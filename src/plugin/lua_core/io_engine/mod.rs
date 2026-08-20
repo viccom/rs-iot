@@ -13,7 +13,6 @@ mod udp;
 
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
-use tokio::time::timeout;
 
 #[allow(unused_imports)]
 // MockIoTask：luaClient run 不再用（Task 4 去占位）；io_engine/api tests 用，dual-build
@@ -60,16 +59,25 @@ impl IoEngine {
     pub(super) async fn request(&self, frame: &[u8], timeout_ms: u64) -> mlua::Result<Vec<u8>> {
         let timeout_ms = crate::plugin::lua_core::capability::clamp_timeout_ms(timeout_ms);
         let (otx, orx) = oneshot::channel();
-        self.tx
-            .send(IoRequest {
-                frame: frame.to_vec(),
-                reply_to: otx,
-            })
-            .await
-            .map_err(|_| mlua::Error::RuntimeError("IO task closed".into()))?;
-        match timeout(Duration::from_millis(timeout_ms), orx).await {
-            Ok(Ok(r)) => r,
-            Ok(Err(_)) => Err(mlua::Error::RuntimeError("IO reply dropped".into())),
+        // send 与等回执整体纳入同一超时预算（现场实测 2026-08-20：IO task 卡死 +
+        // channel(64) 塞满弃单后，裸 send 永久挂起——脚本侧 collect 只能撞回调预算
+        // 死循环 degraded，进程重启才恢复）。
+        match tokio::time::timeout(Duration::from_millis(timeout_ms), async {
+            self.tx
+                .send(IoRequest {
+                    frame: frame.to_vec(),
+                    reply_to: otx,
+                })
+                .await
+                .map_err(|_| mlua::Error::RuntimeError("IO task closed".into()))?;
+            orx.await
+                .map_err(|_| mlua::Error::RuntimeError("IO reply dropped".into()))
+                // oneshot 载荷本身是 backend 的 Result<Vec<u8>, LuaError>——展平
+                .and_then(|r| r)
+        })
+        .await
+        {
+            Ok(inner) => inner,
             Err(_) => Err(mlua::Error::RuntimeError(format!(
                 "IO request timeout ({timeout_ms}ms)"
             ))),
@@ -91,12 +99,18 @@ pub(crate) fn spawn_io_task(
     inst_id: String,
     trace_registry: crate::io_trace::TraceRegistry,
     dropped_frames: std::sync::Arc<std::sync::atomic::AtomicU64>,
-) -> IoEngine {
+    token: tokio_util::sync::CancellationToken,
+) -> (IoEngine, tokio::task::JoinHandle<()>) {
     let (tx, mut rx) = mpsc::channel::<IoRequest>(64);
-    tokio::spawn(async move {
+    let join = tokio::spawn(async move {
         loop {
             tokio::select! {
-                biased; // request 优先：有 request 时立即处理，不被 recv_idle 阻塞
+                // token 首位（biased）：backend 卡死在自身 await 内（如串口驱动层挂起）
+                // 时，select 的其它分支轮询仍会在 token 就绪处返回——backend future 被
+                // drop → 串口句柄释放。现场实测（2026-08-20）：无此分支时 stopinst 后
+                // COM 口仍被 wedged task 占用，只能杀进程恢复。
+                _ = token.cancelled() => break,
+                // request 优先：有 request 时立即处理，不被 recv_idle 阻塞
                 req = rx.recv() => match req {
                     Some(req) => {
                         crate::io_trace::dump(&trace_registry, &inst_id, crate::io_trace::Dir::Tx, &req.frame);
@@ -127,7 +141,7 @@ pub(crate) fn spawn_io_task(
             }
         }
     });
-    IoEngine { tx }
+    (IoEngine { tx }, join)
 }
 
 #[cfg(test)]
@@ -137,7 +151,7 @@ mod tests {
     use tokio::net::TcpListener;
 
     /// 测试用：spawn_io_task 配一个丢弃被动帧的 on_data channel（单测不测 on_data）。
-    fn spawn_no_on_data(backend: Box<dyn IoBackend>) -> IoEngine {
+    fn spawn_no_on_data(backend: Box<dyn IoBackend>) -> (IoEngine, tokio::task::JoinHandle<()>) {
         let (tx, _rx) = mpsc::channel::<Vec<u8>>(8);
         spawn_io_task(
             backend,
@@ -145,7 +159,104 @@ mod tests {
             "test-inst".into(),
             crate::io_trace::TraceRegistry::new(),
             std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            tokio_util::sync::CancellationToken::new(),
         )
+    }
+
+    /// request/recv_idle 双双永挂的 backend（复现现场串口驱动层 wedged 场景）。
+    struct HangingBackend {
+        dropped: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    }
+    #[async_trait::async_trait]
+    impl IoBackend for HangingBackend {
+        async fn request(&mut self, _: &[u8]) -> mlua::Result<Vec<u8>> {
+            std::future::pending().await
+        }
+        async fn recv_idle(&mut self) -> Option<Vec<u8>> {
+            std::future::pending().await
+        }
+    }
+    impl Drop for HangingBackend {
+        fn drop(&mut self) {
+            self.dropped
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    /// 现场实测回归（2026-08-20，Bug A）：IO task 卡死 + channel(64) 塞满弃单后，
+    /// 裸 `tx.send` 永久挂起——脚本侧 collect 只能撞回调预算死循环 degraded。
+    /// 修复：send 与等回执整体纳入同一超时预算。
+    #[tokio::test]
+    async fn request_send_saturation_times_out_not_hangs() {
+        let (tx, _keepalive) = mpsc::channel::<Vec<u8>>(8);
+        let (engine, _join) = spawn_io_task(
+            Box::new(HangingBackend {
+                dropped: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            }),
+            tx,
+            "saturation".into(),
+            crate::io_trace::TraceRegistry::new(),
+            std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            tokio_util::sync::CancellationToken::new(),
+        );
+        // 并发塞满 channel(64)：每个调用方 50ms 超时放弃，但 IoRequest 留在队列里
+        let mut fills = Vec::new();
+        for _ in 0..64 {
+            fills.push(engine.request(b"x", 50));
+        }
+        let _ = futures_join_all(fills).await;
+        // 第 65 个：send 无空位——修复前永久挂起，修复后随预算返回 Err
+        let t0 = std::time::Instant::now();
+        let fifth =
+            tokio::time::timeout(std::time::Duration::from_secs(3), engine.request(b"x", 100))
+                .await;
+        assert!(
+            fifth.is_ok() && fifth.unwrap().is_err(),
+            "饱和 send 应在预算内返回 Err 而非挂起（elapsed {:?}）",
+            t0.elapsed()
+        );
+        assert!(t0.elapsed() < std::time::Duration::from_secs(2));
+    }
+
+    /// 现场实测回归（2026-08-20，Bug B）：backend 卡死在自身 await 内时，select 无
+    /// token 分支 → stopinst 后 IO task 不退出、串口句柄不释放（COM 口 wedged，
+    /// 杀进程才恢复）。修复：token 首位分支——select 轮询在 token 就绪处返回，
+    /// backend future 被 drop。
+    #[tokio::test]
+    async fn io_task_exits_on_token_despite_wedged_backend() {
+        let dropped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let token = tokio_util::sync::CancellationToken::new();
+        let (tx, _keepalive) = mpsc::channel::<Vec<u8>>(8);
+        let (_engine, join) = spawn_io_task(
+            Box::new(HangingBackend {
+                dropped: dropped.clone(),
+            }),
+            tx,
+            "wedge".into(),
+            crate::io_trace::TraceRegistry::new(),
+            std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            token.clone(),
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await; // 进入 wedged await
+        token.cancel();
+        let exited = tokio::time::timeout(std::time::Duration::from_secs(3), join).await;
+        assert!(
+            exited.is_ok(),
+            "token 取消后 IO task 应退出（backend wedged 也不例外）"
+        );
+        assert!(
+            dropped.load(std::sync::atomic::Ordering::SeqCst),
+            "task 退出须 drop backend（释放串口句柄）"
+        );
+    }
+
+    /// join 一组 future 的最小等价（避免仅为测试引 futures crate）。
+    async fn futures_join_all<F: std::future::Future>(futs: Vec<F>) -> Vec<F::Output> {
+        let mut out = Vec::new();
+        for f in futs {
+            out.push(f.await);
+        }
+        out
     }
 
     #[tokio::test]
@@ -157,7 +268,7 @@ mod tests {
                 Ok(r)
             }),
         };
-        let engine = spawn_no_on_data(Box::new(mock));
+        let (engine, _join) = spawn_no_on_data(Box::new(mock));
         let resp = engine.request(b"\x01\x02", 200).await.unwrap();
         assert_eq!(resp, vec![0x01, 0x02, 0xAA]);
     }
@@ -252,12 +363,13 @@ mod tests {
 
         let backend = Box::new(TcpIo::new(format!("127.0.0.1:{port}"), 50));
         let (on_data_tx, mut on_data_rx) = mpsc::channel::<Vec<u8>>(8);
-        let _engine = spawn_io_task(
+        let (_engine, _join) = spawn_io_task(
             backend,
             on_data_tx,
             "test-inst".into(),
             crate::io_trace::TraceRegistry::new(),
             std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            tokio_util::sync::CancellationToken::new(),
         );
 
         let frame = tokio::time::timeout(Duration::from_secs(2), on_data_rx.recv())
@@ -291,12 +403,13 @@ mod tests {
         let (on_data_tx, _rx_keepalive) = mpsc::channel::<Vec<u8>>(1);
         on_data_tx.try_send(vec![0u8]).unwrap();
         let dropped: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
-        let _engine = spawn_io_task(
+        let (_engine, _join) = spawn_io_task(
             backend,
             on_data_tx,
             "p3-inst".into(),
             crate::io_trace::TraceRegistry::new(),
             dropped.clone(),
+            tokio_util::sync::CancellationToken::new(),
         );
 
         // 两帧到达即丢（try_send 永不等待，测试只等 IO task 处理完两个 recv_idle 帧）
