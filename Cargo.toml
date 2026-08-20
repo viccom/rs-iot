@@ -128,6 +128,12 @@ tokio = { version = "1", features = ["test-util"] }
 # dev-dep 兜底，测试目标编译失败（CI minimal job 存量红，2026-08-20 修复）。
 # dev-deps 只进测试构建，不影响 release feature 面；lua-http 开启时与 lib 依赖同源合并。
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+# 进程内 MQTT broker（阶段 B T10 契约 e2e：luaNorth 全链路连真 broker 语义跑默认
+# 套件，不再依赖外部 mosquitto/EMQX）。仅 dev-deps——release 依赖面零变化；
+# rumqttd 最新发布即 0.20（crates.io 无 0.24，与 rumqttc 0.25 版本号不同步是
+# 上游发布节奏问题，两者为独立 crate 无版本耦合）。default-features = false 裁掉
+# rustls/websocket——测试只用明文 TCP v4 listener。
+rumqttd = { version = "0.20", default-features = false }
 
 [features]
 default = ["transform", "lua", "lua-http", "opcua", "modbus", "s7", "eip"]

@@ -859,7 +859,7 @@ mod tests {
     /// （`algo/hashings/<x>.lua`）sync 落 `_stdlib/` 后，沙箱 require 按点分
     /// 模块名路由可达，且 **`_stdlib/` 内模块间 require**（hashings 算法件
     /// require `algo.hashings.uintn` 的依赖闭包形态）与 selftest 约定成立。
-    /// 真实 hashings 源码的向量验证见 `official_dist_hashings_emqx_local`
+    /// 真实 hashings 源码的向量验证见 `official_dist_local`
     /// （ignore，走官方 dist 全链路）。
     #[tokio::test]
     async fn sync_nested_stdlib_module_dependency() {
@@ -925,14 +925,14 @@ mod tests {
         let _ = fs::remove_dir_all(&up);
     }
 
-    /// T9 hashings/emqx 真实源码端到端（本地手工跑，默认 ignore）：真实官方
-    /// dist（rsiot-lualib 仓 `./gen_index.sh 1.1.0 && ./sign_index.sh` 产物，
+    /// T9+T10 官方 dist 真实源码端到端（本地手工跑，默认 ignore）：真实官方
+    /// dist（rsiot-lualib 仓 `./gen_index.sh 1.2.0 && ./sign_index.sh` 产物，
     /// 官方私钥签名）经 dir_fetcher（无需 HTTP 服务）→ `sync_with_fetcher`
     /// 注入 **生产 VERIFY_KEYS** 验签全链路落 `_stdlib/` → 沙箱 VM 逐模块
     /// `selftest()`（NIST/RFC 已知向量）。跑法：
     ///
     /// ```text
-    /// cd rsiot-lualib && ./gen_index.sh 1.1.0 && ./sign_index.sh
+    /// cd rsiot-lualib && ./gen_index.sh 1.2.0 && ./sign_index.sh
     /// cargo test -p rs-iot --features lua,lua-http -- --ignored official_dist
     /// ```
     ///
@@ -941,11 +941,11 @@ mod tests {
     #[cfg(feature = "lua-http")]
     #[tokio::test]
     #[ignore = "需本地 rsiot-lualib dist（见测试文档注释）"]
-    async fn official_dist_hashings_emqx_local() {
+    async fn official_dist_local() {
         let dist = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../rsiot-lualib/dist");
         assert!(
             dist.join("index.json").exists(),
-            "缺官方 dist：{}（先在源仓跑 ./gen_index.sh 1.1.0 && ./sign_index.sh）",
+            "缺官方 dist：{}（先在源仓跑 ./gen_index.sh 1.2.0 && ./sign_index.sh）",
             dist.display()
         );
         let root = fresh_scripts("official-dist", "");
@@ -960,14 +960,14 @@ mod tests {
         )
         .await
         .expect("官方 dist 验签→逐文件 sha→原子落盘");
-        assert_eq!(report.version, "1.1.0");
-        assert_eq!(report.added.len(), 11, "T9 后全量：{report:?}");
+        assert_eq!(report.version, "1.2.0");
+        assert_eq!(report.added.len(), 12, "T10 后全量：{report:?}");
 
         // 沙箱 VM 两档指令预算（cfg.hook_instr_limit，护栏参数本就宿主可配）：
         //   默认 1M 档——轻算法（sha256 单次 ~0.4M 指令）生产默认护栏内可用；
         //   提高档 4M ——hmac = 3 次哈希（sha1 inner+outer+data 块），实测
-        //     mlua 5.4 下 >1M 默认护栏（纯 Lua 元表运算密度所致）——T10 OneNET
-        //     token（hmac_sha1）生产使用须调高 hook_instr_limit，见任务汇报。
+        //     mlua 5.4 下 >1M 默认护栏（纯 Lua 元表运算密度所致）——OneNET token
+        //     （hmac_sha1）生产使用须调高 hook_instr_limit，见任务汇报。
         let mk_vm = |limit: u64| {
             let cfg = parse_cfg(&json!({"script":"devA","endpoint":"x","hook_instr_limit": limit}))
                 .unwrap();
@@ -989,7 +989,7 @@ mod tests {
             "sha256 selftest 应在默认 1M 指令护栏内通过"
         );
 
-        // 提高档：全部新模块 selftest（已知向量）+ emqx 薄配方 helper
+        // 提高档：全部新模块 selftest（已知向量）+ emqx/onenet 薄配方 helper
         let lua = mk_vm(4_000_000);
         load_main(&lua, &lctx).unwrap();
         for m in [
@@ -1018,17 +1018,127 @@ mod tests {
                 .unwrap(),
             "EMQX 裸 broker：auth 恒 nil（凭证走 broker ACL）"
         );
+        // T10 onenet：**另起一个 4M VM**——指令 hook 计数在同一 lua_State 上跨
+        // eval 累计（实测），前面 selftest 已耗 ~2M，叠加 onenet 的两次 hmac 会
+        // 撞 4M 护栏；换新 VM 即单独预算（生产等价：一个实例一个 VM）。
+        let lua = mk_vm(4_000_000);
+        load_main(&lua, &lctx).unwrap();
+        assert!(
+            lua.load("return require('cloud.onenet').selftest()")
+                .eval::<bool>()
+                .unwrap(),
+            "cloud.onenet selftest 应通过（4M 预算）"
+        );
+        // token 已知向量（Python 3 生成，2018-10-31 规范）：
+        // b64decode(key) → hmac_sha1(et\nmethod\nres\nversion) → b64 → quote
+        let tok: String = lua
+            .load(
+                r#"return require('cloud.onenet')
+                    .token("a2V5LWZvci10ZXN0LW9uZW5ldA==", "PID123", "dev456", 2000000000)"#,
+            )
+            .eval()
+            .unwrap();
+        assert_eq!(
+            tok,
+            "2018-10-31&products/PID123/devices/dev456&2000000000&sha1&JbiHI4hp1SDqPzI0jc7x69nf4Pw%3D",
+            "OneNET token 向量（算法一致性锁）"
+        );
 
         let _ = fs::remove_dir_all(&root);
     }
 
+    /// T10 onenet 配方已知向量（本地手工跑，默认 ignore——CI 只 checkout lux，无
+    /// `../rsiot-lualib` 兄弟仓）：**真实源码文件**（`stdlib/cloud/onenet.lua` +
+    /// hashings/basexx 依赖闭包）经 write_upstream（dev key 签名）+ dir_fetcher
+    /// sync 落 `_stdlib/` → 沙箱 VM require 后断言（同向量也锁在
+    /// [`official_dist_local`] 的生产验签路径——本测试免 dist 重建，改配方源码后
+    /// 先跑这个）。
+    ///
+    /// **指令预算**：token 含一次纯 Lua hmac_sha1（~70 万条 VM 指令，T9 量化），
+    /// VM hook_instr_limit 调 4M（生产等价项：NorthCfg.hook_instr_limit——OneNET
+    /// 接入实例须调高至 ≥2M，默认 1M 会拦截 auth 回调）。
+    ///
+    /// 跑法：`cargo test -p rs-iot --features lua,lua-http -- --ignored onenet`
+    #[cfg(feature = "lua-http")]
+    #[tokio::test]
+    #[ignore = "需本地 ../rsiot-lualib 源仓（CI 无此仓）"]
+    async fn onenet_recipe_known_vector_local() {
+        let lib = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../rsiot-lualib/stdlib");
+        assert!(
+            lib.join("cloud/onenet.lua").exists(),
+            "缺源仓 stdlib：{}",
+            lib.display()
+        );
+        // 依赖闭包（json 是 builtin，无文件）：onenet → basexx/sha1/hmac → uintn
+        let read = |p: &str| fs::read_to_string(lib.join(p)).unwrap();
+        let files = [
+            ("cloud/onenet.lua", read("cloud/onenet.lua")),
+            ("codec/basexx.lua", read("codec/basexx.lua")),
+            ("algo/hashings/uintn.lua", read("algo/hashings/uintn.lua")),
+            ("algo/hashings/sha1.lua", read("algo/hashings/sha1.lua")),
+            ("algo/hashings/hmac.lua", read("algo/hashings/hmac.lua")),
+        ];
+        let refs: Vec<(&str, &str)> = files.iter().map(|(p, c)| (*p, c.as_str())).collect();
+        let up = fresh_scripts("up-onenet", "");
+        write_upstream(&up, "1.2.0", 1, &refs, None);
+        let root = fresh_scripts("onenet", "onenet = require('cloud.onenet')");
+        let r = sync_with_fetcher(UPSTREAM, &root, None, &dev_keys(), dir_fetcher(up.clone()))
+            .await
+            .expect("sync onenet 依赖闭包");
+        assert_eq!(r.added.len(), 5, "5 文件全量新增：{r:?}");
+
+        let cfg = parse_cfg(&json!({"script":"devA","endpoint":"x","hook_instr_limit":4_000_000}))
+            .unwrap();
+        let lua = new_vm(&cfg).unwrap();
+        let lctx = LoadCtx {
+            scripts_root: Arc::from(root.as_path()),
+            script_name: Arc::<str>::from("devA"),
+        };
+        load_main(&lua, &lctx).unwrap();
+        // a) token 已知向量（Python 3 现场生成：hmac/hashlib/base64/quote）：
+        //    key=b64decode("a2V5LWZvci10ZXN0LW9uZW5ldA==")=b"key-for-test-onenet"；
+        //    sfs="2000000000\nsha1\nproducts/PID123/devices/dev456\n2018-10-31"
+        let tok: String = lua
+            .load(r#"return onenet.token("a2V5LWZvci10ZXN0LW9uZW5ldA==", "PID123", "dev456", 2000000000)"#)
+            .eval()
+            .unwrap();
+        assert_eq!(
+            tok,
+            "2018-10-31&products/PID123/devices/dev456&2000000000&sha1&JbiHI4hp1SDqPzI0jc7x69nf4Pw%3D",
+            "OneNET token 向量（算法一致性锁）"
+        );
+        // b) selftest 全量（token 向量 + auth_builder + topic/parse helper）
+        assert!(
+            lua.load("return onenet.selftest()").eval::<bool>().unwrap(),
+            "onenet selftest 应通过（4M 预算）"
+        );
+        // c) 下行解析 helper 形状（合法提取 + 非法 topic nil）
+        let m: String = lua
+            .load(r#"local m = onenet.parse_property_set(
+                "$sys/PID123/dev456/thing/property/set",
+                '{"id":"7","params":{"temperature":25}}')
+                return tostring(m.pid) .. "|" .. tostring(m.id) .. "|" .. tostring(m.params.temperature)"#)
+            .eval()
+            .unwrap();
+        assert_eq!(m, "PID123|7|25", "parse_property_set 字段提取");
+        assert!(
+            lua.load(r#"return onenet.parse_property_set("$sys/PID123/dev456/thing/property/post", "{}") == nil"#)
+                .eval::<bool>()
+                .unwrap(),
+            "非 set topic → nil"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&up);
+    }
+
     /// T13 端到端验收（本地手工跑，默认 ignore）：真实官方 dist（rsiot-lualib
-    /// 仓 `./gen_index.sh && ./sign_index.sh` 产物，官方 v1 私钥签名）经本机
+    /// 仓 `./gen_index.sh 1.2.0 && ./sign_index.sh` 产物，官方 v1 私钥签名）经本机
     /// 静态 HTTP 服务 → **生产 reqwest 路径** [`sync`]（内置 VERIFY_KEYS 验签）
     /// 全链路落 `_stdlib/`。跑法：
     ///
     /// ```text
-    /// cd rsiot-lualib && ./gen_index.sh && ./sign_index.sh
+    /// cd rsiot-lualib && ./gen_index.sh 1.2.0 && ./sign_index.sh
     /// python -m http.server 8765 -d dist &          # 或任意静态服务
     /// cargo test -p rs-iot --features lua,lua-http -- --ignored e2e_sync
     /// ```
@@ -1048,8 +1158,8 @@ mod tests {
         let report = sync(&upstream, &root, None)
             .await
             .expect("官方 dist 全链路同步（验签→逐文件 sha→原子落盘）");
-        assert_eq!(report.version, "1.1.0");
-        assert_eq!(report.added.len(), 11, "T9 后全量新增：{report:?}");
+        assert_eq!(report.version, "1.2.0");
+        assert_eq!(report.added.len(), 12, "T10 后全量新增：{report:?}");
 
         // a) _stdlib/ 落位 + 本地 index 版本
         for p in [
@@ -1060,6 +1170,7 @@ mod tests {
             "algo/hashings/sha256.lua",
             "algo/hashings/uintn.lua",
             "cloud/emqx.lua",
+            "cloud/onenet.lua",
             "codec/basexx.lua",
             "util/retry.lua",
             "util/tablex.lua",
@@ -1067,17 +1178,17 @@ mod tests {
         ] {
             assert!(root.join("_stdlib").join(p).exists(), "_stdlib 缺 {p}");
         }
-        assert_eq!(read_index(&root).expect("read_index").version, "1.1.0");
+        assert_eq!(read_index(&root).expect("read_index").version, "1.2.0");
 
         // b) inventory 徽标：crc16 转 synced（其余仍 seed）
         let (ver, entries) = inventory(&root);
-        assert_eq!(ver.as_deref(), Some("1.0.0"));
+        assert_eq!(ver.as_deref(), Some("1.2.0"));
         let crc = entries
             .iter()
             .find(|e| e.path == "algo/crc16.lua")
             .expect("inventory 应含 crc16");
         assert_eq!(crc.source, "synced");
-        assert_eq!(crc.ver.as_deref(), Some("1.0.0"));
+        assert_eq!(crc.ver.as_deref(), Some("1.2.0"));
 
         // c) require("algo.crc16") 取同步文件版（非种子）——行为证明：给本地
         //    _stdlib 文件追加种子没有的字段，新 VM require 应可见（文件优先）

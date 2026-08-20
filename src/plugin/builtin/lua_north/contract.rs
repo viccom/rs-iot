@@ -1304,4 +1304,383 @@ end"#,
         let _ = std::fs::remove_dir_all(&tmp);
         let _ = std::fs::remove_dir_all(&data_dir);
     }
+
+    // ===== e2e（进程内 rumqttd broker，默认套件，T10）=====
+
+    /// 起进程内 rumqttd（明文 TCP v4 listener，127.0.0.1 随机端口）。
+    ///
+    /// 端口选法：先 bind `:0` 拿空闲口再释放交给 rumqttd（其 `TcpListener` 在自有
+    /// 线程内 bind，无 local_addr 查询口）——微小 TOCTOU 测试可忍，就绪探测失败即
+    /// panic。0.20 的 `Broker::start` 无停机口（阻塞线程常驻，测试结束随进程回收），
+    /// 断连编排走同 client_id 抢占（rumqttd 默认 takeover 语义）而非停 broker——
+    /// 见 [`e2e_north_contract_inproc_broker`] 文档。
+    fn spawn_inproc_broker(tag: &str) -> u16 {
+        let port = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").expect("bind :0 选空闲端口");
+            l.local_addr().expect("local_addr").port()
+        };
+        // RouterConfig 需显式非零（derive Default 全 0——max_connections=0 会拒一切连接）
+        let config = rumqttd::Config {
+            router: rumqttd::RouterConfig {
+                max_connections: 64,
+                max_outgoing_packet_count: 200,
+                max_segment_size: 10 * 1024 * 1024,
+                max_segment_count: 10,
+                custom_segment: None,
+                initialized_filters: None,
+                shared_subscriptions_strategy: Default::default(),
+            },
+            v4: Some(
+                [(
+                    "test".to_string(),
+                    rumqttd::ServerSettings {
+                        name: format!("e2e-{tag}"),
+                        listen: format!("127.0.0.1:{port}").parse().expect("SocketAddr"),
+                        tls: None,
+                        next_connection_delay_ms: 1,
+                        connections: rumqttd::ConnectionSettings {
+                            connection_timeout_ms: 60_000,
+                            max_payload_size: 1024 * 1024,
+                            max_inflight_count: 100,
+                            auth: None, // 匿名放行（ConnectionSettings 无 Default derive）
+                            external_auth: None,
+                            dynamic_filters: false,
+                        },
+                    },
+                )]
+                .into_iter()
+                .collect(),
+            ),
+            ..Default::default()
+        };
+        let mut broker = rumqttd::Broker::new(config);
+        std::thread::Builder::new()
+            .name(format!("rumqttd-{tag}"))
+            .spawn(move || {
+                if let Err(e) = broker.start() {
+                    eprintln!("[e2e] rumqttd start 失败：{e:?}");
+                }
+            })
+            .expect("spawn rumqttd 线程");
+        // 就绪探测：TCP 连通即 listener up（5s 上限）
+        for _ in 0..100 {
+            if std::net::TcpStream::connect(("127.0.0.1", port)).is_ok() {
+                return port;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        panic!("rumqttd 5s 未就绪（port {port}）");
+    }
+
+    /// T10 契约 e2e（进程内 rumqttd 0.20，默认跑——无需外部 broker/环境变量，
+    /// 真 broker 现场版见 [`e2e_north_contract_over_broker`]）。
+    ///
+    /// 覆盖清单（T7 契约全链路 + LWT + 重连）：
+    /// 1. ConnAck → on_connack 落 kv；cfg.subscribe 订阅生效；
+    /// 2. up() 发布 → 对端订阅者收到 payload（hello-n，n 为 kv 计数）；
+    /// 3. 对端 publish 下行 topic → down(topic, payload) 落 kv；
+    /// 4. **断连编排**：helper 以同 client_id 连入（rumqttd 默认 takeover——旧连接
+    ///    被路由器丢弃且 TCP 关闭，等效"断 broker"侧的连接中断）→
+    ///    a) 遗嘱：will() 配置的 topic 上对端收到 "offline"（LWT，clean_session
+    ///       下 rumqttd 立即发布）；
+    ///    b) on_disconnect 落 kv；
+    /// 5. 退避 1 个 period 后重连（重调 auth）→ connacks ≥ 2；
+    /// 6. 重连后再发布一批 → 对端收到 hello-n（n ≥ 2，断连后新批次）。
+    ///
+    /// 脚本侧 auth 委托 `require("cloud.emqx")` 配方（保留段 require 路由进 e2e：
+    /// `_stdlib/cloud/emqx.lua` 直写——分发验签链路有 stdlib_sync 专项测试）。
+    #[tokio::test]
+    async fn e2e_north_contract_inproc_broker() {
+        use crate::host::{BridgeRegistry, CtlRegistry, HostContext};
+        use crate::plugin::traits::Sink;
+        use crate::types::{AppType, DeviceSpec, HostKind, Hwid, InstConfig, PluginName};
+        use rumqttc::{AsyncClient, Event, MqttOptions, Packet, QoS};
+        use serde_json::json;
+
+        const UP: &str = "rsiot/e2e/north/up";
+        const CMD: &str = "rsiot/e2e/north/cmd";
+        const WILL: &str = "rsiot/e2e/north/will";
+        const CLIENT_ID: &str = "north-e2e-inproc";
+
+        let port = spawn_inproc_broker("north-e2e");
+
+        // 脚本根：main.lua + `_stdlib/cloud/emqx.lua`（保留段 require 路由面；
+        // stdlib 验签 sync 分发链路有 stdlib_sync.rs 专项测试，此处直写保持
+        // e2e 对 feature 组合自包含——minimal `--features lua` 同样默认跑）。
+        let tmp = std::env::temp_dir().join(format!("lua-north-e2e2-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join("cloudE2E2")).unwrap();
+        std::fs::create_dir_all(tmp.join("_stdlib/cloud")).unwrap();
+        std::fs::write(
+            tmp.join("_stdlib/cloud/emqx.lua"),
+            // 合成 emqx stub（auth 恒 nil + topic helper——真实配方 API 面等价子集）
+            "local M = {}\n\
+             function M.auth(_cfg) return nil end\n\
+             function M.topic_data(hw, devid) return hw .. '/' .. devid .. '/datas' end\n\
+             function M.selftest() return M.topic_data('a', 'b') == 'a/b/datas' end\n\
+             return M\n",
+        )
+        .unwrap();
+        std::fs::write(
+            tmp.join("cloudE2E2/main.lua"),
+            format!(
+                r#"-- @role mqtt-north
+local em = require("cloud.emqx")
+local UP = "{UP}"
+function auth(cfg)
+  -- EMQX 裸 broker 配方：无平台认证（恒 nil）；固定 client_id 供 takeover 断连编排
+  assert(em.auth(cfg) == nil)
+  return {{ client_id = "{CLIENT_ID}" }}
+end
+function will() return {{ topic = "{WILL}", payload = "offline" }} end
+function up(batch)
+  local n = (ctx:kv_get("ups") or 0) + 1
+  ctx:kv_set("ups", n)
+  return {{ {{ topic = UP, payload = "hello-" .. n }} }}
+end
+function down(topic, payload) ctx:kv_set("down_got", topic .. "|" .. payload) end
+function on_connack()
+  local n = (ctx:kv_get("connacks") or 0) + 1
+  ctx:kv_set("connacks", n)
+end
+function on_disconnect()
+  local n = (ctx:kv_get("disconnects") or 0) + 1
+  ctx:kv_set("disconnects", n)
+end"#
+            ),
+        )
+        .unwrap();
+
+        let data_dir = std::env::temp_dir()
+            .join(format!("lua-north-e2e2-lux-{}", std::process::id()))
+            .to_str()
+            .unwrap()
+            .to_string();
+        let cfg_lux = crate::config::AppConfig {
+            lux: crate::config::LuxConfig {
+                port: 0,
+                data_dir: data_dir.clone(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let handle = lux::run_with_config(crate::db::build_lux_config(&cfg_lux))
+            .await
+            .expect("lux");
+        let client = handle.client();
+
+        let inst = InstConfig {
+            inst_id: "north-e2e2".into(),
+            inst_name: "e2e2".into(),
+            app_code: PluginName::new("luaNorth"),
+            app_type: AppType::North,
+            devices: vec![DeviceSpec {
+                label: "d".into(),
+                value: "devE".into(),
+                children: vec![],
+                slave_id: None,
+            }],
+            app_config: json!({
+                "script": "cloudE2E2", "host": "127.0.0.1", "port": port,
+                "period": 1, "batch_max_secs": 1,
+                "subscribe": [CMD],
+                "client_id": CLIENT_ID,
+                "scripts_root": tmp.to_str().unwrap()
+            }),
+            auto_start: false,
+            host_kind: HostKind::Builtin,
+        };
+        let (tx, rx) = mpsc::channel::<Sample>(8); // 保有 tx 喂样例（驱动 up() 批量）
+        let (_cmd_tx, cmd_rx) = mpsc::channel::<crate::types::CtlMessage>(4);
+        let token = CancellationToken::new();
+        let run_token = token.child_token();
+        let ctx = HostContext {
+            lux: client.clone(),
+            hwid: Hwid::new("it"),
+            shutdown: CancellationToken::new(),
+            ctl_registry: CtlRegistry::new(std::sync::Arc::new(
+                crate::process_metrics::ProcessMetrics::new(),
+            )),
+            bridge_registry: BridgeRegistry::new(),
+            metrics: std::sync::Arc::new(crate::process_metrics::ProcessMetrics::new()),
+            trace_registry: crate::io_trace::TraceRegistry::new(),
+            event_tx: crate::event_bus::EventBus::dummy(),
+        };
+        tokio::spawn(async move {
+            crate::plugin::builtin::lua_north::LuaNorth
+                .run(ctx, inst, rx, cmd_rx, run_token)
+                .await;
+        });
+        // 首批样例（up() 批量数据源；断连期缓冲、重连后补发由实例语义保证）
+        tx.send(Sample {
+            hwid: crate::types::Hwid::new("it"),
+            devid: "devE".into(),
+            values: [("v".to_string(), crate::types::SampleValue::Int(1))]
+                .into_iter()
+                .collect(),
+            timestamp: 1,
+        })
+        .await
+        .unwrap();
+
+        // 对端订阅者：收 up 发布 + 遗嘱；ConnAck 后周期性发下行（规避订阅时序竞态）。
+        let mut peer = MqttOptions::new("rsiot-e2e2-peer", "127.0.0.1", port);
+        peer.set_keep_alive(std::time::Duration::from_secs(30));
+        let (peer_tx, mut peer_ev) = AsyncClient::new(peer, 10);
+        peer_tx
+            .subscribe(UP, QoS::AtMostOnce)
+            .await
+            .expect("sub UP");
+        peer_tx
+            .subscribe(WILL, QoS::AtMostOnce)
+            .await
+            .expect("sub WILL");
+
+        let mut ups_received: Vec<String> = Vec::new();
+        let mut will_got = false;
+        let mut peer_connacked = false;
+
+        // 阶段 1（20s）：up 发布到达 + down 落 kv。
+        let kv_get_num = |client: &lux::EmbeddedClient, key: &str| {
+            let client = client.clone();
+            let key = key.to_string();
+            async move {
+                crate::db::luakv::get(&client, "north-e2e2", &key)
+                    .await
+                    .unwrap()
+                    .and_then(|s| serde_json::from_str::<i64>(&s).ok())
+                    .unwrap_or(0)
+            }
+        };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        let mut down_got = false;
+        while std::time::Instant::now() < deadline {
+            match tokio::time::timeout(std::time::Duration::from_millis(500), peer_ev.poll()).await
+            {
+                Ok(Ok(Event::Incoming(Packet::ConnAck(_)))) => {
+                    peer_connacked = true;
+                }
+                Ok(Ok(Event::Incoming(Packet::Publish(p)))) if p.topic == UP => {
+                    ups_received.push(String::from_utf8_lossy(&p.payload).into_owned());
+                }
+                Ok(Ok(Event::Incoming(Packet::Publish(p)))) if p.topic == WILL => {
+                    assert_eq!(&p.payload[..], b"offline", "遗嘱 payload");
+                    will_got = true;
+                }
+                _ => {}
+            }
+            // 对端就绪后周期发下行（1s 一发，直到 down 落痕——容忍 north 订阅晚于首发）
+            if peer_connacked && !down_got {
+                let _ = peer_tx.publish(CMD, QoS::AtMostOnce, false, b"ping").await;
+            }
+            down_got = crate::db::luakv::get(&client, "north-e2e2", "down_got")
+                .await
+                .unwrap()
+                .is_some();
+            if !ups_received.is_empty() && down_got {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
+        assert!(!ups_received.is_empty(), "对端应收 up() 发布（20s 内）");
+        assert!(
+            ups_received[0].starts_with("hello-"),
+            "up payload 形状：{:?}",
+            ups_received
+        );
+        assert_eq!(
+            crate::db::luakv::get(&client, "north-e2e2", "down_got")
+                .await
+                .unwrap()
+                .as_deref()
+                .map(|s| s.trim_matches('"')),
+            Some("rsiot/e2e/north/cmd|ping"),
+            "down(topic, payload) 应收到并落 kv"
+        );
+
+        // 阶段 2：takeover 断连（同 client_id 连入 → 旧连接被丢弃）。
+        let mut helper = MqttOptions::new(CLIENT_ID, "127.0.0.1", port);
+        helper.set_keep_alive(std::time::Duration::from_secs(30));
+        let (_helper_tx, mut helper_ev) = AsyncClient::new(helper, 10);
+        tokio::spawn(async move {
+            // 只泵事件使 CONNECT 写出（连入即触发 takeover；随后被 north 重连反抢占）
+            while helper_ev.poll().await.is_ok() {}
+        });
+
+        // 喂第二批样例（重连后 up() 再发布一批的数据源）。
+        tx.send(Sample {
+            hwid: crate::types::Hwid::new("it"),
+            devid: "devE".into(),
+            values: [("v".to_string(), crate::types::SampleValue::Int(2))]
+                .into_iter()
+                .collect(),
+            timestamp: 2,
+        })
+        .await
+        .unwrap();
+
+        // 阶段 3（20s）：遗嘱 + on_disconnect + 重连（connacks≥2）+ 再发布（n≥2）。
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        loop {
+            match tokio::time::timeout(std::time::Duration::from_millis(500), peer_ev.poll()).await
+            {
+                Ok(Ok(Event::Incoming(Packet::Publish(p)))) if p.topic == UP => {
+                    ups_received.push(String::from_utf8_lossy(&p.payload).into_owned());
+                }
+                Ok(Ok(Event::Incoming(Packet::Publish(p)))) if p.topic == WILL => {
+                    assert_eq!(&p.payload[..], b"offline", "遗嘱 payload");
+                    will_got = true;
+                }
+                _ => {}
+            }
+            let connacks = kv_get_num(&client, "connacks").await;
+            let disconnects = kv_get_num(&client, "disconnects").await;
+            let ups = kv_get_num(&client, "ups").await;
+            let republished = ups_received
+                .iter()
+                .any(|p| p.trim_start_matches("hello-").parse::<i64>().unwrap_or(0) >= 2);
+            if will_got && disconnects >= 1 && connacks >= 2 && republished {
+                break;
+            }
+            if std::time::Instant::now() > deadline {
+                panic!(
+                    "断连→重连链未闭合：will_got={will_got} disconnects={disconnects} \
+                     connacks={connacks} ups(kv)={ups} 对端收到={ups_received:?}"
+                );
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
+        // 重连订阅仍生效（takeover后新连接重新 subscribe：再发一条下行也该落 kv；
+        // 周期重发规避订阅/发布时序竞态——同阶段 1 的 down 重试策略。**必须持续
+        // poll peer_ev**：AsyncClient 有界请求通道（10）只由 eventloop 排空，不 poll
+        // 则第 11 次 publish().await 永久阻塞）。
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let _ = peer_tx.publish(CMD, QoS::AtMostOnce, false, b"ping2").await;
+            if let Ok(Ok(Event::Incoming(Packet::Publish(p)))) =
+                tokio::time::timeout(std::time::Duration::from_millis(200), peer_ev.poll()).await
+            {
+                if p.topic == UP {
+                    ups_received.push(String::from_utf8_lossy(&p.payload).into_owned());
+                }
+                // WILL 分支已在阶段 3 断言过（will_got 此后不再消费）
+            }
+            let v = crate::db::luakv::get(&client, "north-e2e2", "down_got")
+                .await
+                .unwrap()
+                .and_then(|s| serde_json::from_str::<String>(&s).ok());
+            if v.as_deref() == Some("rsiot/e2e/north/cmd|ping2") {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "重连后订阅应重新生效（down_got={v:?}）"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        }
+
+        token.cancel();
+        let _ = std::fs::remove_dir_all(&tmp);
+        let _ = std::fs::remove_dir_all(&data_dir);
+    }
 }

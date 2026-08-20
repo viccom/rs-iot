@@ -13,7 +13,10 @@ luaClient 是 rs-iot 的南向 `Source`（与 modbus/opcua/s7 同构，`inventor
 - **数据上行**：`collect` 返 table / `on_data` 调 `ctx:set_value` → hub → pipeline → lux `rtdata:<devid>`。
 - **控制下行**：写命令经 `CtlRegistry` → 实例 `cmd_rx` → `on_write(cmd)`。
 
-详见 `docs/designs/2026-08-06-lua-script-collector-design.md`。
+北向另有 **mqtt-north 角色**（`luaNorth` 实例，`@role mqtt-north`）：同一套沙箱与
+ctx API，把收拢的批量数据经 MQTT 发布上云（EMQX/OneNET 等平台配方见
+「mqtt-north 角色」章节）。详见 `docs/designs/2026-08-06-lua-script-collector-design.md`
+与 `docs/designs/2026-08-20-lua-script-system-stage-b-plan.md`。
 
 ## 快速开始
 
@@ -132,7 +135,7 @@ luaClient 是 rs-iot 的南向 `Source`（与 modbus/opcua/s7 同构，`inventor
 | require 名 | 层 | 解析位置 | 说明 |
 |---|---|---|---|
 | `json` | builtin | Rust 注册（不读盘） | builtin 名单优先于"单段=私有"判断；阶段 A 仅 `json` |
-| `algo.crc16`、`codec.basexx`、`cloud.onenet.token` | 官方 stdlib | `scripts/_stdlib/<路径>.lua` | 首段 ∈ 保留段（`algo`/`codec`/`proto`/`cloud`/`util`/`oo`）。`_stdlib/` 同步文件优先，miss 回落宿主内嵌种子，仍 miss 报"未同步"可行动错误——**永不回落共享/私有层**（防投毒核心规则） |
+| `algo.crc16`、`codec.basexx`、`cloud.onenet` | 官方 stdlib | `scripts/_stdlib/<路径>.lua` | 首段 ∈ 保留段（`algo`/`codec`/`proto`/`cloud`/`util`/`oo`）。`_stdlib/` 同步文件优先，miss 回落宿主内嵌种子，仍 miss 报"未同步"可行动错误——**永不回落共享/私有层**（防投毒核心规则） |
 | `viccom.calcex`、`viccom.calcex.poller` | 站点共享 | `scripts/_lib/<首段>/<余段>.lua` | 首段 = 作者/组织命名空间，**须 ≥2 段**——单段名结构上进不了共享层（见下违规示例） |
 | `myutil`、`lib.util`（旧前缀兼容） | 脚本私有 | `scripts/<script>/lib/<段>.lua` | 单段名或旧 `lib.` 前缀，现状语义不变 |
 
@@ -212,6 +215,33 @@ sync 后的批量 reload 为 **VM 级热加载**（运行中实例逐一经控�
 `_stdlib/scripts/` 供查阅，但**尚不可直接配置运行**——安装到 `scripts/<name>/` 的安装器与
 `@source` 徽标（设计 Q18）为 B 阶段项；模板条目也不列入 `stdlib.list()`（非 require 可达模块）。
 
+### 在线分发库与 cloud/ 云平台配方（官方源 ≥1.1.0）
+
+官方源 1.1.0 起在线分发（**不进宿主种子**，sync 后 require 可达）：
+
+| 版本 | 模块 | 函数面 | 说明 |
+|---|---|---|---|
+| 1.1.0 | `algo.hashings.{uintn,md5,sha1,sha256,hmac}` | 流式哈希 + HMAC（RFC 2104） | vendored from freeioe@1398d47（MIT）；selftest 带 NIST/RFC 已知向量 |
+| 1.1.0 | `cloud.emqx` | `auth(cfg) -> nil`；`topic_data(hw, devid) -> "{hw}/{devid}/datas"` | EMQX 裸 broker 薄配方：无平台级认证（凭证/主题 ACL 全走 broker 侧），脚本直连 |
+| 1.2.0 | `cloud.onenet` | `token(ak, pid, dev, et)`；`auth_builder(cfg)`；`topic_property_post(pid, dev)`；`parse_property_set(topic, payload)` | OneNET 安全鉴权 token 配方（见下） |
+
+**OneNET token 约定假设**（`cloud.onenet`，务必现场核对）：
+
+- 签名算法按官方「安全鉴权token」规范 **version 2018-10-31**：签名原文
+  `et + "\n" + method + "\n" + res + "\n" + version`（参数名排序，仅 value 参与）；
+  `access_key` **先 base64 解码**再作 HMAC-SHA1 key；`sig` = 标准 base64 后做 URL
+  百分号编码（`+`→`%2B`、`/`→`%2F`、`=`→`%3D`，官方 Python 示例 `quote(safe='')` 语义，
+  **非** RFC 4648 urlsafe 字母表）；`token = version&res&et&method&sig`；设备接入
+  `res = products/{pid}/devices/{device_name}`。
+- MQTT 凭证采用 **2024+ 新版物模型接入**形态：`client_id = device_name`、
+  `username = product_id&device_name`、`password = token`；**旧版 MQTTS 多协议**接入
+  是 `username = device_name`——现场是旧版时脚本自行组包（fork 配方改 `auth_builder`）。
+- 属性通道 topic：上报 `$sys/{pid}/{dev}/thing/property/post`；设置下行
+  `$sys/{pid}/{dev}/thing/property/set`（`parse_property_set` 校验 topic 形状并解
+  OneJSON，返回 `{pid, dev, id, params}` 或 `nil, 原因`）。
+- selftest 锁 Python 参考向量（算法一致性）；**性能**：token 含一次纯 Lua hmac_sha1
+  （~70 万 VM 指令），mqtt-north 实例须调高 `hook_instr_limit`（见 mqtt-north 章节）。
+
 ### 站点共享库（`scripts/_lib/`）
 
 第三方/站点级复用库经 REST 保存（`kind=lib`），require 按 `<org>.<库路径>` 引用：
@@ -246,7 +276,7 @@ main.lua 顶部注释块可声明脚本契约（`-- @key value`，逐行扫至�
 
 | 键 | 含义 | 缺省 |
 |---|---|---|
-| `@role` | 脚本角色（v1 仅 `collector`） | 不声明（缺省语义 collector，但不强制契约，见下） |
+| `@role` | 脚本角色：`collector`（南向采集，必需 `collect`）/ `mqtt-north`（北向 MQTT，必需 `auth`+`up`，见「mqtt-north 角色」） | 不声明（缺省语义 collector，但不强制契约，见下） |
 | `@api_ver` | 要求的宿主 API 版本（整数） | `1`（非法值报错，不静默放行） |
 | `@stdlib` | stdlib 版本范围：`>=1.0`、`>=1.0 <2`（空格组合，全部满足） | 不限 |
 | `@param` | 参数声明，可多行（B 阶段参数面板消费） | — |
@@ -259,8 +289,10 @@ main.lua 顶部注释块可声明脚本契约（`-- @key value`，逐行扫至�
 **dry-run 校验**（启动与热加载 reload 均执行；失败启动放弃、reload 回退旧 VM）：
 
 - `api_ver` > 宿主当前（见兼容矩阵）→ 拒载，提示"请升级宿主"；< 宿主最低 → 拒载，提示"请升级脚本"。
-- **仅当显式声明 `@role collector`** 时强制全局 `collect` 存在（显式声明 = 作者签署契约 → 严格
-  校验；无 manifest 头的存量脚本豁免——可能只定义 `on_data`，向后兼容放行）。未知角色名拒载。
+- **仅当显式声明 `@role`** 时强制角色契约（显式声明 = 作者签署契约 → 严格校验）：
+  `collector` → 全局 `collect` 必需；`mqtt-north` → `auth`+`up` 必需
+  （down/will/on_connack/on_disconnect 可选）。无 manifest 头的存量脚本豁免——
+  可能只定义 `on_data`，向后兼容放行。未知角色名拒载。
 - `@stdlib` 范围 vs 本地 index 版本，不满足提示"请 sync"；未 sync（种子兜底态）跳过比对——
   内网冷启动不拒载。
 
@@ -287,6 +319,122 @@ main.lua 顶部注释块可声明脚本契约（`-- @key value`，逐行扫至�
 | `hook_instr_limit` | num | — | 指令 hook 阈值（防死循环，spec §9.2） |
 | `callback_timeout_ms` | num | `10000` | 单次回调（collect/on_write/on_data/**on_init**）时长预算（毫秒，见护栏） |
 | `fail_threshold` | num | `10` | 连续 collect 失败 N 次标记 degraded |
+
+## mqtt-north 角色（北向 `luaNorth` 实例）
+
+阶段 B 起脚本系统支持双角色：`luaClient`（南向 collector，上文）与 `luaNorth`
+（北向 **mqtt-north Sink**——收拢批量数据发布到 MQTT 平台/裸 broker）。同一套沙箱、
+ctx API（L2 数据/L4 kv+secret/L5 HTTP/L6 工具全量；角色裁剪掉 C1 `ctx:request` 与
+`ctx:transport()`——MQTT 连接层在宿主 rumqttc，脚本拿不到连接对象）、manifest/热
+加载/stdlib require 机制。设计见
+`docs/designs/2026-08-18-lua-script-system-evolution-design.md` §5。
+
+### 回调契约（六回调）
+
+main.lua 头部声明 `-- @role mqtt-north`（dry-run 校验 `auth`+`up` 必需）：
+
+| 函数 | 必需 | 调用时机 | 返回 |
+|---|---|---|---|
+| `auth(cfg)` | ✅ | **每次**连接/重连前（Q5：重连必重调——token 型认证刷新的生效点） | `{client_id?, username?, password?, keepalive?}`（覆盖 NorthCfg 对应项）或 nil（cfg 缺省生效）；password 支持 `secret:` 引用 |
+| `up(batch)` | ✅ | 批量周期（满 `batch_max_count` 条或 `batch_max_secs` 秒先到先触发；断连期跳过、数据留缓冲重连后补发） | `{ {topic=str, payload=str, qos=0\|1\|2?}, ... }` 发布数组（或 nil） |
+| `down(topic, payload)` | 可选 | `subscribe` 订阅 topic 收到下行 | 忽略（命令处理/落 kv 由脚本自定） |
+| `will()` | 可选 | 每次连接前组 LWT（遗嘱） | `{topic, payload, qos?, retain?}` 或 nil（无遗嘱） |
+| `on_connack()` | 可选 | 连接成功后（宿主随后自动订阅 `cfg.subscribe`） | 忽略 |
+| `on_disconnect()` | 可选 | 断连后（退避 `period` 秒重连，重连重调 auth） | 忽略 |
+
+- `batch` 是数组：`{{devid="...", ts=<来源时间戳>, values={tag=v, ...}}, ...}`
+  （lux `rtdata:*` 快照 + 实时样本合并，一个设备一条）；`up` 返回的坏条目
+  （topic/payload 非 string）计 `publish_fail` 跳过不中断。
+- 全局 `cfg` 表（`auth(cfg)` 同参）：NorthCfg 有效子集
+  （`hwid/script/host/port/username/password/client_id/batch_max_count/batch_max_secs/
+  period/subscribe`；password 的 `secret:` 引用保持原样，连接前一刻才解析）。
+
+```lua
+-- @role mqtt-north
+-- @stdlib >=1.2
+local onenet = require("cloud.onenet")
+local json = require("json")
+
+function auth(cfg)
+  return onenet.auth_builder({
+    product_id = "123456",
+    device_name = "dev01",
+    access_key = ctx:secret_get("secret:onenet_key"),  -- 授权清单内引用
+    et = 2000000000,                                     -- 过期 unix 秒
+  })
+end
+
+function will() return { topic = "offline/dev01", payload = "gone" } end
+
+function up(batch)
+  local posts, pid, dev = {}, "123456", "dev01"
+  for _, e in ipairs(batch) do
+    -- OneJSON 属性上报：params 每点嵌套 {value=...}
+    local params = {}
+    for tag, v in pairs(e.values) do params[tag] = { value = v } end
+    posts[#posts+1] = {
+      topic = onenet.topic_property_post(pid, dev),
+      payload = json.encode({ id = tostring(e.ts), version = "1.0", params = params }),
+    }
+  end
+  return posts
+end
+
+function down(topic, payload)
+  local m = onenet.parse_property_set(topic, payload)
+  if m then ctx:kv_set("last_set", json.encode(m.params)) end
+end
+```
+
+### 配置（NorthCfg，`app_config`）
+
+`app_code="luaNorth"`（`app_type` North）。**无传输项**（kind/endpoint/serial_*——
+MQTT 连接在宿主）：
+
+| 字段 | 类型 | 默认 | 说明 |
+|---|---|---|---|
+| `script` | str | 必填 | 脚本目录名（校验同 collector） |
+| `host` / `port` | str / num | 必填 / `1883` | broker 地址 |
+| `username` / `password` | str | — | 凭证缺省项（auth 返回优先）；password 支持 `secret:<ref>` |
+| `client_id` | str | `hwid-<inst_id>` | auth 返回优先 |
+| `period` | num | `5` | 断连重连退避秒数 |
+| `batch_max_count` / `batch_max_secs` | num | `50` / 取 `period` | 混合批量触发（先到先发） |
+| `subscribe` | str[] | `[]` | ConnAck 后订阅的 topic 列表（`down` 数据源） |
+| `secrets` | str[] | `[]` | `ctx:secret_get` 授权清单（同 collector） |
+| `callback_timeout_ms` | num | `10000` | 单回调预算（auth/up/down/will/on_*） |
+| `mem_limit_mb` / `hook_instr_limit` | num | `32` / `1000000` | 沙箱参数（见下提示） |
+
+### secret 引用（平台凭证不落脚本/配置）
+
+```bash
+# 管理面写入 lux secrets 表（REST，见 rest-api.md §4.11；写入/删除有审计日志）
+curl -X POST -H "Authorization: <token>" -H 'Content-Type: application/json' \
+  -d '{"ref":"secret:onenet_key","value":"<平台分配 access_key>"}' \
+  localhost:8790/api/v1/secret/set
+```
+
+两条独立通路，规则不同：
+
+- **脚本侧** `ctx:secret_get(ref)`：受实例 `app_config.secrets` 授权清单约束——
+  清单外引用**报错**（可感知）；清单内但未写入返回 `nil`（补写后下一轮 auth 即救活）。
+- **宿主侧** password `secret:<ref>`（NorthCfg.password 或 auth 返回的 password）：
+  连接配置的一部分，**不受授权清单约束**（清单管脚本侧读取）；连接序列解析时未写
+  按"认证失败"处理退避重试，不静默改无密码连接。
+
+### hook_instr_limit 提示（OneNET 接入必读）
+
+OneNET token 签名含一次纯 Lua hmac_sha1（实测 ~70 万条 VM 指令，叠加脚本自身
+逻辑会逼近默认 1M 指令护栏；护栏在同一 VM 内跨回调**累计**）。超限 auth 回调被
+切断 → 实例反复重连失败。**OneNET 接入实例配置 `hook_instr_limit ≥ 2000000`**
+（CI 以 4M 验证全量 selftest）。
+
+### 兼容默认实例（T8 迁移）
+
+存量 `[mqtt]`（mqttPub）配置在启动时**无损迁移**为默认 luaNorth 实例
+`mqtt-pub-default`（内置 mqttPub 兼容脚本：每设备一条
+`<hwid>/<devid>/datas` topic、payload `{hwid, devid, values, timestamp}`、qos 0）。
+R5 单通道锁：`[mqtt]` 与 luaNorth 不双通道并存（默认实例已在运行则跳过二次启动）；
+`cfg.mqtt.host` 留空 = 显式关闭不生成。迁移细节见 stage-b 设计 §7。
 
 ## 运行时护栏
 
@@ -415,7 +563,12 @@ curl -H "Authorization: <token>" "localhost:8790/api/v1/logs/recent?target=io_tr
 
 | 宿主版本 | API_VER（MIN / CUR） | STDLIB | builtin 模块 |
 |---|---|---|---|
-| 阶段 A（本版） | 1 / 1 | 种子 4 库（freeioe@1398d47 vendored，随宿主内嵌、无独立版本轴）；官方源 index 首发版本 **1.0.0**（sync 后本地 index 为准） | `json` |
+| 阶段 A | 1 / 1 | 种子 4 库（freeioe@1398d47 vendored，随宿主内嵌、无独立版本轴）；官方源 index 首发版本 **1.0.0**（sync 后本地 index 为准） | `json` |
+| 阶段 B（本版） | 1 / 1 | 种子不变；官方源在线分发：**1.1.0**（`algo.hashings` 子集 uintn/md5/sha1/sha256/hmac + `cloud.emqx`）→ **1.2.0**（+`cloud.onenet` token 配方）。sync 后本地 index 为准 | `json` |
 
 - 脚本 `@api_ver 1`（或缺省）在本版通过；宿主升级 CUR 后旧脚本不受影响（MIN 锁下界）。
-- `@stdlib >=1.0`：种子兜底态跳过比对（冷启动不拒载）；sync 1.0.0 后 `>=1.0 <2` 区间均满足。
+- `@stdlib >=1.0`：种子兜底态跳过比对（冷启动不拒载）；sync 后 `>=1.0 <2` 区间均满足
+  （1.1.0/1.2.0 亦然）——用 `cloud.onenet`/hashings 的脚本声明 `@stdlib >=1.1`/`>=1.2`
+  可获得"未 sync 即拒载"的显式闸门。
+- hashings/cloud 均不进种子：新装宿主未 sync 前 `require` 报"未同步"（可行动错误，
+  按上文 sync 流程安装）。

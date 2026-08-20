@@ -234,6 +234,35 @@ curl -s -XPOST -H "Authorization: $TOKEN" -H 'Content-Type: application/json' \
 
 > **报文 trace 按设计不落盘**：trace 报文（trace level）只进内存 ring buffer（2000 条/实例，按需激活、用完关闭），不写入日志文件——避免 hex 数据撑爆磁盘；常规运行日志（info/warn/error）才 daily 落盘。
 
+### 4.11 平台凭证 secret（`routes_secret.rs`，阶段 B T4）
+
+平台级凭证（MQTT broker 密码、OneNET access_key 等）的 lux 全局 `secrets` 表管理面。
+ref 规则：`secret:` 前缀 + `[a-z0-9_-]`（小写；非法字符 400，消息含合法字符集）。
+消费侧见 Lua 脚本指南（脚本 `ctx:secret_get` 走实例 `app_config.secrets` 授权清单；
+mqtt-north password 的 `secret:` 引用走宿主连接序列）。
+
+| Method | Path | 鉴权 | Body/Query | 响应 |
+|---|---|---|---|---|
+| POST | `/api/v1/secret/set` | JWT | `{"ref":"secret:onenet_key","value":"<明文>"}` | `{"status":"ok","ref":...}`（覆盖旧值；不回显 value） |
+| GET | `/api/v1/secret/list` | JWT | — | `[{"ref":"secret:mqtt_pwd","masked":"****"}, ...]`（ref 字典序） |
+| DELETE | `/api/v1/secret` | JWT | `?ref=secret:onenet_key` | `{"status":"ok","ref":...}`（幂等：不存在仍 200） |
+
+- **掩码规则**（list 绝不回显明文，D6）：值 >8 字符 → 前 4 + `****` + 后 4；≤8 → 全 `****`。
+- **审计**（Q4 ref 级、不落值）：set/delete 各落一条 `[secret][audit] set/delete ref=...`
+  日志——日志与响应里**绝不出现明文**（who 由 JWT 访问日志侧承载）；脚本侧读取不落日志。
+- 删除后引用该 ref 的实例下一轮 auth/重连按"认证失败"退避重试（补写即救活，无需重启）。
+
+```bash
+# 写入（管理机）
+curl -X POST -H "Authorization: <token>" -H 'Content-Type: application/json' \
+  -d '{"ref":"secret:onenet_key","value":"<平台分配 access_key>"}' \
+  localhost:8790/api/v1/secret/set
+# 列表（仅掩码）
+curl -H "Authorization: <token>" localhost:8790/api/v1/secret/list
+# 删除
+curl -X DELETE -H "Authorization: <token>" "localhost:8790/api/v1/secret?ref=secret:onenet_key"
+```
+
 ## 5. 数据模型（`src/types.rs`）
 
 ```
