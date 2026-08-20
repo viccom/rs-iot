@@ -12,7 +12,8 @@ pub struct AppConfig {
     pub api_port: u16,
     /// JWT 签名密钥（HS256，32 字节）。默认值与 Lite_IOT 对齐。
     pub jwt_secret: String,
-    /// 北向 MQTT broker（mqttPub 默认实例连接目标）
+    /// 北向 MQTT broker（T8 起等价生成默认 luaNorth 实例 mqtt-pub-default；
+    /// 细粒度控制可自建 luaNorth 实例）
     pub mqtt: MqttConfig,
     /// 日志配置（终端 + 可选文件轮转）。
     pub log: LogConfig,
@@ -45,18 +46,24 @@ pub struct LuxConfig {
 }
 
 /// 北向 MQTT broker 配置。
+///
+/// T8 迁移语义：编排层（`run_app_with_shutdown`）据此**等价生成**默认 luaNorth
+/// 实例（`mqtt-pub-default`，内置 mqttPub 兼容脚本 `scripts/_builtin-north-compat/`）
+/// ——host 非空即生成，`host = ""` 为显式关闭；细粒度控制（独立脚本/批量节奏/
+/// 多 broker）可自建 luaNorth 实例（REST `instances` 配置，与默认实例互不干扰）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct MqttConfig {
-    /// broker 主机（公网或本地 mosquitto 等）。
+    /// broker 主机（公网或本地 mosquitto 等）。空串 = 不生成默认北向实例。
     pub host: String,
     /// broker 端口（默认 1883）。
     pub port: u16,
     /// 用户名（匿名 broker 留 None）。
     pub username: Option<String>,
-    /// 密码。
+    /// 密码（支持 `secret:<ref>` 引用——luaNorth 连接序列解析 lux secrets 表）。
     pub password: Option<String>,
-    /// 北向发布周期（秒）：`MqttPub` 每隔该时长从 lux 抽取 rtdata 发布。
+    /// 北向发布周期（秒）：映射默认实例的 `period` 与 `batch_max_secs`——每隔该
+    /// 时长从 lux 抽取 rtdata 发布。
     pub publish_interval_secs: u64,
 }
 

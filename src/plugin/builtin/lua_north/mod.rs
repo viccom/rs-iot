@@ -9,6 +9,9 @@
 //! BatchTick 的 lux pull 收拢批量 → `up(batch)` → 逐条投递 + down/on_connack/
 //! on_disconnect 回调 + stat（publish_ok/publish_fail/reconnect_count）。
 //!
+//! T8：[`compat`]——旧 `[mqtt]` 配置 → 默认实例 `mqtt-pub-default` 的无损迁移
+//! （内置 mqttPub 兼容脚本 + R5 单通道锁），编排层接线见 `lib.rs`。
+//!
 //! 与 luaClient 的结构差异（§5.0「一套沙箱，多种角色」）：
 //! - register 先于 load_main（collector 相反）——mqtt-north 脚本顶层即可用
 //!   `ctx`/`cfg`（能力探针/配置读取）；
@@ -17,6 +20,7 @@
 //! - 数据收拢走 lux pull 快照批量（取舍 1，Q6）：Sink `rx` 恒闲置但语义正确
 //!   消费——收到即入批缓冲，随 BatchTick flush 一并交 up()。
 
+pub(crate) mod compat;
 mod config;
 mod contract;
 

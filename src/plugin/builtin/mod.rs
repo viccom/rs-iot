@@ -9,7 +9,6 @@ pub mod lua_client;
 pub mod lua_north;
 #[cfg(feature = "modbus")]
 pub mod modbus_client;
-pub mod mqtt_pub;
 #[cfg(feature = "opcua")]
 pub mod opcua_client;
 #[cfg(feature = "s7")]

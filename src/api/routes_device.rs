@@ -168,7 +168,7 @@ pub async fn delete(State(st): State<AppState>, Json(req): Json<DelReq>) -> Resp
         }
     };
     cfg.devices.retain(|d| d.value != req.dev_id);
-    // 清被删设备的实时数据（避免孤儿被 mqttPub 周期发布）。
+    // 清被删设备的实时数据（避免孤儿被默认北向实例周期发布）。
     if let Err(e) = crate::db::rtdata::delete_device(&st.lux, &req.dev_id).await {
         tracing::warn!("[routes_device] delete rtdata:{} failed: {e}", req.dev_id);
     }

@@ -156,9 +156,11 @@ impl NorthCfg {
     /// 表」）：脚本业务相关的有效配置子集（client_id 缺省已物化；沙箱参数/
     /// 授权清单等宿主内部项不暴露）。password 保持原始形态——`secret:` 引用
     /// 在连接前一刻经 contract::resolve_password_opt 解析（解析后明文不长期驻留
-    /// VM globals）。
+    /// VM globals）。`hwid`（T8）供 mqttPub 兼容脚本组 `<hwid>/<devid>/datas`
+    /// topic 与 payload。
     pub(crate) fn to_script_cfg(&self, hwid: &str, inst_id: &str) -> serde_json::Value {
         serde_json::json!({
+            "hwid": hwid,
             "script": self.script,
             "host": self.host,
             "port": self.port,
@@ -264,6 +266,7 @@ mod tests {
         }))
         .unwrap();
         let v = cfg.to_script_cfg("hw-9", "north-9");
+        assert_eq!(v["hwid"], "hw-9", "T8：兼容脚本组 topic/payload 需 hwid");
         assert_eq!(v["host"], "127.0.0.1");
         assert_eq!(v["port"], 1883);
         assert_eq!(v["client_id"], "hw-9-north-9", "缺省已物化");

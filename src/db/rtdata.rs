@@ -98,7 +98,7 @@ pub async fn write_batch(
 
 /// 删除某设备的全部实时数据（`DEL rtdata:<dev_id>` 整个 hash）。
 ///
-/// 实例/设备删除时调，清孤儿数据——否则 `mqttPub` 仍会周期 `KEYS rtdata:*`
+/// 实例/设备删除时调，清孤儿数据——否则北向发布器（默认 luaNorth 实例）仍会周期 `KEYS rtdata:*`
 /// 把已移除设备的点位发布到 broker。DEL 模式对标 `luakv::remove`。
 pub async fn delete_device(c: &EmbeddedClient, dev_id: &str) -> Result<(), RsIotError> {
     c.execute("DEL", &[&format!("rtdata:{dev_id}")]).await?;

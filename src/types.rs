@@ -18,7 +18,7 @@ pub struct InstId(String);
 #[derive(Debug, Clone, Eq, PartialEq, Hash, Serialize, Deserialize)]
 pub struct UserId(String);
 
-/// 插件名（注册表 key，对应 `InstConfig::app_code`，如 "dataSim"/"mqttPub"）。
+/// 插件名（注册表 key，对应 `InstConfig::app_code`，如 "dataSim"/"luaNorth"）。
 #[derive(Debug, Clone, Eq, PartialEq, Hash, Serialize, Deserialize)]
 pub struct PluginName(String);
 
@@ -212,7 +212,7 @@ pub struct InstConfig {
     /// 实例显示名（缺省留空，配置容错）。
     #[serde(default)]
     pub inst_name: String,
-    /// 插件名（如 "dataSim"、"mqttPub"），用于在注册表查找。
+    /// 插件名（如 "dataSim"、"luaNorth"），用于在注册表查找。
     pub app_code: PluginName,
     /// 插件方向（南向 Source / 北向 Sink）。
     pub app_type: AppType,

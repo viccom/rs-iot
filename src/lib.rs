@@ -1,8 +1,8 @@
 //! rs-iot：轻量跨平台工业 IoT 边缘框架（Rust）。
 //!
 //! 内嵌 lux 作为进程内 Redis 兼容数据库；南向 Source 采集 → hub → pipeline →
-//! lux rtdata；北向 Sink（mqtt，STEP 5 起为 pull 模式）发布到外部 broker；
-//! axum REST 管理 API（默认 :8780）。
+//! lux rtdata；北向走默认 luaNorth 实例 mqtt-pub-default（T8 起，mqttPub 兼容
+//! 脚本，pull 模式周期发布）发布到外部 broker；axum REST 管理 API（默认 :8780）。
 //!
 #![warn(
     missing_docs,
@@ -181,8 +181,8 @@ pub async fn run_app(
 /// 服务态入口（M4 Windows Service / systemd）：shutdown 由外部（SCM/sigterm）触发。
 ///
 /// 数据流（hub 模式，STEP 5 pull 化）：N 个 Source ──hub(mpsc)──► pipeline
-/// ──Processor──► lux HSET rtdata:{devid}；北向 `MqttPub` 独立常驻，
-/// 周期从 lux 抽取 rtdata → PUBLISH `{hwid}/{devid}/datas`。
+/// ──Processor──► lux HSET rtdata:{devid}；北向默认 luaNorth 实例
+/// （mqtt-pub-default，T8 起）周期从 lux 抽取 rtdata → PUBLISH `{hwid}/{devid}/datas`。
 #[tracing::instrument(skip(cfg, shutdown, log_ringbuffer, event_bus))]
 pub async fn run_app_with_shutdown(
     cfg: config::AppConfig,
@@ -227,11 +227,41 @@ pub async fn run_app_with_shutdown(
     let (hub_tx, hub_rx) = tokio::sync::mpsc::channel::<types::Sample>(512);
     let mgr = Arc::new(plugin::instance::InstanceManager::new(ctx.clone(), hub_tx));
 
-    // 北向 MQTT 发布器（pull 模式，STEP 5）：常驻独立 task，周期从 lux 抽取 rtdata 发布。
-    let mqtt_token = shutdown.child_token();
-    let mqtt_handle = tokio::spawn(
-        plugin::builtin::mqtt_pub::MqttPub::new(cfg.mqtt.clone()).run(ctx.clone(), mqtt_token),
-    );
+    // 北向 MQTT（T8 无损迁移）：cfg.mqtt.host 非空 → 默认 luaNorth 实例
+    // （mqtt-pub-default + 内置 mqttPub 兼容脚本），经 InstanceManager 全套生命周期
+    // 管理；R5 单通道锁在 compat::start_default_north（本进程已运行不二次启动、
+    // lux 已有同名配置沿用不覆盖、auto_start=true 交 lux autoStart 路径）。
+    #[cfg(feature = "lua")]
+    {
+        use plugin::builtin::lua_north::compat::{start_default_north, DefaultNorth};
+        match start_default_north(
+            &cfg,
+            &hwid,
+            std::path::Path::new(plugin::lua_core::loader::SCRIPTS_ROOT),
+            &client,
+            &mgr,
+        )
+        .await
+        {
+            DefaultNorth::Started => {
+                tracing::info!("[mqtt] 默认北向实例 mqtt-pub-default 已启动（mqttPub 无损迁移）");
+            }
+            DefaultNorth::Disabled => {
+                tracing::info!("[mqtt] [mqtt].host 为空——不生成默认北向实例（显式关闭）");
+            }
+            DefaultNorth::Failed(e) => {
+                tracing::warn!("[mqtt] 默认北向实例启动失败：{e}");
+            }
+            // AlreadyRunning / DeferredToAutoStart：compat 内已记日志。
+            _ => {}
+        }
+    }
+    #[cfg(not(feature = "lua"))]
+    if !cfg.mqtt.host.trim().is_empty() {
+        tracing::warn!(
+            "[mqtt] 本构建未启用 lua feature：[mqtt] 配置无效（mqttPub 已删，北向发布走 luaNorth 实例）"
+        );
+    }
 
     // pipeline：hub → processor → lux rtdata（不再 fan-out 到 sink）
     let processor: Arc<dyn plugin::traits::Processor> =
@@ -349,7 +379,6 @@ pub async fn run_app_with_shutdown(
     // 让 worker 的 best-effort flush 在 shutdown_lux 前完成(防丢最后 ≤50ms 数据)。
     // 5s timeout 兜底防 worker 卡 lux 写致 shutdown 挂死(B3 修复:原 abort() 抢占退出)。
     let _ = tokio::time::timeout(std::time::Duration::from_secs(5), pipeline_handle).await;
-    mqtt_handle.abort();
     axum_handle.abort();
     if let Some(h) = bridge_handle {
         h.abort();

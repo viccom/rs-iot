@@ -28,7 +28,7 @@ pub trait Source: Send + Sync {
     );
 }
 
-/// 北向：消费数据。`mqttPub` 等发布插件实现此 trait。
+/// 北向：消费数据。`luaNorth` 等发布插件实现此 trait。
 #[async_trait]
 pub trait Sink: Send + Sync {
     /// 插件名（注册表 key）。

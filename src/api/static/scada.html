@@ -894,7 +894,7 @@ const fmt = {
   val:(v)=>{if(v===null||v===undefined)return '—';if(typeof v==='boolean')return v?'TRUE':'FALSE';return String(v);},
 };
 const STATE_COLOR={running:'green',stopped:'',starting:'amber',stopping:'amber',failed:'red'};
-const PROTO_LABEL={dataSim:'数据模拟',opcuaClient:'OPC UA',modbusClient:'MODBUS',s7Client:'SIEMENS S7',sidecarClient:'外部插件',mqttPub:'MQTT 北向',luaClient:'LUA 脚本'};
+const PROTO_LABEL={dataSim:'数据模拟',opcuaClient:'OPC UA',modbusClient:'MODBUS',s7Client:'SIEMENS S7',sidecarClient:'外部插件',luaNorth:'MQTT 北向',luaClient:'LUA 脚本'};
 
 const State={
   token: (document.cookie.match(/token=([^;]+)/)||[])[1] || localStorage.getItem('rsiot_token') || '',
@@ -1038,7 +1038,7 @@ const SIM={
     'mb-power':{inst_id:'mb-power',inst_name:'电力监控 Modbus',app_code:'modbusClient',app_type:'south',auto_start:true,host_kind:'builtin',app_config:{kind:'tcp',endpoint:'127.0.0.1:502',slave_id:1,period:2},devices:[{label:'电表1',value:'pwr1',children:[{label:'有功功率',value:'holding:0:f32:ABCD',type:'f32'},{label:'电流',value:'holding:2:f32:CDAB',type:'f32'},{label:'电压',value:'holding:4:f32',type:'f32'}]}]},
     's7-press':{inst_id:'s7-press',inst_name:'压机 S7-1200',app_code:'s7Client',app_type:'south',auto_start:false,host_kind:'builtin',app_config:{endpoint:'192.168.0.1:102',plc_type:'s1200',period:3},devices:[]},
     'ext-gw':{inst_id:'ext-gw',inst_name:'外部网关(sidecar)',app_code:'sidecarClient',app_type:'south',auto_start:true,host_kind:'external',app_config:{},devices:[{label:'第三方PLC',value:'extPlc',children:[{label:'产量',value:'cnt',type:'int'},{label:'状态字',value:'status',type:'int'}]}]},
-    'north-mqtt':{inst_id:'north-mqtt',inst_name:'MQTT 北向发布',app_code:'mqttPub',app_type:'north',auto_start:true,host_kind:'builtin',app_config:{},devices:[]},
+    'north-mqtt':{inst_id:'north-mqtt',inst_name:'MQTT 北向发布',app_code:'luaNorth',app_type:'north',auto_start:true,host_kind:'builtin',app_config:{script:'_builtin-north-compat',host:'127.0.0.1',port:1883,period:5},devices:[]},
   },
   states:{'sim-plant-a':'running','opcua-line1':'running','mb-power':'running','s7-press':'stopped','ext-gw':'running','north-mqtt':'running'},
   health:{
@@ -1158,7 +1158,7 @@ function renderOverviewVitals(){
   $('#pp-proc').textContent=fmt.num(m.pipeline_processed_count); $('#pp-fail').textContent=fmt.num(m.pipeline_write_fail_count);
   $('#pp-send').textContent=fmt.num(m.ctl_send_count); $('#pp-drop').textContent=fmt.num(m.ctl_dropped_count); $('#pp-nf').textContent=fmt.num(m.ctl_not_found_count);
   // overview tiles
-  const south=State.stats.filter(x=>x.app_code!=='mqttPub'); const running=south.filter(x=>x.state==='running').length;
+  const south=State.stats.filter(x=>x.app_code!=='luaNorth'); const running=south.filter(x=>x.state==='running').length;
   $('#ov-inst').innerHTML=running+'<small>/'+south.length+'</small>';
   const tagc=Object.values(State.rtdata).reduce((a,d)=>a+Object.keys(d||{}).length,0);
   $('#ov-tags').textContent=fmt.num(tagc); $('#ov-tags-s').textContent=Object.keys(State.rtdata).length+' 设备';

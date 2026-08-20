@@ -125,7 +125,7 @@ pub struct DelReq {
 /// 清 trace → 删配置 → 清 token/luakv。
 ///
 /// **顺序关键**：先 `HGET` 读配置拿 devid 列表，再 `HDEL` 删配置——否则配置删了
-/// 就读不到关联设备，rtdata 会残留成孤儿（mqttPub 仍发布）。各步骤容错（warn 不
+/// 就读不到关联设备，rtdata 会残留成孤儿（北向发布器仍发布）。各步骤容错（warn 不
 /// 中断），尽力清完避免半残留，与原 `delete` 的语义一致。`pub(crate)` 供
 /// `purge` 批量复用。
 pub(crate) async fn cascade_delete(st: &AppState, inst_id: &str) {
@@ -149,7 +149,7 @@ pub(crate) async fn cascade_delete(st: &AppState, inst_id: &str) {
     // 2b. stop 仅置 Stopped（保留死活历史），删除需彻底移除运行态记录——
     //     否则 /inst/stats 持续返回已删除实例（残留 bug）。
     st.mgr.remove_state(inst_id);
-    // 3. 清该实例所有设备的实时数据（防 mqttPub 发孤儿）。
+    // 3. 清该实例所有设备的实时数据（防默认北向实例发孤儿）。
     for dev_id in &devids {
         if let Err(e) = crate::db::rtdata::delete_device(&st.lux, dev_id).await {
             tracing::warn!("[routes_inst] delete rtdata:{dev_id} failed: {e}");

@@ -34,12 +34,15 @@ pub struct ProcessMetrics {
     pub hub_depth_last: AtomicU64,
     /// hub channel 历史最大深度（gauge）。
     pub hub_depth_max: AtomicU64,
-    // 北向（mqtt）
-    /// mqtt 发布成功次数。
+    // 北向（mqtt）——T8 迁移说明：mqttPub 直启已删（北向改默认 luaNorth 实例
+    // mqtt-pub-default），下列字段不再有运行时写入方（恒 0 / 恒 false）；实时
+    // 计数在实例 stat 的 extra（publish_ok/publish_fail/reconnect_count，T7）。
+    // 字段与方法保留是为 /metrics 与 /sysstatus 端点形状稳定（抓取端不破）。
+    /// mqtt 发布成功次数（T8 后恒 0，见上方迁移说明）。
     pub mqtt_publish_count: AtomicU64,
-    /// mqtt 发布失败次数。
+    /// mqtt 发布失败次数（T8 后恒 0，见上方迁移说明）。
     pub mqtt_publish_fail_count: AtomicU64,
-    /// mqtt 当前是否已连接（gauge，1=true/0=false）。
+    /// mqtt 当前是否已连接（gauge，1=true/0=false；T8 后恒 false）。
     pub mqtt_connected: AtomicBool,
 }
 
@@ -122,15 +125,15 @@ impl ProcessMetrics {
         self.hub_depth_last.store(d, Ordering::Relaxed);
         self.hub_depth_max.fetch_max(d, Ordering::Relaxed);
     }
-    /// mqtt publish 成功 +1。
+    /// mqtt publish 成功 +1（T8 后无调用方——旧 mqtt_pub 已删；保留为端点形状）。
     pub fn mqtt_publish(&self) {
         self.mqtt_publish_count.fetch_add(1, Ordering::Relaxed);
     }
-    /// mqtt publish 失败 +1。
+    /// mqtt publish 失败 +1（T8 后无调用方——旧 mqtt_pub 已删；保留为端点形状）。
     pub fn mqtt_publish_fail(&self) {
         self.mqtt_publish_fail_count.fetch_add(1, Ordering::Relaxed);
     }
-    /// 更新 mqtt 连接状态。
+    /// 更新 mqtt 连接状态（T8 后无调用方——旧 mqtt_pub 已删；保留为端点形状）。
     pub fn mqtt_connected(&self, connected: bool) {
         self.mqtt_connected.store(connected, Ordering::Relaxed);
     }
