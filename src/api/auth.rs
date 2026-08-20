@@ -92,7 +92,7 @@ pub async fn auth_middleware(State(st): State<AppState>, req: Request, next: Nex
             let mut req = req;
             req.extensions_mut().insert(AuthedUser {
                 user_id: user_id.clone(),
-                via: "jwt".into(),
+                via: "jwt",
             });
             next.run(req).await
         }
