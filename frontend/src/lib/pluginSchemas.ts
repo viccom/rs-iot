@@ -100,7 +100,7 @@ export const DATASIM_SCHEMA: PluginField[] = [
   { key: 'period', label: '采集周期(秒)', type: 'number', default: 3, hint: '全插件统一秒（非毫秒）；修改后需重启实例生效' },
 ]
 
-/** 内置 app_code 选项（新建实例下拉）。北向 mqttPub 不在此（实例管理聚焦南向采集）。 */
+/** 内置 app_code 选项（新建实例下拉）。北向 luaNorth 不在此（实例管理聚焦南向采集）。 */
 export const SOUTH_APP_CODES = ['modbusClient', 'opcuaClient', 's7Client', 'luaClient', 'dataSim']
 
 /** 取某 app_code 的 schema；未匹配返空数组（InstanceForm 回退 JSON 文本框）。 */

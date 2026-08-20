@@ -19,7 +19,7 @@
 - **实例动态启停**：REST `startinst`/`stopinst` 从 lux `instances` 读配置动态启停 Source。
 - **服务化**：Windows Service（`windows-service` crate dispatch）/ Linux systemd unit 生成；SCM stop 触发 `CancellationToken` → 优雅关闭（lux SAVE → shutdown）。
 - **文件日志（M3）**：`tracing-appender` daily 轮转，`[log].dir` 默认 `./logs`（开箱即落盘）+ `max_days`/`max_size_mb` 保留期清理（按天/按总大小删旧，跳过当天活动日志）+ 退出 `WorkerGuard` flush（不再 `mem::forget`，保故障末尾日志）。
-- **可观测性（M4 + P1 三子系统）**：统一埋点（`InstanceStat` + `StatTracker`，全部内置插件 + sidecar + mqttPub）+ `GET /metrics`（Prometheus 文本，免 JWT，进程级 + per-instance 指标）+ `POST/GET/DELETE /api/v1/inst/trace`（per-instance 报文 hex dump 按需激活，lua + modbus 4 传输）+ `GET /api/v1/logs/recent`（日志 ring buffer 快照，内存 2000 条/实例）+ `GET /api/v1/inst/stats`（per-instance JSON 指标，替代废弃的 `/api/v1/lua/stats`）。详见 `docs/reference/rest-api.md` §4.10。
+- **可观测性（M4 + P1 三子系统）**：统一埋点（`InstanceStat` + `StatTracker`，全部内置插件 + sidecar + 北向 luaNorth）+ `GET /metrics`（Prometheus 文本，免 JWT，进程级 + per-instance 指标）+ `POST/GET/DELETE /api/v1/inst/trace`（per-instance 报文 hex dump 按需激活，lua + modbus 4 传输）+ `GET /api/v1/logs/recent`（日志 ring buffer 快照，内存 2000 条/实例）+ `GET /api/v1/inst/stats`（per-instance JSON 指标，替代废弃的 `/api/v1/lua/stats`）。详见 `docs/reference/rest-api.md` §4.10。
 - **实例自愈可信（M3）**：实例 task 异常退出（panic/配置错误早退）由 supervisor 真实标 `Failed` + `error!` 落盘；REST `inststatus` 可见，`startinst` 重拉。
 - **L1→L2 生产基线**：`missing_docs`/clippy/rustfmt 基线、统一 `RsIotError`（thiserror + `#[non_exhaustive]`）错误规范、newtype ID（`Hwid`/`InstId`/`UserId`/`PluginName`）、`tracing` 日志（`#[instrument]` + TraceLayer）、GitHub Actions CI。规范依据为外部文档《rust-architecture-by-code-size》（未入库）。
 
@@ -194,7 +194,7 @@ GitHub Actions（`.github/workflows/ci.yml`，push/PR 触发）：
 - [x] **RS485-M1** modbus 多 slave 轮询：`slave_id` 下沉设备级（`DeviceSpec.slave_id`）+ `app_config.poll_strategy`（`round_robin` 默认 / `sequential`）+ `request_timeout_secs`（per-request 超时跳过，单 slave 无响应故障隔离不拖垮整轮）；向后兼容旧单 slave 配置。一条 RS485 总线一个实例管多从站
 - [x] **lua-M2** lua 单实例多设备输出：`set_value(devid, tag, v)` 3 参（原硬绑 `devices[0]`）+ `set_values` 批量 + `collect` 嵌套返回 `{[devid]={tag=v}}` 自动判定 → 一条链路多 devid 各产一个 Sample
 - [x] **M3** 日志兜底 + 自愈可信：`[log].dir` 默认 `./logs`（开箱落盘）+ `max_days`/`max_size_mb` 保留期清理 + 退出 `WorkerGuard` flush（修 `mem::forget` 丢末尾日志盲区）；实例 supervisor（`spawn_supervisor`）真实标 `Failed`（修 task 死了仍显 Running 盲区）
-- [x] **M4** 统一埋点：`InstanceStat` 替代 lua 专属 `luastat` + `StatTracker` 接入 helper + `ProcessMetrics` 进程级 + `CtlRegistry`/pipeline/hub 咽喉计数；统一 `GET /api/v1/inst/stats`（替代废弃 `/api/v1/lua/stats`）；全部内置插件（dataSim/opcua/modbus/s7/lua/sidecar）+ mqttPub 接入。约定见 `docs/conventions/instrumentation-conventions.md`
+- [x] **M4** 统一埋点：`InstanceStat` 替代 lua 专属 `luastat` + `StatTracker` 接入 helper + `ProcessMetrics` 进程级 + `CtlRegistry`/pipeline/hub 咽喉计数；统一 `GET /api/v1/inst/stats`（替代废弃 `/api/v1/lua/stats`）；全部内置插件（dataSim/opcua/modbus/s7/lua/sidecar）+ 北向 luaNorth 接入。约定见 `docs/conventions/instrumentation-conventions.md`
 - [x] **P1 #1** `/metrics` Prometheus 端点（免 JWT，手写 exposition 文本，进程级 14 + per-instance 5 metric family，对接 Grafana）
 - [x] **P1 #2** 报文 trace（阶段 1）：`POST/GET/DELETE /api/v1/inst/trace` per-instance 按需激活收发字节 hex dump；lua（io_engine direct dump 三点）+ modbus 4 传输（`TraceIo<T>` 拦截层）；opcua/s7/sidecar 后置。**按设计只进内存 ring buffer（2000 条/实例，不落盘）**
 - [x] **P1 #3** 日志 ring buffer：`RingBufferLayer` 截获最近 N 条 + `GET /api/v1/logs/recent?level=&target=&limit=`；独立 filter `info,io_trace=trace` 衔接报文 trace（`?target=io_trace` 拉报文 hex）

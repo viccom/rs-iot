@@ -224,9 +224,9 @@ curl -s -XPOST -H "Authorization: $TOKEN" -H 'Content-Type: application/json' \
 | DELETE | `/api/v1/inst/trace` | JWT | `?inst_id=` | `{"status":"ok"}` |
 | GET | `/api/v1/logs/recent` | JWT | `?level=&target=&limit=`（均可选） | `[LogEntry]`（最近 N 条结构化日志） |
 
-**`/metrics`**（P1 #1，机器出口）：进程级 14 metric family（`rs_iot_info`/`uptime_seconds`/`process_cpu_pct`/`process_mem_bytes`/`ctl_*_total`/`pipeline_*_total`/`hub_depth[_max]`/`mqtt_*`）+ per-instance 5（`rs_iot_instance_info{inst_id,app_code,host_kind,state,health}` + `instance_tick_total`/`fail_total`/`last_activity_duration_ms`/`last_activity_ts`）。命名遵循 Prometheus 规范（counter `_total`、gauge 无后缀、耗时 `_ms`/字节 `_bytes`）。对接 Prometheus/Grafana：`job: rs-iot, /metrics`，免认证（内网信任，跨网加 IP 白名单/mTLS）。
+**`/metrics`**（P1 #1，机器出口）：进程级 14 metric family（`rs_iot_info`/`uptime_seconds`/`process_cpu_pct`/`process_mem_bytes`/`ctl_*_total`/`pipeline_*_total`/`hub_depth[_max]`/`mqtt_*`）——注：mqtt_* 阶段 B 起恒 0（MqttPub 迁移 luaNorth，实时计数在 /api/v1/inst/stats extra：publish_ok/publish_fail/reconnect_count；字段保留为端点形状兼容，外部面板请迁移）。+ per-instance 5（`rs_iot_instance_info{inst_id,app_code,host_kind,state,health}` + `instance_tick_total`/`fail_total`/`last_activity_duration_ms`/`last_activity_ts`）。命名遵循 Prometheus 规范（counter `_total`、gauge 无后缀、耗时 `_ms`/字节 `_bytes`）。对接 Prometheus/Grafana：`job: rs-iot, /metrics`，免认证（内网信任，跨网加 IP 白名单/mTLS）。
 
-**`/api/v1/inst/stats`**（M4）：替代废弃的 `/api/v1/lua/stats`，**全部内置插件**（dataSim/opcua/modbus/s7/lua/sidecar）+ 北向 mqttPub 统一经 `StatTracker` 写 lux `stat:<inst>` InstanceStat。核心 6 字段：`status`（running/degraded/stopped）/`tick_count`/`fail_count`/`last_activity_ts`/`last_activity_duration_ms`/`last_err`；插件扩展字段经 `extra` 透传（如 opcua `session_reconnect_count`、modbus `exception_count`、lua `vm_restart_count`/`script_version`）。
+**`/api/v1/inst/stats`**（M4）：替代废弃的 `/api/v1/lua/stats`，**全部内置插件**（dataSim/opcua/modbus/s7/lua/sidecar）+ 北向 luaNorth 统一经 `StatTracker` 写 lux `stat:<inst>` InstanceStat。核心 6 字段：`status`（running/degraded/stopped）/`tick_count`/`fail_count`/`last_activity_ts`/`last_activity_duration_ms`/`last_err`；插件扩展字段经 `extra` 透传（如 opcua `session_reconnect_count`、modbus `exception_count`、lua `vm_restart_count`/`script_version`）。
 
 **`/api/v1/inst/trace`**（P1 #2，报文 trace 开关）：per-instance 运行时激活收发字节 hex dump（裸报文调试）。激活后该实例收发字节进 tracing target `io_trace`（抓包风格 `[inst_id] TX/RX <hex>`，惰性超时关闭）。**覆盖 lua（io_engine direct dump：request TX/RX + recv_idle 被动 RX 三点）+ modbus 4 传输（`TraceIo<T>` 包底层 IO——TCP/RTU serial/RTU tcp/RTU udp）**；opcua/s7（非裸报文协议）/sidecar（bridge IPC 帧）后置。
 
@@ -269,7 +269,7 @@ curl -X DELETE -H "Authorization: <token>" "localhost:8790/api/v1/secret?ref=sec
 InstConfig {
   inst_id: String,          // 实例 ID（rtdata key 组成部分）
   inst_name: String,        // 显示名
-  app_code: String,         // 插件注册名：dataSim/opcuaClient/modbusClient/s7Client/luaClient/sidecarClient/mqttPub
+  app_code: String,         // 插件注册名：dataSim/opcuaClient/modbusClient/s7Client/luaClient/luaNorth/sidecarClient
   app_type: "south"|"north",
   auto_start: bool,         // 启动时自动拉起
   app_config: <任意 JSON>,   // 插件自解析（period/endpoint/...）

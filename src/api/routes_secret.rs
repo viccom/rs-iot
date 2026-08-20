@@ -159,15 +159,17 @@ mod tests {
         let items = list_masked(&c).await.unwrap();
         let raw = serde_json::to_string(&items).unwrap();
         assert!(!raw.contains("abcd12345678wxyz"), "明文绝不回显（D6）");
+        // 注意：5 字符明文 "short" 的掩码 "****hort" 含子串 "hort" 但不含 "short"——
+        // 断言用完整明文（D6 绝不回显的语义单元）。
         assert!(!raw.contains("short"), "短明文同样绝不回显");
 
         assert_eq!(
             serde_json::to_value(&items).unwrap(),
             serde_json::json!([
-                {"ref": "secret:mqtt_pwd", "masked": "****"},
-                {"ref": "secret:onenet_key", "masked": "abcd****wxyz"},
+                {"ref": "secret:mqtt_pwd", "masked": "****hort"},
+                {"ref": "secret:onenet_key", "masked": "****wxyz"},
             ]),
-            "字典序稳定 + 掩码规则（>8 前后4 / ≤8 全掩）"
+            "字典序稳定 + 掩码规则（复审 M1：只显尾4，≤4 全掩）"
         );
     }
 }
