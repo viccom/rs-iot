@@ -1,5 +1,12 @@
 # Lua 脚本系统演进 · 阶段 A（机制地基）实施计划
 
+> 日期：2026-08-19
+> **状态**：implemented（2026-08-19~20 于 worktree `feat/lua-stage-a` 执行完毕，13 task 全落地）
+> **实施**：T1-T13 逐 task commit（`c31e4a6` spike-1 → `496549a` T13 公钥回填）；2026-08-20 四轮独立审查后追加修复 commit（安全/行为/接口共 16 项，见设计文档 v0.5.1 版本记录）
+> **代码**：`src/plugin/lua_core/` + `src/plugin/builtin/lua_client/` + `src/api/routes_lua.rs`
+> **测试**：`cargo test -p rs-iot --features lua,lua-http`（注：主 crate 包名为 `rs-iot`，下文 `rsiot` 为计划期笔误统称）全绿；`cargo test -p rsiot-mcp` 全绿
+> **遗留**：审查登记项见设计文档头部遗留清单（模板安装器/sync 角色权限/min_host_ver 等，排期 B）
+
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
 **Goal:** 落地 `2026-08-18-lua-script-system-evolution-design.md` v0.5 阶段 A——lua_core 重构、能力卡、五项护栏、require 命名空间路由、stdlib 种子/json/index/sync、`_lib/` 共享库、manifest dry-run、官方源仓建制。

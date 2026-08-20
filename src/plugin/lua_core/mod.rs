@@ -8,6 +8,9 @@ pub(crate) mod hotload;
 pub(crate) mod io_engine;
 pub(crate) mod loader;
 pub(crate) mod manifest;
+/// R2 频控（lua-http 门控对齐，阶段 A 审查修复）：RateLimiter 的唯一消费者是
+/// `api/http.rs`（http_get/post），裸 lua 构建下编译它会成 dead_code 告警群。
+#[cfg(feature = "lua-http")]
 pub(crate) mod ratelimit;
 pub(crate) mod reload;
 pub(crate) mod script;

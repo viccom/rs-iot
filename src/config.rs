@@ -24,6 +24,10 @@ pub struct AppConfig {
     /// `POST /api/v1/lua/stdlib/sync` body 未传 upstream 时用它；内网镜像 =
     /// 官方静态目录完整拷贝，改此键指向镜像即切换。v1 占位官方 Pages URL（T13 建置）。
     pub lua_stdlib_upstream: String,
+    /// Lua stdlib 持久化 pin 版本（§3.3：默认锁定；`auto` 跟随 latest 须显式）。
+    /// sync 解析顺序：body.pin（显式版本或 "auto"）> 此键 > 锁定本地已装版本。
+    /// None = 未显式配置（回落"锁定本地已装版本"，首装无 index 时取 latest）。
+    pub lua_stdlib_pin: Option<String>,
 }
 
 /// lux ServerConfig 的子集映射（仅暴露我们关心的字段）。
@@ -67,6 +71,7 @@ impl Default for AppConfig {
             bridge: BridgeConfig::default(),
             pipeline: PipelineConfig::default(),
             lua_stdlib_upstream: "https://rsiot.github.io/lualib/".into(),
+            lua_stdlib_pin: None,
         }
     }
 }
@@ -265,5 +270,15 @@ ring_buffer_capacity = 500"#,
         let cfg: AppConfig =
             toml::from_str(r#"lua_stdlib_upstream = "http://mirror.local/lualib/""#).unwrap();
         assert_eq!(cfg.lua_stdlib_upstream, "http://mirror.local/lualib/");
+    }
+
+    /// §3.3 pin 策略（阶段 A 审查修复：默认锁定语义落地）：缺省 None（回落锁定
+    /// 本地已装版本，由 sync 端点解析）；显式配置即持久化锁定。
+    #[test]
+    fn lua_stdlib_pin_default_and_override() {
+        let cfg: AppConfig = toml::from_str("").unwrap();
+        assert_eq!(cfg.lua_stdlib_pin, None, "缺省不配置（锁定本地已装版本）");
+        let cfg: AppConfig = toml::from_str(r#"lua_stdlib_pin = "1.2.0""#).unwrap();
+        assert_eq!(cfg.lua_stdlib_pin.as_deref(), Some("1.2.0"));
     }
 }

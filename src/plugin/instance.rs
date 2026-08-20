@@ -197,6 +197,23 @@ impl InstanceManager {
         self.handles.remove(inst_id);
     }
 
+    /// 定向控制消息直达（无回执）：经 `CtlRegistry` 投递到实例 task 的 cmd_rx。
+    ///
+    /// 实例未运行（`stop` 已 unregister / 从未启动）返回 false——批量 reload 等
+    /// 隐式全量操作据此跳过非运行实例，不复活管理员已停的实例（Q11 语义，
+    /// 阶段 A 审查修复）。
+    pub fn ctl_send(&self, inst_id: &str, cmd: &str, data: &str) -> bool {
+        self.ctx.ctl_registry.send(
+            inst_id,
+            CtlMessage {
+                instance: crate::types::InstId::new(inst_id),
+                devid: String::new(),
+                cmd: cmd.to_string(),
+                data: data.to_string(),
+            },
+        )
+    }
+
     /// 停止所有实例（关闭流程用）。
     pub async fn stop_all(&self) {
         let ids: Vec<String> = self.handles.iter().map(|r| r.key().clone()).collect();

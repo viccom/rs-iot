@@ -56,16 +56,26 @@ pub(crate) fn route(
     script_name: &str,
     req: &str,
 ) -> Result<ModuleSource, String> {
+    // `:` 一并拒绝（段级，非整串）：Windows 上 `Path::join("C:x")` 会以盘符前缀
+    // 整体替换基路径（`scripts/a/lib` + `C:foo.lua` → `C:foo.lua`，盘符相对路径），
+    // `require("C:foo")` 即可逃出 scripts/ 树——防穿越规则的 Windows 补丁。
     if req.contains("..") || req.starts_with('/') || req.contains('\\') {
         return Err("路径违规（禁止 ..、绝对路径、反斜杠）".into());
     }
     let parts: Vec<&str> = req.split('.').collect();
-    if parts.iter().any(|p| p.is_empty() || p.contains('/')) {
-        return Err("空段或内嵌斜杠".into());
+    if parts
+        .iter()
+        .any(|p| p.is_empty() || p.contains('/') || p.contains(':'))
+    {
+        return Err("空段、内嵌斜杠或盘符冒号".into());
     }
     let first = parts[0];
-    // ② builtin 名单优先（json 是单段 builtin 名——先于单段=私有判断）
+    // ② builtin 名单优先（json 是单段 builtin 名——先于单段=私有判断）；
+    //    builtin 名是封闭单段名，多段引用（require("json.x")）是违规而非降级路由
     if BUILTIN_MODULES.contains(&first) {
+        if parts.len() > 1 {
+            return Err(format!("“{first}” 是内置模块名单段名，不可多段引用"));
+        }
         return Ok(ModuleSource::Builtin(first.to_string()));
     }
     // ③ 单段或旧 "lib." 前缀 → 私有；裸 "lib" 剥前缀后为空 → 拒绝（同旧规则）
@@ -178,5 +188,28 @@ mod tests {
         assert!(route(root, "a", "..\\x").is_err(), "反斜杠");
         assert!(route(root, "a", "a/b").is_err(), "内嵌斜杠（沿用现有规则）");
         assert!(route(root, "a", "lib").is_err(), "裸 lib 前缀无模块名");
+    }
+
+    /// Windows 盘符冒号段逃逸（阶段 A 审查修复）：`Path::join("C:x")` 会以盘符
+    /// 前缀整体替换基路径，`require("C:foo")` 解析为盘符相对路径 `C:foo.lua`
+    /// 逃出 scripts/ 树——段级拒绝 `:`（ntpath/PathBuf 同语义实验证实）。
+    #[test]
+    fn route_rejects_drive_colon_segments() {
+        let root = Path::new("scripts");
+        for bad in ["C:foo", "C:.foo", "a:C:b", "c:d.e", "a.b:C"] {
+            assert!(
+                route(root, "devA", bad).is_err(),
+                "含盘符冒号段应被拒（Windows join 前缀替换逃逸）：{bad:?}"
+            );
+        }
+    }
+
+    /// builtin 名是封闭单段名（阶段 A 审查修复）：`require("json.x")` 原先静默
+    /// 命中 builtin 按首段匹配返回 json 模块——多段引用内置名应显式报错。
+    #[test]
+    fn route_rejects_builtin_name_with_segments() {
+        let root = Path::new("scripts");
+        assert!(route(root, "a", "json.x").is_err(), "内置名多段引用应拒");
+        assert!(route(root, "a", "json.util").is_err());
     }
 }

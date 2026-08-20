@@ -444,6 +444,7 @@ async fn reload_vm_rejects_bad_manifest() {
         data_tx,
         "reload-it".to_string(),
         crate::io_trace::TraceRegistry::new(),
+        std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
     );
     let (tx, _rx) = mpsc::channel::<crate::types::Sample>(8);
 
@@ -464,5 +465,221 @@ async fn reload_vm_rejects_bad_manifest() {
         msg.contains("api_ver") && msg.contains("升级宿主"),
         "应含可行动提示：{msg}"
     );
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// 阶段 A 审查修复（§4.5-1 "每次回调"）：启动路径 on_init 挂起（满 hub 的
+/// set_value，send_with_deadline 要等 2s）被 `callback_timeout_ms`（200ms）切断——
+/// 实例不死，随后 collect 照常出数（消费掉占位样本释放容量后）。
+#[tokio::test]
+async fn on_init_budget_timeout_startup_continues() {
+    let tmp = std::env::temp_dir().join(format!("lua-oninit-{}-{}", std::process::id(), 1));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(tmp.join("devI")).unwrap();
+    std::fs::write(
+        tmp.join("devI/main.lua"),
+        "function on_init() ctx:set_value('devI', 'x', 1) end\nfunction collect() return { v = 7 } end",
+    )
+    .unwrap();
+
+    // 容量 1 且预填占满：on_init 的 set_value → send_with_deadline 挂起 → 预算切断
+    let (tx, mut rx) = mpsc::channel::<crate::types::Sample>(1);
+    tx.try_send(crate::types::Sample {
+        hwid: Hwid::new("it"),
+        devid: "placeholder".into(),
+        values: Default::default(),
+        timestamp: 0,
+    })
+    .unwrap();
+
+    let cfg_app = json!({
+        "script":"devI","endpoint":"127.0.0.1:1","period":1,
+        "scripts_root": tmp.to_str().unwrap(), "callback_timeout_ms": 200
+    });
+    let inst = InstConfig {
+        inst_id: "lua-oninit-budget".into(),
+        inst_name: "it".into(),
+        app_code: PluginName::new("luaClient"),
+        app_type: AppType::South,
+        auto_start: false,
+        app_config: cfg_app,
+        devices: vec![DeviceSpec {
+            label: "d".into(),
+            value: "devI".into(),
+            children: vec![],
+            slave_id: None,
+        }],
+        host_kind: HostKind::Builtin,
+    };
+    let ctx = lua_host_ctx().await;
+    let (cmd_tx, cmd_rx) = mpsc::channel::<CtlMessage>(1);
+    let token = CancellationToken::new();
+    let run_token = token.child_token();
+    tokio::spawn(async move {
+        LuaClient.run(ctx, inst, tx, cmd_rx, run_token).await;
+    });
+    let _ = cmd_tx;
+
+    // 等 on_init 在满通道上被 200ms 预算切断（占位样本未消费 → set_value 的
+    // send 挂起 → 预算 Elapsed → 协程弃留，x=1 永不入队）
+    tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+    let placeholder = tokio::time::timeout(std::time::Duration::from_millis(500), rx.recv())
+        .await
+        .expect("先取回占位样本释放容量")
+        .expect("Sample 非 None");
+    assert_eq!(placeholder.devid, "placeholder", "首个必是占位样本");
+    let s = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+        .await
+        .expect("on_init 超预算被切断后实例应继续 collect")
+        .expect("Sample 非 None");
+    assert!(
+        format!("{:?}", s.values).contains('7'),
+        "应收到 collect 的 v=7（而非被切断的 on_init set_value x=1），实得 {:?}",
+        s.values
+    );
+    token.cancel();
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// 阶段 A 审查修复（reload 路径 on_init 预算）：reload_vm 的 on_init dry-run 挂起
+/// （满 hub 的 set_value）→ 预算切断 → Err（主循环回退旧 VM，Q11 韧性语义）。
+#[tokio::test]
+async fn reload_vm_on_init_budget_timeout_falls_back() {
+    let tmp = std::env::temp_dir().join(format!("lua-oninit-reload-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(tmp.join("devM")).unwrap();
+    std::fs::write(
+        tmp.join("devM/main.lua"),
+        "function on_init() ctx:set_value('devM', 'x', 1) end\nfunction collect() return { temp = 1 } end",
+    )
+    .unwrap();
+
+    let cfg = crate::plugin::lua_core::config::parse_cfg(&json!({
+        "script": "devM", "endpoint": "127.0.0.1:1", "period": 1, "callback_timeout_ms": 200
+    }))
+    .unwrap();
+    let lctx = crate::plugin::lua_core::script::LoadCtx {
+        scripts_root: std::sync::Arc::from(tmp.as_path()),
+        script_name: std::sync::Arc::<str>::from("devM"),
+    };
+    let (data_tx, _data_rx) = mpsc::channel::<Vec<u8>>(1);
+    let io = crate::plugin::lua_core::io_engine::spawn_io_task(
+        Box::new(crate::plugin::lua_core::io_engine::TcpIo::new(
+            "127.0.0.1:1".into(),
+            cfg.recv_idle_ms,
+        )),
+        data_tx,
+        "oninit-reload-it".to_string(),
+        crate::io_trace::TraceRegistry::new(),
+        std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+    );
+    // 满 hub（容量 1 预填 + 接收端保活不消费）→ on_init 的 set_value 挂起
+    let (tx, _rx_keepalive) = mpsc::channel::<crate::types::Sample>(1);
+    tx.try_send(crate::types::Sample {
+        hwid: Hwid::new("it"),
+        devid: "placeholder".into(),
+        values: Default::default(),
+        timestamp: 0,
+    })
+    .unwrap();
+
+    let started = std::time::Instant::now();
+    let e = super::reload_vm(
+        &cfg,
+        &lctx,
+        lua_host_ctx().await,
+        &lua_inst_config(&tmp, "devM"),
+        io,
+        tx,
+        Default::default(),
+        Default::default(),
+    )
+    .await
+    .expect_err("on_init 挂起应被预算切断 → Err → 回退旧 VM");
+    assert!(e.to_string().contains("on_init"), "错误应可辨识回调名：{e}");
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(2),
+        "应在 200ms 预算处切断，而非等满 send_with_deadline 的 2s"
+    );
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// 阶段 A 审查修复（Q11 批量 reload 语义）：控制通道 "reload" 消息 → Evt::Reload →
+/// VM 级替换（on_init 重跑，kv 计数 +1）——stdlib sync / `_lib` watcher 的批量
+/// reload 即走此路径（不再 stop+start，失败回退旧 VM 且不复活已停实例）。
+#[tokio::test]
+async fn ctl_reload_message_triggers_vm_reload() {
+    let tmp = std::env::temp_dir().join(format!("lua-ctlreload-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(tmp.join("devR")).unwrap();
+    // on_init 计数落 kv（跨 VM 重建持久）：reload 后 on_init 重跑 → 计数递增
+    std::fs::write(
+        tmp.join("devR/main.lua"),
+        "function on_init()\n  local n = (ctx:kv_get('boots') or 0) + 1\n  ctx:kv_set('boots', n)\nend\nfunction collect() return { boots = ctx:kv_get('boots') } end",
+    )
+    .unwrap();
+
+    let (tx, mut rx) = mpsc::channel::<crate::types::Sample>(8);
+    let cfg_app = json!({
+        "script":"devR","endpoint":"127.0.0.1:1","period":1,
+        "scripts_root": tmp.to_str().unwrap()
+    });
+    let inst = InstConfig {
+        inst_id: "lua-ctl-reload".into(),
+        inst_name: "it".into(),
+        app_code: PluginName::new("luaClient"),
+        app_type: AppType::South,
+        auto_start: false,
+        app_config: cfg_app,
+        devices: vec![DeviceSpec {
+            label: "d".into(),
+            value: "devR".into(),
+            children: vec![],
+            slave_id: None,
+        }],
+        host_kind: HostKind::Builtin,
+    };
+    let ctx = lua_host_ctx().await;
+    let (cmd_tx, cmd_rx) = mpsc::channel::<CtlMessage>(4);
+    let token = CancellationToken::new();
+    let run_token = token.child_token();
+    tokio::spawn(async move {
+        LuaClient.run(ctx, inst, tx, cmd_rx, run_token).await;
+    });
+
+    // 首轮样本：boots=1（首启 on_init）
+    let first = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+        .await
+        .expect("首个样本")
+        .expect("Sample 非 None");
+    assert!(format!("{:?}", first.values).contains('1'), "首启 boots=1");
+
+    // 控制通道 reload → VM 重建 → on_init 重跑 → boots=2
+    cmd_tx
+        .send(CtlMessage {
+            instance: crate::types::InstId::new("lua-ctl-reload"),
+            devid: String::new(),
+            cmd: "reload".into(),
+            data: String::new(),
+        })
+        .await
+        .unwrap();
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(6);
+    let mut saw_two = false;
+    while std::time::Instant::now() < deadline {
+        if let Ok(Some(s)) =
+            tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv()).await
+        {
+            if format!("{:?}", s.values).contains('2') {
+                saw_two = true;
+                break;
+            }
+        } else {
+            break;
+        }
+    }
+    assert!(saw_two, "reload 后 on_init 应重跑（boots=2）");
+    token.cancel();
     let _ = std::fs::remove_dir_all(&tmp);
 }

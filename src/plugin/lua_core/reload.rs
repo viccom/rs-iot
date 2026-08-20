@@ -4,8 +4,16 @@
 //! 若留在 api 层，lua_core → api 反向依赖破坏分层（api → lua_core 已存在）。
 //! 移入 lua_core 后两个调用方都单向依赖本模块。lux 直连（HGET/HGETALL
 //! `execute_value`），不借 `api::hget*` helper。
+//!
+//! 两条 reload 路径（阶段 A 审查修复后语义对齐 Q11）：
+//! - **批量**（[`reload_all_lua_instances`]，stdlib sync / `_lib` watcher 触发）：
+//!   经控制通道发 `"reload"` → 实例 task 内走既有 `Evt::Reload`（`reload_vm`
+//!   VM 级替换，**失败回退旧 VM**）——不再 stop+start（旧实现会复活管理员已停
+//!   实例，且坏库语法错误会让实例停机无回退，两条均违背 Q11）。
+//! - **单实例**（[`reload_lua_inst`]，REST `POST /lua/reload` 显式操作）：保持
+//!   stop + start 全量重启（管理员显式指定，语义 = 重启该实例）。
 
-use crate::plugin::instance::InstanceManager;
+use crate::plugin::instance::{InstState, InstanceManager};
 use crate::types::InstConfig;
 
 /// 单实例 reload 结果（REST `reload` 端点映射 HTTP 码、批量版映射 JSON，
@@ -59,13 +67,18 @@ pub(crate) async fn reload_lua_inst(
 }
 
 /// 全实例 reload（Q11，设计 §3.6 D1「同步后引用实例自动 reload」；Q15 `_lib/`
-/// watcher 同走此入口）：遍历 lux `instances`，`app_code == "luaClient"` 的逐一
-/// stop + start。
+/// watcher 同走此入口）：遍历 lux `instances`，**仅当前 Running 的 luaClient 实例**
+/// 经控制通道发 `"reload"` → 实例 task 内 `reload_vm` VM 级替换（require 重执行
+/// 天然生效；manifest dry-run 失败或 on_init dry-run 超限 → **回退旧 VM**，Q11）。
 ///
-/// stdlib 同步换新 `_stdlib/`、或 `_lib/` 共享库变更后，运行中 VM 已加载的模块
-/// 不会自动失效，须重启实例重走 require（Q15 全实例策略：未直接引用的实例也一并
-/// 重启——引用关系无登记，简单起见全刷）。配置缺席/解析失败/非 lua 实例自然跳过
-/// （批量语义只管 lua）。返回 `[{inst_id, result: "ok"|<错误>}]` 供 REST 响应与审计。
+/// 阶段 A 审查修复（原实现 stop+start 的两个缺陷）：
+/// 1. **不复活已停实例**——`auto_start=false` 从未启动或运行中手动停止的实例
+///    被隐式全量操作拉起，破坏 InstanceManager 按实例启停语义；
+/// 2. **失败有回退**——坏 `_lib`/`_stdlib` 文件让 `start_source` 失败后实例停机
+///    （旧实现仅在响应 JSON 报告），现在 reload 失败旧 VM 继续。
+///
+/// 非运行实例记 `skipped`（响应可见，管理员可判断哪些实例下次启动时自然取新库）。
+/// 返回 `[{inst_id, result}]` 供 REST 响应与审计。
 pub(crate) async fn reload_all_lua_instances(
     lux: &lux::EmbeddedClient,
     mgr: &InstanceManager,
@@ -74,23 +87,45 @@ pub(crate) async fn reload_all_lua_instances(
         Ok(lux::EmbeddedValue::Array(a)) => a,
         _ => return Vec::new(),
     };
+    let states = mgr.status();
     let mut out = Vec::new();
     // HGETALL 返回 [k1, v1, k2, v2, ...] 扁平数组（同 api::hgetall / try_start_from_lux）。
     let mut i = 0;
     while i + 1 < pairs.len() {
         let inst_id = str_from_value(&pairs[i]);
-        match reload_lua_inst(lux, mgr, &inst_id).await {
-            ReloadOutcome::Ok => out.push(serde_json::json!({"inst_id": inst_id, "result": "ok"})),
-            ReloadOutcome::StartFail(m) => {
-                out.push(serde_json::json!({"inst_id": inst_id, "result": m}))
+        let raw = str_from_value(&pairs[i + 1]);
+        let app_code: String = serde_json::from_str::<InstConfig>(&raw)
+            .ok()
+            .map(|c| c.app_code.as_ref().to_string())
+            .unwrap_or_default();
+        if !batch_reload_target(&app_code, states.get(&inst_id).copied()) {
+            // 非 lua 实例静默跳过（批量语义只管 lua）；lua 但非 Running 记 skipped。
+            if app_code == "luaClient" {
+                out.push(serde_json::json!({
+                    "inst_id": inst_id,
+                    "result": format!("skipped（非运行态 {:?}，不复活；下次启动自然取新库）",
+                        states.get(&inst_id).copied()),
+                }));
             }
-            // NotFound 不可达（键来自同一次 HGETALL，HGET 必命中）；
-            // BadRequest（非 lua/坏配置）跳过——批量语义只管 lua。
-            _ => {}
+            i += 2;
+            continue;
         }
+        // 控制通道直达（fire-and-forget）：reload 结果由实例侧日志/stat 呈现
+        // （reload_vm 失败 → "热加载失败，旧 VM 继续" warn + 旧 VM 不受影响）。
+        let result = if mgr.ctl_send(&inst_id, "reload", "") {
+            "ok（VM 级 reload 触发，失败自动回退旧 VM）"
+        } else {
+            "控制通道不可达（实例可能刚停止，跳过）"
+        };
+        out.push(serde_json::json!({"inst_id": inst_id, "result": result}));
         i += 2;
     }
     out
+}
+
+/// 批量 reload 目标判定（纯函数便于单测）：luaClient 且当前 Running 才触发。
+fn batch_reload_target(app_code: &str, state: Option<InstState>) -> bool {
+    app_code == "luaClient" && matches!(state, Some(InstState::Running))
 }
 
 #[cfg(test)]
@@ -104,5 +139,22 @@ mod tests {
         assert_eq!(str_from_value(&lux::EmbeddedValue::Simple("x".into())), "x");
         assert_eq!(str_from_value(&lux::EmbeddedValue::Int(7)), "7");
         assert_eq!(str_from_value(&lux::EmbeddedValue::Nil), "");
+    }
+
+    /// 批量 reload 目标判定（阶段 A 审查修复：不复活非运行实例）：
+    /// 仅「luaClient 且 Running」触发；未启动/已停/失败态/非 lua 一律跳过。
+    #[test]
+    fn batch_reload_target_only_running_lua() {
+        use crate::plugin::instance::InstState;
+        assert!(batch_reload_target("luaClient", Some(InstState::Running)));
+        // 管理员已停（含从未启动的 None）→ 不复活
+        assert!(!batch_reload_target("luaClient", Some(InstState::Stopped)));
+        assert!(!batch_reload_target("luaClient", Some(InstState::Failed)));
+        assert!(!batch_reload_target("luaClient", None));
+        // 非 lua 实例不进批量语义
+        assert!(!batch_reload_target(
+            "modbusClient",
+            Some(InstState::Running)
+        ));
     }
 }

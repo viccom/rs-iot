@@ -135,10 +135,10 @@ pub fn build_router(state: AppState) -> axum::Router {
         // Lua 实例重载/脚本（spec §13，默认 JWT 保护；实例指标走 /api/v1/inst/stats）
         // /lua/reload 的 handler 依赖 lua_core::reload（T10 移入）→ lua 门控，
         // 注册移下方 cfg 块；scripts/save 等纯 fs 端点不门控。
+        // Lua 脚本列表/回读（脚本编辑器 + MCP；?kind=lib → 共享库视图，T10/Q13）
+        .route("/api/v1/lua/scripts", get(routes_lua::list_scripts))
         // Lua 脚本写入（AI 写脚本入口：MCP save_script 工具 / 浮动面板；路径白名单
         // scripts/<name>；?kind=lib → scripts/_lib/<org>/<name>.lua，T10）
-        .route("/api/v1/lua/scripts", get(routes_lua::list_scripts))
-        // Lua 脚本写入（AI 写脚本入口：MCP save_script 工具 / 浮动面板；路径白名单 scripts/<name>）
         .route("/api/v1/lua/script/save", post(routes_lua::save_script))
         // Lua 脚本回读 / 版本管理（前端脚本编辑器：读内容 / 列历史版本 / 回滚）
         .route("/api/v1/lua/script", get(routes_lua::get_script))

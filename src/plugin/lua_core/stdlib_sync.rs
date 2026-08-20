@@ -29,6 +29,7 @@
 //! - 下载经注入的 fetch 闭包（[`sync_with_fetcher`]）：生产 reqwest（[`sync`]，
 //!   feature lua-http），测试本地目录副本——reqwest 不支持 `file://` 的务实解。
 
+#[cfg(feature = "lua-http")]
 use crate::plugin::lua_core::capability::CUR_API_VER;
 use crate::plugin::lua_core::stdlib::SEED_MODULES;
 use serde::{Deserialize, Serialize};
@@ -41,6 +42,7 @@ use std::path::Path;
 /// secret，绝不入任何仓）。测试 `verify_keys_official_v1_locked` 以 hex
 /// 常量锁字节防手误。
 // 官方钥 v1 (2026-08-19)，轮换走双钥过渡（Q17）：新钥追加进数组，全网升级后移除旧钥。
+#[cfg(feature = "lua-http")]
 pub(crate) const VERIFY_KEYS: &[[u8; 32]] = &[[
     0x51, 0xdb, 0x92, 0x80, 0xde, 0xbf, 0x69, 0x53, 0x7f, 0xdb, 0xed, 0xa8, 0xdf, 0x7a, 0xca, 0x3e,
     0xa9, 0x71, 0x4b, 0x11, 0x77, 0xac, 0x10, 0x44, 0x38, 0xa1, 0x99, 0x6f, 0xcf, 0xcd, 0xd9, 0x5a,
@@ -72,6 +74,7 @@ fn default_min_api_ver() -> u32 {
 }
 
 /// 同步结果报告（REST 响应体；added/updated/removed 为文件路径列表）。
+#[cfg(feature = "lua-http")]
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct SyncReport {
     pub(crate) added: Vec<String>,
@@ -90,6 +93,7 @@ pub(crate) fn read_index(scripts_root: &Path) -> Option<LocalIndex> {
 ///
 /// `sig_file` 为裸 64 字节 ed25519 签名（容忍末尾单个 LF/CRLF）；逐 key 试验签，
 /// 任一通过即信任，随后才反序列化（fail closed：签名不覆盖的 JSON 不消费）。
+#[cfg(feature = "lua-http")]
 pub(crate) fn verify_index(
     bytes: &[u8],
     sig_file: &[u8],
@@ -138,8 +142,12 @@ pub(crate) fn verify_index(
 /// `.index.json`）→ [`atomic_swap`] 两步换 → [`SyncReport`]。任一步失败即 Err，
 /// 不动旧 `_stdlib/`（下载/sha 失败时清理 tmp）。
 ///
+/// 进程级互斥：两管理员并发 sync 会互删对方的 `_stdlib.tmp`（阶段 A 审查
+/// 修复）——低频操作，全局串行化无吞吐代价。
+///
 /// 文件量小（D5 预算几十库）且为管理员低频操作，`std::fs` 同步 IO 直接执行
 /// （不 spawn_blocking，见模块文档"实现取舍"）。
+#[cfg(feature = "lua-http")]
 pub(crate) async fn sync_with_fetcher<F, Fut>(
     upstream_base: &str,
     scripts_root: &Path,
@@ -151,6 +159,11 @@ where
     F: Fn(String) -> Fut,
     Fut: std::future::Future<Output = Result<Vec<u8>, String>>,
 {
+    static SYNC_MUTEX: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+    let _guard = SYNC_MUTEX
+        .get_or_init(|| tokio::sync::Mutex::new(()))
+        .lock()
+        .await;
     let base = upstream_base.trim_end_matches('/');
     let idx_bytes = fetch(format!("{base}/index.json"))
         .await
@@ -276,12 +289,18 @@ async fn http_fetch(url: String) -> Result<Vec<u8>, String> {
 }
 
 /// index 条目路径闸门：仅接受仓库内相对 `.lua` 路径（防 index 本身被构造出穿越）。
+///
+/// `:` 拒绝与 loader.rs `route()` 同因：Windows 上 `Path::join` 遇盘符前缀段会
+/// 整体替换基路径。此处属纵深防御（index 已验签，正常不可达此分支）。
+#[cfg(feature = "lua-http")]
 fn safe_rel_path(p: &str) -> Result<(), String> {
     if p.is_empty() || !p.ends_with(".lua") {
         return Err(format!("index 条目 {p:?} 非 .lua 文件"));
     }
-    if p.starts_with('/') || p.contains('\\') || p.contains("..") {
-        return Err(format!("index 条目 {p:?} 路径违规（穿越/绝对路径）"));
+    if p.starts_with('/') || p.contains('\\') || p.contains("..") || p.contains(':') {
+        return Err(format!(
+            "index 条目 {p:?} 路径违规（穿越/绝对路径/盘符冒号）"
+        ));
     }
     if p.split('/').any(|seg| seg.is_empty()) {
         return Err(format!("index 条目 {p:?} 含空路径段"));
@@ -290,6 +309,7 @@ fn safe_rel_path(p: &str) -> Result<(), String> {
 }
 
 /// sha256 → 小写 hex。
+#[cfg(feature = "lua-http")]
 fn sha256_hex(bytes: &[u8]) -> String {
     use sha2::Digest;
     let mut h = sha2::Sha256::new();
@@ -302,6 +322,7 @@ fn sha256_hex(bytes: &[u8]) -> String {
 ///
 /// Windows `rename` 到已存在目录返回 ERROR_ALREADY_EXISTS（POSIX 则是原子覆盖），
 /// 故必须两步；备份名用纳秒时间戳防同秒冲突，残留的旧备份在下次 sync 前清理。
+#[cfg(feature = "lua-http")]
 fn atomic_swap(tmp: &Path, target: &Path) -> Result<(), String> {
     if !target.exists() {
         return std::fs::rename(tmp, target).map_err(|e| format!("_stdlib 落盘失败: {e}"));
@@ -382,16 +403,23 @@ pub(crate) struct InventoryEntry {
 ///
 /// 本地 index 存在时以 index 为准消歧（§3.6 D5）——同名文件种子不再重复列出；
 /// index 缺失/损坏 → 纯种子视图（内网冷启动兜底态）。返回 (版本, 条目)。
+///
+/// `scripts/` 前缀条目（官方脚本模板，D1 分发面）不列入：模板不是 require 可达
+/// 的 stdlib 模块（首段 `scripts` 非保留段，路由进不了 `_stdlib/`），列出即假模块
+/// （阶段 A 审查修复）。模板安装器（装 `scripts/<name>/` + `@source` 徽标，Q18）
+/// 登记为 B 阶段遗留——现状模板仅分发落盘 `_stdlib/scripts/` 供查阅。
 pub(crate) fn inventory(scripts_root: &Path) -> (Option<String>, Vec<InventoryEntry>) {
     let index = read_index(scripts_root);
     let synced: std::collections::HashSet<&str> = index
         .iter()
         .flat_map(|i| i.files.keys())
+        .filter(|p| !p.starts_with("scripts/"))
         .map(|s| s.as_str())
         .collect();
     let mut out: Vec<InventoryEntry> = index
         .iter()
         .flat_map(|i| i.files.iter())
+        .filter(|(p, _)| !p.starts_with("scripts/"))
         .map(|(path, e)| InventoryEntry {
             name: path.strip_suffix(".lua").unwrap_or(path).replace('/', "."),
             path: path.clone(),
@@ -414,7 +442,9 @@ pub(crate) fn inventory(scripts_root: &Path) -> (Option<String>, Vec<InventoryEn
     (index.map(|i| i.version), out)
 }
 
-#[cfg(test)]
+/// 测试整体挂 lua-http：主体（验签/sync/atomic_swap）均在 `sync_with_fetcher`
+/// 门控内，default features 含 lua-http，CI/本地默认跑全量覆盖。
+#[cfg(all(test, feature = "lua-http"))]
 mod tests {
     use super::*;
     use crate::plugin::lua_core::config::parse_cfg;
@@ -739,6 +769,51 @@ mod tests {
 
         let _ = fs::remove_dir_all(&root);
         let _ = fs::remove_dir_all(&up);
+    }
+
+    /// 阶段 A 审查修复：`scripts/` 前缀条目（官方脚本模板，D1 分发面）不列入
+    /// inventory——模板非 require 可达模块（首段 `scripts` 非保留段），列出即假模块。
+    #[tokio::test]
+    async fn inventory_skips_script_templates() {
+        let root = fresh_scripts("inv-tpl", "");
+        let up = fresh_scripts("up-inv-tpl", "");
+        write_upstream(
+            &up,
+            "1.0.0",
+            1,
+            &[
+                ("algo/crc16.lua", "return {}"),
+                ("scripts/modbus-like/main.lua", "function collect() end"),
+            ],
+            None,
+        );
+        sync_with_fetcher(UPSTREAM, &root, None, &dev_keys(), dir_fetcher(up.clone()))
+            .await
+            .expect("sync");
+        // 文件已分发落盘（D1 分发面成立，安装器为 B 阶段遗留）
+        assert!(root.join("_stdlib/scripts/modbus-like/main.lua").exists());
+        let (_, entries) = inventory(&root);
+        assert!(
+            entries.iter().all(|e| !e.path.starts_with("scripts/")),
+            "模板条目不应列入 stdlib 清单，实得 {entries:?}"
+        );
+        assert_eq!(
+            entries.len(),
+            SEED_MODULES.len(),
+            "1 synced（crc16）+ 种子差集"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&up);
+    }
+
+    /// 阶段 A 审查修复：index 条目含盘符冒号 → 拒（Windows `Path::join` 前缀
+    /// 替换逃逸，与 loader.rs `route()` 同因；验签后正常不可达，纵深防御）。
+    #[test]
+    fn safe_rel_path_rejects_colon() {
+        assert!(safe_rel_path("C:evil.lua").is_err());
+        assert!(safe_rel_path("algo/C:x.lua").is_err());
+        assert!(safe_rel_path("algo/crc16.lua").is_ok());
     }
 
     /// stdlib.list()/info() 挂进沙箱 VM：list 返回合并数组，info 支持点分名，

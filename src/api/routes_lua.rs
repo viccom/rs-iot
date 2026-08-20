@@ -7,9 +7,12 @@
 //! - `POST /api/v1/lua/script/save`（`kind` 缺省 `script` / `lib`）→ 写脚本 main.lua
 //!   或站点共享库 `scripts/_lib/<org>/<...>.lua`（D11 保留段拒绝）
 //! - `GET /api/v1/lua/script/versions` / `POST /api/v1/lua/script/rollback`（同 `kind`）
-//! - `GET /api/v1/lua/stdlib` → 本地 stdlib 清单（index + 种子合并，来源徽标 seed/synced）
+//! - `GET /api/v1/lua/script?name=<n>` → 回读内容（`kind=script` 缺省 / `lib`，Q13 库读回）
+//! - `GET /api/v1/lua/stdlib` → 本地 stdlib 清单（index + 种子合并，来源徽标 seed/synced；
+//!   `scripts/` 模板条目不列入——安装器为 B 阶段遗留）
 //! - `POST /api/v1/lua/stdlib/sync` → 官方源/镜像验签同步（body `{upstream?, pin?}`；
-//!   成功后全实例 reload，Q11）
+//!   pin 缺省锁定本地已装版本，`"auto"` 跟随 latest，§3.3；成功/失败落审计日志 §3.7；
+//!   成功后批量 **VM 级 reload**（运行中实例逐一触发，失败回退旧 VM、非运行态不复活，Q11））
 //!
 //! 实例 reload 核心在 `plugin::lua_core::reload`（T10 移入：`_lib/` 全局 watcher
 //! 与本层端点共用，保持 api → lua_core 单向依赖）。
@@ -157,33 +160,44 @@ pub struct RollbackReq {
     pub kind: Option<String>,
 }
 
-/// `GET /api/v1/lua/script?name=<n>` → `{name, content, size, mtime?}`（回读脚本内容）。
+/// `GET /api/v1/lua/script?name=<n>` → `{name, content, size, mtime?}`（回读内容）。
 ///
-/// 前端编辑已有脚本入口。`name` 经白名单（同 save），防路径逃逸。文件不存在 → 404。
+/// kind=script（缺省）：`scripts/<name>/main.lua`；kind=lib：`scripts/_lib/<org>/...lua`
+/// （阶段 A 审查修复——Q13 前端「库」tab 复用编辑器须有读回入口，原先库可写不可读）。
+/// `name` 经白名单（同 save），防路径逃逸。文件不存在 → 404。
 pub async fn get_script(State(_st): State<AppState>, Query(q): Query<NameQuery>) -> Response {
-    match resolve_script_path(&q.name) {
-        Ok(dir) => {
-            let main_lua = dir.join("main.lua");
-            match std::fs::read_to_string(&main_lua) {
-                Ok(content) => {
-                    let size = content.len();
-                    let mtime = std::fs::metadata(&main_lua)
-                        .ok()
-                        .and_then(|m| m.modified().ok())
-                        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-                        .map(|d| d.as_secs());
-                    Json(serde_json::json!({
-                        "name": q.name,
-                        "content": content,
-                        "size": size,
-                        "mtime": mtime,
-                    }))
-                    .into_response()
-                }
-                Err(_) => err(StatusCode::NOT_FOUND, "script main.lua not found"),
-            }
+    let path = match asset_read_path(q.kind.as_deref(), &q.name) {
+        Ok(p) => p,
+        Err(msg) => return err(StatusCode::BAD_REQUEST, msg),
+    };
+    match std::fs::read_to_string(&path) {
+        Ok(content) => {
+            let size = content.len();
+            let mtime = std::fs::metadata(&path)
+                .ok()
+                .and_then(|m| m.modified().ok())
+                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                .map(|d| d.as_secs());
+            Json(serde_json::json!({
+                "name": q.name,
+                "kind": q.kind.unwrap_or_else(|| "script".into()),
+                "content": content,
+                "size": size,
+                "mtime": mtime,
+            }))
+            .into_response()
         }
-        Err(msg) => err(StatusCode::BAD_REQUEST, msg),
+        Err(_) => err(StatusCode::NOT_FOUND, "file not found"),
+    }
+}
+
+/// [`get_script`] 的路径解析主体（纯函数便于单测）：kind=script →
+/// `scripts/<name>/main.lua`；kind=lib → 共享库文件本体（`resolve_lib_path` 白名单）。
+fn asset_read_path(kind: Option<&str>, name: &str) -> Result<PathBuf, &'static str> {
+    match kind {
+        None | Some("script") => Ok(resolve_script_path(name)?.join("main.lua")),
+        Some("lib") => resolve_lib_path(name),
+        Some(_) => Err("kind must be \"script\" or \"lib\""),
     }
 }
 
@@ -303,6 +317,11 @@ fn resolve_script_path(name: &str) -> Result<PathBuf, &'static str> {
         .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
     {
         return Err("script name may only contain [A-Za-z0-9_-]");
+    }
+    // 保留目录名（阶段 A 审查修复）：`_` 在白名单内，不拒则 REST 可创建
+    // `scripts/_lib/main.lua` 与共享库/官方镜像目录冲突、混入脚本列表。
+    if matches!(name, "_lib" | "_stdlib") {
+        return Err("script name reserved (_lib/_stdlib)");
     }
     let dir = PathBuf::from("scripts").join(name);
     // 双保险：字符白名单已排除 `..`/分隔符，这里再验 components 防 future regression。
@@ -600,42 +619,92 @@ fn stdlib_list_payload(scripts_root: &Path) -> serde_json::Value {
 pub struct SyncReq {
     /// upstream 基址（省 = `AppConfig::lua_stdlib_upstream`，内网镜像改配置切 D2）。
     pub upstream: Option<String>,
-    /// 锁定版本（省 = 跟随 upstream 最新，§3.3 默认 pin 策略由调用方显式传）。
+    /// 版本策略（§3.3）：显式版本 = 校验上游恰为该版；`"auto"` = 显式跟随 latest；
+    /// 省 = 锁定（`lua_stdlib_pin` 配置键 > 本地已装版本，首装取 latest）。
     pub pin: Option<String>,
+}
+
+/// 解析生效 pin（§3.3 默认锁定，阶段 A 审查修复）：body 显式 > 配置键 >
+/// 锁定本地已装版本（`_stdlib/.index.json` 的 version；无 index 的首装 → None 跟随
+/// latest）。返回 (生效 pin, 语义描述) 供响应与审计日志。
+#[cfg(feature = "lua-http")]
+fn resolve_effective_pin(
+    body_pin: Option<&str>,
+    cfg_pin: Option<&String>,
+    scripts_root: &Path,
+) -> (Option<String>, String) {
+    match body_pin {
+        Some("auto") => (None, "auto（显式跟随 latest）".into()),
+        Some(p) => (Some(p.to_string()), format!("body 显式 pin {p}")),
+        None => match cfg_pin
+            .cloned()
+            .or_else(|| read_installed_version(scripts_root))
+        {
+            Some(v) => (Some(v.clone()), format!("锁定 {v}（默认 pin 策略）")),
+            None => (None, "首装（无本地 index，跟随 latest）".into()),
+        },
+    }
+}
+
+/// 本地已装 stdlib 版本（`_stdlib/.index.json`；缺失 → None）。
+#[cfg(feature = "lua-http")]
+fn read_installed_version(scripts_root: &Path) -> Option<String> {
+    crate::plugin::lua_core::stdlib_sync::read_index(scripts_root).map(|i| i.version)
 }
 
 /// `POST /api/v1/lua/stdlib/sync` → 验签同步官方源/镜像（§3.6 D1）+ 全实例 reload（Q11）。
 ///
 /// 流程：拉 index+sig → ed25519 验签 → min_api_ver/pin 预检 → 逐文件 sha256 →
 /// `_stdlib.tmp/` → 原子替换 → 返回 `SyncReport`，随后全实例 reload
-/// （`lua_core::reload::reload_all_lua_instances`，T10 移入的公共 helper）重启全部
-/// luaClient 实例加载新库。任一步失败 → 502（upstream/验签域错误，本地
-/// `_stdlib/` 未动）。需要 reqwest（feature lua-http 门控，无此 feature 端点缺席）。
+/// （`lua_core::reload::reload_all_lua_instances`，T10 移入的公共 helper）触发全部
+/// 运行中 luaClient 实例的 VM 级热加载（失败自动回退旧 VM，Q11）。任一步失败 →
+/// 502（upstream/验签域错误，本地 `_stdlib/` 未动）。成功/失败均落审计日志（§3.7）。
+/// 需要 reqwest（feature lua-http 门控，无此 feature 端点缺席）。
 #[cfg(feature = "lua-http")]
 pub async fn stdlib_sync(State(st): State<AppState>, body: Option<Json<SyncReq>>) -> Response {
     let Json(req) = body.unwrap_or_default();
     let upstream = req
         .upstream
+        .clone()
         .unwrap_or_else(|| st.config.lua_stdlib_upstream.clone());
+    let (pin, pin_desc) = resolve_effective_pin(
+        req.pin.as_deref(),
+        st.config.lua_stdlib_pin.as_ref(),
+        Path::new("scripts"),
+    );
+    // §3.7 同步审计日志：who 由 JWT 访问日志侧承载，此处落 what/when/result。
+    tracing::info!("[lua][audit] stdlib sync 开始：upstream={upstream}，pin 策略={pin_desc}");
     match crate::plugin::lua_core::stdlib_sync::sync(
         &upstream,
         Path::new("scripts"),
-        req.pin.as_deref(),
+        pin.as_deref(),
     )
     .await
     {
         Ok(report) => {
             let reloaded =
                 crate::plugin::lua_core::reload::reload_all_lua_instances(&st.lux, &st.mgr).await;
+            tracing::info!(
+                "[lua][audit] stdlib sync 成功：{upstream} → v{}（+{}/~{}/-{}），reload 触发 {} 个运行中实例",
+                report.version,
+                report.added.len(),
+                report.updated.len(),
+                report.removed.len(),
+                reloaded.len()
+            );
             Json(serde_json::json!({
                 "status": "ok",
                 "upstream": upstream,
+                "pin": pin,
                 "report": report,
                 "reloaded": reloaded,
             }))
             .into_response()
         }
-        Err(e) => err(StatusCode::BAD_GATEWAY, &e),
+        Err(e) => {
+            tracing::warn!("[lua][audit] stdlib sync 失败：{upstream}（{pin_desc}）：{e}");
+            err(StatusCode::BAD_GATEWAY, &e)
+        }
     }
 }
 
@@ -698,6 +767,75 @@ mod tests {
                 "should reject traversal/separator/space in name: {bad:?}"
             );
         }
+    }
+
+    /// 阶段 A 审查修复：保留目录名不可作为脚本名（白名单含 `_`，须显式拒）。
+    #[test]
+    fn resolve_rejects_reserved_dir_names() {
+        for bad in ["_lib", "_stdlib"] {
+            assert!(resolve_script_path(bad).is_err(), "保留目录名应拒：{bad}");
+        }
+    }
+
+    // ---- get_script 资产读回路径（阶段 A 审查修复：lib 可写即可读，Q13）----
+
+    #[test]
+    fn asset_read_path_script_and_lib() {
+        assert_eq!(
+            asset_read_path(None, "devA").unwrap(),
+            PathBuf::from("scripts").join("devA").join("main.lua")
+        );
+        assert_eq!(
+            asset_read_path(Some("script"), "devA").unwrap(),
+            PathBuf::from("scripts").join("devA").join("main.lua")
+        );
+        assert_eq!(
+            asset_read_path(Some("lib"), "viccom/hex.lua").unwrap(),
+            PathBuf::from("scripts")
+                .join("_lib")
+                .join("viccom")
+                .join("hex.lua")
+        );
+        assert!(asset_read_path(Some("bogus"), "x").is_err());
+        // 白名单仍生效：lib 单段 / 撞保留段 / 穿越照拒
+        assert!(asset_read_path(Some("lib"), "foo.lua").is_err());
+        assert!(asset_read_path(Some("lib"), "algo/evil.lua").is_err());
+        assert!(asset_read_path(Some("lib"), "../evil.lua").is_err());
+    }
+
+    // ---- sync 生效 pin 解析（§3.3 默认锁定，阶段 A 审查修复）----
+
+    #[cfg(feature = "lua-http")]
+    #[test]
+    fn effective_pin_resolution_order() {
+        let tmp = std::env::temp_dir().join(format!("lua-pin-{}", std::process::id()));
+        std::fs::create_dir_all(tmp.join("_stdlib")).unwrap();
+        std::fs::write(
+            tmp.join("_stdlib/.index.json"),
+            r#"{"version":"1.2.0","files":{}}"#,
+        )
+        .unwrap();
+
+        // body "auto" 显式跟随 latest（最高优先）
+        let (p, _) = resolve_effective_pin(Some("auto"), Some(&"1.0.0".into()), &tmp);
+        assert_eq!(p, None);
+        // body 显式版本 > 配置键 / 本地已装
+        let (p, _) = resolve_effective_pin(Some("2.0.0"), Some(&"1.0.0".into()), &tmp);
+        assert_eq!(p.as_deref(), Some("2.0.0"));
+        // 省 body → 配置键持久化 pin
+        let (p, _) = resolve_effective_pin(None, Some(&"1.0.0".into()), &tmp);
+        assert_eq!(p.as_deref(), Some("1.0.0"));
+        // 省 body 且无配置 → 锁定本地已装版本（默认 pin 语义）
+        let (p, _) = resolve_effective_pin(None, None, &tmp);
+        assert_eq!(p.as_deref(), Some("1.2.0"));
+        // 首装（无本地 index）→ 跟随 latest
+        let empty = std::env::temp_dir().join(format!("lua-pin-empty-{}", std::process::id()));
+        std::fs::create_dir_all(&empty).unwrap();
+        let (p, _) = resolve_effective_pin(None, None, &empty);
+        assert_eq!(p, None);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+        let _ = std::fs::remove_dir_all(&empty);
     }
 
     // ---- 版本管理：archive_version / list_version_files / scan 排除 versions ----

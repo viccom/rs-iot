@@ -14,17 +14,11 @@ use std::collections::BTreeMap;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+use core_::api::{lua_value_to_sample, RuntimeDevs};
 use core_::config::parse_cfg;
 use core_::io_engine::{spawn_io_task, IoBackend, SerialIo, TcpIo, UdpIo};
 use core_::loader::SCRIPTS_ROOT;
 use core_::script::{load_main, LoadCtx};
-
-/// 运行时设备集（本实例实际上报过数据的 devid，含配置外上报）。
-///
-/// 主循环（collect）与 ctx API（`set_value`/`set_values`）双出口写入，周期 flush
-/// 时经 `StatTracker::extra_insert("runtime_devices")` 落 lux stat:<inst>——前端
-/// "实例→实际采集设备"追溯的数据源。std Mutex：insert 瞬时无 await，无死锁面。
-pub(crate) type RuntimeDevs = std::sync::Arc<std::sync::Mutex<std::collections::BTreeSet<String>>>;
 
 /// 把运行时设备集快照写进 tracker extra（每个 flush 点前调用，不留陈旧）。
 ///
@@ -42,10 +36,16 @@ fn sync_runtime_devs(tracker: &mut crate::plugin::stat_tracker::StatTracker, dev
 fn sync_dropped_samples(
     tracker: &mut crate::plugin::stat_tracker::StatTracker,
     dropped: &std::sync::atomic::AtomicU64,
+    dropped_frames: &std::sync::atomic::AtomicU64,
 ) {
     tracker.extra_insert(
         "dropped_samples",
         serde_json::json!(dropped.load(std::sync::atomic::Ordering::Relaxed)),
+    );
+    // 附录 B P3（on_data try_send）：IO task 侧被动帧满通道丢弃计数，同 flush 出口。
+    tracker.extra_insert(
+        "dropped_frames",
+        serde_json::json!(dropped_frames.load(std::sync::atomic::Ordering::Relaxed)),
     );
 }
 
@@ -58,7 +58,8 @@ enum Evt {
     Data(Vec<u8>),
     /// 采集周期（ticker）。
     Tick,
-    /// 热加载信号（reload_rx，notify watcher 触发）。
+    /// 热加载信号（reload_rx notify watcher，或 cmd_rx 收到 "reload" 控制消息——
+    /// stdlib sync / `_lib` 变更的批量 reload 经控制通道触发，Q11 VM 级替换）。
     Reload,
 }
 
@@ -150,12 +151,15 @@ impl Source for LuaClient {
             }
         };
         // IO 引擎 + on_data 被动帧 channel（IO task 无在飞 request 时收到的帧 → 主循环）。
+        // dropped_frames：IO task 侧满通道丢帧计数（附录 B P3，flush 落 stat）。
         let (data_tx, mut data_rx) = mpsc::channel::<Vec<u8>>(64);
+        let dropped_frames: std::sync::Arc<std::sync::atomic::AtomicU64> = Default::default();
         let io_engine = spawn_io_task(
             backend,
             data_tx,
             inst.inst_id.to_string(),
             ctx.trace_registry.clone(),
+            dropped_frames.clone(),
         );
 
         // 4. 注册 ctx API（runtime_devs：L2 上报出口的设备记录，与 collect 出口共用；
@@ -178,10 +182,20 @@ impl Source for LuaClient {
         }
 
         // 5. on_init（若脚本定义）。on_init 用全局 ctx（与 collect/on_write 一致，无参）。
+        //    同样包时长预算（§4.5-1 "每次回调"，阶段 A 审查修复）：指令 hook 只能熔断
+        //    纯计算死循环，挂起型 await（如反复 ctx:request）防不住——启动路径超限
+        //    仅告警放行（本回调无重试语义，失败=脚本自己的事）。
         if lua.globals().get::<mlua::Function>("on_init").is_ok() {
-            let r: mlua::Result<()> = lua.load("on_init()").eval_async().await;
-            if let Err(e) = r {
-                tracing::warn!("[luaClient] on_init 失败：{e}");
+            match with_budget(
+                "on_init",
+                cfg.callback_timeout_ms,
+                lua.load("on_init()").eval_async::<()>(),
+            )
+            .await
+            {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => tracing::warn!("[luaClient] on_init 失败：{e}"),
+                Err(e) => tracing::warn!("[luaClient] on_init 超时长预算：{e}"),
             }
         }
 
@@ -234,10 +248,15 @@ impl Source for LuaClient {
         loop {
             let evt = tokio::select! {
                 _ = token.cancelled() => break,
-                msg = cmd_rx.recv() => Evt::Cmd(msg),
+                // 控制通道的 "reload" 映射为 Evt::Reload（Q11：批量 reload 走 VM 级
+                // 替换而非 stop+start——失败回退旧 VM，且不惊动非运行态实例）
+                msg = cmd_rx.recv() => match msg {
+                    Some(m) if m.cmd == "reload" => Evt::Reload,
+                    other => Evt::Cmd(other),
+                },
                 Some(frame) = data_rx.recv() => Evt::Data(frame),
                 Some(()) = reload_rx.recv() => Evt::Reload, // None（watcher 退出/失败）忽略，不忙循环
-                _ = flush_ticker.tick() => { sync_runtime_devs(&mut tracker, &runtime_devs); sync_dropped_samples(&mut tracker, &dropped); tracker.flush().await; continue; }
+                _ = flush_ticker.tick() => { sync_runtime_devs(&mut tracker, &runtime_devs); sync_dropped_samples(&mut tracker, &dropped, &dropped_frames); tracker.flush().await; continue; }
                 _ = ticker.tick() => Evt::Tick,
             };
             match evt {
@@ -302,6 +321,12 @@ impl Source for LuaClient {
                     .await
                     {
                         Ok(Ok(samples)) if !samples.is_empty() => {
+                            // 防反压（Q3/附录 B 冻结面①）：满 hub 时 2s 后丢样计数，
+                            // 控制面（stop/reload/cmd）永不被数据面冻结。
+                            // 同一 tick 多样本：首次 Dropped 后剩余样本改 try_send——
+                            // 否则 hub 持续满时一个 tick 内控制面最长冻结 N×2s
+                            // （send 不在 with_budget 内，阶段 A 审查修复）。
+                            let mut hub_stalled = false;
                             for (devid, values) in samples {
                                 if let Ok(mut set) = runtime_devs.lock() {
                                     set.insert(devid.clone());
@@ -312,14 +337,18 @@ impl Source for LuaClient {
                                     values,
                                     timestamp: now,
                                 };
-                                // 防反压（Q3/附录 B 冻结面①）：满 hub 时 2s 后丢样计数，
-                                // 控制面（stop/reload/cmd）永不被数据面冻结。
-                                match core_::api::send_with_deadline(&tx, sample).await {
+                                let outcome = if hub_stalled {
+                                    core_::api::try_send_outcome(&tx, sample)
+                                } else {
+                                    core_::api::send_with_deadline(&tx, sample).await
+                                };
+                                match outcome {
                                     core_::api::SendOutcome::Sent => {}
                                     core_::api::SendOutcome::Closed => {
                                         tracing::warn!("[luaClient] hub 关闭，collect 值未上报");
                                     }
                                     core_::api::SendOutcome::Dropped => {
+                                        hub_stalled = true;
                                         dropped.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                                         tracing::warn!(
                                             "[luaClient] hub 背压超 2s，collect 丢样（累计 {}）",
@@ -358,7 +387,7 @@ impl Source for LuaClient {
                     }
                     if tracker.should_flush() {
                         sync_runtime_devs(&mut tracker, &runtime_devs);
-                        sync_dropped_samples(&mut tracker, &dropped);
+                        sync_dropped_samples(&mut tracker, &dropped, &dropped_frames);
                         tracker.flush().await;
                     }
                 }
@@ -392,7 +421,7 @@ impl Source for LuaClient {
                             consecutive_fail = 0;
                             tracker.set_status("running");
                             sync_runtime_devs(&mut tracker, &runtime_devs);
-                            sync_dropped_samples(&mut tracker, &dropped);
+                            sync_dropped_samples(&mut tracker, &dropped, &dropped_frames);
                             tracker.flush().await;
                             tracing::info!("[luaClient] inst {} 热加载成功", inst.inst_id);
                         }
@@ -409,7 +438,7 @@ impl Source for LuaClient {
         // 设备清单（停止后仍可追溯"它上次采了什么"，诊断价值）。
         tracker.set_status("stopped");
         sync_runtime_devs(&mut tracker, &runtime_devs);
-        sync_dropped_samples(&mut tracker, &dropped);
+        sync_dropped_samples(&mut tracker, &dropped, &dropped_frames);
         tracker.flush().await;
     }
 }
@@ -513,11 +542,13 @@ async fn call_on_data(lua: &mlua::Lua, frame: &[u8]) -> mlua::Result<()> {
     Ok(())
 }
 
-/// 单回调时长预算包装（Q3/§4.5-1，T5）：collect/on_write/on_data 每次调用统一包
-/// `tokio::time::timeout(callback_timeout_ms)`；Elapsed → 外层 `Err(RuntimeError
+/// 单回调时长预算包装（Q3/§4.5-1，T5）：collect/on_write/on_data/**on_init** 每次调用
+/// 统一包 `tokio::time::timeout(callback_timeout_ms)`；Elapsed → 外层 `Err(RuntimeError
 /// ("callback timeout: {kind} 超预算 {budget}ms，跳过本轮"))`——消息含回调名与预算，
 /// 供 warn 日志与 tick_err/tick_fail 记账。脚本自身的错误（内层 Result 的 Err）原样
-/// 透传，与超时严格区分。
+/// 透传，与超时严格区分。on_init 同纳入预算（阶段 A 审查修复，§4.5-1 "每次回调"）：
+/// 指令 hook 只能熔断纯计算死循环，挂起型 await（反复 ctx:request / 满 hub 的
+/// set_value）只有预算能切断。
 ///
 /// spike-1 方案 a：超时仅跳过本轮 + 计数（连续超限走 collect 的 fail_threshold →
 /// degraded），不重建 VM——被 drop 的协程弃留在 await 点，全局态半途，要求脚本幂等。
@@ -557,7 +588,7 @@ async fn reload_vm(
     let stdlib_ver = core_::stdlib_sync::read_index(&lctx.scripts_root).map(|i| i.version);
     let summary =
         manifest_dry_run(&lua, lctx, stdlib_ver.as_deref()).map_err(mlua::Error::RuntimeError)?;
-    tracing::warn!("[luaClient] 热加载 manifest dry-run 通过：{summary}");
+    tracing::info!("[luaClient] 热加载 manifest dry-run 通过：{summary}");
     core_::api::register(
         &lua,
         ctx_host,
@@ -569,10 +600,17 @@ async fn reload_vm(
         cfg.transport.as_str(),
         &lctx.scripts_root,
     )?;
-    // dry-run on_init（hook 兜底死循环；失败 → Err → 主循环回退旧 VM）。
+    // dry-run on_init（hook 兜底纯计算死循环 + with_budget 兜底挂起型 await——
+    // 阶段 A 审查修复：reload 路径挂起会让主循环 select! 停摆，stop token 不再
+    // 被轮询；超限 → Err → 主循环回退旧 VM）。
     if lua.globals().get::<mlua::Function>("on_init").is_ok() {
-        let r: mlua::Result<()> = lua.load("on_init()").eval_async().await;
-        r?;
+        // 双层 Result：外层 = 预算 Elapsed（→ Err → 回退旧 VM），内层 = 脚本错误
+        with_budget(
+            "on_init",
+            cfg.callback_timeout_ms,
+            lua.load("on_init()").eval_async::<()>(),
+        )
+        .await??;
     }
     Ok(lua)
 }
@@ -603,17 +641,6 @@ fn manifest_dry_run(
         m.role.as_deref().unwrap_or("collector(缺省)"),
         m.api_ver
     ))
-}
-
-/// mlua::Value → SampleValue（对标 transform/rhai.rs 的类型映射）。
-pub(crate) fn lua_value_to_sample(v: &mlua::Value) -> Option<SampleValue> {
-    match v {
-        mlua::Value::Integer(i) => Some(SampleValue::Int(*i)),
-        mlua::Value::Number(n) => Some(SampleValue::Float(*n)),
-        mlua::Value::Boolean(b) => Some(SampleValue::Bool(*b)),
-        mlua::Value::String(s) => Some(SampleValue::Str(s.to_str().ok()?.to_string())),
-        _ => None,
-    }
 }
 
 /// 算脚本版本（main.lua 内容 sha256 前 8 hex，spec §13 `script_version`）。

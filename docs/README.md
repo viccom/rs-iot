@@ -13,7 +13,7 @@
 | 主题 | 决策（why） | 设计（build） | 代码 | 测试 | 指南/参考 |
 |---|---|---|---|---|---|
 | 南向协议接入 | [feature 裁剪](decisions/2026-08-07-feature-gating-protocols.md)（已实施） | [eipClient](designs/2026-08-17-eip-client-design.md)（已实施·真机待验） | `src/plugin/builtin/{opcua,modbus,s7,eip}_client/` | `tests/{s7,modbus_multi_slave,eip_client,feature_gate}_e2e.rs` | CLAUDE.md 验证规则节 |
-| Lua 脚本系统 | [扩展策略](decisions/2026-08-07-plugin-extension-strategy.md)（已实施） | [采集系统](designs/2026-08-06-lua-script-collector-design.md)（已实施）→ [平台演进](designs/2026-08-18-lua-script-system-evolution-design.md)（讨论中） | `src/plugin/builtin/lua_client/` | `tests/lua_*_e2e.rs`（11 个） | [lua-script-guide](guides/lua-script-guide.md) |
+| Lua 脚本系统 | [扩展策略](decisions/2026-08-07-plugin-extension-strategy.md)（已实施） | [采集系统](designs/2026-08-06-lua-script-collector-design.md)（已实施）→ [平台演进](designs/2026-08-18-lua-script-system-evolution-design.md)（已实施·阶段 A） | `src/plugin/lua_core/` + `src/plugin/builtin/lua_client/` | `tests/lua_*_e2e.rs`（11 个）+ lua_core 内单测 | [lua-script-guide](guides/lua-script-guide.md) |
 | 外部插件 bridge | [扩展策略](decisions/2026-08-07-plugin-extension-strategy.md)（已实施） | —（[协议规约](reference/external-plugin-protocol.md)即设计） | `src/plugin/builtin/sidecar_client/` | `tests/sidecar_e2e.rs` | [开发指南](guides/external-plugin-dev-guide.md)、`examples/ext-plugin-*` |
 | 可观测性（M4+P1） | — | [packet-trace](designs/2026-08-10-packet-trace-design.md)（部分实施）· [log-ringbuffer](designs/2026-08-10-log-ringbuffer-design.md)（已实施） | `src/io_trace.rs`、`src/log_ringbuffer.rs`、`src/api/routes_{metrics,trace,logs}.rs` | `tests/{trace,log,metrics}_e2e.rs` | [埋点规范](conventions/instrumentation-conventions.md)、[rest-api](reference/rest-api.md) §4.10+ |
 | AI 网关集成 | [技术选型](decisions/2026-08-12-gateway-tech-selection.md)（已实施） | [v3 设计](designs/2026-08-11-ai-agent-integration-v3-design.md)（已实施）→ [分层演进](designs/2026-08-18-multi-system-gateway-design.md)（**待实施**） | `crates/rsiot-gateway/`、`crates/rsiot-mcp/` | gateway/mcp crate 内单测 | [部署指南](ops/deploy-gateway-and-mcp.md) |
@@ -59,7 +59,8 @@
 | [2026-08-11-ai-agent-integration-v3-design.md](designs/2026-08-11-ai-agent-integration-v3-design.md) | AI Agent 集成 v3：独立 API Gateway 程序（v1/v2 已归档） | 已实施 |
 | [2026-08-17-eip-client-design.md](designs/2026-08-17-eip-client-design.md) | eipClient：罗克韦尔 AB EtherNet/IP 南向插件（rust-ethernet-ip 1.2.0） | 已实施（真机待验） |
 | [2026-08-18-multi-system-gateway-design.md](designs/2026-08-18-multi-system-gateway-design.md) | 多系统网关分层：gateway-core 通用引擎 + rsiot-gateway 薄组装 | **待实施** |
-| [2026-08-18-lua-script-system-evolution-design.md](designs/2026-08-18-lua-script-system-evolution-design.md) | Lua 脚本系统演进：多角色脚本平台 v0.1（含 Open Questions） | **讨论中** |
+| [2026-08-18-lua-script-system-evolution-design.md](designs/2026-08-18-lua-script-system-evolution-design.md) | Lua 脚本系统演进：多角色脚本平台 v0.5（阶段 A 已实施 + 审查修复） | **已实施**（阶段 A） |
+| [2026-08-19-lua-script-system-stage-a-plan.md](designs/2026-08-19-lua-script-system-stage-a-plan.md) | 阶段 A 实施计划：13 task TDD（lua_core/护栏/stdlib/manifest/源仓） | **已实施** |
 
 ## ops/ — 部署与运维（怎么跑起来）
 

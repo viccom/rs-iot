@@ -1,10 +1,20 @@
 # rs-iot Lua 脚本系统演进设计（多角色脚本平台）
 
-> 日期：2026-08-18（v0.5 更新于 2026-08-19：全部 Open Questions 定案 + 冲突/风险分析 + 附录 B）
-> 版本：v0.5（设计草案；Q1-Q19 全部决议，含 §9 架构冲突与实施风险分析）
-> **状态**：draft（设计完备，可进入 writing-plans 拆分）
-> **实施**：未开始（前置 [2026-08-06-lua-script-collector-design.md](2026-08-06-lua-script-collector-design.md) 已实施）
-> **遗留**：全部（Open Questions 为下一轮议程）
+> 日期：2026-08-18（v0.5 更新于 2026-08-19：全部 Open Questions 定案 + 冲突/风险分析 + 附录 B；2026-08-20 阶段 A 落地 + 审查修复回填）
+> 版本：v0.5（Q1-Q19 全部决议，含 §9 架构冲突与实施风险分析；阶段 A 已实施）
+> **状态**：implemented（阶段 A；worktree `feat/lua-stage-a` 待合并，B/C/D 规划中）
+> **实施**：阶段 A（2026-08-19~20，13 task + 审查修复）：lua_core 重构 / 能力卡 / 护栏五项（含附录 B P0/P1/P3）/ require 四层路由 / stdlib 种子+sync / `_lib` / manifest dry-run / 官方源仓建制
+> **代码**：`src/plugin/lua_core/`（公共层）+ `src/plugin/builtin/lua_client/`（薄壳）；源仓 `E:/Rs_Codes/rsiot-lualib`
+> **测试**：`cargo test -p rs-iot --features lua,lua-http`（lib 304 通过 / 2 ignored[需外部资源] + 19 个 e2e 套件全绿）；e2e 官方源同步经 `--ignored e2e_sync` 本地实跑验收
+> **遗留**（阶段 A 审查[2026-08-20 四轮]登记，排期 B 阶段或平台前置）：
+> - **官方脚本模板安装器**（Q18/D1 半体）：模板已随 sync 分发到 `_stdlib/scripts/`（不列入 `stdlib.list()`），安装到 `scripts/<name>/` + `@source` 徽标写入待 B 阶段
+> - **sync 管理员权限**（§3.7）：平台 auth 尚无角色模型（JWT 统一鉴权已覆盖），角色区分属平台级前置
+> - **`min_host_ver` 预检**（§3.3 兼容矩阵第三轴）：宿主无版本轴常量，随发布流程补
+> - **sync 后本地 selftest 抽样**（§3.3）：源仓 CI 已冒烟，本地抽样待 B
+> - **json encode 深度护栏**（§4.3-5 滥用用例）：decode 受 serde_json 128 层递归限制，encode 侧深嵌套 table 理论可栈溢出，需自写深度受限转换
+> - **reqwest Client 复用**（附录 B P2）与 1MB 检查流式化（P4）：实现期优化项
+> - **stdlib sync 与 `lua-http` 解耦**：脚本出站风险面与官方库分发是正交关注点，feature 语义待拆
+> - **默认 upstream 为占位 URL**：`rsiot.github.io/lualib` 未发布（源仓无 remote），上线前须发布 dist 或改配置指向可用镜像
 > 流程：调研（mlua 生态 / FreeIOE / IIoT 趋势）→ 本 spec → 分章深化 → writing-plans → 分阶段实施
 > 前置：`2026-08-06-lua-script-collector-design.md`（luaClient 采集系统，已落地，本文是其演进）
 
@@ -17,6 +27,7 @@
 | v0.3 | 2026-08-18 | §3 重构：官方分发体系——rsiot-lualib 官方源（git 仓+CI+静态托管+ed25519 签名 index，非服务端软件）、rs-iot 内置同步客户端（验签/原子替换/pin）、只读镜像（换 upstream URL）、标志信任链（官方/已修改/本地/导入四态）、embed 降级为种子兜底；ADR D7 修订 +D9/D10；OQ +Q16-Q18 |
 | v0.4 | 2026-08-19 | 三决策定案：①官方源静态托管（GitHub Pages/对象存储，Q16✅）；②embed 种子保留，规模预算几十库/≤500KB（重型件只走在线）；③require 命名规范定稿——官方保留段封闭集（algo/codec/proto/cloud/util/oo）+ 第三方强制两段式 `作者.库名[.子模块]`，`local.` 前缀取消（D8 修订，+D11）；官方脚本模板装 `scripts/<name>/` + manifest `@source` 安装器写入（Q18✅） |
 | v0.5 | 2026-08-19 | 全部 OQ 定案（用户「全按推荐」）：Q1-Q17/Q19 决议登记见上表；§5.3 mqtt-north 契约定稿、§5.1 on_timer 澄清 + 反馈环路防护、§5.0 插件形态（lua_core+三薄插件）、§4.5 护栏参数定稿；新增 §9 架构冲突与实施风险分析、附录 B 性能/死锁评估摘要 |
+| v0.5.1 | 2026-08-20 | 阶段 A 落地后四轮独立审查的修复回填：Windows `:` 段路径逃逸封堵（loader/safe_rel_path）、on_init 纳入回调时长预算（§4.5-1 补全）、批量 reload 改 VM 级（不复活已停实例 + 失败回退旧 VM，Q11 语义对齐）、io_engine on_data 改 try_send+计数（附录 B P3 落地，`dropped_frames`）、pin 默认锁定语义落地（`lua_stdlib_pin` 配置键 + 本地已装版本锁定）、`GET /lua/script` 支持 kind=lib（Q13 读回补全）、`RuntimeDevs`/`lua_value_to_sample` 下沉 lua_core（解除反向依赖）、sync 审计日志（§3.7）、clamp 上限读能力卡（单一事实源）、sync 进程级互斥、模板条目不列入 stdlib 清单；头部实施块与遗留清单更新 |
 
 ## 设计问题决议登记（Q1-Q19，v0.5 全部定案）
 
@@ -168,13 +179,16 @@ rsiot-lualib/                 ← GitHub 仓（开发态；FreeIOE 搬运库的�
 
 | 层 | 场景 | 机制 |
 |---|---|---|
-| **D1 官方源在线同步**（主通道） | 官方基础库 + 官方脚本模板分发 | rs-iot 内置同步客户端：拉 upstream index → **验签 → 逐文件 sha256 校验 → 原子替换** `_stdlib/`（库）/ `scripts/<name>/`（官方模板，hash 记入本地 index 供徽标判定）；REST `GET /lua/stdlib`、`POST /lua/stdlib/sync`、`POST /lua/stdlib/pin`；同步后引用实例自动 reload |
+| **D1 官方源在线同步**（主通道） | 官方基础库 + 官方脚本模板分发 | rs-iot 内置同步客户端：拉 upstream index → **验签 → 逐文件 sha256 校验 → 原子替换** `_stdlib/`（库）/ `scripts/<name>/`（官方模板，hash 记入本地 index 供徽标判定）*；REST `GET /lua/stdlib`、`POST /lua/stdlib/sync`、`POST /lua/stdlib/pin`**；同步后引用实例自动 reload |
 | **D2 只读镜像**（内网） | 内网/隔离网络 | 镜像 = 官方静态目录完整拷贝（index+签名随内容走，镜像无法篡改注入）；内网管理员周期同步官方源（wget --mirror/rclone/极简脚本）；rs-iot 仅改 `stdlib_upstream` 配置指向镜像，「换新镜像升级」= 换 URL + sync |
 | **D3 站点共享库** | 现场私有跨脚本库 | `scripts/_lib/<作者>/<库名>.lua`（两段式命名，§3.1），复用 REST save/versions/rollback 管理模式（Q13）；企业多机可用自有手段同步该目录，不进官方通道 |
 | **D4 脚本包导出/导入** | 用户自扩展库/脚本的多机分发 | zip（manifest + main.lua + 私有 lib + stdlib 版本声明，**不含 stdlib 本体**）；导入端 dry-run 校验兼容；导入内容徽标「导入」（Q14） |
 | **D5 embed 种子**（bootstrap 兜底，已定案保留） | 内网冷启动（无网络无镜像） | 宿主二进制内嵌常用核心种子，**规模预算：几十个库 / ≤500KB 纯文本**（algo/codec/util 精选；hashings 重型件如 whirlpool 单文件 900 行只走在线同步）；`_stdlib/` 为空时解包兜底；种子与宿主同仓同测（API 天然兼容）；本地 index 存在时以 index 为准消歧 |
 
 官方通道单向（官方→网关）；用户内容永不进官方通道，亦无签名 → 进不了 `_stdlib/` 命名空间（前缀隔离 + 验签双保险，ADR D8/D10）。
+
+> \* D1 模板安装（阶段 A 现状）：模板条目随 sync 分发到 `_stdlib/scripts/`（不列入 stdlib 清单），安装到 `scripts/<name>/` + `@source` 徽标写入延后至 B 阶段（见头部遗留）。
+> \*\* D1 pin 端点（阶段 A 现状）：未单列端点——pin 语义经 sync body（显式版本 / `auto`）与配置键 `lua_stdlib_pin` 承载，缺省锁定本地已装版本（§3.3 默认锁定语义已落地）。
 
 ### 3.7 标志与信任链（四态徽标）
 
@@ -460,10 +474,10 @@ MqttPublisher 从 `lib.rs:231-234` 硬编码单例收敛为 luaNorth（mqtt-nort
 
 1. hub 背压传导：`tx.send().await`（collect 分支 / push_sample）在 hub(512) 满时挂起——pipeline/lux 严重变慢时全部实例集体冻结。→ §4.5 第 4 项（2s 超时丢样）。
 2. 脚本可控合法无限等待：`ctx:request` 超时参数 u64 直用、http 超时只 clamp 下限——脚本写 `3600000` 冻结实例一小时。→ §4.5 第 3 项（clamp ≤30s）。
-3. 被动帧反压级联：IO task 在 `on_data_tx.send().await` 无界等待，主循环忙时 data_rx(64) 填满 → IO task 冻结 → request 也进不去。→ 建议改 try_send + 丢弃计数（P3，未入 §4.5，实现时一并处理）。
+3. 被动帧反压级联：IO task 在 `on_data_tx.send().await` 无界等待，主循环忙时 data_rx(64) 填满 → IO task 冻结 → request 也进不去。→ 已改 try_send + 丢弃计数（P3，随阶段 A 审查修复落地：`dropped_frames` 落 stat）。
 
 **性能短板**（按影响排序）：reqwest Client 每请求新建（TLS/连接池不复用，建议进程级 OnceLock，P2）；1MB 上限检查在下载完成后（先全量进内存，建议 chunk 流式截断，P4）；idle 静默成帧固有尾延迟（快 TCP 场景每 request 多付 idle 等待，由 stdlib proto/frame 长度字段成帧解决）；mlua send feature 固定微量税（架构需要，接受）。
 
 **资源面**：每实例 1 VM + 2 task + 1 watcher 线程，100 实例量级 tokio 无压力；内存最坏 32MB×实例（限额是护栏非常态，实际 <1MB）；versions/ 快照无限累积（建议按数量滚动）；watcher 线程泄漏已修复（tokio task + token）。
 
-**修复优先级**：P0 超时 clamp → P1 hub send 超时 → P2 reqwest 复用 → P3 on_data try_send → P4 HTTP 流式截断 →（设计层）成帧策略可配。P0/P1/P3 已并入 §4.5；P2/P4 为实现期优化项。
+**修复优先级**：P0 超时 clamp → P1 hub send 超时 → P2 reqwest 复用 → P3 on_data try_send → P4 HTTP 流式截断 →（设计层）成帧策略可配。P0/P1/P3 已随阶段 A 落地（P3 于 2026-08-20 审查修复补齐，`dropped_frames` 计数落 stat）；P2/P4 为实现期优化项（见头部遗留）。

@@ -83,6 +83,10 @@ pub struct SaveScriptRequest {
     pub name: String,
     #[schemars(description = "Content of main.lua")]
     pub content: String,
+    #[schemars(
+        description = "Asset kind: \"script\" (default, scripts/<name>/main.lua) or \"lib\" (site shared library scripts/_lib/<org>/<name>.lua, needs >=2 segments and must not collide with reserved stdlib namespaces)"
+    )]
+    pub kind: Option<String>,
 }
 
 /// `rsiot_start_packet_trace`：激活报文 trace。对标 `routes_trace::TraceReq`。
@@ -519,13 +523,14 @@ impl RsiotMcpServer {
     /// 写后对**运行中**实例调 `rsiot_reload_lua_instance`（stop+start）生效——不要用
     /// `rsiot_start_instance`（对运行中实例是错误路径）。
     #[tool(
-        description = "Write a lua collection script to scripts/<name>/main.lua. After saving, call rsiot_reload_lua_instance to apply to a running luaClient. Requires approval."
+        description = "Write a lua collection script to scripts/<name>/main.lua (kind=script, default) or a site shared library to scripts/_lib/<org>/<name>.lua (kind=lib). After saving, call rsiot_reload_lua_instance to apply to a running luaClient (lib changes trigger watcher auto-reload). Requires approval."
     )]
     async fn rsiot_save_lua_script(
         &self,
         Parameters(req): Parameters<SaveScriptRequest>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        let body = serde_json::json!({ "name": req.name, "content": req.content });
+        let body =
+            serde_json::json!({ "name": req.name, "content": req.content, "kind": req.kind });
         backend_to_result(
             self.backend.post("/api/v1/lua/script/save", &body).await,
             "rsiot_save_lua_script",
@@ -1202,6 +1207,7 @@ mod tests {
             .rsiot_save_lua_script(Parameters(SaveScriptRequest {
                 name: "devA".into(),
                 content: "function collect() end".into(),
+                kind: None,
             }))
             .await
             .unwrap();
@@ -1209,6 +1215,28 @@ mod tests {
         assert_eq!(path, "/api/v1/lua/script/save");
         assert_eq!(body["name"], "devA");
         assert_eq!(body["content"], "function collect() end");
+    }
+
+    /// 阶段 A 审查修复（Q13 管理面一致）：kind=lib 时透传共享库资产类型，
+    /// AI 可写 `_lib/` 共享库（原先 MCP 侧缺失，库只可经 REST 写）。
+    #[tokio::test]
+    async fn save_script_kind_lib_passes_through() {
+        let backend = Arc::new(FakeBackend::new(json!(null)));
+        let server = RsiotMcpServer::new(
+            backend.clone() as Arc<dyn RsiotBackend>,
+            RiskPolicy::default(),
+        );
+        server
+            .rsiot_save_lua_script(Parameters(SaveScriptRequest {
+                name: "viccom/hex.lua".into(),
+                content: "return {}".into(),
+                kind: Some("lib".into()),
+            }))
+            .await
+            .unwrap();
+        let (_, body) = &backend.recorded_posts()[0];
+        assert_eq!(body["kind"], "lib");
+        assert_eq!(body["name"], "viccom/hex.lua");
     }
 
     #[tokio::test]

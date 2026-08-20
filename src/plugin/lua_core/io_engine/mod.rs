@@ -76,11 +76,17 @@ impl IoEngine {
 /// 启动 IO task（独占 backend）。`on_data_tx` 接被动帧（无在飞 request 时 recv_idle 收到）。
 /// 返回 IoEngine 句柄（Lua 侧 request 用）。`inst_id` + `trace_registry` 用于报文 trace
 /// （request TX/RX + recv_idle 被动 RX 三点 dump；trace 关闭时 dump 快速路径跳过）。
+///
+/// 被动帧投递用 `try_send`（附录 B 冻结面③/P3，阶段 A 审查修复）：主循环忙时
+/// `data_rx(64)` 填满，若 IO task 在 `send().await` 无界等待会连带 request 也进
+/// 不来（同一 select! 停摆）——满通道即丢帧计数（`dropped_frames` 由调用方持有，
+/// flush 落 stat），主循环消费后自然恢复。
 pub(crate) fn spawn_io_task(
     mut backend: Box<dyn IoBackend>,
     on_data_tx: mpsc::Sender<Vec<u8>>,
     inst_id: String,
     trace_registry: crate::io_trace::TraceRegistry,
+    dropped_frames: std::sync::Arc<std::sync::atomic::AtomicU64>,
 ) -> IoEngine {
     let (tx, mut rx) = mpsc::channel::<IoRequest>(64);
     tokio::spawn(async move {
@@ -101,7 +107,16 @@ pub(crate) fn spawn_io_task(
                 res = backend.recv_idle() => {
                     if let Some(frame) = res {
                         crate::io_trace::dump(&trace_registry, &inst_id, crate::io_trace::Dir::Rx, &frame);
-                        let _ = on_data_tx.send(frame).await; // 主循环 drop → 忽略
+                        // 满通道丢帧（P3）：IO task 永不因数据面反压停摆
+                        if let Err(tokio::sync::mpsc::error::TrySendError::Full(_)) =
+                            on_data_tx.try_send(frame)
+                        {
+                            dropped_frames.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            tracing::warn!(
+                                "[luaClient] {inst_id}: on_data 通道满，丢被动帧（累计 {}）",
+                                dropped_frames.load(std::sync::atomic::Ordering::Relaxed)
+                            );
+                        }
                     }
                     // None（idle 无数据/未连接）→ 回 loop 重 select!（recv_idle 重启）
                 }
@@ -125,6 +140,7 @@ mod tests {
             tx,
             "test-inst".into(),
             crate::io_trace::TraceRegistry::new(),
+            std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
         )
     }
 
@@ -237,6 +253,7 @@ mod tests {
             on_data_tx,
             "test-inst".into(),
             crate::io_trace::TraceRegistry::new(),
+            std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
         );
 
         let frame = tokio::time::timeout(Duration::from_secs(2), on_data_rx.recv())
@@ -244,6 +261,44 @@ mod tests {
             .expect("超时")
             .expect("应收到被动帧");
         assert_eq!(frame, b"\x02ping");
+    }
+
+    /// P3（附录 B 冻结面③，阶段 A 审查修复）：on_data 通道满 → IO task `try_send`
+    /// 丢帧并计数，不再 `send().await` 无界等待（主循环忙时 request 也进不来）。
+    #[tokio::test]
+    async fn on_data_full_channel_drops_and_counts() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        use std::sync::Arc;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        // server：连接后连推两帧（间隔 > idle 成帧窗，确保成两帧）
+        tokio::spawn(async move {
+            let (mut s, _) = listener.accept().await.unwrap();
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let _ = s.write_all(b"\xf1").await;
+            tokio::time::sleep(Duration::from_millis(80)).await;
+            let _ = s.write_all(b"\xf2").await;
+            tokio::time::sleep(Duration::from_millis(300)).await; // 保连接
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let backend = Box::new(TcpIo::new(format!("127.0.0.1:{port}"), 50));
+        // 容量 1 且预填占满 + 接收端保活不消费 → 两帧都应走 Full 分支
+        let (on_data_tx, _rx_keepalive) = mpsc::channel::<Vec<u8>>(1);
+        on_data_tx.try_send(vec![0u8]).unwrap();
+        let dropped: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
+        let _engine = spawn_io_task(
+            backend,
+            on_data_tx,
+            "p3-inst".into(),
+            crate::io_trace::TraceRegistry::new(),
+            dropped.clone(),
+        );
+
+        // 两帧到达即丢（try_send 永不等待，测试只等 IO task 处理完两个 recv_idle 帧）
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        let n = dropped.load(Ordering::Relaxed);
+        assert!(n >= 1, "满通道被动帧应丢并计数，实得 {n}");
     }
 
     /// serial 闭环：需真机/虚拟串口。CI 标 ignore；手动跑配 `SERIAL_PORT_A` 环境变量。

@@ -16,13 +16,32 @@ mod http;
 mod json;
 
 use crate::host::HostContext;
-use crate::plugin::builtin::lua_client::lua_value_to_sample;
-use crate::plugin::builtin::lua_client::RuntimeDevs;
 use crate::plugin::lua_core::io_engine::IoEngine;
 use crate::types::{CtlMessage, InstConfig, InstId, Sample, SampleValue};
 use mlua::{Lua, LuaSerdeExt, LuaString, Value};
 use std::path::Path;
 use tokio::sync::mpsc;
+
+/// 运行时上报设备集（collect 与 L2 `set_value(s)` 双出口共用；flush 时同步 stat）。
+///
+/// 原定义在 `builtin/lua_client/mod.rs`，阶段 A 审查修复下沉 lua_core：api 层
+/// `register`/`push_sample` 与薄壳主循环同为消费者，公共层反向依赖薄壳违背
+/// §5.0 分层（B 阶段 luaTransform/luaNorth 复用 api 时会拖进 collector 壳）。
+pub(crate) type RuntimeDevs = std::sync::Arc<std::sync::Mutex<std::collections::BTreeSet<String>>>;
+
+/// mlua::Value → SampleValue（对标 transform/rhai.rs 的类型映射）。
+///
+/// 下沉缘由同 [`RuntimeDevs`]：collect 返回值解析（薄壳）与 L2 set_value 解析
+/// （本层）共用的通用转换，属 lua_core 公共层。
+pub(crate) fn lua_value_to_sample(v: &mlua::Value) -> Option<SampleValue> {
+    match v {
+        mlua::Value::Integer(i) => Some(SampleValue::Int(*i)),
+        mlua::Value::Number(n) => Some(SampleValue::Float(*n)),
+        mlua::Value::Boolean(b) => Some(SampleValue::Bool(*b)),
+        mlua::Value::String(s) => Some(SampleValue::Str(s.to_str().ok()?.to_string())),
+        _ => None,
+    }
+}
 
 /// hub send 结果（`send_with_deadline` 调用方语义：丢样时计数、关闭时告警）。
 #[derive(Debug, PartialEq, Eq)]
@@ -46,6 +65,17 @@ pub(crate) async fn send_with_deadline(tx: &mpsc::Sender<Sample>, sample: Sample
         Ok(Ok(())) => SendOutcome::Sent,
         Ok(Err(_)) => SendOutcome::Closed,
         Err(_) => SendOutcome::Dropped,
+    }
+}
+
+/// [`send_with_deadline`] 的非等待版（阶段 A 审查修复）：同一 tick 内首次 send 已
+/// 超预算（hub 持续满）后，剩余样本不再逐条各等 2s——立即入队或丢弃，控制面
+/// 不被数据面冻结（语义映射与 [`send_with_deadline`] 一致）。
+pub(crate) fn try_send_outcome(tx: &mpsc::Sender<Sample>, sample: Sample) -> SendOutcome {
+    match tx.try_send(sample) {
+        Ok(()) => SendOutcome::Sent,
+        Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => SendOutcome::Dropped,
+        Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => SendOutcome::Closed,
     }
 }
 

@@ -140,11 +140,20 @@ luaClient 是 rs-iot 的南向 `Source`（与 modbus/opcua/s7 同构，`inventor
 
 ```lua
 require("../evil")   -- 拒：穿越 / 绝对路径 / 反斜杠 / 内嵌斜杠 / 空段，一律报错
+require("C:foo")     -- 拒：段含盘符冒号（Windows 上 join 会以盘符前缀整体替换基路径逃逸）
 require("lib")       -- 拒：裸 lib 前缀无模块名
+require("json.util") -- 拒：builtin 名（json）是封闭单段名，不可多段引用
 require("viccom")    -- 不拒但**进不了共享层**：单段名路由到私有 scripts/<script>/lib/viccom.lua；
                     --   要进 _lib/ 须经 REST 保存（保存侧拒单段与保留段首段，见下）
 require("algo.evil") -- 保留段只查 _stdlib/ 与种子：不存在即报"未同步"，不会回落到任何第三方文件
 ```
+
+> **⚠️ 旧脚本迁移告示（多段私有 require 行为变更）**：旧版加载器把任意点分名（如
+> `require("vendor.helper")`）都映射到私有 `scripts/<name>/lib/vendor/helper.lua`；
+> 首段路由上线后，多段名改判共享层（`scripts/_lib/vendor/helper.lua`）——旧用法会得到
+> "共享库不存在"错误。**修复**：私有库改单段名（`require("helper")` →
+> `scripts/<name>/lib/helper.lua`）或旧 `lib.` 前缀（`require("lib.helper")`，语义不变）。
+> 单段与 `lib.` 前缀的私有语义**逐字节不变**，未用过多段私有 require 的脚本零影响。
 
 ### json 模块（builtin，C0）
 
@@ -190,6 +199,18 @@ curl -X POST -H "Authorization: <token>" -H 'Content-Type: application/json' \
   -d '{"upstream":"https://rsiot.github.io/lualib/","pin":"1.0.0"}' \
   localhost:8790/api/v1/lua/stdlib/sync
 ```
+
+**版本策略（pin，设计 §3.3 默认锁定）**：`pin` 缺省 = **锁定当前已装版本**（上游发新版会
+因"pin 版本不匹配"拒装，须显式升级）；`"pin":"auto"` = 显式跟随 latest；请求体显式版本 >
+配置键 `lua_stdlib_pin`（持久化锁定）> 本地已装版本；首次安装（本地无 index）自动取 latest。
+每次 sync 成功/失败均落审计日志（`[lua][audit] stdlib sync ...`，§3.7）。
+
+sync 后的批量 reload 为 **VM 级热加载**（运行中实例逐一经控制通道触发 `reload_vm`，失败自动
+回退旧 VM）；**非运行态实例不复活**（响应中记 `skipped`，下次启动自然取新库）。
+
+官方脚本模板（index 中 `scripts/` 前缀条目，如 `scripts/modbus-like/main.lua`）随 sync 分发到
+`_stdlib/scripts/` 供查阅，但**尚不可直接配置运行**——安装到 `scripts/<name>/` 的安装器与
+`@source` 徽标（设计 Q18）为 B 阶段项；模板条目也不列入 `stdlib.list()`（非 require 可达模块）。
 
 ### 站点共享库（`scripts/_lib/`）
 
@@ -264,7 +285,7 @@ main.lua 顶部注释块可声明脚本契约（`-- @key value`，逐行扫至�
 | `reconnect_secs` | num | — | 断连重连间隔（秒） |
 | `mem_limit_mb` | num | — | VM 内存限额（MB，防脚本泄漏） |
 | `hook_instr_limit` | num | — | 指令 hook 阈值（防死循环，spec §9.2） |
-| `callback_timeout_ms` | num | `10000` | 单次回调（collect/on_write/on_data）时长预算（毫秒，见护栏） |
+| `callback_timeout_ms` | num | `10000` | 单次回调（collect/on_write/on_data/**on_init**）时长预算（毫秒，见护栏） |
 | `fail_threshold` | num | `10` | 连续 collect 失败 N 次标记 degraded |
 
 ## 运行时护栏
@@ -273,11 +294,12 @@ main.lua 顶部注释块可声明脚本契约（`-- @key value`，逐行扫至�
 
 | 护栏 | 参数 / 默认 | 超限行为 |
 |---|---|---|
-| 回调时长预算 | `callback_timeout_ms`（默认 10s，可配） | 本次回调被放弃（协程弃留，VM 不重建）、tick 记失败——连续超时照常走 `fail_threshold` → `degraded`，下一 tick 继续 |
-| HTTP 频控 | 20 次/s（`http_get`/`http_post` 共享一个出站窗口） | 向脚本返回错误 `rate limited（20/s）`（可感知退避） |
-| `ctx:request` 超时上限 | 脚本传值 clamp 至 30s（`0` → 1ms） | 防超大超时挂死等待 |
-| HTTP 超时上限 | `timeout` 参数 clamp 至 1-30s（缺省 5s） | 同上 |
-| hub 背压防反压 | 样本上送 `send` 超 2s | 丢弃该样本并累计计数——stat 扩展字段 `dropped_samples`（见状态监测）；hub 关闭时 warn |
+| 回调时长预算 | `callback_timeout_ms`（默认 10s，可配；覆盖 collect/on_write/on_data/on_init 四类回调） | 本次回调被放弃（协程弃留，VM 不重建）、tick 记失败——连续超时照常走 `fail_threshold` → `degraded`，下一 tick 继续；reload 路径的 on_init 超限 → 回退旧 VM |
+| HTTP 频控 | 20 次/s（`http_get`/`http_post` 共享一个出站窗口；**固定 1s 窗口计数**语义，窗口边界理论可突发 2×——护栏目的等效，token bucket 列为后续优化） | 向脚本返回错误 `rate limited（20/s）`（可感知退避） |
+| `ctx:request` 超时上限 | 脚本传值 clamp 至 30s（`0` → 1ms；上限读能力卡 `timeout_cap_ms`） | 防超大超时挂死等待 |
+| HTTP 超时上限 | `timeout` 参数 clamp 至 1-30s（缺省 5s；上限读能力卡） | 同上 |
+| hub 背压防反压 | 样本上送 `send` 超 2s；同一 collect 周期首批丢弃后，剩余样本改即时丢弃（不再逐条各等 2s） | 丢弃该样本并累计计数——stat 扩展字段 `dropped_samples`（见状态监测）；hub 关闭时 warn |
+| on_data 帧通道防反压 | 被动帧通道（容量 64）满时即时丢帧（不等待） | 丢弃并累计计数——stat 扩展字段 `dropped_frames`；主循环恢复消费后自愈 |
 
 死循环由指令 hook 熔断（`hook_instr_limit`，见沙箱限制）、内存由 `mem_limit_mb` 封顶，与上表
 互补构成完整护栏面。
@@ -346,9 +368,15 @@ backend 可解决。触发条件：现场出现明确的 server 侧协议需求�
 改 `scripts/<name>/main.lua` → notify watcher（去抖 200ms）→ VM 重建（新 load + register +
 dry-run：manifest 契约校验 + `on_init` 验证）。失败回退旧 VM（永不半生效）。
 
-共享库另有**全局 watcher**：`scripts/_lib/` 变更（去抖 200ms）→ 全实例 reload（见「站点共享库」）。
+共享库另有**全局 watcher**：`scripts/_lib/` 变更（去抖 200ms）→ 全实例 **VM 级 reload**
+（stdlib sync 后的批量 reload 同路径：运行中实例逐一经控制通道触发 `reload_vm`，失败回退旧 VM，
+非运行态实例跳过不复活）。
 
-兜底：`POST /api/v1/lua/reload?inst_id=<id>`（stop + start，IO 重连）。
+兜底：`POST /api/v1/lua/reload?inst_id=<id>`（单实例显式操作，stop + start，IO 重连）。
+
+> **scripts 根说明**：REST 保存/读取、`_lib` watcher 与 stdlib sync 固定使用进程工作目录下的
+> `scripts/`；实例可用 `app_config.scripts_root` 覆盖自己的脚本根（多见于测试）——覆盖根的实例
+> 不在 REST save 的热加载/`_lib` watcher 覆盖范围内（沿袭既有约定）。
 
 ## 状态监测（M4 统一埋点）
 
@@ -359,7 +387,7 @@ lux `stat:<inst>` 存 `InstanceStat` JSON（`StatTracker` 周期 flush，每 col
 - `last_activity_ts` / `last_activity_duration_ms`：最近活动时间戳与耗时。
 - `last_err`：最近失败原因（成功时清空）。
 
-lua 专有扩展字段经 `extra` 透传：`vm_restart_count`（VM 重建次数）、`script_version`（main.lua sha256 前 8 hex）、`consecutive_fail`、`dropped_samples`（hub 背压超 2s 累计丢样数，见护栏）。
+lua 专有扩展字段经 `extra` 透传：`vm_restart_count`（VM 重建次数）、`script_version`（main.lua sha256 前 8 hex）、`consecutive_fail`、`dropped_samples`（hub 背压累计丢样数，见护栏）、`dropped_frames`（on_data 通道满累计丢帧数，见护栏）。
 
 REST：`GET /api/v1/inst/stats?inst_id=<id>`（读 stat，M4 统一端点，**旧 `GET /api/v1/lua/stats` 已废弃移除**）/ `GET /api/v1/lua/scripts`（列脚本）。埋点约定详见 [`instrumentation-conventions.md`](../conventions/instrumentation-conventions.md)。
 

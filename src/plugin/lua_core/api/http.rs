@@ -95,11 +95,19 @@ pub(super) fn register(lua: &Lua, ctx: &mlua::Table, inst: &InstConfig) -> mlua:
 
 /// 宿主侧超时参数钳制（Q3/附录 B 冻结面②，T4 接线）：缺省 5s，1-30s 封顶（秒）。
 ///
+/// 上限查能力卡 `ctx:http_get` 的 `timeout_cap_ms`（毫秒 → 秒）——单一事实源
+/// （阶段 A 审查修复：原先硬编码 30 与卡片靠约定同步，有漂移风险）。
 /// 单测锁边界（0→1 / 3600→30，`tests::clamp_timeout_secs_bounds`）；下限行为级断言见
 /// `tests::http_timeout_clamped_lower_bound_to_1s`（timeout=0 被抬到 1s）。
 #[cfg(feature = "lua-http")]
 pub(super) fn clamp_timeout_secs(t: Option<u64>) -> u64 {
-    t.unwrap_or(5).clamp(1, 30)
+    let cap_secs = crate::plugin::lua_core::capability::CAPABILITIES
+        .iter()
+        .find(|c| c.name == "ctx:http_get")
+        .map(|c| c.timeout_cap_ms / 1000)
+        .filter(|&s| s > 0)
+        .unwrap_or(30);
+    t.unwrap_or(5).clamp(1, cap_secs)
 }
 
 /// http R2 频控限值（次/秒/实例，Q3/§4.5-2/T5）：查能力卡 `ctx:http_get` 的

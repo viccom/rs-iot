@@ -47,9 +47,9 @@ pub(crate) enum Risk {
 
 /// 一张能力卡的元数据（设计 §4.2 卡片示例的代码化）。
 ///
-/// struct 级 `#[allow(dead_code)]`（对标 `config::LuaCfg` 先例）：阶段 A 消费方是
-/// 一致性测试（cfg(test)）与后续 Task（T4 clamp 读 `timeout_cap_ms`、T5 频控读
-/// `rate_per_sec`、T6 loader 读 [`BUILTIN_MODULES`]），非测试构建暂无运行时读者。
+/// struct 级 `#[allow(dead_code)]`（对标 `config::LuaCfg` 先例）：部分字段
+/// （layer/risk/feature/api_ver/desc）阶段 A 消费方是一致性测试与文档生成；
+/// `timeout_cap_ms`/`rate_per_sec` 已被 clamp/频控运行时读取（单一事实源）。
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub(crate) struct CapabilityCard {
@@ -294,11 +294,21 @@ pub(crate) static CAPABILITIES: &[CapabilityCard] = &[
 
 /// 宿主侧超时 clamp（Q3/附录 B 冻结面②）：脚本可传超时封顶 30s、下限 1ms。
 ///
-/// T4 接线调用点（io_engine `IoEngine::request` + `api/http.rs` 两处）；先建于此，
-/// 卡片 `timeout_cap_ms` 与实现共用同一上限约定。
-#[allow(dead_code)] // T4 接线前仅测试消费
+/// 上限查能力卡 `ctx:request` 的 `timeout_cap_ms`——单一事实源（阶段 A 审查修复：
+/// 原先硬编码 30_000 与卡片靠约定同步，有漂移风险；`api/http.rs` 的秒级 clamp 同理
+/// 读 http 卡）。卡缺失或 0（=无超时参数）时回落保守默认 30s。
 pub(crate) fn clamp_timeout_ms(v: u64) -> u64 {
-    v.clamp(1, 30_000)
+    v.clamp(1, request_timeout_cap_ms())
+}
+
+/// `ctx:request` 卡的宿主超时上限（ms）；缺省回落 30s。
+pub(crate) fn request_timeout_cap_ms() -> u64 {
+    CAPABILITIES
+        .iter()
+        .find(|c| c.name == "ctx:request")
+        .map(|c| c.timeout_cap_ms)
+        .filter(|&t| t > 0)
+        .unwrap_or(30_000)
 }
 
 #[cfg(test)]

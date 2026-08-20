@@ -19,6 +19,7 @@ fn spawn_mock_io() -> IoEngine {
         tx,
         "test-inst".into(),
         crate::io_trace::TraceRegistry::new(),
+        std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
     )
 }
 
