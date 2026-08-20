@@ -278,6 +278,8 @@ impl Sink for LuaNorth {
         // 批缓冲（取舍 1：rx 样本与 lux pull 批量共用出口，flush 消费后清空）。
         let mut batch: Vec<Sample> = Vec::new();
         let mut batch_ticks: u64 = 0;
+        // 满批/到时统一触发标志（match 内置位、match 后执行 flush）。
+        let mut flush_now = false;
 
         loop {
             let evt = tokio::select! {
@@ -314,49 +316,30 @@ impl Sink for LuaNorth {
                 }
                 Evt::Cmd(None) => break,
                 Evt::Sample(s) => {
-                    // 入批缓冲 + 容量截断（丢最旧保最新；BatchTick flush 清空）。
+                    // 入批缓冲 + 容量截断（丢最旧保最新；flush 清空）。
                     if batch.len() >= cfg.batch_max_count {
                         batch.remove(0);
                     }
                     batch.push(s);
+                    // 满批即发（Q5 混合批量 count 维，复审 P1-1）：此前只有时间维，
+                    // 突发下持续丢最旧直至下个 tick——丢弃窗口远超设计意图。
+                    // 仅统计 rx 入批样本（lux pull 快照按全量语义不受 N 约束）。
+                    if connected && batch.len() >= cfg.batch_max_count {
+                        flush_now = true;
+                    }
                 }
                 Evt::BatchTick => {
                     batch_ticks += 1;
                     // 断连期跳过 flush：数据留缓冲（容量截断保最新），重连后首批带上
                     // 积压——不白跑 up() 也不制造 publish_fail 计数噪音。
-                    if !connected {
+                    if connected {
+                        flush_now = true;
+                    } else {
                         tracing::debug!(
                             "[luaNorth] inst {} batch tick #{}（断连未 flush）",
                             inst.inst_id,
                             batch_ticks
                         );
-                        continue;
-                    }
-                    let started = std::time::Instant::now();
-                    match contract::flush_batch(&lua, &ctx.lux, &cfg, &mut batch, &mqtt_cmd_tx)
-                        .await
-                    {
-                        Ok(contract::FlushOutcome::Skipped) => {}
-                        Ok(contract::FlushOutcome::Up { parse_fail }) => {
-                            if parse_fail > 0 {
-                                publish_fail += parse_fail as u64;
-                            }
-                            tracker.tick_ok(started.elapsed().as_millis() as u64);
-                        }
-                        Err(e) => {
-                            // up 超预算/失败：跳过本轮 + tick_fail（degraded 判定）；
-                            // 缓冲样本已被 flush 消费（mem::take），本轮数据弃。
-                            tracing::warn!(
-                                "[luaNorth] inst {} flush 失败（{}），跳过本轮",
-                                inst.inst_id,
-                                e
-                            );
-                            tracker.tick_fail(&e);
-                        }
-                    }
-                    if tracker.should_flush() {
-                        sync_north_stats(&mut tracker, publish_ok, publish_fail, reconnect_count);
-                        tracker.flush().await;
                     }
                 }
                 Evt::Mqtt(ev) => match ev {
@@ -491,6 +474,35 @@ impl Sink for LuaNorth {
                         inst.inst_id
                     ),
                 },
+            }
+            // flush 统一后处理（满批即发 / batch tick 同路径；复审 P1-1 重构）。
+            // 失败时样本由 flush_batch 内部回填缓冲（复审 P2-3），本轮不弃数据。
+            if flush_now {
+                flush_now = false;
+                let started = std::time::Instant::now();
+                match contract::flush_batch(&lua, &ctx.lux, &cfg, &mut batch, &mqtt_cmd_tx).await {
+                    Ok(contract::FlushOutcome::Skipped) => {}
+                    Ok(contract::FlushOutcome::Up { parse_fail }) => {
+                        if parse_fail > 0 {
+                            publish_fail += parse_fail as u64;
+                        }
+                        tracker.tick_ok(started.elapsed().as_millis() as u64);
+                    }
+                    Err(e) => {
+                        // up 超预算/失败：跳过本轮 + tick_fail（degraded 判定）；
+                        // 样本已回填缓冲（flush_batch P2-3），下轮重试。
+                        tracing::warn!(
+                            "[luaNorth] inst {} flush 失败（{}），本轮数据留缓冲",
+                            inst.inst_id,
+                            e
+                        );
+                        tracker.tick_fail(&e);
+                    }
+                }
+                if tracker.should_flush() {
+                    sync_north_stats(&mut tracker, publish_ok, publish_fail, reconnect_count);
+                    tracker.flush().await;
+                }
             }
         }
 

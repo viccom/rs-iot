@@ -615,7 +615,25 @@ pub(crate) async fn flush_batch(
         return Ok(FlushOutcome::Skipped);
     }
     let samples = std::mem::take(batch_buf);
-    let batch_t = batch_to_lua(lua, &entries, &samples).map_err(|e| format!("batch 组装 {e}"))?;
+    // 复审 P2-3：take 之后的失败路径（up 超预算/组装/解析/通道）属瞬时性故障——
+    // 样本放回缓冲待下轮（与上方 lux pull 失败保留缓冲同语义；此前 Err 即整轮
+    // 蒸发且无计数）。flush 期间主循环单任务不回 select，缓冲不会有并发写入。
+    let r = flush_inner(lua, cfg, &entries, &samples, cmd_tx).await;
+    if r.is_err() {
+        *batch_buf = samples;
+    }
+    r
+}
+
+/// [`flush_batch`] 的 take 后主体（samples 只读；Err 语义见调用方回填）。
+async fn flush_inner(
+    lua: &mlua::Lua,
+    cfg: &NorthCfg,
+    entries: &[BatchEntry],
+    samples: &[Sample],
+    cmd_tx: &mpsc::Sender<MqttCmd>,
+) -> Result<FlushOutcome, String> {
+    let batch_t = batch_to_lua(lua, entries, samples).map_err(|e| format!("batch 组装 {e}"))?;
     let up_v = with_budget("up", cfg.callback_timeout_ms, call_up(lua, batch_t))
         .await
         .map_err(|e| format!("up() {e}"))?

@@ -86,7 +86,9 @@ pub(crate) fn parse_north_cfg(app: &serde_json::Value) -> Result<NorthCfg, Strin
     let batch_max_count = app
         .get("batch_max_count")
         .and_then(|v| v.as_u64())
-        .unwrap_or(50) as usize;
+        .unwrap_or(50)
+        .max(1) // 复审 P2-1：0 会使首个样本在空 Vec 上 remove(0) panic
+        as usize;
     let callback_timeout_ms = app
         .get("callback_timeout_ms")
         .and_then(|v| v.as_u64())
@@ -277,5 +279,17 @@ mod tests {
             v.get("secrets").is_none() && v.get("callback_timeout_ms").is_none(),
             "宿主内部项（授权清单/沙箱参数）不进脚本 cfg"
         );
+    }
+    /// 复审 P1-1/P2-1：batch_max_count 解析下限——0（panic 诱因）被抬到 1；
+    /// 缺省 50；显式合法值原样。满批即发的行为断言在 contract.rs e2e
+    /// （batch 缓冲驱动路径），此处锁配置面。
+    #[test]
+    fn batch_max_count_floor() {
+        let c = parse_north_cfg(&json!({"script":"t","host":"h"})).unwrap();
+        assert_eq!(c.batch_max_count, 50, "缺省 50");
+        let c = parse_north_cfg(&json!({"script":"t","host":"h","batch_max_count":0})).unwrap();
+        assert_eq!(c.batch_max_count, 1, "0 抬到 1（空 Vec remove panic 预防）");
+        let c = parse_north_cfg(&json!({"script":"t","host":"h","batch_max_count":7})).unwrap();
+        assert_eq!(c.batch_max_count, 7, "合法值原样");
     }
 }
