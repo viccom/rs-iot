@@ -512,13 +512,21 @@ mod tests {
         let lua = Lua::new();
         lua.load("function on_timer() end").exec().unwrap();
         let m = parse("-- @role transform").unwrap();
-        assert!(dry_run(&m, &lua, None).is_ok(), "只 on_timer 应通过（纯定时）");
+        assert!(
+            dry_run(&m, &lua, None).is_ok(),
+            "只 on_timer 应通过（纯定时）"
+        );
 
         // 只 on_rtdata（纯订阅形态）→ 过。
         let lua = Lua::new();
-        lua.load("function on_rtdata(devid, tag, value) end").exec().unwrap();
+        lua.load("function on_rtdata(devid, tag, value) end")
+            .exec()
+            .unwrap();
         let m = parse("-- @role transform").unwrap();
-        assert!(dry_run(&m, &lua, None).is_ok(), "只 on_rtdata 应通过（纯订阅）");
+        assert!(
+            dry_run(&m, &lua, None).is_ok(),
+            "只 on_rtdata 应通过（纯订阅）"
+        );
 
         // 两者皆无（即使有 on_init）→ 拒，错误可行动：点名角色与两个回调 + 其一语义。
         let lua = Lua::new();
@@ -534,9 +542,11 @@ mod tests {
 
         // 两者皆有 + on_init → 过（on_init 可选，双回调叠加合法形态）。
         let lua = Lua::new();
-        lua.load("function on_init() end\nfunction on_timer() end\nfunction on_rtdata(d, t, v) end")
-            .exec()
-            .unwrap();
+        lua.load(
+            "function on_init() end\nfunction on_timer() end\nfunction on_rtdata(d, t, v) end",
+        )
+        .exec()
+        .unwrap();
         let m = parse("-- @role transform").unwrap();
         assert!(dry_run(&m, &lua, None).is_ok(), "双回调 + on_init 应通过");
     }

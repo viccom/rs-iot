@@ -7,6 +7,8 @@ pub mod eip_client;
 pub mod lua_client;
 #[cfg(feature = "lua")]
 pub mod lua_north;
+#[cfg(feature = "lua")]
+pub mod lua_transform;
 #[cfg(feature = "modbus")]
 pub mod modbus_client;
 #[cfg(feature = "opcua")]
