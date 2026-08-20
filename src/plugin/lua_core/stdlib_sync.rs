@@ -855,6 +855,173 @@ mod tests {
         let _ = fs::remove_dir_all(&up);
     }
 
+    /// T9 hashings/emqx 在线分发（机制层）：三段嵌套保留段路径
+    /// （`algo/hashings/<x>.lua`）sync 落 `_stdlib/` 后，沙箱 require 按点分
+    /// 模块名路由可达，且 **`_stdlib/` 内模块间 require**（hashings 算法件
+    /// require `algo.hashings.uintn` 的依赖闭包形态）与 selftest 约定成立。
+    /// 真实 hashings 源码的向量验证见 `official_dist_hashings_emqx_local`
+    /// （ignore，走官方 dist 全链路）。
+    #[tokio::test]
+    async fn sync_nested_stdlib_module_dependency() {
+        let up = fresh_scripts("up-nested", "");
+        write_upstream(
+            &up,
+            "1.1.0",
+            1,
+            &[
+                (
+                    "algo/hashings/dep.lua",
+                    "local M = {}\nM.tag = 'dep'\nfunction M.selftest() return M.tag == 'dep' end\nreturn M\n",
+                ),
+                (
+                    "algo/hashings/user.lua",
+                    "local dep = require('algo.hashings.dep')\nlocal M = {}\nfunction M.selftest() return dep.selftest() and dep.tag == 'dep' end\nreturn M\n",
+                ),
+                (
+                    "cloud/emqx.lua",
+                    "local M = {}\nfunction M.topic_data(hw, devid) return hw..'/'..devid..'/datas' end\nfunction M.selftest() return M.topic_data('a','b') == 'a/b/datas' end\nreturn M\n",
+                ),
+            ],
+            None,
+        );
+        let root = fresh_scripts("nested", "em = require('cloud.emqx')");
+        let r = sync_with_fetcher(UPSTREAM, &root, None, &dev_keys(), dir_fetcher(up.clone()))
+            .await
+            .expect("sync 嵌套路径");
+        assert_eq!(r.added.len(), 3, "三文件全量新增：{r:?}");
+        assert!(
+            root.join("_stdlib/algo/hashings/dep.lua").exists(),
+            "嵌套路径应落 _stdlib/algo/hashings/"
+        );
+
+        // 沙箱 VM：跨模块 require + selftest 约定 + cloud 保留段路由
+        let cfg = parse_cfg(&json!({"script":"devA","endpoint":"x"})).unwrap();
+        let lua = new_vm(&cfg).unwrap();
+        let lctx = LoadCtx {
+            scripts_root: Arc::from(root.as_path()),
+            script_name: Arc::<str>::from("devA"),
+        };
+        load_main(&lua, &lctx).unwrap();
+        assert!(
+            lua.load("return require('algo.hashings.user').selftest()")
+                .eval::<bool>()
+                .unwrap(),
+            "user → dep 的 _stdlib 内模块间 require 应成立"
+        );
+        let ok: bool = lua
+            .load(r#"return select(1, pcall(require, 'algo.hashings.nope'))"#)
+            .eval()
+            .unwrap();
+        assert!(!ok, "未同步模块 pcall 应失败（miss 即错，永不回落）");
+        assert_eq!(
+            lua.load("return em.topic_data('gw01', 'dev42')")
+                .eval::<String>()
+                .unwrap(),
+            "gw01/dev42/datas",
+            "cloud 保留段 require 应取同步文件"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&up);
+    }
+
+    /// T9 hashings/emqx 真实源码端到端（本地手工跑，默认 ignore）：真实官方
+    /// dist（rsiot-lualib 仓 `./gen_index.sh 1.1.0 && ./sign_index.sh` 产物，
+    /// 官方私钥签名）经 dir_fetcher（无需 HTTP 服务）→ `sync_with_fetcher`
+    /// 注入 **生产 VERIFY_KEYS** 验签全链路落 `_stdlib/` → 沙箱 VM 逐模块
+    /// `selftest()`（NIST/RFC 已知向量）。跑法：
+    ///
+    /// ```text
+    /// cd rsiot-lualib && ./gen_index.sh 1.1.0 && ./sign_index.sh
+    /// cargo test -p rs-iot --features lua,lua-http -- --ignored official_dist
+    /// ```
+    ///
+    /// 依赖源仓 dist 存在（`../rsiot-lualib`，CI 无此仓）故 ignore，不进默认
+    /// 套件——本地发布前必跑（等价 e2e_sync_official_dist_over_http 的免端口版）。
+    #[cfg(feature = "lua-http")]
+    #[tokio::test]
+    #[ignore = "需本地 rsiot-lualib dist（见测试文档注释）"]
+    async fn official_dist_hashings_emqx_local() {
+        let dist = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../rsiot-lualib/dist");
+        assert!(
+            dist.join("index.json").exists(),
+            "缺官方 dist：{}（先在源仓跑 ./gen_index.sh 1.1.0 && ./sign_index.sh）",
+            dist.display()
+        );
+        let root = fresh_scripts("official-dist", "");
+
+        // 生产信任锚 VERIFY_KEYS 验官方签名（同时锁 pub.key 与 VERIFY_KEYS 同源）
+        let report = sync_with_fetcher(
+            UPSTREAM,
+            &root,
+            None,
+            VERIFY_KEYS,
+            dir_fetcher(dist.clone()),
+        )
+        .await
+        .expect("官方 dist 验签→逐文件 sha→原子落盘");
+        assert_eq!(report.version, "1.1.0");
+        assert_eq!(report.added.len(), 11, "T9 后全量：{report:?}");
+
+        // 沙箱 VM 两档指令预算（cfg.hook_instr_limit，护栏参数本就宿主可配）：
+        //   默认 1M 档——轻算法（sha256 单次 ~0.4M 指令）生产默认护栏内可用；
+        //   提高档 4M ——hmac = 3 次哈希（sha1 inner+outer+data 块），实测
+        //     mlua 5.4 下 >1M 默认护栏（纯 Lua 元表运算密度所致）——T10 OneNET
+        //     token（hmac_sha1）生产使用须调高 hook_instr_limit，见任务汇报。
+        let mk_vm = |limit: u64| {
+            let cfg = parse_cfg(&json!({"script":"devA","endpoint":"x","hook_instr_limit": limit}))
+                .unwrap();
+            new_vm(&cfg).unwrap()
+        };
+        let lctx = LoadCtx {
+            scripts_root: Arc::from(root.as_path()),
+            script_name: Arc::<str>::from("devA"),
+        };
+
+        // 默认预算档：sha256 selftest 过（轻算法护栏内可用的验收锚点）
+        let lua_default = mk_vm(1_000_000);
+        load_main(&lua_default, &lctx).unwrap();
+        assert!(
+            lua_default
+                .load("return require('algo.hashings.sha256').selftest()")
+                .eval::<bool>()
+                .unwrap(),
+            "sha256 selftest 应在默认 1M 指令护栏内通过"
+        );
+
+        // 提高档：全部新模块 selftest（已知向量）+ emqx 薄配方 helper
+        let lua = mk_vm(4_000_000);
+        load_main(&lua, &lctx).unwrap();
+        for m in [
+            "algo.hashings.uintn",
+            "algo.hashings.md5",
+            "algo.hashings.sha1",
+            "algo.hashings.sha256",
+            "algo.hashings.hmac",
+            "cloud.emqx",
+        ] {
+            assert!(
+                lua.load(format!("return require('{m}').selftest()"))
+                    .eval::<bool>()
+                    .unwrap_or_else(|e| panic!("{m} selftest 应通过：{e}")),
+                "{m} selftest 向量失败"
+            );
+        }
+        let topic: String = lua
+            .load(r#"return require('cloud.emqx').topic_data('gw01', 'dev42')"#)
+            .eval()
+            .unwrap();
+        assert_eq!(topic, "gw01/dev42/datas");
+        assert!(
+            lua.load(r#"return require('cloud.emqx').auth({}) == nil"#)
+                .eval::<bool>()
+                .unwrap(),
+            "EMQX 裸 broker：auth 恒 nil（凭证走 broker ACL）"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
     /// T13 端到端验收（本地手工跑，默认 ignore）：真实官方 dist（rsiot-lualib
     /// 仓 `./gen_index.sh && ./sign_index.sh` 产物，官方 v1 私钥签名）经本机
     /// 静态 HTTP 服务 → **生产 reqwest 路径** [`sync`]（内置 VERIFY_KEYS 验签）
@@ -881,12 +1048,18 @@ mod tests {
         let report = sync(&upstream, &root, None)
             .await
             .expect("官方 dist 全链路同步（验签→逐文件 sha→原子落盘）");
-        assert_eq!(report.version, "1.0.0");
-        assert_eq!(report.added.len(), 5, "首发全量新增：{report:?}");
+        assert_eq!(report.version, "1.1.0");
+        assert_eq!(report.added.len(), 11, "T9 后全量新增：{report:?}");
 
         // a) _stdlib/ 落位 + 本地 index 版本
         for p in [
             "algo/crc16.lua",
+            "algo/hashings/hmac.lua",
+            "algo/hashings/md5.lua",
+            "algo/hashings/sha1.lua",
+            "algo/hashings/sha256.lua",
+            "algo/hashings/uintn.lua",
+            "cloud/emqx.lua",
             "codec/basexx.lua",
             "util/retry.lua",
             "util/tablex.lua",
@@ -894,7 +1067,7 @@ mod tests {
         ] {
             assert!(root.join("_stdlib").join(p).exists(), "_stdlib 缺 {p}");
         }
-        assert_eq!(read_index(&root).expect("read_index").version, "1.0.0");
+        assert_eq!(read_index(&root).expect("read_index").version, "1.1.0");
 
         // b) inventory 徽标：crc16 转 synced（其余仍 seed）
         let (ver, entries) = inventory(&root);
