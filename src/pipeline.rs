@@ -251,7 +251,9 @@ fn aggregate_rtdata(buf: &[Sample]) -> (Vec<String>, usize, Vec<RtdataSample>) {
         if !by_dev.contains_key(&s.devid) {
             order.push(s.devid.clone());
         }
-        let e = by_dev.entry(s.devid.clone()).or_insert((BTreeMap::new(), s.timestamp));
+        let e = by_dev
+            .entry(s.devid.clone())
+            .or_insert((BTreeMap::new(), s.timestamp));
         // 同 tag 后写覆盖（extend 后值覆盖先值），不同 tag 保留。
         e.0.extend(s.values.iter().map(|(k, v)| (k.clone(), v.clone())));
         e.1 = s.timestamp; // 每笔更新，循环结束即该 dev 本批最后一笔
@@ -380,10 +382,7 @@ mod tests {
             smp(
                 "d1",
                 100,
-                &[
-                    ("t1", SampleValue::Float(1.0)),
-                    ("t2", SampleValue::Int(2)),
-                ],
+                &[("t1", SampleValue::Float(1.0)), ("t2", SampleValue::Int(2))],
             ),
             smp("d2", 200, &[("t1", SampleValue::Bool(true))]),
             smp(
@@ -413,10 +412,7 @@ mod tests {
         // d2 未被覆盖：ts 与值原样。
         assert_eq!(samples[1].devid, "d2");
         assert_eq!(samples[1].ts, 200);
-        assert_eq!(
-            samples[1].values.get("t1"),
-            Some(&SampleValue::Bool(true))
-        );
+        assert_eq!(samples[1].values.get("t1"), Some(&SampleValue::Bool(true)));
         // 空 buf：三件套全空、count 0（不 panic）。
         let (ids0, c0, s0) = aggregate_rtdata(&[]);
         assert_eq!((ids0.len(), c0, s0.len()), (0, 0, 0));
@@ -468,7 +464,11 @@ mod tests {
         };
         let v = serde_json::to_value(&payload).unwrap();
         assert_eq!(v["kind"], "rtdata", "SSE tag 序列化保持");
-        assert_eq!(v["dev_ids"], serde_json::json!(["d1"]), "兼容字段 dev_ids 不丢");
+        assert_eq!(
+            v["dev_ids"],
+            serde_json::json!(["d1"]),
+            "兼容字段 dev_ids 不丢"
+        );
         assert_eq!(v["count"], serde_json::json!(7), "兼容字段 count 不丢");
         assert_eq!(v["ts"], serde_json::json!("t"), "兼容字段 ts 不丢");
         assert_eq!(v["samples"][0]["devid"], "d1");

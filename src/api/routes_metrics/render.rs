@@ -162,6 +162,20 @@ pub(crate) fn render_process(
         &m.hub_depth_max.load(rel).to_string(),
     );
 
+    // SSE lag(R6/C 阶段 T2:慢消费者 broadcast 丢帧累计;持续增长提示调大 event_bus_capacity)
+    family_header(
+        &mut s,
+        "rs_iot_sse_lagged_total",
+        "SSE 连接 broadcast lag 累计丢帧数",
+        "counter",
+    );
+    metric_line(
+        &mut s,
+        "rs_iot_sse_lagged_total",
+        "",
+        &m.sse_lagged_count.load(rel).to_string(),
+    );
+
     // 北向 mqtt
     family_header(
         &mut s,
@@ -320,6 +334,7 @@ mod tests {
         m.hub_depth_max.store(99, Ordering::Relaxed);
         m.mqtt_publish_count.store(5, Ordering::Relaxed);
         m.mqtt_connected.store(true, Ordering::Relaxed);
+        m.sse_lagged_count.store(3, Ordering::Relaxed);
         m
     }
 
@@ -327,13 +342,13 @@ mod tests {
     fn render_process_has_help_type_and_values() {
         let m = proc_metrics();
         let out = render_process(&m, "eiot_abc", "0.1.0", 12.5, 8192);
-        // 全部 17 个 metric family 都在场(防误删某 family 静默通过)
+        // 全部 18 个 metric family 都在场(防误删某 family 静默通过)
         assert_eq!(
             out.lines()
                 .filter(|line| line.starts_with("# TYPE "))
                 .count(),
-            17,
-            "应输出 17 个 metric family"
+            18,
+            "应输出 18 个 metric family"
         );
         // HELP / TYPE 每个 family 齐全
         assert!(out.contains("# HELP rs_iot_info "));
@@ -351,6 +366,9 @@ mod tests {
         // mqtt
         assert!(out.contains("rs_iot_mqtt_publish_total 5"));
         assert!(out.contains("rs_iot_mqtt_connected 1"));
+        // SSE lagged(R6:慢消费者 lag 丢帧计数,>0 提示调大 event_bus_capacity)
+        assert!(out.contains("# TYPE rs_iot_sse_lagged_total counter"));
+        assert!(out.contains("rs_iot_sse_lagged_total 3"));
         // 资源
         assert!(out.contains("rs_iot_process_cpu_pct 12.5"));
         assert!(out.contains("rs_iot_process_mem_bytes 8192"));

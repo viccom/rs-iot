@@ -50,6 +50,9 @@ pub const VERSION: &str = "20250123";
 /// non_blocking 专用日志线程）。级别优先读 `RUST_LOG`，缺省用 `cfg.level`。
 ///
 /// `cfg = None` 表示仅终端、级别 info（供 install/uninstall 等管理命令使用）。
+/// `event_bus_capacity` 为 EventBus broadcast 容量（C 阶段 T2 配置化，调用方传
+/// `cfg.event_bus_capacity`；无完整配置的管理命令传
+/// `config::DEFAULT_EVENT_BUS_CAPACITY`）。
 /// 用 `try_init` 容忍重复调用（进程级 subscriber 单例，重复设置静默忽略）。
 ///
 /// 返回 tuple：
@@ -62,6 +65,7 @@ pub const VERSION: &str = "20250123";
 ///   `HostContext`（报文/状态扇出）、`AppState`（SSE endpoint 订阅），三方共享。
 pub fn init_tracing(
     cfg: Option<&config::LogConfig>,
+    event_bus_capacity: usize,
 ) -> (
     Option<tracing_appender::non_blocking::WorkerGuard>,
     std::sync::Arc<crate::log_ringbuffer::LogRingBuffer>,
@@ -102,9 +106,11 @@ pub fn init_tracing(
     let ring_buffer = std::sync::Arc::new(crate::log_ringbuffer::LogRingBuffer::new(ring_capacity));
     let ring_filter =
         EnvFilter::try_new("info,io_trace=trace").unwrap_or_else(|_| EnvFilter::new("info"));
-    // 阶段一 SSE：建事件总线（容量 256 对标 hub），同一 bus 注入 RingBufferLayer
-    // （日志扇出）、HostContext（报文/状态扇出）、AppState（SSE endpoint 订阅）。
-    let event_bus = crate::event_bus::EventBus::new(256);
+    // 阶段一 SSE：建事件总线（容量配置化，C 阶段 T2/R6——Rtdata 载荷带值后
+    // 事件变大，慢消费者更易 lagged，可经 config 调大），同一 bus 注入
+    // RingBufferLayer（日志扇出）、HostContext（报文/状态扇出）、
+    // AppState（SSE endpoint 订阅）。
+    let event_bus = crate::event_bus::EventBus::new(event_bus_capacity);
     layers.push(
         crate::log_ringbuffer::RingBufferLayer {
             buffer: ring_buffer.clone(),
@@ -457,6 +463,7 @@ fn demo_datasim_config() -> types::InstConfig {
 #[cfg(test)]
 mod init_tracing_tests {
     use crate::config::LogConfig;
+    use crate::config::DEFAULT_EVENT_BUS_CAPACITY;
     use crate::init_tracing;
 
     #[test]
@@ -467,7 +474,7 @@ mod init_tracing_tests {
             dir: dir.to_str().unwrap().to_string(),
             ..Default::default()
         };
-        let (guard, _ring, _event_bus) = init_tracing(Some(&cfg));
+        let (guard, _ring, _event_bus) = init_tracing(Some(&cfg), DEFAULT_EVENT_BUS_CAPACITY);
         assert!(guard.is_some(), "dir 非空应返回 Some(guard)");
         drop(guard); // 先释放日志文件句柄，再清理目录
         let _ = std::fs::remove_dir_all(&dir);
@@ -479,7 +486,7 @@ mod init_tracing_tests {
             dir: String::new(),
             ..Default::default()
         };
-        let (guard, _ring, _event_bus) = init_tracing(Some(&cfg));
+        let (guard, _ring, _event_bus) = init_tracing(Some(&cfg), DEFAULT_EVENT_BUS_CAPACITY);
         assert!(guard.is_none(), "dir 空应返回 None");
     }
 }

@@ -7,7 +7,9 @@
 //! `addEventListener(kind)` 分发。无事件时 `KeepAlive` 周期发注释帧防代理超时。
 //!
 //! broadcast 语义：每 SSE 连接 `subscribe()` 得独立 Receiver，慢客户端缓冲满则
-//! 收 `Lagged`（filter_map 丢帧继续，不终结流）；无生产者时连接静默等待。
+//! 收 `Lagged`（filter_map 丢帧继续，不终结流；丢失条数累入
+//! `rs_iot_sse_lagged_total`，R6/C 阶段 T2——持续增长提示调大
+//! `event_bus_capacity`）；无生产者时连接静默等待。
 
 use crate::api::AppState;
 use axum::extract::{Query, State};
@@ -15,6 +17,7 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::IntoResponse;
 use serde::Deserialize;
 use std::convert::Infallible;
+use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::StreamExt;
 
@@ -48,11 +51,16 @@ pub fn parse_types(raw: &str) -> Option<std::collections::HashSet<String>> {
 /// `GET /api/v1/events`：SSE 流。
 pub async fn events(State(st): State<AppState>, Query(q): Query<EventsQuery>) -> impl IntoResponse {
     let filter = q.types.as_deref().and_then(parse_types);
+    let metrics = st.metrics.clone();
     let rx = st.event_bus.subscribe();
-    // BroadcastStream: broadcast Receiver → Stream（Err=Lagged/Closed，丢帧继续）。
+    // BroadcastStream: broadcast Receiver → Stream（Err=Lagged，丢帧继续）。
     // filter 丢 Lagged/不匹配 kind/序列化失败的项；map 转 SSE Event。
+    // Lagged 按携带的丢失条数 n 累入进程指标（不再静默，R6 可观测）。
     let stream = BroadcastStream::new(rx).filter_map(move |res| match res {
-        Err(_) => None,
+        Err(BroadcastStreamRecvError::Lagged(n)) => {
+            metrics.sse_lagged(n);
+            None
+        }
         Ok(payload) => {
             let kind = payload.kind();
             if filter.as_ref().is_some_and(|f| !f.contains(kind)) {

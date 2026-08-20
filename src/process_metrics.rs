@@ -34,6 +34,9 @@ pub struct ProcessMetrics {
     pub hub_depth_last: AtomicU64,
     /// hub channel 历史最大深度（gauge）。
     pub hub_depth_max: AtomicU64,
+    // SSE 消费（R6 可观测）
+    /// SSE 连接 broadcast lag 累计丢帧数（慢消费者；Rtdata 载荷带值后事件变大更易触发）。
+    pub sse_lagged_count: AtomicU64,
     // 北向（mqtt）——T8 迁移说明：mqttPub 直启已删（北向改默认 luaNorth 实例
     // mqtt-pub-default），下列字段不再有运行时写入方（恒 0 / 恒 false）；实时
     // 计数在实例 stat 的 extra（publish_ok/publish_fail/reconnect_count，T7）。
@@ -61,6 +64,7 @@ impl ProcessMetrics {
             pipeline_worker_deaths_count: AtomicU64::new(0),
             hub_depth_last: AtomicU64::new(0),
             hub_depth_max: AtomicU64::new(0),
+            sse_lagged_count: AtomicU64::new(0),
             mqtt_publish_count: AtomicU64::new(0),
             mqtt_publish_fail_count: AtomicU64::new(0),
             mqtt_connected: AtomicBool::new(false),
@@ -125,6 +129,11 @@ impl ProcessMetrics {
         self.hub_depth_last.store(d, Ordering::Relaxed);
         self.hub_depth_max.fetch_max(d, Ordering::Relaxed);
     }
+    /// SSE lag 丢帧 +n（R6：每次 Lagged 携带丢失条数，按 n 累加；持续增长提示
+    /// 调大 `event_bus_capacity` 或排查慢 SSE 消费者）。
+    pub fn sse_lagged(&self, n: u64) {
+        self.sse_lagged_count.fetch_add(n, Ordering::Relaxed);
+    }
     /// mqtt publish 成功 +1（T8 后无调用方——旧 mqtt_pub 已删；保留为端点形状）。
     pub fn mqtt_publish(&self) {
         self.mqtt_publish_count.fetch_add(1, Ordering::Relaxed);
@@ -169,6 +178,15 @@ mod tests {
         m.ctl_dropped();
         assert_eq!(m.ctl_send_count.load(Ordering::Relaxed), 2);
         assert_eq!(m.ctl_dropped_count.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn sse_lagged_accumulates_by_n() {
+        // SSE lag 计数(R6):每次 Lagged 携带丢失条数 n,按 n 累加(非每事件 +1)
+        let m = ProcessMetrics::new();
+        m.sse_lagged(5);
+        m.sse_lagged(2);
+        assert_eq!(m.sse_lagged_count.load(Ordering::Relaxed), 7);
     }
 
     #[test]

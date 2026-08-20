@@ -2,6 +2,10 @@ use crate::error::RsIotError;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
+/// EventBus broadcast 容量默认值（R6/C 阶段 T2）。pub 供无完整配置的场景
+/// （install/uninstall 管理命令的 `init_tracing(None)`）引用同一默认。
+pub const DEFAULT_EVENT_BUS_CAPACITY: usize = 256;
+
 /// 应用总配置。从 toml 加载，缺失字段走 Default。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -29,6 +33,10 @@ pub struct AppConfig {
     /// sync 解析顺序：body.pin（显式版本或 "auto"）> 此键 > 锁定本地已装版本。
     /// None = 未显式配置（回落"锁定本地已装版本"，首装无 index 时取 latest）。
     pub lua_stdlib_pin: Option<String>,
+    /// EventBus broadcast 容量（R6/C 阶段 T2）。Rtdata 载荷带 samples 后事件
+    /// 变大，慢 SSE 消费者更易 lagged 丢帧；持续增长 `rs_iot_sse_lagged_total`
+    /// 时可调大此值（默认 256 对标 hub）。
+    pub event_bus_capacity: usize,
 }
 
 /// lux ServerConfig 的子集映射（仅暴露我们关心的字段）。
@@ -79,6 +87,7 @@ impl Default for AppConfig {
             pipeline: PipelineConfig::default(),
             lua_stdlib_upstream: "https://rsiot.github.io/lualib/".into(),
             lua_stdlib_pin: None,
+            event_bus_capacity: DEFAULT_EVENT_BUS_CAPACITY,
         }
     }
 }
@@ -287,5 +296,14 @@ ring_buffer_capacity = 500"#,
         assert_eq!(cfg.lua_stdlib_pin, None, "缺省不配置（锁定本地已装版本）");
         let cfg: AppConfig = toml::from_str(r#"lua_stdlib_pin = "1.2.0""#).unwrap();
         assert_eq!(cfg.lua_stdlib_pin.as_deref(), Some("1.2.0"));
+    }
+
+    /// EventBus 容量配置化（C 阶段 T2 / R6）：缺省 256，显式配置覆盖。
+    #[test]
+    fn event_bus_capacity_default_and_override() {
+        let cfg: AppConfig = toml::from_str("").unwrap();
+        assert_eq!(cfg.event_bus_capacity, 256, "默认容量 256（对标 hub）");
+        let cfg: AppConfig = toml::from_str("event_bus_capacity = 1024").unwrap();
+        assert_eq!(cfg.event_bus_capacity, 1024);
     }
 }
