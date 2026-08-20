@@ -1115,3 +1115,170 @@ async fn ctx_transport_returns_configured_kind() {
         let _ = std::fs::remove_dir_all(&data_dir);
     }
 }
+
+/// T5 ctx:secret_get 授权清单语义（Q4/R3/D6）：在清单且已写 → 明文；越权可感知
+/// （错误含「未授权」非静默 nil——脚本作者需要知道为什么读不到）；无前缀 ref 报错
+/// （脚本侧防线，提示可行动）；在清单但 lux 未写 → nil（脚本可判空给默认）。
+#[tokio::test]
+async fn secret_get_allowlist_semantics() {
+    let lua = Lua::new();
+    let io = spawn_mock_io();
+    let (ctx_host, handle, data_dir) = setup_ctx("t5-secret").await;
+    let inst = InstConfig {
+        inst_id: "it".into(),
+        inst_name: "it".into(),
+        app_code: PluginName::new("luaClient"),
+        app_type: AppType::South,
+        auto_start: false,
+        // 实例授权清单：test_key（已预写）/ absent_key（故意不写，验缺省 nil）。
+        app_config: serde_json::json!({
+            "script": "a", "endpoint": "x",
+            "secrets": ["secret:test_key", "secret:absent_key"]
+        }),
+        devices: vec![DeviceSpec {
+            label: "d".into(),
+            value: "d".into(),
+            children: vec![],
+            slave_id: None,
+        }],
+        host_kind: HostKind::Builtin,
+    };
+    // 预写 lux secrets（对标 REST 管理面写入路径，T4 routes_secret）。
+    crate::db::secrets::set(&ctx_host.lux, "secret:test_key", "plain-1")
+        .await
+        .expect("预写 secret");
+    register(
+        &lua,
+        &ApiCtx {
+            ctx_host,
+            inst: &inst,
+            io,
+            tx: mock_hub_tx(),
+            runtime_devs: RuntimeDevs::default(),
+            dropped: zero_dropped(),
+            transport: "tcp",
+            scripts_root: Path::new("scripts"),
+        },
+    )
+    .expect("register");
+
+    // 1) 在清单且已写 → 明文。
+    let v: String = lua
+        .load("return ctx:secret_get('secret:test_key')")
+        .eval_async()
+        .await
+        .expect("授权 ref 应读到明文");
+    assert_eq!(v, "plain-1");
+
+    // 2) 不在清单 → 越权可感知：报错（含 ref 与清单提示），非静默 nil。
+    let e = lua
+        .load("return ctx:secret_get('secret:other')")
+        .eval_async::<String>()
+        .await
+        .expect_err("越权引用应报错");
+    let msg = e.to_string();
+    assert!(msg.contains("未授权"), "错误应含「未授权」：{msg}");
+    assert!(
+        msg.contains("secret:other"),
+        "错误应带 ref 本身（ref 非机密，可行动）：{msg}"
+    );
+    assert!(
+        msg.contains("secrets"),
+        "错误应提示检查实例配置 secrets 清单：{msg}"
+    );
+
+    // 3) 无前缀 ref → 报错（防读任意 lux key 的企图；提示应指向加前缀而非改清单）。
+    let e = lua
+        .load("return ctx:secret_get('foo')")
+        .eval_async::<String>()
+        .await
+        .expect_err("无前缀 ref 应报错");
+    assert!(
+        e.to_string().contains("前缀"),
+        "错误应含前缀提示（可行动）：{e}"
+    );
+
+    // 4) 在清单但 lux 未写 → nil。
+    let nil: mlua::Value = lua
+        .load("return ctx:secret_get('secret:absent_key')")
+        .eval_async()
+        .await
+        .expect("在清单未写应返回 nil 而非报错");
+    assert_eq!(
+        nil,
+        mlua::Value::Nil,
+        "配置了但没写入 → nil（脚本判空给默认）"
+    );
+
+    let _ = crate::db::shutdown_lux(handle).await;
+    let _ = std::fs::remove_dir_all(&data_dir);
+}
+
+/// T5 恒注入（Q4）：无 secrets 配置（键缺失 / 类型不符按空清单降级）的实例
+/// secret_get 仍注册可调，任何引用 → 未授权错误（默认空清单语义；未引用零成本）。
+#[tokio::test]
+async fn secret_get_always_registered_with_default_empty_allowlist() {
+    for (tag, secrets_cfg) in [
+        ("miss", None),
+        ("badtype", Some(serde_json::json!("not-an-array"))),
+    ] {
+        let lua = Lua::new();
+        let io = spawn_mock_io();
+        let (ctx_host, handle, data_dir) = setup_ctx(&format!("t5-sec-{tag}")).await;
+        let mut app_config = serde_json::json!({"script":"a","endpoint":"x"});
+        if let Some(v) = secrets_cfg {
+            app_config["secrets"] = v;
+        }
+        let inst = InstConfig {
+            inst_id: "it".into(),
+            inst_name: "it".into(),
+            app_code: PluginName::new("luaClient"),
+            app_type: AppType::South,
+            auto_start: false,
+            app_config,
+            devices: vec![DeviceSpec {
+                label: "d".into(),
+                value: "d".into(),
+                children: vec![],
+                slave_id: None,
+            }],
+            host_kind: HostKind::Builtin,
+        };
+        register(
+            &lua,
+            &ApiCtx {
+                ctx_host,
+                inst: &inst,
+                io,
+                tx: mock_hub_tx(),
+                runtime_devs: RuntimeDevs::default(),
+                dropped: zero_dropped(),
+                transport: "tcp",
+                scripts_root: Path::new("scripts"),
+            },
+        )
+        .expect("register");
+
+        let is_fn: bool = lua
+            .load("return type(ctx.secret_get) == 'function'")
+            .eval()
+            .expect("type check");
+        assert!(
+            is_fn,
+            "未配置 secrets 的实例也应注册 secret_get（恒注入，场景 {tag}）"
+        );
+
+        let e = lua
+            .load("return ctx:secret_get('secret:test_key')")
+            .eval_async::<String>()
+            .await
+            .expect_err("空清单任何引用应报未授权");
+        assert!(
+            e.to_string().contains("未授权"),
+            "空清单语义 = 未授权错误（场景 {tag}）：{e}"
+        );
+
+        let _ = crate::db::shutdown_lux(handle).await;
+        let _ = std::fs::remove_dir_all(&data_dir);
+    }
+}

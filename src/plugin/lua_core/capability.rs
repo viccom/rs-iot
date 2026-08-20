@@ -1,10 +1,10 @@
 //! 能力卡（设计 §4.2/Q2）：宿主赋予脚本能力的元数据登记——单一事实源，
 //! 驱动一致性测试、护栏参数与文档生成。
 //!
-//! 现登记 19 张卡：18 个 ctx 方法（与 [`crate::plugin::lua_core::api::register`] +
-//! `api/http.rs` 的 ctx.set 清单逐一对齐；设计 §4.1 表写的"17 项"实测为 18——
-//! `set_values`/`log_*` 按方法名单计数）+ builtin `json` 模块（T8 实现，
-//! `api::tests::json_roundtrip_and_limit` 锁行为）。
+//! 现登记 20 张卡：19 个 ctx 方法（与 [`crate::plugin::lua_core::api::register`] +
+//! `api/http.rs` 的 ctx.set 清单逐一对齐；设计 §4.1 表写的"17 项"实测 +T5
+//! `secret_get` 为 19——`set_values`/`log_*` 按方法名单计数）+ builtin `json` 模块
+//! （T8 实现，`api::tests::json_roundtrip_and_limit` 锁行为）。
 //! 一致性锁：本文件 tests（卡名格式/去重/数量）+ `api::tests::capability_cards_match_registered_ctx`
 //! （每张 "ctx:" 卡必须真注册在 mock VM 的 ctx 表上）。
 
@@ -41,7 +41,8 @@ pub(crate) enum Risk {
     R1,
     /// 网络出站（http/mqtt pub）：白名单 + 大小限额 + 频控。
     R2,
-    /// 权限敏感（send_command/secret 读取）：实例配置显式授权才注入（§4.2）。
+    /// 权限敏感（send_command/secret 读取，§4.2）。Q4 定案：secret_get 恒注入 +
+    /// 实例配置 secrets 清单运行时校验（越权可感知报错，非静默）。
     R3,
 }
 
@@ -184,6 +185,16 @@ pub(crate) static CAPABILITIES: &[CapabilityCard] = &[
         rate_per_sec: 0,
         api_ver: 1,
         desc: "实例持久状态读（lux luakv）",
+    },
+    CapabilityCard {
+        name: "ctx:secret_get",
+        layer: Layer::C4,
+        risk: Risk::R3, // Q4/R3：恒注入 + 实例配置 secrets 清单运行时校验（越权可感知）
+        feature: None,
+        timeout_cap_ms: 0,
+        rate_per_sec: 0,
+        api_ver: 1,
+        desc: "凭证读取（实例配置 secrets 清单显式授权）",
     },
     // --- L3 控制联动（api/mod.rs）---
     CapabilityCard {

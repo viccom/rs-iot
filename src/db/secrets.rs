@@ -2,7 +2,7 @@
 //!
 //! mqtt-north 等平台凭证（OneNET access_key 等）不进脚本源码与 manifest
 //! （D6：密钥永不进脚本源码与日志），经 REST 管理面（`routes_secret`）写入本表；
-//! 脚本侧 `ctx:secret_get` 按实例授权清单读取是 Task 5。
+//! 脚本侧 `ctx:secret_get`（`api::register`）按实例授权清单读取。
 //!
 //! - field = ref：强制 `secret:` 前缀 + `[a-z0-9_-]`（D6 受限前缀——前缀强制
 //!   防脚本未来读到任意 lux key；ref 非机密可入审计日志，value 绝不入日志/回显）；
@@ -65,12 +65,8 @@ pub(crate) async fn set(c: &EmbeddedClient, r: &str, value: &str) -> Result<(), 
     Ok(())
 }
 
-/// 读一个 ref 的明文（脚本侧 ctx:secret_get 消费，Task 5；无则 `None`）。
-///
-/// T4 只建存储与管理面——REST 按设计绝不回读明文（list 仅掩码），非 test 构建
-/// 下 `get` 暂无调用方；`expect(dead_code)` 留信号：T5 接入后期望落空，编译器
-/// 会显式提醒移除本属性。
-#[cfg_attr(not(test), expect(dead_code))]
+/// 读一个 ref 的明文（脚本侧 `ctx:secret_get` 经 `api::register` 消费，T5 接线；
+/// 无则 `None`——在授权清单但未写入时脚本据此判空给默认）。
 pub(crate) async fn get(c: &EmbeddedClient, r: &str) -> Result<Option<String>, RsIotError> {
     validate_ref(r)?;
     let v = c.execute_value("HGET", &[HASH, r]).await?;

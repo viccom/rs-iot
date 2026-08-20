@@ -163,6 +163,10 @@ pub(crate) struct ApiCtx<'a> {
 /// - L4 `ctx:kv_set(key, v)` / `ctx:kv_get(key) -> v|nil`：async，落 lux `luakv:<inst>`
 ///   （[`crate::db::luakv`]），脚本本地持久状态——跨重启保留、实例间隔离。value 经
 ///   `serde_json::Value` 中转（Lua value <-> JSON 文本）。
+/// - L4 `ctx:secret_get(ref) -> str|nil`：async，读 lux 全局 `secrets` 表（平台凭证，
+///   [`crate::db::secrets`]）。恒注入 + 实例配置 `app_config.secrets` 字符串数组显式
+///   授权（Q4/R3）：越权引用报错（可感知，非静默 nil）；在清单但未写 → nil；读取
+///   不落日志（审计点在管理面写入/删除）。
 /// - L6 `log_info/warn/err/debug(msg)`：tracing，前缀 `[lua:<inst>]`。
 /// - L6 `now()`/`time()`：当前本地毫秒/秒时间戳（f64）。
 /// - 全局 `stdlib` 表（T9 §3.5）：`stdlib.list()/info(mod)` 只读清单——本地 index
@@ -251,6 +255,54 @@ pub(crate) fn register(lua: &Lua, ac: &ApiCtx<'_>) -> mlua::Result<()> {
         }
     })?;
     ctx.set("kv_get", kv_get_fn)?;
+
+    // --- L4 ctx:secret_get(ref) -> str|nil（Q4/R3/D6：实例授权清单显式授权）---
+    // lux 全局 secrets 表受控读取（[crate::db::secrets]，REST 管理面 T4 写入）。
+    // 函数恒注入（Q4 定案：未配置 secrets 的实例也注册——未引用零成本）；授权 =
+    // 实例配置 app_config.secrets 字符串数组显式列出的 ref。审计定案：读取不落日志
+    // （高频回调里打日志会刷屏；Q4 审计点是管理面写入/删除，T4 routes_secret 已做）。
+    // 清单在 register 期解析一次（类型不符按空清单降级 + warn 一次，非每次调用）。
+    let secret_allowed: Vec<String> = match ac.inst.app_config.get("secrets") {
+        None => Vec::new(), // 可选键：未配置 = 空清单（任何引用都未授权）
+        Some(serde_json::Value::Array(arr)) => arr
+            .iter()
+            .filter_map(|v| v.as_str().map(String::from))
+            .collect(),
+        Some(other) => {
+            tracing::warn!(
+                "[lua:{}] app_config.secrets 类型不符（期望字符串数组，实 {other}），按空清单处理",
+                ac.inst.inst_id
+            );
+            Vec::new()
+        }
+    };
+    let lux_secret = ac.ctx_host.lux.clone();
+    let secret_fn = lua.create_async_function(move |lua, (_self, r): (Value, LuaString)| {
+        let lux = lux_secret.clone();
+        let allowed = secret_allowed.clone();
+        async move {
+            let r = r.to_string_lossy().to_string();
+            // 前缀防线（脚本侧）：防读任意 lux key 的企图——与 validate_ref 同
+            // 规则、先于授权检查（格式非法时提示加前缀，而非误导去改清单）。
+            if let Err(e) = crate::db::secrets::validate_ref(&r) {
+                return Err(mlua::Error::RuntimeError(format!("secret_get: {e}")));
+            }
+            // 授权清单（R3 越权可感知）：不在清单 → 报错而非静默 nil（脚本作者
+            // 需要知道为什么读不到；ref 非机密可入消息，value 绝不出现）。
+            if !allowed.contains(&r) {
+                return Err(mlua::Error::RuntimeError(format!(
+                    "secret 未授权：{r}（请检查实例配置 secrets 清单）"
+                )));
+            }
+            // 在清单但 lux 未写 → nil（配置了但没写入，脚本可判空给默认）。
+            match crate::db::secrets::get(&lux, &r).await {
+                Ok(Some(v)) => Ok(Value::String(lua.create_string(&v)?)),
+                Ok(None) => Ok(Value::Nil),
+                Err(e) => Err(mlua::Error::RuntimeError(format!("secret_get: {e}"))),
+            }
+        }
+    })?;
+    ctx.set("secret_get", secret_fn)?;
 
     // --- L3 ctx:send_command(inst_id, devid, cmd, data) -> bool ---
     // 经 CtlRegistry::send 投到目标实例 cmd_rx（与 MQTT/REST 写入口同总线）。
