@@ -105,12 +105,14 @@ pub(crate) fn spawn_io_task(
     let join = tokio::spawn(async move {
         loop {
             tokio::select! {
-                // token 首位（biased）：backend 卡死在自身 await 内（如串口驱动层挂起）
-                // 时，select 的其它分支轮询仍会在 token 就绪处返回——backend future 被
-                // drop → 串口句柄释放。现场实测（2026-08-20）：无此分支时 stopinst 后
-                // COM 口仍被 wedged task 占用，只能杀进程恢复。
+                // biased：token 严格首位（取消即时生效），request 次位（有请求时
+                // 立即处理，不被 recv_idle 窗口推迟）。
+                biased;
+                // backend 卡死在自身 await 内（如串口驱动层挂起）时，select 的其它
+                // 分支轮询仍会在 token 就绪处返回——backend future 被 drop → 串口
+                // 句柄释放。现场实测（2026-08-20）：无此分支时 stopinst 后 COM 口
+                // 仍被 wedged task 占用，只能杀进程恢复。
                 _ = token.cancelled() => break,
-                // request 优先：有 request 时立即处理，不被 recv_idle 阻塞
                 req = rx.recv() => match req {
                     Some(req) => {
                         crate::io_trace::dump(&trace_registry, &inst_id, crate::io_trace::Dir::Tx, &req.frame);
@@ -130,28 +132,25 @@ pub(crate) fn spawn_io_task(
                     }
                     None => break, // 所有 IoEngine 句柄 drop → 退出
                 },
-                _ = backend.recv_idle() => {
-                    // 臂内 token 同 request 臂（防 select 提交后卡死在
-                    // ensure_connected/驱动调用内不可打断——现场复验第三轮）。
-                    tokio::select! {
-                        _ = token.cancelled() => break,
-                        res = backend.recv_idle() => {
-                            if let Some(frame) = res {
-                                crate::io_trace::dump(&trace_registry, &inst_id, crate::io_trace::Dir::Rx, &frame);
-                                // 满通道丢帧（P3）：IO task 永不因数据面反压停摆
-                                if let Err(tokio::sync::mpsc::error::TrySendError::Full(_)) =
-                                    on_data_tx.try_send(frame)
-                                {
-                                    dropped_frames.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                    tracing::warn!(
-                                        "[luaClient] {inst_id}: on_data 通道满，丢被动帧（累计 {}）",
-                                        dropped_frames.load(std::sync::atomic::Ordering::Relaxed)
-                                    );
-                                }
-                            }
-                            // None（idle 无数据/未连接）→ 回 loop 重 select!（recv_idle 重启）
+                // 直连处理（审查修复 2026-08-20 阶段 B 复审）：外层完成值直接消费。
+                // 此前版本曾在臂内再起一次 recv_idle 并丢弃外层完成值——帧已从
+                // socket 消费却无 dump/转发/计数，稳态 ~50% 被动帧静默丢失（A/B
+                // 实证 20→10）；臂体为同步处理（try_send 非阻塞），无需内层 select。
+                res = backend.recv_idle() => {
+                    if let Some(frame) = res {
+                        crate::io_trace::dump(&trace_registry, &inst_id, crate::io_trace::Dir::Rx, &frame);
+                        // 满通道丢帧（P3）：IO task 永不因数据面反压停摆
+                        if let Err(tokio::sync::mpsc::error::TrySendError::Full(_)) =
+                            on_data_tx.try_send(frame)
+                        {
+                            dropped_frames.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            tracing::warn!(
+                                "[luaClient] {inst_id}: on_data 通道满，丢被动帧（累计 {}）",
+                                dropped_frames.load(std::sync::atomic::Ordering::Relaxed)
+                            );
                         }
                     }
+                    // None（idle 窗口无数据/未连接）→ 回 loop 重 select!（recv_idle 重启）
                 }
             }
         }
@@ -392,6 +391,54 @@ mod tests {
             .expect("超时")
             .expect("应收到被动帧");
         assert_eq!(frame, b"\x02ping");
+    }
+
+    /// 阶段 B 复审回归（审查修复 2026-08-20）：多帧被动流 **100%** 到达——此前版本
+    /// recv_idle 臂内重复调用丢弃外层完成值，稳态 ~50% 帧静默丢失（A/B 实证 20→10），
+    /// 单帧测试靠窗口相位侥幸全绿。本测试推 20 帧、断言全数到达，锁死该回归面。
+    #[tokio::test]
+    async fn on_data_stream_full_arrival_no_phase_luck() {
+        use std::time::Duration;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        // server：连上后每 60ms 推 1 帧×20（帧间隔 > idle 成帧窗 40ms 各自独立成帧；
+        // 到达时刻横跨外层 select 多个窗口相位——相位侥幸无法全过）
+        tokio::spawn(async move {
+            let (mut s, _) = listener.accept().await.unwrap();
+            tokio::time::sleep(Duration::from_millis(80)).await;
+            for i in 0..20u8 {
+                let _ = s.write_all(&[0xF0, i]).await;
+                tokio::time::sleep(Duration::from_millis(60)).await;
+            }
+            tokio::time::sleep(Duration::from_millis(300)).await; // 保连接收尾
+        });
+        tokio::time::sleep(Duration::from_millis(40)).await;
+
+        let backend = Box::new(TcpIo::new(format!("127.0.0.1:{port}"), 40));
+        let (on_data_tx, mut on_data_rx) = mpsc::channel::<Vec<u8>>(64);
+        let (_engine, _join) = spawn_io_task(
+            backend,
+            on_data_tx,
+            "stream-inst".into(),
+            crate::io_trace::TraceRegistry::new(),
+            std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            tokio_util::sync::CancellationToken::new(),
+        );
+
+        let mut got: Vec<u8> = Vec::new();
+        let deadline = std::time::Instant::now() + Duration::from_secs(6);
+        while got.len() < 20 && std::time::Instant::now() < deadline {
+            match tokio::time::timeout(Duration::from_millis(500), on_data_rx.recv()).await {
+                Ok(Some(frame)) => got.extend(frame.iter().filter(|b| **b != 0xF0).copied()),
+                Ok(None) => break,
+                Err(_) => {}
+            }
+        }
+        assert_eq!(got.len(), 20, "20 帧应全数到达（丢帧回归），实得 {got:?}");
+        // 序号完整（0..=19 各一次，帧不重不漏）
+        let mut sorted = got.clone();
+        sorted.sort();
+        assert_eq!(sorted, (0u8..20).collect::<Vec<u8>>(), "帧序号应无缺失");
     }
 
     /// P3（附录 B 冻结面③，阶段 A 审查修复）：on_data 通道满 → IO task `try_send`
