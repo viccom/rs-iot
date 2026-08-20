@@ -109,12 +109,14 @@ export interface InstConfig {
 /** 实例配置表（GET /insts 返回：inst_id → InstConfig）。 */
 export type InstanceConfigs = Record<string, InstConfig>
 
-/** lua 脚本内容回读（GET /lua/script?name=）。 */
+/** lua 资产内容回读（GET /lua/script?name=&kind=；kind=lib 为站点共享库）。 */
 export interface LuaScript {
   name: string
   content: string
   size: number
   mtime?: number | null
+  /** 资产类型：缺省 script（scripts/<名>/main.lua）| lib（scripts/_lib/<org>/...） */
+  kind?: 'script' | 'lib'
 }
 
 /** lua 脚本历史版本（GET /lua/script/versions，按 ts 降序）。 */

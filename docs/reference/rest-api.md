@@ -163,14 +163,24 @@ curl -s -XPOST -H "Authorization: $TOKEN" -H 'Content-Type: application/json' \
 
 - 用户组数据**当前不参与任何权限判定**（无授权层）；AccessKey 全局单值，轮换即时生效
 
-### 4.6 Lua 运维（`routes_lua.rs`）
+### 4.6 Lua 脚本与 stdlib 运维（`routes_lua.rs`）
+
+脚本/共享库资产端点（`kind` 参数区分资产类型：`script` 缺省 / `lib` 站点共享库，阶段 A）：
 
 | Method | Path | Body/Query | 响应 |
 |---|---|---|---|
 | POST | `/api/v1/lua/reload` | `?inst_id=` | `{"status":"ok"}`；实例不存在 404；非 luaClient 400 |
-| GET | `/api/v1/lua/scripts` | — | `{"scripts":["<目录名>",...]}` |
+| GET | `/api/v1/lua/scripts` | `?kind=script\|lib`（缺省 script） | script：`{"scripts":["<目录名>",...]}`；lib：`{"libs":["<org>/<路径>.lua",...]}` |
+| GET | `/api/v1/lua/script` | `?name=`、`?kind=` | `{"name","kind","content","size","mtime?"}`；不存在 404 |
+| POST | `/api/v1/lua/script/save` | `{"name","content","kind?"}` | script 写 `scripts/<名>/main.lua`；lib 写 `scripts/_lib/<org>/...`；覆盖前自动存版本快照 |
+| GET | `/api/v1/lua/script/versions` | `?name=`、`?kind=` | `{"versions":[{ts,size},...]}`（ts 降序） |
+| POST | `/api/v1/lua/script/rollback` | `{"name","ts","kind?"}` | 回滚到 `versions/<ts>.lua`（回滚点另存快照） |
+| GET | `/api/v1/lua/stdlib` | — | `{"version","files":[{name,path,ver,source}]}`（source：`synced`/`seed`；`scripts/` 模板条目不列入） |
+| POST | `/api/v1/lua/stdlib/sync` | `{"upstream?","pin?"}` | `{"status","upstream","pin","report":{added,updated,removed,version},"reloaded":[{inst_id,result}]}`；失败 502 |
 
 - `reload` 仅对 `app_code=="luaClient"` 生效（stop+start，IO 重连）；与文件 notify 自动热加载等价
+- `kind=lib` 路径校验：**≥2 段**（`<org>/<库名>.lua`）、首段非官方保留段（`algo`/`codec`/`proto`/`cloud`/`util`/`oo`）、防穿越；脚本名白名单 `[A-Za-z0-9_-]` 且拒绝保留目录 `_lib`/`_stdlib`
+- `sync`：ed25519 验签 + 逐文件 sha256 + `_stdlib/` 原子替换（失败本地不动）；**pin 默认锁定**（缺省 = 锁定本地已装版本，`"pin":"auto"` 显式跟随 latest，配置键 `lua_stdlib_pin` 持久化锁定）；成功/失败落审计日志；成功后批量 **VM 级 reload**——运行中实例逐一热加载（失败自动回退旧 VM），非运行实例记 `skipped` 不复活；需 `lua-http` feature（缺省开启）
 - **实例运行指标（含 luaClient）已统一到 `GET /api/v1/inst/stats`**（M4，见 §4.10）；旧 `GET /api/v1/lua/stats` 已移除
 
 ### 4.7 写命令下发（`routes_command.rs`）

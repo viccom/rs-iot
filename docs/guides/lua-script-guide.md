@@ -374,6 +374,10 @@ dry-run：manifest 契约校验 + `on_init` 验证）。失败回退旧 VM（永
 
 兜底：`POST /api/v1/lua/reload?inst_id=<id>`（单实例显式操作，stop + start，IO 重连）。
 
+**远程 reload**：MQTT `<hwid>/command` 主题发布 `{"instance":"<lua实例>","cmd":"reload"}` 同样
+触发该实例的 **VM 级热加载**（经控制通道走 `Evt::Reload`，失败自动回退旧 VM）——与 JWT 保护的
+REST reload 等价能力，授权面 = broker 命令 topic 的发布权（运维按需收敛 topic ACL）。
+
 > **scripts 根说明**：REST 保存/读取、`_lib` watcher 与 stdlib sync 固定使用进程工作目录下的
 > `scripts/`；实例可用 `app_config.scripts_root` 覆盖自己的脚本根（多见于测试）——覆盖根的实例
 > 不在 REST save 的热加载/`_lib` watcher 覆盖范围内（沿袭既有约定）。

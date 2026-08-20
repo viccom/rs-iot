@@ -1,8 +1,9 @@
 <script setup lang="ts">
 // frontend/src/views/Lua.vue
-// lua 脚本管理（模块 M4c）：双栏——左脚本列表（三级树：脚本 → 关联实例 → 设备）/ 右编辑器 + 版本历史 + reload 关联实例。
-// 后端：GET /lua/scripts（列表）、GET /lua/script（内容）、POST /lua/script/save（存版本）、
-// GET /lua/script/versions（历史）、POST /lua/script/rollback（回滚）、POST /lua/reload（重载实例）。
+// lua 资产管理（模块 M4c）：双栏——左列表（脚本 tab：三级树 脚本→实例→设备 / 库 tab：站点共享库）/ 右编辑器 + 版本历史。
+// 后端：GET /lua/scripts[?kind=lib]（列表）、GET /lua/script?kind=（内容）、POST /lua/script/save（存版本，kind 跟随 tab）、
+// GET /lua/script/versions?kind=（历史）、POST /lua/script/rollback（回滚）、POST /lua/reload（重载实例，仅脚本 tab）。
+// 库 tab（阶段 A Q13）：scripts/_lib/<org>/<名>.lua，require("<org>.<名>") 引用；保存后全局 watcher 自动 reload 引用实例，无需手动重载。
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { onBeforeRouteLeave, useRouter } from 'vue-router'
 import { useWorkspacePage } from '../composables/useWorkspacePage'
@@ -16,8 +17,22 @@ const lua = useLuaStore()
 const monitor = useMonitorStore()
 const router = useRouter()
 
-/** 新建脚本名输入（新建对话框简易态：列表下方输入框 + 按钮）。 */
+/** 新建资产名输入（新建对话框简易态：列表下方输入框 + 按钮；脚本名或库路径）。 */
 const newName = ref('')
+
+/** 官方保留段（D11）——库路径首段不得撞（与后端 parse_lib_segments 同规则的前端预检）。 */
+const RESERVED_TOP = ['algo', 'codec', 'proto', 'cloud', 'util', 'oo']
+
+/** 库路径前端预检：≥2 段、段白名单 [A-Za-z0-9_-]、.lua 结尾、首段非保留段（后端最终裁决）。 */
+function validLibPath(p: string): string | null {
+  if (!/^[A-Za-z0-9_-]+(\/[A-Za-z0-9_-]+)+\.lua$/.test(p)) {
+    return '库路径须 ≥2 段且以 .lua 结尾，如 viccom/hex.lua（段仅限字母/数字/下划线/短横）'
+  }
+  if (RESERVED_TOP.includes(p.split('/')[0])) {
+    return `首段「${p.split('/')[0]}」是官方 stdlib 保留段，不可用作组织名（D11）`
+  }
+  return null
+}
 /** 当前编辑内容（v-model ScriptEditor）。 */
 const editContent = computed({
   get: () => lua.current?.content ?? '',
@@ -27,9 +42,12 @@ const editContent = computed({
 /** 展开设备子列表的实例 ID（三级树第三级，页内状态：null=全收起）。 */
 const expandedInst = ref<string | null>(null)
 
-/** 当前选中脚本的关联实例名单（lib 纯函数派生：inst_id/state/设备数/运行时设备）。 */
+/** 当前选中脚本的关联实例名单（lib 纯函数派生：inst_id/state/设备数/运行时设备；
+ *  库 tab 无实例关联概念——恒空，右栏隐藏 reload 按钮）。 */
 const relatedInstances = computed(() =>
-  lua.current ? relatedLuaInstances(monitor.instanceConfigs, monitor.roster, lua.current.name) : [],
+  lua.current && lua.kind === 'script'
+    ? relatedLuaInstances(monitor.instanceConfigs, monitor.roster, lua.current.name)
+    : [],
 )
 
 /** 某实例的设备行（配置 ∪ 运行时并集 + 来源标注，第三级数据）。 */
@@ -75,27 +93,35 @@ function countInstances(name: string): number {
   ).length
 }
 
-/** 选中脚本：加载内容 + 历史（切脚本收起设备子列表，三级树回第二级）。 */
+/** 选中资产：加载内容 + 历史（切脚本收起设备子列表，三级树回第二级）。 */
 async function selectScript(name: string) {
   if (lua.dirty && lua.current && !confirm(`放弃对「${lua.current.name}」的未保存改动？`)) return
   expandedInst.value = null
   await lua.loadScript(name)
 }
 
-/** 新建脚本（仅本地占位，保存时真正写盘）。 */
+/** 新建资产（仅本地占位，保存时真正写盘；按当前 tab 校验脚本名 / 库路径）。 */
 async function createScript() {
   const name = newName.value.trim()
-  if (!name || !/^[A-Za-z0-9_-]+$/.test(name)) {
-    alert('脚本名只能含字母/数字/下划线/短横')
-    return
+  if (lua.kind === 'lib') {
+    const err = validLibPath(name)
+    if (err) { alert(err); return }
+    if (lua.libs.includes(name)) { alert('库已存在'); return }
+    newName.value = ''
+    lua.current = { name, kind: 'lib', content: '-- 站点共享库（require("<org>.<模块>") 引用）\nlocal M = {}\n\nfunction M.hello()\n  return "hi"\nend\n\nreturn M\n', size: 0 }
+  } else {
+    if (!name || !/^[A-Za-z0-9_-]+$/.test(name)) {
+      alert('脚本名只能含字母/数字/下划线/短横')
+      return
+    }
+    if (lua.scripts.includes(name)) {
+      alert('脚本已存在')
+      return
+    }
+    newName.value = ''
+    // 直接初始化 current（空内容），保存时 POST /lua/script/save 会建目录。
+    lua.current = { name, kind: 'script', content: '-- 新建 lua 脚本\nfunction collect()\n  -- ctx:request(frame, timeout)\n  return {}\nend\n', size: 0 }
   }
-  if (lua.scripts.includes(name)) {
-    alert('脚本已存在')
-    return
-  }
-  newName.value = ''
-  // 直接初始化 current（空内容），保存时 POST /lua/script/save 会建目录。
-  lua.current = { name, content: '-- 新建 lua 脚本\nfunction collect()\n  -- ctx:request(frame, timeout)\n  return {}\nend\n', size: 0 }
   lua.versions = []
   lua.dirty = true
 }
@@ -170,11 +196,12 @@ function onBeforeUnload(e: BeforeUnloadEvent) {
 
 useWorkspacePage(() => ({
   pageSummary: lua.current
-    ? `正在编辑 lua 脚本「${lua.current.name}」${lua.dirty ? '（有未保存改动）' : ''}`
-    : '正在浏览 lua 脚本库',
+    ? `正在编辑 lua ${lua.kind === 'lib' ? '共享库' : '脚本'}「${lua.current.name}」${lua.dirty ? '（有未保存改动）' : ''}`
+    : `正在浏览 lua ${lua.kind === 'lib' ? '共享库' : '脚本'}库`,
   facts: [
     `脚本总数 ${lua.scripts.length}`,
-    `当前脚本 ${lua.current?.name || '未选中'}`,
+    `共享库总数 ${lua.libs.length}`,
+    `当前资产 ${lua.current?.name || '未选中'}`,
     `历史版本 ${lua.versions.length}`,
     `操作中 ${lua.loading ? '是' : '否'}`,
   ],
@@ -187,13 +214,32 @@ useWorkspacePage(() => ({
     <article class="page-panel list-panel">
       <div class="panel-head">
         <div>
-          <p class="panel-label">脚本库</p>
-          <h3>lua 脚本</h3>
+          <p class="panel-label">lua 资产</p>
+          <div class="kind-tabs">
+            <button :class="{ on: lua.kind === 'script' }" @click="lua.switchKind('script')">脚本</button>
+            <button :class="{ on: lua.kind === 'lib' }" @click="lua.switchKind('lib')">库</button>
+          </div>
         </div>
-        <span>{{ lua.scripts.length }} 个</span>
+        <span>{{ lua.kind === 'script' ? lua.scripts.length : lua.libs.length }} 个</span>
       </div>
 
-      <div class="script-list">
+      <!-- 库 tab：站点共享库列表（无实例树；保存后全局 watcher 自动 reload 引用实例） -->
+      <div v-if="lua.kind === 'lib'" class="script-list">
+        <button
+          v-for="name in lua.libs"
+          :key="name"
+          class="script-item"
+          :class="{ active: lua.current?.name === name }"
+          @click="selectScript(name)"
+        >
+          <span class="name">{{ name }}</span>
+          <span class="inst-count">共享库</span>
+        </button>
+        <p v-if="!lua.libs.length" class="empty">暂无共享库（scripts/_lib/）</p>
+        <p class="lib-hint">库以 require("组织名.模块名") 引用，如 require("viccom.hex")</p>
+      </div>
+
+      <div v-else class="script-list">
         <div v-for="it in items" :key="it.name" class="script-block">
           <button
             class="script-item"
@@ -256,9 +302,13 @@ useWorkspacePage(() => ({
         <p v-if="!lua.scripts.length" class="empty">暂无脚本</p>
       </div>
 
-      <!-- 新建脚本 -->
+      <!-- 新建资产（脚本名或库路径，按当前 tab） -->
       <div class="new-row">
-        <input v-model="newName" placeholder="新脚本名（[A-Za-z0-9_-]）" @keydown.enter="createScript" />
+        <input
+          v-model="newName"
+          :placeholder="lua.kind === 'lib' ? '新库路径（如 viccom/hex.lua）' : '新脚本名（[A-Za-z0-9_-]）'"
+          @keydown.enter="createScript"
+        />
         <button class="btn-new" @click="createScript">新建</button>
       </div>
     </article>
@@ -267,12 +317,12 @@ useWorkspacePage(() => ({
     <article class="page-panel editor-panel">
       <div class="panel-head">
         <div>
-          <p class="panel-label">{{ lua.current ? '脚本编辑' : '请选择脚本' }}</p>
+          <p class="panel-label">{{ lua.current ? (lua.kind === 'lib' ? '共享库编辑' : '脚本编辑') : (lua.kind === 'lib' ? '请选择库' : '请选择脚本') }}</p>
           <h3>{{ lua.current?.name || '—' }}</h3>
         </div>
         <div v-if="lua.current" class="head-actions">
           <span v-if="lua.dirty" class="dirty-flag">未保存</span>
-          <button class="btn-reload" @click="reloadInstances">重载关联实例</button>
+          <button v-if="lua.kind === 'script'" class="btn-reload" @click="reloadInstances">重载关联实例</button>
           <button class="btn-save" :disabled="lua.loading" @click="save">保存</button>
         </div>
       </div>
@@ -300,7 +350,7 @@ useWorkspacePage(() => ({
         </div>
       </div>
 
-      <p v-else class="empty">左侧选择一个脚本开始编辑，或新建脚本。</p>
+      <p v-else class="empty">{{ lua.kind === 'lib' ? '左侧选择一个共享库开始编辑，或新建库。' : '左侧选择一个脚本开始编辑，或新建脚本。' }}</p>
     </article>
   </section>
 </template>
@@ -338,6 +388,18 @@ useWorkspacePage(() => ({
   margin: 0 0 10px; font-size: 11px; letter-spacing: 0.18em; text-transform: uppercase;
   color: var(--color-ink-dim);
 }
+
+/* 资产类型 tab + 库提示 */
+.kind-tabs { display: flex; gap: 4px; }
+.kind-tabs button {
+  padding: 5px 14px; border-radius: 8px; font-size: 13px; cursor: pointer;
+  border: 1px solid var(--card-border); background: var(--card-bg); color: var(--color-ink-secondary);
+}
+.kind-tabs button.on {
+  background: linear-gradient(135deg, color-mix(in srgb, var(--color-primary) 18%, white), var(--card-bg));
+  border-color: var(--color-divider-strong); color: var(--color-ink);
+}
+.lib-hint { margin: 6px 2px 0; font-size: 11px; color: var(--color-ink-muted); line-height: 1.5; }
 
 /* 脚本列表 */
 .list-panel { display: flex; flex-direction: column; }
