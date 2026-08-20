@@ -118,6 +118,32 @@ async fn push_sample(
     }
 }
 
+/// [`register`] 的组装上下文（阶段 A 审查遗留收敛：9 参 → struct；B 阶段 north
+/// 能力包再加字段不再扩参）。字段与原 register 参数一一对应；`inst`/
+/// `scripts_root` 借用调用方（零克隆），其余为廉价句柄。
+pub(crate) struct ApiCtx<'a> {
+    /// 宿主上下文：提供 lux（L2/L4 读写）+ `ctl_registry`（L3 路由）。
+    pub(crate) ctx_host: HostContext,
+    /// 实例配置（L2 `ctx:list_devices` 返 `inst.devices`；log 前缀取 `inst_id`）。
+    pub(crate) inst: &'a InstConfig,
+    /// IO 引擎（L1 `ctx:request` 内部 `io.request` → IO task 独占处理，spec §8 模式 Z）。
+    pub(crate) io: IoEngine,
+    /// hub 发送端（L2 `set_value` 推 [`Sample`]）。
+    pub(crate) tx: mpsc::Sender<Sample>,
+    /// 运行时上报设备集（collect 与 L2 `set_value(s)` 双出口共用，flush 时同步
+    /// stat；详见 [`RuntimeDevs`]）。
+    pub(crate) runtime_devs: RuntimeDevs,
+    /// 丢样计数（`push_sample` 背压超时分支 fetch_add；与 collect 分支共享同一
+    /// 实例，flush 时落 stat `dropped_samples`）。
+    pub(crate) dropped: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// 底层链路类型字符串（`cfg.transport.as_str()`，"tcp"/"serial"/"udp"），供
+    /// `ctx:transport()` 暴露给脚本（脚本据此选帧格式：serial 加 CRC16、tcp 加
+    /// MBAP 头）。
+    pub(crate) transport: &'static str,
+    /// 脚本根目录（全局 `stdlib` 表读 `scripts/_stdlib/.index.json` 合并种子，T9 §3.5）。
+    pub(crate) scripts_root: &'a Path,
+}
+
 /// 在 `lua` 上注册 ctx 全局对象 + host 函数（`run` 调用）。
 ///
 /// - L1 `ctx:request(frame, timeout_ms) -> resp|nil,err`：async，经 `create_async_function`
@@ -140,36 +166,17 @@ async fn push_sample(
 /// - L6 `log_info/warn/err/debug(msg)`：tracing，前缀 `[lua:<inst>]`。
 /// - L6 `now()`/`time()`：当前本地毫秒/秒时间戳（f64）。
 /// - 全局 `stdlib` 表（T9 §3.5）：`stdlib.list()/info(mod)` 只读清单——本地 index
-///   与 embed 种子合并视图（`scripts_root` 参数即为其数据源）。
+///   与 embed 种子合并视图（[`ApiCtx::scripts_root`] 即为其数据源）。
 ///
-/// `tx` 为 hub [`mpsc::Sender`]（L2 `set_value` 推 [`Sample`]）；`ctx_host` 提供 lux
-/// （L2/L4 读写）+ `ctl_registry`（L3 路由）。`dropped` 为丢样计数（`push_sample`
-/// 背压超时分支 fetch_add；与 collect 分支共享同一实例，flush 时落 stat
-/// `dropped_samples`）。`transport` 为底层链路类型字符串
-///（`cfg.transport.as_str()`，"tcp"/"serial"/"udp"），供 `ctx:transport()` 暴露给脚本
-///（脚本据此选帧格式：serial 加 CRC16、tcp 加 MBAP 头）。`scripts_root` 为脚本根
-/// 目录（全局 `stdlib` 表读 `scripts/_stdlib/.index.json` 合并种子，T9 §3.5）。
-// 9 参为 T4 加 dropped、T9 加 scripts_root 所致——组装型编排函数，参数各自独立
-// 语义，强行打包 struct 反增间接层；定点 allow。
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn register(
-    lua: &Lua,
-    ctx_host: HostContext,
-    inst: &InstConfig,
-    io: IoEngine,
-    tx: mpsc::Sender<Sample>,
-    runtime_devs: RuntimeDevs,
-    dropped: std::sync::Arc<std::sync::atomic::AtomicU64>,
-    transport: &'static str,
-    scripts_root: &Path,
-) -> mlua::Result<()> {
+/// 组装参数见 [`ApiCtx`]（9 参收敛 struct，阶段 B T3）。
+pub(crate) fn register(lua: &Lua, ac: &ApiCtx<'_>) -> mlua::Result<()> {
     let ctx = lua.create_table()?;
 
     // --- L1 ctx:request(frame:str, timeout_ms:num) -> resp:str | nil,err ---
     // create_async_function：ctx:request 内部 coroutine.yield 桥接 IO task（spec §8）。
     // 首参 `_self` 接收 Lua 方法调用语法 `ctx:request(...)` 隐式传入的 self（ctx 表本身），
     // 不使用——若漏掉会导致 mlua 把 ctx 表当 frame 解析（bad argument #1: Lua table to string）。
-    let io_req = io.clone();
+    let io_req = ac.io.clone();
     let request_fn = lua.create_async_function(
         move |lua, (_self, frame, timeout_ms): (Value, LuaString, u64)| {
             let io = io_req.clone();
@@ -187,7 +194,7 @@ pub(crate) fn register(
     ctx.set("request", request_fn)?;
 
     // --- L6 log_info / log_warn / log_err / log_debug ---
-    let name = inst.inst_id.as_str().to_string();
+    let name = ac.inst.inst_id.as_str().to_string();
     register_log(lua, &ctx, &name)?;
 
     // --- L6 now() / time() ---
@@ -205,8 +212,8 @@ pub(crate) fn register(
     // --- L4 ctx:kv_set(key, v) / ctx:kv_get(key) -> v|nil ---
     // value 经 serde_json::Value 中转（Lua value <-> JSON 文本），落 lux luakv:<inst>。
     // async（lux 操作 await）→ create_async_function；_self 吸收冒号隐式 self。
-    let lux_set = ctx_host.lux.clone();
-    let inst_set = inst.inst_id.as_str().to_string();
+    let lux_set = ac.ctx_host.lux.clone();
+    let inst_set = ac.inst.inst_id.as_str().to_string();
     let kv_set_fn =
         lua.create_async_function(move |lua, (_self, key, v): (Value, LuaString, Value)| {
             let lux = lux_set.clone();
@@ -224,8 +231,8 @@ pub(crate) fn register(
         })?;
     ctx.set("kv_set", kv_set_fn)?;
 
-    let lux_get = ctx_host.lux.clone();
-    let inst_get = inst.inst_id.as_str().to_string();
+    let lux_get = ac.ctx_host.lux.clone();
+    let inst_get = ac.inst.inst_id.as_str().to_string();
     let kv_get_fn = lua.create_async_function(move |lua, (_self, key): (Value, LuaString)| {
         let lux = lux_get.clone();
         let inst = inst_get.clone();
@@ -248,7 +255,7 @@ pub(crate) fn register(
     // --- L3 ctx:send_command(inst_id, devid, cmd, data) -> bool ---
     // 经 CtlRegistry::send 投到目标实例 cmd_rx（与 MQTT/REST 写入口同总线）。
     // send 是同步 try_send → create_function（非 async）；_self 吸收冒号隐式 self。
-    let ctl = ctx_host.ctl_registry.clone();
+    let ctl = ac.ctx_host.ctl_registry.clone();
     let send_fn = lua.create_function(
         move |_lua,
               (_self, inst_id, devid, cmd, data): (
@@ -273,10 +280,10 @@ pub(crate) fn register(
     // --- L2 ctx:set_value(devid, tag, v) → 推 Sample 到 hub（数据上行总线）---
     // devid 由脚本显式传入（多设备支持：脚本可对 ctx:list_devices() 的任一 devid 上报）。
     // value 经 lua_value_to_sample 转 SampleValue；单点便捷，等价 set_values(devid,{[tag]=v})。
-    let tx_set = tx.clone();
-    let hwid_set = ctx_host.hwid.clone();
-    let rt_set = runtime_devs.clone();
-    let drop_set = dropped.clone();
+    let tx_set = ac.tx.clone();
+    let hwid_set = ac.ctx_host.hwid.clone();
+    let rt_set = ac.runtime_devs.clone();
+    let drop_set = ac.dropped.clone();
     let set_value_fn = lua.create_async_function(
         move |_lua, (_self, devid, tag, v): (Value, LuaString, LuaString, Value)| {
             let tx = tx_set.clone();
@@ -300,10 +307,10 @@ pub(crate) fn register(
     // --- L2 ctx:set_values(devid, {tag=v,...}) → 批量推一个设备多 tag（一个 Sample）---
     // 贴合 Sample 多变量语义：on_data 解析被动帧多点一次上报（点间同时刻 timestamp）。
     // table 经 pairs 遍历 → BTreeMap；空 table 不上报。
-    let tx_sv = tx.clone();
-    let hwid_sv = ctx_host.hwid.clone();
-    let rt_sv = runtime_devs.clone();
-    let drop_sv = dropped.clone();
+    let tx_sv = ac.tx.clone();
+    let hwid_sv = ac.ctx_host.hwid.clone();
+    let rt_sv = ac.runtime_devs.clone();
+    let drop_sv = ac.dropped.clone();
     let set_values_fn = lua.create_async_function(
         move |_lua, (_self, devid, table): (Value, LuaString, mlua::Table)| {
             let tx = tx_sv.clone();
@@ -329,7 +336,7 @@ pub(crate) fn register(
     // --- L2 ctx:get_value(devid, tag) -> str|nil ---
     // 读 lux HGET rtdata:<devid> field=<devid>.<tag> → [ts, localTime, value] → value_str。
     // field 已含 devid 前缀（pipeline 写入格式）则原样用，否则补 <devid>.<tag>。
-    let lux_gv = ctx_host.lux.clone();
+    let lux_gv = ac.ctx_host.lux.clone();
     let get_value_fn = lua.create_async_function(
         move |lua, (_self, devid, tag): (Value, LuaString, LuaString)| {
             let lux = lux_gv.clone();
@@ -366,7 +373,7 @@ pub(crate) fn register(
     // --- L2 ctx:get_device(devid) -> table|nil ---
     // 读 lux HGETALL rtdata:<devid> → {tag: value_str}（设备当前全部数据点）。
     // field=<devid>.<tag> → 剥前缀得 tag；cell=[ts,localTime,value] → value_str。
-    let lux_gd = ctx_host.lux.clone();
+    let lux_gd = ac.ctx_host.lux.clone();
     let get_device_fn =
         lua.create_async_function(move |lua, (_self, devid): (Value, LuaString)| {
             let lux = lux_gd.clone();
@@ -421,7 +428,8 @@ pub(crate) fn register(
     // --- L2 ctx:list_devices() -> table ---
     // 返 inst.devices（当前实例设备树，{label, value} 数组）。同步（inst.devices 已知，
     // 无 lux IO）。
-    let devices: Vec<(String, String)> = inst
+    let devices: Vec<(String, String)> = ac
+        .inst
         .devices
         .iter()
         .map(|d| (d.label.clone(), d.value.clone()))
@@ -442,19 +450,20 @@ pub(crate) fn register(
     // 脚本据此选帧格式（serial → PDU+CRC16、tcp → MBAP 头、udp → 裸 RTU/自定义）。
     // 与 app_config.kind 一致；同步（配置解析产物，register 传入 &'static str）。
     // _self 吸收冒号语法隐式 self（ctx:transport()）。
+    let transport = ac.transport;
     let transport_fn = lua.create_function(move |_lua, _self: Value| Ok(transport))?;
     ctx.set("transport", transport_fn)?;
 
     // --- L5 ctx:http_get/http_post（feature lua-http）---
     // 实现移 http.rs（守 <500）；此处委托 http::register 注册到同一 ctx 表。
     #[cfg(feature = "lua-http")]
-    http::register(lua, &ctx, inst)?;
+    http::register(lua, &ctx, ac.inst)?;
 
     // --- 全局 stdlib 表（T9 §3.5）：stdlib.list()/info(mod) 只读清单 ---
     // 本地 index + embed 种子合并视图（读盘即时，sync 后 reload 即见新版）。
     lua.globals().set(
         "stdlib",
-        crate::plugin::lua_core::stdlib_sync::stdlib_table(lua, scripts_root)?,
+        crate::plugin::lua_core::stdlib_sync::stdlib_table(lua, ac.scripts_root)?,
     )?;
 
     lua.globals().set("ctx", ctx)?;

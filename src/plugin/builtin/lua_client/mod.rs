@@ -166,17 +166,19 @@ impl Source for LuaClient {
         //    dropped：丢样计数，set_value(s) 与 collect 双出口共享，flush 落 stat）。
         let runtime_devs: RuntimeDevs = Default::default();
         let dropped: std::sync::Arc<std::sync::atomic::AtomicU64> = Default::default();
-        if let Err(e) = core_::api::register(
-            &lua,
-            ctx.clone(),
-            &inst,
-            io_engine.clone(),
-            tx.clone(),
-            runtime_devs.clone(),
-            dropped.clone(),
-            cfg.transport.as_str(),
-            &scripts_root,
-        ) {
+        // ApiCtx（9 参收敛 struct，B 阶段 T3）：启动注册与 Evt::Reload 两处共用一份；
+        // 字段为廉价句柄克隆 + 借用 inst/scripts_root。
+        let ac = core_::api::ApiCtx {
+            ctx_host: ctx.clone(),
+            inst: &inst,
+            io: io_engine.clone(),
+            tx: tx.clone(),
+            runtime_devs: runtime_devs.clone(),
+            dropped: dropped.clone(),
+            transport: cfg.transport.as_str(),
+            scripts_root: &scripts_root,
+        };
+        if let Err(e) = core_::api::register(&lua, &ac) {
             tracing::warn!("[luaClient] inst {} ctx API 注册失败：{e}", inst.inst_id);
             return;
         }
@@ -392,18 +394,7 @@ impl Source for LuaClient {
                     }
                 }
                 Evt::Reload => {
-                    match reload_vm(
-                        &cfg,
-                        &lctx,
-                        ctx.clone(),
-                        &inst,
-                        io_engine.clone(),
-                        tx.clone(),
-                        runtime_devs.clone(),
-                        dropped.clone(),
-                    )
-                    .await
-                    {
+                    match reload_vm(&cfg, &lctx, &ac).await {
                         Ok(new_lua) => {
                             lua = new_lua;
                             vm_restarts += 1;
@@ -567,20 +558,13 @@ async fn with_budget<T>(
 
 /// 重建 VM：new_vm + load_main + register ctx + dry-run on_init（spec §5.3 热加载）。
 ///
-/// IO engine / ctx_host / 丢样计数复用（不随 VM 替换——dropped 是实例生命周期累计值）。
-/// dry-run 跑 on_init（hook 验证不死循环）；collect dry-run 跳过（真 collect 在下 tick，
-/// 失败 warn）。失败返回 Err（主循环回退旧 VM）。
-// 8 参为 T4 加 dropped 所致——与 api::register 同由（透传其参数集），定点 allow。
-#[allow(clippy::too_many_arguments)]
+/// IO engine / ctx_host / 丢样计数随 `ac` 复用（不随 VM 替换——dropped 是实例生命
+/// 周期累计值）。dry-run 跑 on_init（hook 验证不死循环）；collect dry-run 跳过
+/// （真 collect 在下 tick，失败 warn）。失败返回 Err（主循环回退旧 VM）。
 async fn reload_vm(
     cfg: &core_::config::LuaCfg,
     lctx: &LoadCtx,
-    ctx_host: HostContext,
-    inst: &InstConfig,
-    io: core_::io_engine::IoEngine,
-    tx: mpsc::Sender<Sample>,
-    runtime_devs: RuntimeDevs,
-    dropped: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    ac: &core_::api::ApiCtx<'_>,
 ) -> mlua::Result<mlua::Lua> {
     let lua = core_::engine::new_vm(cfg)?;
     load_main(&lua, lctx)?;
@@ -589,17 +573,7 @@ async fn reload_vm(
     let summary =
         manifest_dry_run(&lua, lctx, stdlib_ver.as_deref()).map_err(mlua::Error::RuntimeError)?;
     tracing::info!("[luaClient] 热加载 manifest dry-run 通过：{summary}");
-    core_::api::register(
-        &lua,
-        ctx_host,
-        inst,
-        io,
-        tx,
-        runtime_devs,
-        dropped,
-        cfg.transport.as_str(),
-        &lctx.scripts_root,
-    )?;
+    core_::api::register(&lua, ac)?;
     // dry-run on_init（hook 兜底纯计算死循环 + with_budget 兜底挂起型 await——
     // 阶段 A 审查修复：reload 路径挂起会让主循环 select! 停摆，stop token 不再
     // 被轮询；超限 → Err → 主循环回退旧 VM）。

@@ -448,18 +448,20 @@ async fn reload_vm_rejects_bad_manifest() {
     );
     let (tx, _rx) = mpsc::channel::<crate::types::Sample>(8);
 
-    let e = super::reload_vm(
-        &cfg,
-        &lctx,
-        lua_host_ctx().await,
-        &lua_inst_config(&tmp, "devM"),
+    let inst = lua_inst_config(&tmp, "devM");
+    let ac = crate::plugin::lua_core::api::ApiCtx {
+        ctx_host: lua_host_ctx().await,
+        inst: &inst,
         io,
         tx,
-        Default::default(),
-        Default::default(),
-    )
-    .await
-    .expect_err("坏 manifest 的 reload 应 Err（回退旧 VM）");
+        runtime_devs: Default::default(),
+        dropped: Default::default(),
+        transport: cfg.transport.as_str(),
+        scripts_root: &tmp,
+    };
+    let e = super::reload_vm(&cfg, &lctx, &ac)
+        .await
+        .expect_err("坏 manifest 的 reload 应 Err（回退旧 VM）");
     let msg = e.to_string();
     assert!(
         msg.contains("api_ver") && msg.contains("升级宿主"),
@@ -584,18 +586,20 @@ async fn reload_vm_on_init_budget_timeout_falls_back() {
     .unwrap();
 
     let started = std::time::Instant::now();
-    let e = super::reload_vm(
-        &cfg,
-        &lctx,
-        lua_host_ctx().await,
-        &lua_inst_config(&tmp, "devM"),
+    let inst = lua_inst_config(&tmp, "devM");
+    let ac = crate::plugin::lua_core::api::ApiCtx {
+        ctx_host: lua_host_ctx().await,
+        inst: &inst,
         io,
         tx,
-        Default::default(),
-        Default::default(),
-    )
-    .await
-    .expect_err("on_init 挂起应被预算切断 → Err → 回退旧 VM");
+        runtime_devs: Default::default(),
+        dropped: Default::default(),
+        transport: cfg.transport.as_str(),
+        scripts_root: &tmp,
+    };
+    let e = super::reload_vm(&cfg, &lctx, &ac)
+        .await
+        .expect_err("on_init 挂起应被预算切断 → Err → 回退旧 VM");
     assert!(e.to_string().contains("on_init"), "错误应可辨识回调名：{e}");
     assert!(
         started.elapsed() < std::time::Duration::from_secs(2),

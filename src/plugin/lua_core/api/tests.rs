@@ -23,7 +23,7 @@ fn spawn_mock_io() -> IoEngine {
     )
 }
 
-/// 测试用 mock hub tx（满足 register 的 tx 参数；接收端立即丢弃，不验接收）。
+/// 测试用 mock hub tx（满足 ApiCtx.tx 字段；接收端立即丢弃，不验接收）。
 ///
 /// 现有 L1/L3/L4/L6 测试不触 set_value，故 tx 仅占位；L2 `set_value` 测自建真实 channel。
 fn mock_hub_tx() -> tokio::sync::mpsc::Sender<crate::types::Sample> {
@@ -31,7 +31,7 @@ fn mock_hub_tx() -> tokio::sync::mpsc::Sender<crate::types::Sample> {
     tx
 }
 
-/// 测试用零值丢样计数（满足 register 的 dropped 参数；背压行为测试见
+/// 测试用零值丢样计数（满足 ApiCtx.dropped 字段；背压行为测试见
 /// `send_with_deadline_drops_on_full_channel`，其余测试只占位不计数）。
 fn zero_dropped() -> std::sync::Arc<std::sync::atomic::AtomicU64> {
     std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0))
@@ -60,14 +60,16 @@ async fn register_exposes_ctx_api() {
     };
     register(
         &lua,
-        ctx_host,
-        &inst,
-        io,
-        mock_hub_tx(),
-        RuntimeDevs::default(),
-        zero_dropped(),
-        "tcp",
-        Path::new("scripts"),
+        &ApiCtx {
+            ctx_host,
+            inst: &inst,
+            io,
+            tx: mock_hub_tx(),
+            runtime_devs: RuntimeDevs::default(),
+            dropped: zero_dropped(),
+            transport: "tcp",
+            scripts_root: Path::new("scripts"),
+        },
     )
     .expect("register");
     for api in [
@@ -126,14 +128,16 @@ async fn register_exposes_stdlib_table() {
     std::fs::create_dir_all(&tmp).unwrap();
     register(
         &lua,
-        ctx_host,
-        &inst,
-        io,
-        mock_hub_tx(),
-        RuntimeDevs::default(),
-        zero_dropped(),
-        "tcp",
-        &tmp,
+        &ApiCtx {
+            ctx_host,
+            inst: &inst,
+            io,
+            tx: mock_hub_tx(),
+            runtime_devs: RuntimeDevs::default(),
+            dropped: zero_dropped(),
+            transport: "tcp",
+            scripts_root: &tmp,
+        },
     )
     .expect("register");
     let n: i64 = lua
@@ -175,14 +179,16 @@ async fn kv_set_get_roundtrip() {
     };
     register(
         &lua,
-        ctx_host,
-        &inst,
-        io,
-        mock_hub_tx(),
-        RuntimeDevs::default(),
-        zero_dropped(),
-        "tcp",
-        Path::new("scripts"),
+        &ApiCtx {
+            ctx_host,
+            inst: &inst,
+            io,
+            tx: mock_hub_tx(),
+            runtime_devs: RuntimeDevs::default(),
+            dropped: zero_dropped(),
+            transport: "tcp",
+            scripts_root: Path::new("scripts"),
+        },
     )
     .expect("register");
 
@@ -272,14 +278,16 @@ async fn send_command_routes_to_target() {
     };
     register(
         &lua,
-        ctx_host,
-        &inst,
-        io,
-        mock_hub_tx(),
-        RuntimeDevs::default(),
-        zero_dropped(),
-        "tcp",
-        Path::new("scripts"),
+        &ApiCtx {
+            ctx_host,
+            inst: &inst,
+            io,
+            tx: mock_hub_tx(),
+            runtime_devs: RuntimeDevs::default(),
+            dropped: zero_dropped(),
+            transport: "tcp",
+            scripts_root: Path::new("scripts"),
+        },
     )
     .expect("register");
 
@@ -354,14 +362,16 @@ async fn http_get_returns_status_and_body() {
     };
     register(
         &lua,
-        ctx_host,
-        &inst,
-        io,
-        mock_hub_tx(),
-        RuntimeDevs::default(),
-        zero_dropped(),
-        "tcp",
-        Path::new("scripts"),
+        &ApiCtx {
+            ctx_host,
+            inst: &inst,
+            io,
+            tx: mock_hub_tx(),
+            runtime_devs: RuntimeDevs::default(),
+            dropped: zero_dropped(),
+            transport: "tcp",
+            scripts_root: Path::new("scripts"),
+        },
     )
     .expect("register");
 
@@ -502,14 +512,16 @@ async fn capability_cards_match_registered_ctx() {
     };
     register(
         &lua,
-        ctx_host,
-        &inst,
-        io,
-        mock_hub_tx(),
-        RuntimeDevs::default(),
-        zero_dropped(),
-        "tcp",
-        Path::new("scripts"),
+        &ApiCtx {
+            ctx_host,
+            inst: &inst,
+            io,
+            tx: mock_hub_tx(),
+            runtime_devs: RuntimeDevs::default(),
+            dropped: zero_dropped(),
+            transport: "tcp",
+            scripts_root: Path::new("scripts"),
+        },
     )
     .expect("register");
     let ctx: mlua::Table = lua.globals().get("ctx").expect("ctx 全局表");
@@ -650,14 +662,16 @@ async fn set_value_pushes_sample_to_hub() {
     };
     register(
         &lua,
-        ctx_host,
-        &inst,
-        io,
-        tx,
-        RuntimeDevs::default(),
-        zero_dropped(),
-        "tcp",
-        Path::new("scripts"),
+        &ApiCtx {
+            ctx_host,
+            inst: &inst,
+            io,
+            tx,
+            runtime_devs: RuntimeDevs::default(),
+            dropped: zero_dropped(),
+            transport: "tcp",
+            scripts_root: Path::new("scripts"),
+        },
     )
     .expect("register");
 
@@ -707,14 +721,16 @@ async fn set_values_pushes_multi_tag_sample() {
     };
     register(
         &lua,
-        ctx_host,
-        &inst,
-        io,
-        tx,
-        RuntimeDevs::default(),
-        zero_dropped(),
-        "tcp",
-        Path::new("scripts"),
+        &ApiCtx {
+            ctx_host,
+            inst: &inst,
+            io,
+            tx,
+            runtime_devs: RuntimeDevs::default(),
+            dropped: zero_dropped(),
+            transport: "tcp",
+            scripts_root: Path::new("scripts"),
+        },
     )
     .expect("register");
 
@@ -776,14 +792,16 @@ async fn set_value_routes_by_devid() {
     };
     register(
         &lua,
-        ctx_host,
-        &inst,
-        io,
-        tx,
-        RuntimeDevs::default(),
-        zero_dropped(),
-        "tcp",
-        Path::new("scripts"),
+        &ApiCtx {
+            ctx_host,
+            inst: &inst,
+            io,
+            tx,
+            runtime_devs: RuntimeDevs::default(),
+            dropped: zero_dropped(),
+            transport: "tcp",
+            scripts_root: Path::new("scripts"),
+        },
     )
     .expect("register");
 
@@ -831,14 +849,16 @@ async fn get_value_reads_rtdata() {
         .expect("rtdata write");
     register(
         &lua,
-        ctx_host,
-        &inst,
-        io,
-        mock_hub_tx(),
-        RuntimeDevs::default(),
-        zero_dropped(),
-        "tcp",
-        Path::new("scripts"),
+        &ApiCtx {
+            ctx_host,
+            inst: &inst,
+            io,
+            tx: mock_hub_tx(),
+            runtime_devs: RuntimeDevs::default(),
+            dropped: zero_dropped(),
+            transport: "tcp",
+            scripts_root: Path::new("scripts"),
+        },
     )
     .expect("register");
 
@@ -890,14 +910,16 @@ async fn get_device_returns_rtdata_values() {
         .expect("rtdata write");
     register(
         &lua,
-        ctx_host,
-        &inst,
-        io,
-        mock_hub_tx(),
-        RuntimeDevs::default(),
-        zero_dropped(),
-        "tcp",
-        Path::new("scripts"),
+        &ApiCtx {
+            ctx_host,
+            inst: &inst,
+            io,
+            tx: mock_hub_tx(),
+            runtime_devs: RuntimeDevs::default(),
+            dropped: zero_dropped(),
+            transport: "tcp",
+            scripts_root: Path::new("scripts"),
+        },
     )
     .expect("register");
 
@@ -952,14 +974,16 @@ async fn list_devices_returns_inst_devices() {
     };
     register(
         &lua,
-        ctx_host,
-        &inst,
-        io,
-        mock_hub_tx(),
-        RuntimeDevs::default(),
-        zero_dropped(),
-        "tcp",
-        Path::new("scripts"),
+        &ApiCtx {
+            ctx_host,
+            inst: &inst,
+            io,
+            tx: mock_hub_tx(),
+            runtime_devs: RuntimeDevs::default(),
+            dropped: zero_dropped(),
+            transport: "tcp",
+            scripts_root: Path::new("scripts"),
+        },
     )
     .expect("register");
 
@@ -1069,14 +1093,16 @@ async fn ctx_transport_returns_configured_kind() {
         };
         register(
             &lua,
-            ctx_host,
-            &inst,
-            io,
-            mock_hub_tx(),
-            RuntimeDevs::default(),
-            zero_dropped(),
-            kind,
-            Path::new("scripts"),
+            &ApiCtx {
+                ctx_host,
+                inst: &inst,
+                io,
+                tx: mock_hub_tx(),
+                runtime_devs: RuntimeDevs::default(),
+                dropped: zero_dropped(),
+                transport: kind,
+                scripts_root: Path::new("scripts"),
+            },
         )
         .expect("register");
         let got: String = lua
