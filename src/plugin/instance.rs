@@ -117,13 +117,13 @@ impl InstanceManager {
         Ok(())
     }
 
-    /// 启动北向 Sink 实例（sample_rx 由调用方/pipeline 提供）。
+    /// 启动北向 Sink 实例。
+    ///
+    /// 数据面 B 阶段走 lux pull（luaNorth 批量收拢），sample 通道由内部自建：
+    /// tx 即 drop、闲置 rx 传入 run——pipeline 未来 tap 的预留位（阶段 B 计划
+    /// 取舍 1；tap 落地时再加 `start_sink_tapped` 变体）。
     #[tracing::instrument(skip(self, inst), fields(hwid = %self.ctx.hwid, inst_id = %inst.inst_id))]
-    pub async fn start_sink(
-        &self,
-        inst: InstConfig,
-        sample_rx: mpsc::Receiver<Sample>,
-    ) -> Result<(), RsIotError> {
+    pub async fn start_sink(&self, inst: InstConfig) -> Result<(), RsIotError> {
         let create = registry::find_sink(inst.app_code.as_ref()).ok_or_else(|| {
             RsIotError::Config(format!("sink plugin not found: {}", inst.app_code))
         })?;
@@ -131,6 +131,7 @@ impl InstanceManager {
         let id_key = inst.inst_id.to_string();
 
         let (cmd_tx, cmd_rx) = mpsc::channel::<CtlMessage>(64);
+        let (_sample_tx, sample_rx) = mpsc::channel::<Sample>(64);
         let token = self.ctx.shutdown.child_token();
 
         self.states.insert(id_key.clone(), InstState::Starting);

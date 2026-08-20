@@ -245,7 +245,7 @@ pub async fn run_app_with_shutdown(
         pipeline_token,
     ));
 
-    // 南向 Source：lux autoStart 实例；无则 demo
+    // lux autoStart 实例（南向 Source / 北向 Sink）；无则 demo
     let started = try_start_from_lux(&mgr, &client).await;
     if started == 0 {
         let _ = mgr.start_source(demo_datasim_config()).await;
@@ -380,11 +380,15 @@ async fn try_start_from_lux(
             }
         };
         if let Ok(inst) = serde_json::from_str::<types::InstConfig>(&s) {
-            if inst.auto_start
-                && inst.app_type == types::AppType::South
-                && mgr.start_source(inst).await.is_ok()
-            {
-                count += 1;
+            if inst.auto_start {
+                // 按方向分发（R4）：South→Source、North→Sink（此前 North 被静默跳过）。
+                let ok = match inst.app_type {
+                    types::AppType::South => mgr.start_source(inst).await.is_ok(),
+                    types::AppType::North => mgr.start_sink(inst).await.is_ok(),
+                };
+                if ok {
+                    count += 1;
+                }
             }
         }
         i += 2;

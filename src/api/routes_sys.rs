@@ -111,13 +111,12 @@ pub async fn startinst(State(st): State<AppState>, Json(req): Json<IdReq>) -> Re
         Ok(c) => c,
         Err(e) => return err(StatusCode::BAD_REQUEST, &format!("invalid config: {e}")),
     };
-    if inst.app_type != AppType::South {
-        return err(
-            StatusCode::BAD_REQUEST,
-            "only south(source) instances can be started via REST",
-        );
-    }
-    if let Err(e) = st.mgr.start_source(inst).await {
+    // 按方向分发（R4）：South→Source、North→Sink（此前 North 被 400 拒绝）。
+    let result = match inst.app_type {
+        AppType::South => st.mgr.start_source(inst).await,
+        AppType::North => st.mgr.start_sink(inst).await,
+    };
+    if let Err(e) = result {
         return err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string());
     }
     Json(serde_json::json!({"status": "ok"})).into_response()

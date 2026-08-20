@@ -2,7 +2,7 @@
 
 > 日期：2026-08-20
 > **状态**：accepted（待执行）
-> **实施**：未开始
+> **实施**：Task 1 已完成（R4 核查 + start_sink 接口适配，2026-08-20）
 > **代码**：（执行时回填）
 > **测试**：（执行时回填）
 > **遗留**：全部（本文件即待办）
@@ -308,4 +308,10 @@ end
 
 ## 核查记录（Task 1 执行时回填）
 
--（待 T1：REST 实例 CRUD 对 north 实例创建/启动/删除的实际覆盖路径与缺口清单）
+**核查结论（2026-08-20，代码实读；file:line 以本 worktree 提交前为准）：**
+
+- `start_sink`（`src/plugin/instance.rs:122`）全仓零调用者；签名要求调用方提供 `sample_rx`，lux/REST 启动路径均无法提供——缺口 A，已修复：去参 `start_sink(&self, inst)`，内部自建闲置 `mpsc::channel::<Sample>(64)`（tx 即 drop，rx 是 pipeline 未来 tap 的预留位，见取舍 1）。
+- lux 自动启动（`src/lib.rs:363` `try_start_from_lux`，在 lib.rs 非 host.rs）：原条件 `inst.auto_start && inst.app_type == South && mgr.start_source(..)`——North autoStart 实例被**静默跳过**（不启动不报错不计数）。已改为按方向分发（South→`start_source` / North→`start_sink`）。
+- REST 启动（`src/api/routes_sys.rs:101` `startinst`）：North 实例原被 400 "only south(source) instances can be started via REST" 显式拒绝，到不了 `start_source`。已改为同构分发；无插件时经统一错误路径返回 500 + `config error: sink plugin not found: ...`。
+- REST 实例 CRUD 其余面（`src/api/routes_inst.rs`：set/get/list/roster/delete/purge）与运行态（stop/remove_state/ctl_send/inststatus、`/inst/stats`、状态 SSE）均按 inst_id 操作、不区分 app_type，`set` 可正常写入 North 配置（InstConfig 反序列化即通过）——**CRUD/状态/stat 对 Sink 实例天然覆盖，R4 唯一缺口在启动接线**（本 task 已补齐）。
+- registry `SinkEntry`（`src/plugin/registry.rs:25`）当前无任何 `inventory::submit!` 注册（首个 sink = luaNorth，T6）。负向测试（`tests/lua_north_e2e.rs`，2 例）：InstanceManager 层 `start_sink` 无插件返回 `Config` 错误且运行态无残留；REST 层 startinst 对 North 分发到 `start_sink`（修复前 400 / 修复后 500 Config 错误，含 CRUD set 写入 North 配置放行）。lux 自动启动路径的 North 分发与 REST 同构，无插件时外部行为与"跳过"不可区分（不计数无残留），无法写行为区分断言——正向 Running/生命周期断言留 T6 luaNorth 注册后。

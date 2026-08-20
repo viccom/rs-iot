@@ -216,7 +216,7 @@ pub struct InstConfig {
     pub app_code: PluginName,
     /// 插件方向（南向 Source / 北向 Sink）。
     pub app_type: AppType,
-    /// 是否在启动时自动拉起（仅南向生效）。
+    /// 是否在启动时自动拉起（South→Source、North→Sink 按方向分发）。
     #[serde(default)]
     pub auto_start: bool,
     /// 任意 JSON 配置，由各插件自行解析。
