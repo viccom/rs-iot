@@ -3,7 +3,7 @@
 > 日期：2026-08-20
 > **状态**：implemented（2026-08-20 于 worktree `feat/lua-stage-b` 执行完毕，12 task 全落地，子代理驱动 + task 间审查）
 > **实施**：T1 R4 核查/start_sink 适配（ff848ab）→ T2 spike-2 方案 a（eae5941）→ T3 ApiCtx 收敛（1bc5ae9）→ T4 secrets 表+REST（7d34473）→ T5 secret_get 授权（bba1753）→ T6 luaNorth 骨架（0d61c60）→ T7 mqtt-north 契约（40197e3）→ T8 MqttPub 迁移（b1eb823）→ T9 hashings+emqx（f34b860）→ T10 onenet+进程内 e2e（d9a322c）→ T11 mqtt 透传 backend（8ccdd69）→ T12 收口
-> **代码**：`src/plugin/builtin/lua_north/`（mod/contract/config/compat）+ `src/db/secrets.rs` + `src/api/routes_secret.rs` + `src/plugin/lua_core/io_engine/mqtt.rs`；源仓 rsiot-lualib 至 1.2.0（9759dd0/0aad2f4）
+> **代码**：`src/plugin/builtin/lua_north/`（mod/contract/config/compat）+ `src/db/secrets.rs` + `src/api/routes_secret.rs` + `src/plugin/lua_core/io_engine/mqtt.rs`；源仓 rsiot-lualib 至 1.3.0（9759dd0/0aad2f4/dad260a——1.3.0 为现场 E2E 期 freeioe fork 三件：middleclass/stream_buffer/bcd）
 > **测试**：`cargo test -p rs-iot --features lua,lua-http`（lib 366 通过/5 ignored + 29 个测试目标全绿）；minimal 组合同绿；契约闭环经进程内 rumqttd broker e2e 实测
 > **遗留**：见设计文档 v0.6 头部遗留清单（OneNET 真平台现场验收/IO 兜底超时独占/send_command R3 收紧/hmac 指令成本/A 阶段遗留项）
 

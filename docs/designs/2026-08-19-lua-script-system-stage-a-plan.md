@@ -613,12 +613,12 @@ rsiot-lualib/
 
 ## 验收清单（对照路线图阶段 A）
 
-- [ ] 现有 lua 测试全绿（重构零行为变化）+ 新增护栏/路由/stdlib/manifest 测试全绿
-- [ ] `require("algo.crc16")` 生效（种子与 `_stdlib/` 双路径）；modbus-like 示例迁移后行为不变
-- [ ] 命名违规被拒：共享层单段、`kind=lib` 撞保留段、路径穿越
-- [ ] 离线冷启动：空 `_stdlib/` 时种子兜底可用
-- [ ] 镜像/upstream 切换 + 篡改拒绝（验签）
-- [ ] spike-1 结论落档；护栏五项参数可见于能力卡与指南
-- [ ] 兼容矩阵成文（lua-script-guide.md）
+- [x] 现有 lua 测试全绿（重构零行为变化）+ 新增护栏/路由/stdlib/manifest 测试全绿
+- [x] `require("algo.crc16")` 生效（种子与 `_stdlib/` 双路径）；modbus-like 示例迁移后行为不变
+- [x] 命名违规被拒：共享层单段、`kind=lib` 撞保留段、路径穿越
+- [x] 离线冷启动：空 `_stdlib/` 时种子兜底可用
+- [x] 镜像/upstream 切换 + 篡改拒绝（验签）
+- [x] spike-1 结论落档；护栏五项参数可见于能力卡与指南
+- [x] 兼容矩阵成文（lua-script-guide.md）
 
 > B/C/D 阶段计划待 A 落地后按同法拆分（B：luaNorth/Sink 接线/mqtt-north/secret/EMQX→OneNET；C：luaTransform/EventBus 带值/自环防护；D：Sparkplug/alarm/透传/脚本包）。
