@@ -37,11 +37,22 @@ pub struct RefQuery {
 ///
 /// ref 校验失败（无前缀/非法字符/空）→ 400（消息含合法字符集，可行动）；
 /// lux 故障 → 500。成功 → `{"status":"ok","ref":...}`（不回显 value）。
-pub async fn set(State(st): State<AppState>, Json(req): Json<SetSecretReq>) -> Response {
+pub async fn set(
+    State(st): State<AppState>,
+    auth: Option<axum::Extension<crate::api::auth::AuthedUser>>,
+    Json(req): Json<SetSecretReq>,
+) -> Response {
     match secrets::set(&st.lux, &req.r#ref, &req.value).await {
         Ok(()) => {
             // Q4 审计：ref 级不落值——日志绝不出现 value（D6）。
-            tracing::info!("[secret][audit] set ref={}", req.r#ref);
+            tracing::info!(
+                "[secret][audit] set ref={} by={}（via {}）",
+                req.r#ref,
+                auth.as_ref()
+                    .map(|a| a.user_id.as_str())
+                    .unwrap_or("accesskey"),
+                auth.as_ref().map(|a| a.via).unwrap_or("accesskey")
+            );
             Json(serde_json::json!({"status": "ok", "ref": req.r#ref})).into_response()
         }
         Err(RsIotError::Config(m)) => err(StatusCode::BAD_REQUEST, &m),
@@ -62,10 +73,21 @@ pub async fn list(State(st): State<AppState>) -> Response {
 /// `DELETE /api/v1/secret?ref=` → 删除（幂等：不存在仍 200 ok）。
 ///
 /// ref 校验失败 → 400；lux 故障 → 500。
-pub async fn delete(State(st): State<AppState>, Query(q): Query<RefQuery>) -> Response {
+pub async fn delete(
+    State(st): State<AppState>,
+    auth: Option<axum::Extension<crate::api::auth::AuthedUser>>,
+    Query(q): Query<RefQuery>,
+) -> Response {
     match secrets::del(&st.lux, &q.r#ref).await {
         Ok(()) => {
-            tracing::info!("[secret][audit] delete ref={}", q.r#ref);
+            tracing::info!(
+                "[secret][audit] delete ref={} by={}（via {}）",
+                q.r#ref,
+                auth.as_ref()
+                    .map(|a| a.user_id.as_str())
+                    .unwrap_or("accesskey"),
+                auth.as_ref().map(|a| a.via).unwrap_or("accesskey")
+            );
             Json(serde_json::json!({"status": "ok", "ref": q.r#ref})).into_response()
         }
         Err(RsIotError::Config(m)) => err(StatusCode::BAD_REQUEST, &m),

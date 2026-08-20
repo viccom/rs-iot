@@ -86,7 +86,24 @@ pub async fn auth_middleware(State(st): State<AppState>, req: Request, next: Nex
         None => return (StatusCode::UNAUTHORIZED, "missing token").into_response(),
     };
     match verify_token(&token, &st.jwt_secret) {
-        Some(_) => next.run(req).await,
+        Some(user_id) => {
+            // 复审 M2：操作者身份注入 request extensions——审计面（secret set/delete
+            // 等）经 Extension<AuthedUser> 取 who，不再依赖访问日志侧猜。
+            let mut req = req;
+            req.extensions_mut().insert(AuthedUser {
+                user_id: user_id.clone(),
+                via: "jwt".into(),
+            });
+            next.run(req).await
+        }
         None => (StatusCode::UNAUTHORIZED, "invalid token").into_response(),
     }
+}
+
+/// 已认证操作者（auth_middleware 注入；审计 who 的唯一来源）。
+#[derive(Debug, Clone)]
+pub struct AuthedUser {
+    pub user_id: String,
+    /// 认证通道（jwt；accesskey 直通路径不注入本类型）。
+    pub via: &'static str,
 }

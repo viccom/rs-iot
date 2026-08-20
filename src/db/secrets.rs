@@ -43,19 +43,19 @@ pub fn validate_ref(r: &str) -> Result<(), RsIotError> {
     Ok(())
 }
 
-/// 掩码 value（REST list 回显用；D6 绝不回显明文）：
-/// 字符数 >8 → 前 4 + `****` + 后 4；≤8 → 全 `****`。
+/// 掩码 value（REST list 回显用；D6 绝不回显明文）：只显**尾 4 字符** + `****` 前缀
+/// （≤4 全掩码）。复审 M1：旧规则（首4+尾4）对 9 字符值泄漏 8/9——数字 PIN 场景
+/// 暴力空间从 10^n 缩到 10，形同虚设；尾 4 供人工核对足够，泄漏面恒为 4 字符。
 ///
 /// 按字符（非字节）截取，多字节字符不产生非法 UTF-8 边界。
 pub fn mask_value(v: &str) -> String {
     const MASK: &str = "****";
     let n = v.chars().count();
-    if n <= 8 {
+    if n <= 4 {
         return MASK.to_string();
     }
-    let head: String = v.chars().take(4).collect();
     let tail: String = v.chars().skip(n - 4).collect();
-    format!("{head}{MASK}{tail}")
+    format!("{MASK}{tail}")
 }
 
 /// 写入一个 ref（覆盖旧值）。ref 非法返回 Err（拒绝的不落库）。
@@ -142,28 +142,31 @@ mod tests {
     // ---- 掩码规则（D6：list 回显的唯一形态）----
 
     #[test]
-    fn mask_long_value_keeps_head_and_tail_4() {
-        assert_eq!(mask_value("abcd12345678wxyz"), "abcd****wxyz");
+    fn mask_long_value_shows_tail_4_only() {
+        // 复审 M1：只显尾 4（旧规则首4+尾4 对 9 字符值泄漏 8/9）
+        assert_eq!(mask_value("abcd12345678wxyz"), "****wxyz");
     }
 
     #[test]
     fn mask_short_value_fully_masked() {
-        assert_eq!(mask_value("short"), "****");
+        assert_eq!(mask_value("short"), "****hort"); // 5 字符显尾 4（>4 即显）
         assert_eq!(mask_value(""), "****");
     }
 
-    /// 边界：≤8 全掩码；>8 前后各 4（9 字符是「>8」最小情形）。
+    /// 边界：≤4 全掩码；>4 只显尾 4（5 字符是「>4」最小情形——泄漏面恒为 4）。
     #[test]
-    fn mask_boundary_at_8_and_9_chars() {
-        assert_eq!(mask_value("12345678"), "****");
-        assert_eq!(mask_value("123456789"), "1234****6789");
+    fn mask_boundary_at_4_and_5_chars() {
+        assert_eq!(mask_value("1234"), "****");
+        assert_eq!(mask_value("12345"), "****2345");
+        // 数字 PIN 场景（复审 PoC）：9 位数字旧规则泄漏 8/9，新规则恒 4
+        assert_eq!(mask_value("123456789"), "****6789");
     }
 
     /// 多字节字符按字符截取，不产生非法 UTF-8（panic 即失败）。
     #[test]
     fn mask_multibyte_by_chars() {
         let masked = mask_value("密钥凭证明文八个字以上");
-        assert!(masked.starts_with("密钥凭") && masked.ends_with("字以上"));
+        assert!(masked.starts_with("****") && masked.ends_with("字以上"));
         assert!(masked.contains("****"));
     }
 
