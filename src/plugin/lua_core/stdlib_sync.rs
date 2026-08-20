@@ -926,13 +926,13 @@ mod tests {
     }
 
     /// T9+T10 官方 dist 真实源码端到端（本地手工跑，默认 ignore）：真实官方
-    /// dist（rsiot-lualib 仓 `./gen_index.sh 1.2.0 && ./sign_index.sh` 产物，
+    /// dist（rsiot-lualib 仓 `./gen_index.sh 1.3.0 && ./sign_index.sh` 产物，
     /// 官方私钥签名）经 dir_fetcher（无需 HTTP 服务）→ `sync_with_fetcher`
     /// 注入 **生产 VERIFY_KEYS** 验签全链路落 `_stdlib/` → 沙箱 VM 逐模块
     /// `selftest()`（NIST/RFC 已知向量）。跑法：
     ///
     /// ```text
-    /// cd rsiot-lualib && ./gen_index.sh 1.2.0 && ./sign_index.sh
+    /// cd rsiot-lualib && ./gen_index.sh 1.3.0 && ./sign_index.sh
     /// cargo test -p rs-iot --features lua,lua-http -- --ignored official_dist
     /// ```
     ///
@@ -945,7 +945,7 @@ mod tests {
         let dist = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../rsiot-lualib/dist");
         assert!(
             dist.join("index.json").exists(),
-            "缺官方 dist：{}（先在源仓跑 ./gen_index.sh 1.2.0 && ./sign_index.sh）",
+            "缺官方 dist：{}（先在源仓跑 ./gen_index.sh 1.3.0 && ./sign_index.sh）",
             dist.display()
         );
         let root = fresh_scripts("official-dist", "");
@@ -960,8 +960,8 @@ mod tests {
         )
         .await
         .expect("官方 dist 验签→逐文件 sha→原子落盘");
-        assert_eq!(report.version, "1.2.0");
-        assert_eq!(report.added.len(), 12, "T10 后全量：{report:?}");
+        assert_eq!(report.version, "1.3.0");
+        assert_eq!(report.added.len(), 15, "1.3.0 后全量：{report:?}");
 
         // 沙箱 VM 两档指令预算（cfg.hook_instr_limit，护栏参数本就宿主可配）：
         //   默认 1M 档——轻算法（sha256 单次 ~0.4M 指令）生产默认护栏内可用；
@@ -988,6 +988,21 @@ mod tests {
                 .unwrap(),
             "sha256 selftest 应在默认 1M 指令护栏内通过"
         );
+
+        // 1.3.0 三库 fork（freeioe vendored，另起新 VM 单独预算）：middleclass/
+        // stream_buffer/bcd 纯 OO/字符串运算，默认 1M 护栏内可用（stream_buffer
+        // selftest 同时证明其内部 require('oo.middleclass') 的跨模块依赖链）
+        let lua_fork = mk_vm(1_000_000);
+        load_main(&lua_fork, &lctx).unwrap();
+        for m in ["oo.middleclass", "proto.stream_buffer", "codec.bcd"] {
+            assert!(
+                lua_fork
+                    .load(format!("return require('{m}').selftest()"))
+                    .eval::<bool>()
+                    .unwrap_or_else(|e| panic!("{m} selftest 应通过：{e}")),
+                "{m} selftest 向量失败"
+            );
+        }
 
         // 提高档：全部新模块 selftest（已知向量）+ emqx/onenet 薄配方 helper
         let lua = mk_vm(4_000_000);
@@ -1080,7 +1095,7 @@ mod tests {
         ];
         let refs: Vec<(&str, &str)> = files.iter().map(|(p, c)| (*p, c.as_str())).collect();
         let up = fresh_scripts("up-onenet", "");
-        write_upstream(&up, "1.2.0", 1, &refs, None);
+        write_upstream(&up, "1.3.0", 1, &refs, None);
         let root = fresh_scripts("onenet", "onenet = require('cloud.onenet')");
         let r = sync_with_fetcher(UPSTREAM, &root, None, &dev_keys(), dir_fetcher(up.clone()))
             .await
@@ -1132,13 +1147,108 @@ mod tests {
         let _ = fs::remove_dir_all(&up);
     }
 
+    /// stdlib 1.3.0 三库 fork 在线分发（本地手工跑，默认 ignore——CI 只 checkout
+    /// 主仓，无 `../rsiot-lualib` 兄弟仓）：**真实源码文件**（freeioe@1398d47
+    /// vendored 的 `oo/middleclass`、`proto/stream_buffer`、`codec/bcd`）经
+    /// write_upstream（dev key 签名）+ dir_fetcher sync 落 `_stdlib/` → 沙箱
+    /// VM（**默认 1M 指令预算**——三库纯 OO/字符串运算，实测远低于护栏，生产
+    /// 默认配置即可用）断言：
+    /// a) 三模块 selftest（middleclass 继承/mixin、bcd 已知向量 1234↔0x12 0x34）；
+    /// b) **跨模块依赖链**：stream_buffer 内部 `require('oo.middleclass')` 经
+    ///    保留段路由回 `_stdlib/oo/`（fork 时 require 路径改造的真值锚点）；
+    /// c) 分帧行为锁：JUNK+两帧+NOISE 流水实测帧形（含上游 off-by-one 语义）。
+    /// 同内容也锁在 [`official_dist_local`] 的生产验签路径——本测试免 dist
+    /// 重建，改三库源码后先跑这个。
+    ///
+    /// 跑法：`cargo test -p rs-iot --features lua,lua-http -- --ignored freeioe_fork`
+    #[cfg(feature = "lua-http")]
+    #[tokio::test]
+    #[ignore = "需本地 ../rsiot-lualib 源仓（CI 无此仓）"]
+    async fn freeioe_fork_modules_local() {
+        let lib = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../rsiot-lualib/stdlib");
+        assert!(
+            lib.join("oo/middleclass.lua").exists(),
+            "缺源仓 stdlib：{}",
+            lib.display()
+        );
+        let read = |p: &str| fs::read_to_string(lib.join(p)).unwrap();
+        let files = [
+            ("oo/middleclass.lua", read("oo/middleclass.lua")),
+            ("proto/stream_buffer.lua", read("proto/stream_buffer.lua")),
+            ("codec/bcd.lua", read("codec/bcd.lua")),
+        ];
+        let refs: Vec<(&str, &str)> = files.iter().map(|(p, c)| (*p, c.as_str())).collect();
+        let up = fresh_scripts("up-fork", "");
+        write_upstream(&up, "1.3.0", 1, &refs, None);
+        let root = fresh_scripts("fork", "sb = require('proto.stream_buffer')");
+        let r = sync_with_fetcher(UPSTREAM, &root, None, &dev_keys(), dir_fetcher(up.clone()))
+            .await
+            .expect("sync 三库 fork");
+        assert_eq!(r.version, "1.3.0");
+        assert_eq!(r.added.len(), 3, "三文件全量新增：{r:?}");
+        assert!(root.join("_stdlib/oo/middleclass.lua").exists());
+        assert!(root.join("_stdlib/proto/stream_buffer.lua").exists());
+
+        // 默认 1M 预算 VM（生产默认护栏即用，与 hashings 需 4M 对照）
+        let cfg = parse_cfg(&json!({"script":"devA","endpoint":"x"})).unwrap();
+        let lua = new_vm(&cfg).unwrap();
+        let lctx = LoadCtx {
+            scripts_root: Arc::from(root.as_path()),
+            script_name: Arc::<str>::from("devA"),
+        };
+        load_main(&lua, &lctx).unwrap();
+        // a+b) 三模块 selftest；stream_buffer 的 selftest 即跨模块依赖链证明
+        //    （其分帧全部建立在内部 require 'oo.middleclass' 的类构造上）
+        for m in ["oo.middleclass", "proto.stream_buffer", "codec.bcd"] {
+            assert!(
+                lua.load(format!("return require('{m}').selftest()"))
+                    .eval::<bool>()
+                    .unwrap_or_else(|e| panic!("{m} selftest 应通过：{e}")),
+                "{m} selftest 向量失败"
+            );
+        }
+        // b) bcd 跨语言向量锁：1234/"XXXX" → 字节 0x12 0x34（Rust 侧独立断言）
+        let enc: String = lua
+            .load(r#"return require('codec.bcd').encode(1234, 'XXXX')"#)
+            .eval()
+            .unwrap();
+        assert_eq!(enc.as_bytes(), &[0x12, 0x34], "BCD 高位在左已知向量");
+        // c) 分帧行为锁（实测帧形：含起止标记 + 上游 off-by-one 尾字节/长度语义）
+        let frames: String = lua
+            .load(
+                r#"
+            local b = sb:new(256)
+            b:append('JUNK\xAA\x01\x02\xBBNOISE\xAA\x03\xBB')
+            local out = {}
+            repeat
+                local f, len = b:find('\xAA', '\xBB')
+                if f then
+                    out[#out + 1] = (f:gsub('.', function(c)
+                        return string.format('%02X', c:byte())
+                    end))
+                    b:pop(len)
+                end
+            until not f
+            return table.concat(out, ' | ')"#,
+            )
+            .eval()
+            .unwrap();
+        assert_eq!(
+            frames, "AA0102BB4E | AA03BB",
+            "帧含起止标记；首帧带 1 标记外尾字节（freeioe 上游 find 语义）"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&up);
+    }
+
     /// T13 端到端验收（本地手工跑，默认 ignore）：真实官方 dist（rsiot-lualib
-    /// 仓 `./gen_index.sh 1.2.0 && ./sign_index.sh` 产物，官方 v1 私钥签名）经本机
+    /// 仓 `./gen_index.sh 1.3.0 && ./sign_index.sh` 产物，官方 v1 私钥签名）经本机
     /// 静态 HTTP 服务 → **生产 reqwest 路径** [`sync`]（内置 VERIFY_KEYS 验签）
     /// 全链路落 `_stdlib/`。跑法：
     ///
     /// ```text
-    /// cd rsiot-lualib && ./gen_index.sh 1.2.0 && ./sign_index.sh
+    /// cd rsiot-lualib && ./gen_index.sh 1.3.0 && ./sign_index.sh
     /// python -m http.server 8765 -d dist &          # 或任意静态服务
     /// cargo test -p rs-iot --features lua,lua-http -- --ignored e2e_sync
     /// ```
@@ -1158,8 +1268,8 @@ mod tests {
         let report = sync(&upstream, &root, None)
             .await
             .expect("官方 dist 全链路同步（验签→逐文件 sha→原子落盘）");
-        assert_eq!(report.version, "1.2.0");
-        assert_eq!(report.added.len(), 12, "T10 后全量新增：{report:?}");
+        assert_eq!(report.version, "1.3.0");
+        assert_eq!(report.added.len(), 15, "1.3.0 后全量新增：{report:?}");
 
         // a) _stdlib/ 落位 + 本地 index 版本
         for p in [
@@ -1172,23 +1282,26 @@ mod tests {
             "cloud/emqx.lua",
             "cloud/onenet.lua",
             "codec/basexx.lua",
+            "codec/bcd.lua",
+            "oo/middleclass.lua",
+            "proto/stream_buffer.lua",
             "util/retry.lua",
             "util/tablex.lua",
             "scripts/modbus-like/main.lua",
         ] {
             assert!(root.join("_stdlib").join(p).exists(), "_stdlib 缺 {p}");
         }
-        assert_eq!(read_index(&root).expect("read_index").version, "1.2.0");
+        assert_eq!(read_index(&root).expect("read_index").version, "1.3.0");
 
         // b) inventory 徽标：crc16 转 synced（其余仍 seed）
         let (ver, entries) = inventory(&root);
-        assert_eq!(ver.as_deref(), Some("1.2.0"));
+        assert_eq!(ver.as_deref(), Some("1.3.0"));
         let crc = entries
             .iter()
             .find(|e| e.path == "algo/crc16.lua")
             .expect("inventory 应含 crc16");
         assert_eq!(crc.source, "synced");
-        assert_eq!(crc.ver.as_deref(), Some("1.2.0"));
+        assert_eq!(crc.ver.as_deref(), Some("1.3.0"));
 
         // c) require("algo.crc16") 取同步文件版（非种子）——行为证明：给本地
         //    _stdlib 文件追加种子没有的字段，新 VM require 应可见（文件优先）
