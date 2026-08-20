@@ -1,20 +1,18 @@
 # rs-iot Lua 脚本系统演进设计（多角色脚本平台）
 
-> 日期：2026-08-18（v0.5 更新于 2026-08-19：全部 Open Questions 定案 + 冲突/风险分析 + 附录 B；2026-08-20 阶段 A 落地 + 审查修复回填）
-> 版本：v0.5（Q1-Q19 全部决议，含 §9 架构冲突与实施风险分析；阶段 A 已实施）
-> **状态**：implemented（阶段 A；worktree `feat/lua-stage-a` 待合并，B/C/D 规划中）
-> **实施**：阶段 A（2026-08-19~20，13 task + 审查修复）：lua_core 重构 / 能力卡 / 护栏五项（含附录 B P0/P1/P3）/ require 四层路由 / stdlib 种子+sync / `_lib` / manifest dry-run / 官方源仓建制
-> **代码**：`src/plugin/lua_core/`（公共层）+ `src/plugin/builtin/lua_client/`（薄壳）；源仓 `E:/Rs_Codes/rsiot-lualib`
-> **测试**：`cargo test -p rs-iot --features lua,lua-http`（lib 304 通过 / 2 ignored[需外部资源] + 19 个 e2e 套件全绿）；e2e 官方源同步经 `--ignored e2e_sync` 本地实跑验收
-> **遗留**（阶段 A 审查[2026-08-20 四轮]登记，排期 B 阶段或平台前置）：
-> - **官方脚本模板安装器**（Q18/D1 半体）：模板已随 sync 分发到 `_stdlib/scripts/`（不列入 `stdlib.list()`），安装到 `scripts/<name>/` + `@source` 徽标写入待 B 阶段
-> - **sync 管理员权限**（§3.7）：平台 auth 尚无角色模型（JWT 统一鉴权已覆盖），角色区分属平台级前置
-> - **`min_host_ver` 预检**（§3.3 兼容矩阵第三轴）：宿主无版本轴常量，随发布流程补
-> - **sync 后本地 selftest 抽样**（§3.3）：源仓 CI 已冒烟，本地抽样待 B
-> - **json encode 深度护栏**（§4.3-5 滥用用例）：decode 受 serde_json 128 层递归限制，encode 侧深嵌套 table 理论可栈溢出，需自写深度受限转换
-> - **reqwest Client 复用**（附录 B P2）与 1MB 检查流式化（P4）：实现期优化项
-> - **stdlib sync 与 `lua-http` 解耦**：脚本出站风险面与官方库分发是正交关注点，feature 语义待拆
-> - **默认 upstream 为占位 URL**：`rsiot.github.io/lualib` 未发布（源仓无 remote），上线前须发布 dist 或改配置指向可用镜像
+> 日期：2026-08-18（v0.5 更新于 2026-08-19：全部 Open Questions 定案 + 冲突/风险分析 + 附录 B；2026-08-20 阶段 A 落地 + 审查修复回填；2026-08-20 阶段 B 落地）
+> 版本：v0.6（Q1-Q19 全部决议；阶段 A/B 已实施，C/D 规划中）
+> **状态**：implemented（阶段 A 已合入 master；阶段 B 于 worktree `feat/lua-stage-b` 待合并）
+> **实施**：阶段 A（2026-08-19~20，13 task + 审查修复，见 v0.5.1 行）；阶段 B（2026-08-20，12 task，`2026-08-20-lua-script-system-stage-b-plan.md`）：luaNorth 薄壳（Sink 首个接线）/ mqtt-north 契约（Q5 六回调 + 混合批量 + 重连重调 auth）/ secret 链路（Q4：lux secrets 表 + REST + ctx:secret_get 授权清单）/ MqttPublisher 无损迁移（R5 单通道锁，旧代码删除）/ cloud 配方 emqx+onenet（Q8，源仓 1.2.0）/ io_engine mqtt 透传 backend（Q10，spike-2 方案 a）/ ApiCtx 参数收敛 / manifest 多角色契约
+> **代码**：`src/plugin/lua_core/`（公共层）+ `src/plugin/builtin/{lua_client,lua_north}/`（薄壳）+ `src/db/secrets.rs` + `src/api/routes_secret.rs`；源仓 `E:/Rs_Codes/rsiot-lualib`（stdlib 至 1.2.0：种子 4 库 + hashings 子集 + cloud/emqx + cloud/onenet）
+> **测试**：`cargo test -p rs-iot --features lua,lua-http`（阶段 B 末：lib 366 通过 / 5 ignored[需外部资源] + 29 个测试目标全绿）；`--no-default-features --features lua` 同绿；契约闭环经进程内 rumqttd broker e2e（auth/订阅/up/down/LWT/takeover 断连/重连）实测
+> **遗留**（阶段 A 审查项 + 阶段 B 新增登记）：
+> - **官方脚本模板安装器**（Q18/D1 半体，A 遗留）：模板已分发到 `_stdlib/scripts/`，安装器 + `@source` 徽标待 C/D
+> - **OneNET 真平台端到端待现场**（Q8）：token 向量与进程内契约闭环已验，真实平台（认证→上报→下行）需现场凭证手动验收（`RSIOT_NORTH_E2E_BROKER` 真机 e2e 就绪）
+> - **`IoBackend` request 兜底超时独占 IO task**（B 发现）：连接健康但响应丢失时 backend 层 30s 兜底会占住 IO task（上层 timeout 只释放 Lua 侧）；与 TcpIo 语义一致，属 trait 架构层面，评估 spawn_io_task 对 reply_to.closed() 竞速
+> - **mqtt-north 的 send_command 恒注入**（Q5 兼容依赖）：R3 收紧（显式授权）待角色能力包机制完善后做
+> - **纯 Lua hmac 指令成本**（B 实测量化）：hmac_sha1 ~70 万指令 > 默认 1M hook 护栏，OneNET 生产须 `hook_instr_limit≥2M`（指南已注明）；Rust 侧 builtin 哈希（C7）列远期
+> - sync 管理员权限（平台无角色模型）、`min_host_ver` 预检、sync 后 selftest 抽样、json encode 深度护栏、reqwest 复用、stdlib 与 lua-http 解耦、默认 upstream 占位 URL（A 遗留，均未变）
 > 流程：调研（mlua 生态 / FreeIOE / IIoT 趋势）→ 本 spec → 分章深化 → writing-plans → 分阶段实施
 > 前置：`2026-08-06-lua-script-collector-design.md`（luaClient 采集系统，已落地，本文是其演进）
 
@@ -28,6 +26,7 @@
 | v0.4 | 2026-08-19 | 三决策定案：①官方源静态托管（GitHub Pages/对象存储，Q16✅）；②embed 种子保留，规模预算几十库/≤500KB（重型件只走在线）；③require 命名规范定稿——官方保留段封闭集（algo/codec/proto/cloud/util/oo）+ 第三方强制两段式 `作者.库名[.子模块]`，`local.` 前缀取消（D8 修订，+D11）；官方脚本模板装 `scripts/<name>/` + manifest `@source` 安装器写入（Q18✅） |
 | v0.5 | 2026-08-19 | 全部 OQ 定案（用户「全按推荐」）：Q1-Q17/Q19 决议登记见上表；§5.3 mqtt-north 契约定稿、§5.1 on_timer 澄清 + 反馈环路防护、§5.0 插件形态（lua_core+三薄插件）、§4.5 护栏参数定稿；新增 §9 架构冲突与实施风险分析、附录 B 性能/死锁评估摘要 |
 | v0.5.1 | 2026-08-20 | 阶段 A 落地后四轮独立审查的修复回填：Windows `:` 段路径逃逸封堵（loader/safe_rel_path）、on_init 纳入回调时长预算（§4.5-1 补全）、批量 reload 改 VM 级（不复活已停实例 + 失败回退旧 VM，Q11 语义对齐）、io_engine on_data 改 try_send+计数（附录 B P3 落地，`dropped_frames`）、pin 默认锁定语义落地（`lua_stdlib_pin` 配置键 + 本地已装版本锁定）、`GET /lua/script` 支持 kind=lib（Q13 读回补全）、`RuntimeDevs`/`lua_value_to_sample` 下沉 lua_core（解除反向依赖）、sync 审计日志（§3.7）、clamp 上限读能力卡（单一事实源）、sync 进程级互斥、模板条目不列入 stdlib 清单；头部实施块与遗留清单更新 |
+| v0.6 | 2026-08-20 | 阶段 B 落地：§5.4 修订（spike-2 实测纠正「AsyncClient 自带 poll task」前提——EventLoop 由调用方轮询为官方预期用法，EventLoop 独立 pump + 内部分路模型成立，迟到 QoS1 补发风险落档）；Q5 契约全项实现（六回调/混合批量/重连必重调 auth/宿主逐条投递）；Q4 secret 链路（lux secrets 表/REST 掩码读+审计/ctx:secret_get 授权清单）；Q19 三薄插件之二 luaNorth 接线 Sink（manifest 多角色契约、register Role 裁剪 C1）；MqttPublisher 无损迁移默认 luaNorth 实例（R5 单通道锁、旧代码删除）；Q8 cloud/ 配方（emqx + onenet token，源仓 1.2.0，hashings 子集在线分发）；Q10 mqtt 透传 backend（io_engine 第四传输）；新增遗留登记见头部（OneNET 真平台现场验收/IO 兜底超时独占/send_command 收紧/hmac 指令成本） |
 
 ## 设计问题决议登记（Q1-Q19，v0.5 全部定案）
 

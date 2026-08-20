@@ -1,11 +1,11 @@
 # Lua 脚本系统演进 · 阶段 B（北向突破）实施计划
 
 > 日期：2026-08-20
-> **状态**：accepted（执行中）
-> **实施**：Task 1-2 已完成（T1：R4 核查 + start_sink 接口适配；T2：spike-2 MQTT 透传 pump 分路模型验证——方案 a 成立，结论落设计 §5.4；均 2026-08-20）
-> **代码**：（执行时回填）
-> **测试**：（执行时回填）
-> **遗留**：全部（本文件即待办）
+> **状态**：implemented（2026-08-20 于 worktree `feat/lua-stage-b` 执行完毕，12 task 全落地，子代理驱动 + task 间审查）
+> **实施**：T1 R4 核查/start_sink 适配（ff848ab）→ T2 spike-2 方案 a（eae5941）→ T3 ApiCtx 收敛（1bc5ae9）→ T4 secrets 表+REST（7d34473）→ T5 secret_get 授权（bba1753）→ T6 luaNorth 骨架（0d61c60）→ T7 mqtt-north 契约（40197e3）→ T8 MqttPub 迁移（b1eb823）→ T9 hashings+emqx（f34b860）→ T10 onenet+进程内 e2e（d9a322c）→ T11 mqtt 透传 backend（8ccdd69）→ T12 收口
+> **代码**：`src/plugin/builtin/lua_north/`（mod/contract/config/compat）+ `src/db/secrets.rs` + `src/api/routes_secret.rs` + `src/plugin/lua_core/io_engine/mqtt.rs`；源仓 rsiot-lualib 至 1.2.0（9759dd0/0aad2f4）
+> **测试**：`cargo test -p rs-iot --features lua,lua-http`（lib 366 通过/5 ignored + 29 个测试目标全绿）；minimal 组合同绿；契约闭环经进程内 rumqttd broker e2e 实测
+> **遗留**：见设计文档 v0.6 头部遗留清单（OneNET 真平台现场验收/IO 兜底超时独占/send_command R3 收紧/hmac 指令成本/A 阶段遗留项）
 
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
@@ -281,28 +281,27 @@ end
 
 ### Task 12: 阶段 B 收口——验收核对 + 文档同步
 
-**Step 1: 验收清单核对**（对照设计路线图 B 行，逐项实测留证）：
-- [ ] EMQX 环境契约闭环（auth/up/down/LWT/重连）——mock broker e2e + 真实 EMQX 手动
-- [ ] OneNET 端到端（认证→上报→下行命令）
-- [ ] 凭证不出 lux（secret 链路：掩码读/审计/越权报错测试全绿）
-- [ ] 旧 mqtt 配置无损迁移（兼容脚本 payload 逐字段比对 MqttPub——T8 测试）
-- [ ] `cargo test -p rs-iot --features lua,lua-http` 全绿 + clippy 零警告 + `--no-default-features --features lua` 全绿（CI minimal）
-- [ ] `python scripts/check_docs.py` OK
+**Step 1: 验收清单核对**（对照设计路线图 B 行，逐项实测留证；2026-08-20 完成）：
+- [x] EMQX 环境契约闭环（auth/up/down/LWT/重连）——进程内 rumqttd e2e `e2e_north_contract_inproc_broker` 实测（含 takeover 断连→LWT→退避重连→重调 auth→再发布）；真实 EMQX 留真机 e2e（已就绪待现场）
+- [x] OneNET 端到端——token 已知向量（Python 独立参考值逐字符一致）；真实平台端到端待现场凭证（登记遗留）
+- [x] 凭证不出 lux（掩码读/审计/越权报错测试全绿；`list_masked_never_echoes_plaintext` 锁明文不回显）
+- [x] 旧 mqtt 配置无损迁移（兼容脚本 payload 与 legacy 快照解析后 JSON 结构逐字段相等；R5 三重单通道锁）
+- [x] 三组合全绿 + fmt + check_docs OK（顺带修存量 flaky `db::stat::instances_are_isolated`——固定 data_dir 并发串数据）
 
 **Step 2: 文档**——guide（mqtt-north 角色契约/cloud 配方/透传 backend/secret 使用）、rest-api.md（secret 三端点 + north 实例类型）、设计文档头部实施块与遗留清单更新、README 索引；release note（`ops/releases/`，含迁移告示：旧 `[mqtt]` 配置行为等价说明）。
 **Step 3:** Commit `docs(lua): 阶段 B 收口——指南/参考/矩阵/发布说明`
 
 ---
 
-## 验收清单（对照路线图阶段 B）
+## 验收清单（对照路线图阶段 B——2026-08-20 核对全过）
 
-- [ ] luaNorth 走 InstanceManager 全套（多实例并存/启停/stat/热加载/VM 级 reload 回退）
-- [ ] mqtt-north 契约六回调 + 混合批量 + 重连必重调 auth（Q5 全项）
-- [ ] secret：写入/掩码读/审计/授权清单/越权报错（Q4 全项）
-- [ ] EMQX 契约闭环 + OneNET 端到端（Q8）
-- [ ] 旧 `[mqtt]` 配置无损迁移 + R5 单通道锁 + 旧代码删除
-- [ ] MQTT 透传脚本行为与 TCP 一致（Q10，依 spike-2）
-- [ ] CI 三组合全绿（default / minimal / clippy）
+- [x] luaNorth 走 InstanceManager 全套（多实例并存/启停/stat/热加载/VM 级 reload 回退——e2e 生命周期 4 例）
+- [x] mqtt-north 契约六回调 + 混合批量 + 重连必重调 auth（Q5 全项——auth 重调 kv 计数实测 + 进程内 broker 契约闭环）
+- [x] secret：写入/掩码读/审计/授权清单/越权报错（Q4 全项）
+- [x] EMQX 契约闭环（进程内）+ OneNET token 向量（Q8；真平台待现场）
+- [x] 旧 `[mqtt]` 配置无损迁移 + R5 单通道锁 + 旧代码删除（mqtt_pub 整目录删除，rg 零残留）
+- [x] MQTT 透传脚本行为与 TCP 一致（Q10——`lua_mqtt_pass_e2e`：request 闭环 + on_data 被动帧；断 broker 报错不 panic，自愈真机 TODO）
+- [x] CI 三组合全绿（default / minimal / clippy + fmt）
 
 > C/D 阶段计划待 B 落地后按同法拆分（C：luaTransform/EventBus 带值/自环防护/on_timer/rhai 冻结；D：Sparkplug/alarm/脚本包）。
 

@@ -78,11 +78,21 @@ mod tests {
     use super::*;
 
     async fn client() -> EmbeddedClient {
+        // 唯一 data_dir（pid + 纳秒）：同模块多个测试并行各起 lux server，固定目录
+        // 会让 server 间经持久化文件串数据（存量 flaky：instances_are_isolated 偶发
+        // 读到 delete 测试写入的 "b"），照仓内"唯一临时目录防并发互扰"惯例隔离。
         let cfg = crate::config::AppConfig {
             lux: crate::config::LuxConfig {
                 port: 0,
                 data_dir: std::env::temp_dir()
-                    .join(format!("inststat-{}", std::process::id()))
+                    .join(format!(
+                        "inststat-{}-{}",
+                        std::process::id(),
+                        std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap()
+                            .as_nanos()
+                    ))
                     .to_str()
                     .unwrap()
                     .to_string(),
