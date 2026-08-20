@@ -10,6 +10,7 @@
 > - **官方脚本模板安装器**（Q18/D1 半体，A 遗留）：模板已分发到 `_stdlib/scripts/`，安装器 + `@source` 徽标待 C/D
 > - **OneNET 真平台端到端待现场**（Q8）：token 向量与进程内契约闭环已验，真实平台（认证→上报→下行）需现场凭证手动验收（`RSIOT_NORTH_E2E_BROKER` 真机 e2e 就绪）
 > - **`IoBackend` request 兜底超时独占 IO task**（B 发现）：连接健康但响应丢失时 backend 层 30s 兜底会占住 IO task（上层 timeout 只释放 Lua 侧）；与 TcpIo 语义一致，属 trait 架构层面，评估 spawn_io_task 对 reply_to.closed() 竞速
+> - **串口 backend 异步安全改造**（2026-08-20 现场实测发现，专项）：串口对端接错/无人监听时 SerialIo 卡死在 poll 内部阻塞调用（serialport/驱动层）——select 臂内 token 包裹与 task abort 均无法抢占永不返回的 poll，stopinst 后 COM 口仍被占（杀进程才释放）；同场景旧代码还会因 `tx.send` 无超时保护进入预算死循环（已修，f46a15c）。完整修复：serial open 走 spawn_blocking + 限时、读写经专用线程/通道桥接；缓解：配置正确的对端口、stop 后端口被占即重启进程
 > - **mqtt-north 的 send_command 恒注入**（Q5 兼容依赖）：R3 收紧（显式授权）待角色能力包机制完善后做
 > - **纯 Lua hmac 指令成本**（B 实测量化）：hmac_sha1 ~70 万指令 > 默认 1M hook 护栏，OneNET 生产须 `hook_instr_limit≥2M`（指南已注明）；Rust 侧 builtin 哈希（C7）列远期
 > - sync 管理员权限（平台无角色模型）、`min_host_ver` 预检、sync 后 selftest 抽样、json encode 深度护栏、reqwest 复用、stdlib 与 lua-http 解耦、默认 upstream 占位 URL（A 遗留，均未变）

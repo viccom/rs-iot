@@ -297,6 +297,11 @@ main.lua 顶部注释块可声明脚本契约（`-- @key value`，逐行扫至�
   内网冷启动不拒载。
 
 
+## 编写约束（现场实测提示）
+
+- **collector 脚本顶层不可用 `ctx`**：ctx 在 register 前于 load_main 之后才可用（luaNorth 相反——register 先于 load_main，顶层可用 ctx/cfg）。collector 需要初始化状态时在 `on_init` 里存全局变量（现场实测：顶层 `ctx:now()` 报 index nil）。
+- **serial 对端须真实可达**：串口对端接错/无人监听时，单次 request 会按脚本超时干净返回 nil（warn 可感知）；但底层串口句柄在驱动层异常场景可能 wedged（stop 后端口被占需重启进程——已登记专项改造）。
+
 ## 配置（`app_config`）
 
 | 字段 | 类型 | 默认 | 说明 |

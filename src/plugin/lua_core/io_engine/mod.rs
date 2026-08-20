@@ -114,29 +114,44 @@ pub(crate) fn spawn_io_task(
                 req = rx.recv() => match req {
                     Some(req) => {
                         crate::io_trace::dump(&trace_registry, &inst_id, crate::io_trace::Dir::Tx, &req.frame);
-                        let r = backend.request(&req.frame).await;
-                        if let Ok(resp) = &r {
-                            crate::io_trace::dump(&trace_registry, &inst_id, crate::io_trace::Dir::Rx, resp);
+                        // 臂内再包 token（现场复验 2026-08-20 第二轮）：select 一旦提交到
+                        // 本臂，外层 token 分支不再被轮询——backend.request 挂死在臂体内
+                        // 时（串口对端无人监听场景实测）stop 仍无法释放句柄；臂内 select
+                        // 让 token 取消能 drop 正在 await 的 backend future。
+                        tokio::select! {
+                            _ = token.cancelled() => break,
+                            r = backend.request(&req.frame) => {
+                                if let Ok(resp) = &r {
+                                    crate::io_trace::dump(&trace_registry, &inst_id, crate::io_trace::Dir::Rx, resp);
+                                }
+                                let _ = req.reply_to.send(r);
+                            }
                         }
-                        let _ = req.reply_to.send(r);
                     }
                     None => break, // 所有 IoEngine 句柄 drop → 退出
                 },
-                res = backend.recv_idle() => {
-                    if let Some(frame) = res {
-                        crate::io_trace::dump(&trace_registry, &inst_id, crate::io_trace::Dir::Rx, &frame);
-                        // 满通道丢帧（P3）：IO task 永不因数据面反压停摆
-                        if let Err(tokio::sync::mpsc::error::TrySendError::Full(_)) =
-                            on_data_tx.try_send(frame)
-                        {
-                            dropped_frames.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                            tracing::warn!(
-                                "[luaClient] {inst_id}: on_data 通道满，丢被动帧（累计 {}）",
-                                dropped_frames.load(std::sync::atomic::Ordering::Relaxed)
-                            );
+                _ = backend.recv_idle() => {
+                    // 臂内 token 同 request 臂（防 select 提交后卡死在
+                    // ensure_connected/驱动调用内不可打断——现场复验第三轮）。
+                    tokio::select! {
+                        _ = token.cancelled() => break,
+                        res = backend.recv_idle() => {
+                            if let Some(frame) = res {
+                                crate::io_trace::dump(&trace_registry, &inst_id, crate::io_trace::Dir::Rx, &frame);
+                                // 满通道丢帧（P3）：IO task 永不因数据面反压停摆
+                                if let Err(tokio::sync::mpsc::error::TrySendError::Full(_)) =
+                                    on_data_tx.try_send(frame)
+                                {
+                                    dropped_frames.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                    tracing::warn!(
+                                        "[luaClient] {inst_id}: on_data 通道满，丢被动帧（累计 {}）",
+                                        dropped_frames.load(std::sync::atomic::Ordering::Relaxed)
+                                    );
+                                }
+                            }
+                            // None（idle 无数据/未连接）→ 回 loop 重 select!（recv_idle 重启）
                         }
                     }
-                    // None（idle 无数据/未连接）→ 回 loop 重 select!（recv_idle 重启）
                 }
             }
         }
