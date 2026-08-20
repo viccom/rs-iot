@@ -200,7 +200,9 @@ pub(crate) static CAPABILITIES: &[CapabilityCard] = &[
     CapabilityCard {
         name: "ctx:send_command",
         layer: Layer::C3,
-        risk: Risk::R3, // §4.2：权限敏感，规划显式授权注入
+        risk: Risk::R3, // §4.2 权限敏感。B 阶段 T6 起 collector/north 均恒注入（Q5 定案：
+        // mqtt-north down() 下行依赖 send_command；T8 兼容脚本同依赖）——
+        // 「实例配置显式授权才注入」的收紧排后续 task。
         feature: None,
         timeout_cap_ms: 0,
         rate_per_sec: 0,

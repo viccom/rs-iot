@@ -452,7 +452,8 @@ async fn reload_vm_rejects_bad_manifest() {
     let ac = crate::plugin::lua_core::api::ApiCtx {
         ctx_host: lua_host_ctx().await,
         inst: &inst,
-        io,
+        io: Some(io),
+        role: crate::plugin::lua_core::api::Role::default(),
         tx,
         runtime_devs: Default::default(),
         dropped: Default::default(),
@@ -590,7 +591,8 @@ async fn reload_vm_on_init_budget_timeout_falls_back() {
     let ac = crate::plugin::lua_core::api::ApiCtx {
         ctx_host: lua_host_ctx().await,
         inst: &inst,
-        io,
+        io: Some(io),
+        role: crate::plugin::lua_core::api::Role::default(),
         tx,
         runtime_devs: Default::default(),
         dropped: Default::default(),

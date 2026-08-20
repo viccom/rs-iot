@@ -9,7 +9,6 @@ use crate::plugin::traits::Source;
 use crate::types::{CtlMessage, InstConfig, Sample, SampleValue};
 use async_trait::async_trait;
 use mlua::LuaSerdeExt;
-use sha2::Digest;
 use std::collections::BTreeMap;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -167,16 +166,18 @@ impl Source for LuaClient {
         let runtime_devs: RuntimeDevs = Default::default();
         let dropped: std::sync::Arc<std::sync::atomic::AtomicU64> = Default::default();
         // ApiCtx（9 参收敛 struct，B 阶段 T3）：启动注册与 Evt::Reload 两处共用一份；
-        // 字段为廉价句柄克隆 + 借用 inst/scripts_root。
+        // 字段为廉价句柄克隆 + 借用 inst/scripts_root。role 缺省 Collector（本插件
+        // 全量能力，行为零变化；B 阶段 T6 起 north 按 §5.2 矩阵裁剪 C1）。
         let ac = core_::api::ApiCtx {
             ctx_host: ctx.clone(),
             inst: &inst,
-            io: io_engine.clone(),
+            io: Some(io_engine.clone()),
             tx: tx.clone(),
             runtime_devs: runtime_devs.clone(),
             dropped: dropped.clone(),
             transport: cfg.transport.as_str(),
             scripts_root: &scripts_root,
+            role: core_::api::Role::default(),
         };
         if let Err(e) = core_::api::register(&lua, &ac) {
             tracing::warn!("[luaClient] inst {} ctx API 注册失败：{e}", inst.inst_id);
@@ -591,50 +592,23 @@ async fn reload_vm(
 
 /// 读 main.lua 源 → manifest parse → dry_run（T11，Q1/§2.2/§4.4）。
 ///
-/// Ok 返回一行摘要（role/api_ver/stdlib 协商结果，含本机 stdlib 版本——现场
-/// 诊断"为何拒载/放行"一眼可见）；Err 为可行动错误消息。
-/// 源读取失败按空源处理（全缺省 manifest → 通过）：load_main 刚读过同一文件，
-/// 此处仅竞态兜底，拒载语义由 load_main 承担。
+/// 实现自 B 阶段 T6 起下沉 lua_core::manifest::dry_run_main（luaNorth 共用同一
+/// 多角色契约入口）；本包装保留 lctx 参数形态与文档语义。Ok 返回一行摘要
+/// （role/api_ver/stdlib 协商结果）；Err 为可行动错误消息。
 fn manifest_dry_run(
     lua: &mlua::Lua,
     lctx: &LoadCtx,
     stdlib_ver: Option<&str>,
 ) -> Result<String, String> {
-    let path = core_::loader::main_lua_path(&lctx.scripts_root, &lctx.script_name);
-    let src = std::fs::read_to_string(&path).unwrap_or_default();
-    let m = core_::manifest::parse(&src)?;
-    core_::manifest::dry_run(&m, lua, stdlib_ver)?;
-    let stdlib_desc = match (&m.stdlib, stdlib_ver) {
-        (Some(spec), Some(local)) => format!("{spec}（本机 {local}）"),
-        (Some(spec), None) => format!("{spec}（本机无 index，种子态未比对）"),
-        (None, Some(local)) => format!("不限（本机 {local}）"),
-        (None, None) => "不限".into(),
-    };
-    Ok(format!(
-        "role={} api_ver={} stdlib={stdlib_desc}",
-        m.role.as_deref().unwrap_or("collector(缺省)"),
-        m.api_ver
-    ))
+    core_::manifest::dry_run_main(lua, &lctx.scripts_root, &lctx.script_name, stdlib_ver)
 }
 
 /// 算脚本版本（main.lua 内容 sha256 前 8 hex，spec §13 `script_version`）。
 ///
-/// 文件读失败返回 `"unknown"`（不阻塞启动；`load_main` 会报真正的加载错误）。
+/// B 阶段 T6 实现下沉 lua_core::script::script_version（luaNorth stat 埋点共用）；
+/// 本包装保留原调用点形态。
 fn script_version(scripts_root: &std::path::Path, name: &str) -> String {
-    let path = core_::loader::main_lua_path(scripts_root, name);
-    match std::fs::read(&path) {
-        Ok(bytes) => {
-            let mut h = sha2::Sha256::new();
-            h.update(&bytes);
-            let sum = h.finalize();
-            let mut hex = String::with_capacity(8);
-            for b in sum.iter().take(4) {
-                hex.push_str(&format!("{:02x}", b));
-            }
-            hex
-        }
-        Err(_) => "unknown".into(),
-    }
+    core_::script::script_version(scripts_root, name)
 }
 
 // 静态注册到 inventory（编译期，编进单一二进制）

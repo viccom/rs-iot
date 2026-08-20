@@ -5,6 +5,8 @@ pub mod data_sim;
 pub mod eip_client;
 #[cfg(feature = "lua")]
 pub mod lua_client;
+#[cfg(feature = "lua")]
+pub mod lua_north;
 #[cfg(feature = "modbus")]
 pub mod modbus_client;
 pub mod mqtt_pub;

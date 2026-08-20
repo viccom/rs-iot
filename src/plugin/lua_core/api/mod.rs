@@ -118,16 +118,32 @@ async fn push_sample(
     }
 }
 
+/// 实例角色（能力包裁剪，设计 §5.2 角色与能力包矩阵）：[`register`] 按角色跳过
+/// 矩阵中标记 ✗ 的能力注册点。v1 两角色（§5.0 一套沙箱多种角色）：
+/// - Collector（luaClient）：全量能力（含 C1 request/transport）。
+/// - North（luaNorth / mqtt-north）：无 C1——request/transport 不注册（B 阶段 T6）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum Role {
+    /// collector：全量能力（luaClient 构造 ApiCtx 的缺省值，行为零变化）。
+    #[default]
+    Collector,
+    /// mqtt-north：§5.2 矩阵 mqtt-north 列（C0/C2/C4/C6 ✓、C1 ✗、C3 send_command
+    /// 恒注入——Q5 定案 down() 下行依赖，R3 显式授权收紧排后续 task）。
+    North,
+}
+
 /// [`register`] 的组装上下文（阶段 A 审查遗留收敛：9 参 → struct；B 阶段 north
 /// 能力包再加字段不再扩参）。字段与原 register 参数一一对应；`inst`/
-/// `scripts_root` 借用调用方（零克隆），其余为廉价句柄。
+/// `scripts_root` 借用调用方（零克隆），其余为廉价句柄。T6 起加 [`Role`]（能力包
+/// 裁剪）且 `io` 转 Option（North 无传输层不构建 IO 引擎——C1 request 是其唯一消费者）。
 pub(crate) struct ApiCtx<'a> {
     /// 宿主上下文：提供 lux（L2/L4 读写）+ `ctl_registry`（L3 路由）。
     pub(crate) ctx_host: HostContext,
     /// 实例配置（L2 `ctx:list_devices` 返 `inst.devices`；log 前缀取 `inst_id`）。
     pub(crate) inst: &'a InstConfig,
     /// IO 引擎（L1 `ctx:request` 内部 `io.request` → IO task 独占处理，spec §8 模式 Z）。
-    pub(crate) io: IoEngine,
+    /// North 角色传 None：无传输层不 spawn IO task，C1 随 [`Role`] 裁剪不注册。
+    pub(crate) io: Option<IoEngine>,
     /// hub 发送端（L2 `set_value` 推 [`Sample`]）。
     pub(crate) tx: mpsc::Sender<Sample>,
     /// 运行时上报设备集（collect 与 L2 `set_value(s)` 双出口共用，flush 时同步
@@ -138,10 +154,12 @@ pub(crate) struct ApiCtx<'a> {
     pub(crate) dropped: std::sync::Arc<std::sync::atomic::AtomicU64>,
     /// 底层链路类型字符串（`cfg.transport.as_str()`，"tcp"/"serial"/"udp"），供
     /// `ctx:transport()` 暴露给脚本（脚本据此选帧格式：serial 加 CRC16、tcp 加
-    /// MBAP 头）。
+    /// MBAP 头）。North 角色不注册 transport，值不被消费（占位 "mqtt"）。
     pub(crate) transport: &'static str,
     /// 脚本根目录（全局 `stdlib` 表读 `scripts/_stdlib/.index.json` 合并种子，T9 §3.5）。
     pub(crate) scripts_root: &'a Path,
+    /// 实例角色（能力包裁剪，§5.2）：缺省 Collector（luaClient 行为零变化）。
+    pub(crate) role: Role,
 }
 
 /// 在 `lua` 上注册 ctx 全局对象 + host 函数（`run` 调用）。
@@ -180,22 +198,29 @@ pub(crate) fn register(lua: &Lua, ac: &ApiCtx<'_>) -> mlua::Result<()> {
     // create_async_function：ctx:request 内部 coroutine.yield 桥接 IO task（spec §8）。
     // 首参 `_self` 接收 Lua 方法调用语法 `ctx:request(...)` 隐式传入的 self（ctx 表本身），
     // 不使用——若漏掉会导致 mlua 把 ctx 表当 frame 解析（bad argument #1: Lua table to string）。
-    let io_req = ac.io.clone();
-    let request_fn = lua.create_async_function(
-        move |lua, (_self, frame, timeout_ms): (Value, LuaString, u64)| {
-            let io = io_req.clone();
-            async move {
-                let bytes = frame.as_bytes().to_vec();
-                match io.request(&bytes, timeout_ms).await {
-                    Ok(resp) => {
-                        Ok::<_, mlua::Error>((Value::String(lua.create_string(&resp)?), Value::Nil))
+    // 角色裁剪（§5.2 矩阵 mqtt-north 列无 C1，B 阶段 T6）：North 不注册 request；
+    // io=None 是 North 的合法形态（C1 的唯一消费者就是 request）。
+    if let (Role::Collector, Some(io_engine)) = (&ac.role, &ac.io) {
+        let io_req = io_engine.clone();
+        let request_fn = lua.create_async_function(
+            move |lua, (_self, frame, timeout_ms): (Value, LuaString, u64)| {
+                let io = io_req.clone();
+                async move {
+                    let bytes = frame.as_bytes().to_vec();
+                    match io.request(&bytes, timeout_ms).await {
+                        Ok(resp) => Ok::<_, mlua::Error>((
+                            Value::String(lua.create_string(&resp)?),
+                            Value::Nil,
+                        )),
+                        Err(e) => {
+                            Ok((Value::Nil, Value::String(lua.create_string(e.to_string())?)))
+                        }
                     }
-                    Err(e) => Ok((Value::Nil, Value::String(lua.create_string(e.to_string())?))),
                 }
-            }
-        },
-    )?;
-    ctx.set("request", request_fn)?;
+            },
+        )?;
+        ctx.set("request", request_fn)?;
+    }
 
     // --- L6 log_info / log_warn / log_err / log_debug ---
     let name = ac.inst.inst_id.as_str().to_string();
@@ -502,9 +527,13 @@ pub(crate) fn register(lua: &Lua, ac: &ApiCtx<'_>) -> mlua::Result<()> {
     // 脚本据此选帧格式（serial → PDU+CRC16、tcp → MBAP 头、udp → 裸 RTU/自定义）。
     // 与 app_config.kind 一致；同步（配置解析产物，register 传入 &'static str）。
     // _self 吸收冒号语法隐式 self（ctx:transport()）。
-    let transport = ac.transport;
-    let transport_fn = lua.create_function(move |_lua, _self: Value| Ok(transport))?;
-    ctx.set("transport", transport_fn)?;
+    // 角色裁剪（§5.2 矩阵 mqtt-north 列无 C1，B 阶段 T6）：North 不注册 transport
+    //（north 无传输语义——MQTT 连接层在宿主，T7 连接序列）。
+    if ac.role == Role::Collector {
+        let transport = ac.transport;
+        let transport_fn = lua.create_function(move |_lua, _self: Value| Ok(transport))?;
+        ctx.set("transport", transport_fn)?;
+    }
 
     // --- L5 ctx:http_get/http_post（feature lua-http）---
     // 实现移 http.rs（守 <500）；此处委托 http::register 注册到同一 ctx 表。

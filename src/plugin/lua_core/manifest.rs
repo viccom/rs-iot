@@ -14,7 +14,8 @@
 //!
 //! 1. **API_VER 协商**：`@api_ver` > [`CUR_API_VER`]（capability.rs 单一事实源）
 //!    拒载（请升级宿主）；< [`MIN_API_VER`] 拒载（请升级脚本）。
-//! 2. **role 契约**：显式 `@role collector` 时全局 `collect` 必须存在。
+//! 2. **role 契约**（§5.1，B 阶段 T6 起多角色）：显式 `@role collector` → 全局
+//!    `collect` 必须存在；`@role mqtt-north` → `auth`+`up` 必须存在。
 //! 3. **stdlib 范围**：`@stdlib >=X.Y <Z`（空格组合，全部满足）vs 本地 index
 //!    版本（`stdlib_sync::read_index`；None = 种子兜底态，跳过版本比对），
 //!    不满足给可行动提示（请 sync）。
@@ -151,6 +152,10 @@ fn parse_param(value: &str) -> Option<ParamDecl> {
 /// `lua` 为已加载 main.lua 的 VM（globals 含脚本定义的函数）；
 /// `stdlib_ver` 为本地 stdlib index 版本（None = 未 sync 种子态，跳过版本比对）。
 /// 不满足给可行动错误消息（含"请升级宿主/升级脚本/请 sync"）。
+///
+/// role 契约按角色查必需回调（§5.1；B 阶段 T6 起多角色）：collector→`collect`、
+/// mqtt-north→`auth`+`up`（down/will/on_connack/on_disconnect 可选）。仅显式声明
+/// `@role` 时启用（存量无头脚本豁免，见模块文档兼容决策）。
 pub(crate) fn dry_run(m: &Manifest, lua: &Lua, stdlib_ver: Option<&str>) -> Result<(), String> {
     // 1) API_VER 协商（§4.4；CUR/MIN 单一事实源在 capability.rs，与 stdlib sync 预检共用）
     if m.api_ver > CUR_API_VER {
@@ -165,19 +170,26 @@ pub(crate) fn dry_run(m: &Manifest, lua: &Lua, stdlib_ver: Option<&str>) -> Resu
             m.api_ver
         ));
     }
-    // 2) role 契约（§2.2）：仅显式声明时启用（存量无头脚本豁免，见模块文档兼容决策）
-    match m.role.as_deref() {
-        Some("collector") => {
-            if lua.globals().get::<mlua::Function>("collect").is_err() {
-                return Err(
-                    "collector 角色缺少 collect()：显式 @role collector 需定义全局 collect".into(),
-                );
-            }
-        }
+    // 2) role 契约（§5.1/§5.2）：角色 → 必需全局回调清单；仅显式声明时校验。
+    let role = m.role.as_deref();
+    let required: &[&str] = match role {
+        Some("collector") => &["collect"],
+        Some("mqtt-north") => &["auth", "up"],
         Some(other) => {
-            return Err(format!("@role {other} 未知（本宿主支持：collector）"));
+            return Err(format!(
+                "@role {other} 未知（本宿主支持：collector、mqtt-north）"
+            ));
         }
-        None => {}
+        None => &[],
+    };
+    for f in required {
+        if lua.globals().get::<mlua::Function>(*f).is_err() {
+            // required 非空 ⟺ role 是 Some（None 分支清单为空，循环不进）。
+            return Err(format!(
+                "{} 角色缺少 {f}()：显式 @role 需定义全局 {f}",
+                role.unwrap_or_default()
+            ));
+        }
     }
     // 3) @stdlib 范围 vs 本地 index 版本（§3.5；None = 种子兜底态跳过——冷启动不拒载）
     if let (Some(spec), Some(local)) = (&m.stdlib, stdlib_ver) {
@@ -188,6 +200,36 @@ pub(crate) fn dry_run(m: &Manifest, lua: &Lua, stdlib_ver: Option<&str>) -> Resu
         }
     }
     Ok(())
+}
+
+/// 读 main.lua → parse → [`dry_run`]（薄壳共用：luaClient 启动/reload 与 luaNorth
+/// 同一入口，B 阶段 T6 自 lua_client 下沉）。
+///
+/// Ok 返回一行摘要（role/api_ver/stdlib 协商结果，含本机 stdlib 版本——现场诊断
+/// "为何拒载/放行"一眼可见）；Err 为可行动错误消息。源读取失败按空源处理
+/// （全缺省 manifest → 通过）：调用方 `load_main` 刚读过同一文件，此处仅竞态
+/// 兜底，拒载语义由 `load_main` 承担。
+pub(crate) fn dry_run_main(
+    lua: &Lua,
+    scripts_root: &std::path::Path,
+    script_name: &str,
+    stdlib_ver: Option<&str>,
+) -> Result<String, String> {
+    let path = crate::plugin::lua_core::loader::main_lua_path(scripts_root, script_name);
+    let src = std::fs::read_to_string(&path).unwrap_or_default();
+    let m = parse(&src)?;
+    dry_run(&m, lua, stdlib_ver)?;
+    let stdlib_desc = match (&m.stdlib, stdlib_ver) {
+        (Some(spec), Some(local)) => format!("{spec}（本机 {local}）"),
+        (Some(spec), None) => format!("{spec}（本机无 index，种子态未比对）"),
+        (None, Some(local)) => format!("不限（本机 {local}）"),
+        (None, None) => "不限".into(),
+    };
+    Ok(format!(
+        "role={} api_ver={} stdlib={stdlib_desc}",
+        m.role.as_deref().unwrap_or("collector(缺省)"),
+        m.api_ver
+    ))
 }
 
 /// 数值段版本比较（"1.10" > "1.9"；短侧补 0："1.0" == "1.0.0"；非数值段按 0）。
@@ -391,5 +433,47 @@ mod tests {
         let lua = vm_with_collect();
         let m = parse("-- @role collector\n-- @api_ver 1\n-- @stdlib >=1.0").unwrap();
         assert!(dry_run(&m, &lua, Some("1.2")).is_ok());
+    }
+
+    /// B 阶段 T6 多角色契约：显式 @role mqtt-north + auth+up 都在 → 通过
+    ///（§5.1 回调契约：auth(cfg)/up(batch) 必需，down/will/on_connack/on_disconnect 可选）。
+    #[test]
+    fn dry_run_passes_mqtt_north_with_auth_and_up() {
+        let lua = Lua::new();
+        lua.load("function auth(cfg) return {} end\nfunction up(batch) return {} end")
+            .exec()
+            .unwrap();
+        let m = parse("-- @role mqtt-north").unwrap();
+        assert!(dry_run(&m, &lua, None).is_ok(), "auth+up 齐备应通过");
+    }
+
+    /// mqtt-north 缺 up → 拒（错误指明缺的回调名，可行动）。
+    #[test]
+    fn dry_run_rejects_mqtt_north_missing_up() {
+        let lua = Lua::new();
+        lua.load("function auth(cfg) return {} end").exec().unwrap();
+        let m = parse("-- @role mqtt-north").unwrap();
+        let e = dry_run(&m, &lua, None).unwrap_err();
+        assert!(e.contains("up"), "应指明缺 up()：{e}");
+        assert!(e.contains("mqtt-north"), "错误应含角色名：{e}");
+    }
+
+    /// mqtt-north 缺 auth → 拒（重连必重调 auth 的前提是 auth 存在，Q5）。
+    #[test]
+    fn dry_run_rejects_mqtt_north_missing_auth() {
+        let lua = Lua::new();
+        lua.load("function up(batch) return {} end").exec().unwrap();
+        let m = parse("-- @role mqtt-north").unwrap();
+        let e = dry_run(&m, &lua, None).unwrap_err();
+        assert!(e.contains("auth"), "应指明缺 auth()：{e}");
+    }
+
+    /// mqtt-north 只定义 collect（collector 契约）不算满足 north 契约：auth+up 必需。
+    #[test]
+    fn dry_run_rejects_mqtt_north_with_only_collect() {
+        let lua = vm_with_collect();
+        let m = parse("-- @role mqtt-north").unwrap();
+        let e = dry_run(&m, &lua, None).unwrap_err();
+        assert!(e.contains("auth"), "collect 不能替代 auth：{e}");
     }
 }

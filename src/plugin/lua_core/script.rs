@@ -83,6 +83,28 @@ pub(crate) fn load_main(lua: &Lua, lctx: &LoadCtx) -> mlua::Result<()> {
     Ok(())
 }
 
+/// 算脚本版本（main.lua 内容 sha256 前 8 hex，spec §13 `script_version`）。
+///
+/// 文件读失败返回 `"unknown"`（不阻塞启动；`load_main` 会报真正的加载错误）。
+/// B 阶段 T6 自 lua_client 下沉（luaNorth stat 埋点共用）。
+pub(crate) fn script_version(scripts_root: &Path, name: &str) -> String {
+    let path = loader::main_lua_path(scripts_root, name);
+    match std::fs::read(&path) {
+        Ok(bytes) => {
+            use sha2::Digest;
+            let mut h = sha2::Sha256::new();
+            h.update(&bytes);
+            let sum = h.finalize();
+            let mut hex = String::with_capacity(8);
+            for b in sum.iter().take(4) {
+                hex.push_str(&format!("{:02x}", b));
+            }
+            hex
+        }
+        Err(_) => "unknown".into(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

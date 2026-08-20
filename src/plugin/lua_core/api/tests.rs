@@ -63,7 +63,8 @@ async fn register_exposes_ctx_api() {
         &ApiCtx {
             ctx_host,
             inst: &inst,
-            io,
+            io: Some(io),
+            role: Role::default(),
             tx: mock_hub_tx(),
             runtime_devs: RuntimeDevs::default(),
             dropped: zero_dropped(),
@@ -131,7 +132,8 @@ async fn register_exposes_stdlib_table() {
         &ApiCtx {
             ctx_host,
             inst: &inst,
-            io,
+            io: Some(io),
+            role: Role::default(),
             tx: mock_hub_tx(),
             runtime_devs: RuntimeDevs::default(),
             dropped: zero_dropped(),
@@ -182,7 +184,8 @@ async fn kv_set_get_roundtrip() {
         &ApiCtx {
             ctx_host,
             inst: &inst,
-            io,
+            io: Some(io),
+            role: Role::default(),
             tx: mock_hub_tx(),
             runtime_devs: RuntimeDevs::default(),
             dropped: zero_dropped(),
@@ -281,7 +284,8 @@ async fn send_command_routes_to_target() {
         &ApiCtx {
             ctx_host,
             inst: &inst,
-            io,
+            io: Some(io),
+            role: Role::default(),
             tx: mock_hub_tx(),
             runtime_devs: RuntimeDevs::default(),
             dropped: zero_dropped(),
@@ -365,7 +369,8 @@ async fn http_get_returns_status_and_body() {
         &ApiCtx {
             ctx_host,
             inst: &inst,
-            io,
+            io: Some(io),
+            role: Role::default(),
             tx: mock_hub_tx(),
             runtime_devs: RuntimeDevs::default(),
             dropped: zero_dropped(),
@@ -515,7 +520,8 @@ async fn capability_cards_match_registered_ctx() {
         &ApiCtx {
             ctx_host,
             inst: &inst,
-            io,
+            io: Some(io),
+            role: Role::default(),
             tx: mock_hub_tx(),
             runtime_devs: RuntimeDevs::default(),
             dropped: zero_dropped(),
@@ -665,7 +671,8 @@ async fn set_value_pushes_sample_to_hub() {
         &ApiCtx {
             ctx_host,
             inst: &inst,
-            io,
+            io: Some(io),
+            role: Role::default(),
             tx,
             runtime_devs: RuntimeDevs::default(),
             dropped: zero_dropped(),
@@ -724,7 +731,8 @@ async fn set_values_pushes_multi_tag_sample() {
         &ApiCtx {
             ctx_host,
             inst: &inst,
-            io,
+            io: Some(io),
+            role: Role::default(),
             tx,
             runtime_devs: RuntimeDevs::default(),
             dropped: zero_dropped(),
@@ -795,7 +803,8 @@ async fn set_value_routes_by_devid() {
         &ApiCtx {
             ctx_host,
             inst: &inst,
-            io,
+            io: Some(io),
+            role: Role::default(),
             tx,
             runtime_devs: RuntimeDevs::default(),
             dropped: zero_dropped(),
@@ -852,7 +861,8 @@ async fn get_value_reads_rtdata() {
         &ApiCtx {
             ctx_host,
             inst: &inst,
-            io,
+            io: Some(io),
+            role: Role::default(),
             tx: mock_hub_tx(),
             runtime_devs: RuntimeDevs::default(),
             dropped: zero_dropped(),
@@ -913,7 +923,8 @@ async fn get_device_returns_rtdata_values() {
         &ApiCtx {
             ctx_host,
             inst: &inst,
-            io,
+            io: Some(io),
+            role: Role::default(),
             tx: mock_hub_tx(),
             runtime_devs: RuntimeDevs::default(),
             dropped: zero_dropped(),
@@ -977,7 +988,8 @@ async fn list_devices_returns_inst_devices() {
         &ApiCtx {
             ctx_host,
             inst: &inst,
-            io,
+            io: Some(io),
+            role: Role::default(),
             tx: mock_hub_tx(),
             runtime_devs: RuntimeDevs::default(),
             dropped: zero_dropped(),
@@ -1096,7 +1108,8 @@ async fn ctx_transport_returns_configured_kind() {
             &ApiCtx {
                 ctx_host,
                 inst: &inst,
-                io,
+                io: Some(io),
+                role: Role::default(),
                 tx: mock_hub_tx(),
                 runtime_devs: RuntimeDevs::default(),
                 dropped: zero_dropped(),
@@ -1152,7 +1165,8 @@ async fn secret_get_allowlist_semantics() {
         &ApiCtx {
             ctx_host,
             inst: &inst,
-            io,
+            io: Some(io),
+            role: Role::default(),
             tx: mock_hub_tx(),
             runtime_devs: RuntimeDevs::default(),
             dropped: zero_dropped(),
@@ -1214,6 +1228,73 @@ async fn secret_get_allowlist_semantics() {
     let _ = std::fs::remove_dir_all(&data_dir);
 }
 
+/// B 阶段 T6 角色裁剪（§5.2 矩阵 mqtt-north 列）：North 角色注册的 ctx 表**无**
+/// C1（request/transport——io_engine 也不构建，`io: None`）；C0/C2/C4/C6 与
+/// C3 send_command 保留（Q5 定案：down() 下行依赖 send_command，恒注入——
+/// R3 显式授权收紧排后续 task）。
+#[tokio::test]
+async fn north_role_skips_c1_request_transport() {
+    let lua = Lua::new();
+    let (ctx_host, handle, data_dir) = setup_ctx("north-role").await;
+    let inst = InstConfig {
+        inst_id: "it".into(),
+        inst_name: "it".into(),
+        app_code: PluginName::new("luaNorth"),
+        app_type: AppType::North,
+        auto_start: false,
+        app_config: serde_json::json!({"script":"a","host":"127.0.0.1"}),
+        devices: vec![DeviceSpec {
+            label: "d".into(),
+            value: "d".into(),
+            children: vec![],
+            slave_id: None,
+        }],
+        host_kind: HostKind::Builtin,
+    };
+    register(
+        &lua,
+        &ApiCtx {
+            ctx_host,
+            inst: &inst,
+            io: None,
+            tx: mock_hub_tx(),
+            runtime_devs: RuntimeDevs::default(),
+            dropped: zero_dropped(),
+            transport: "mqtt",
+            scripts_root: Path::new("scripts"),
+            role: Role::North,
+        },
+    )
+    .expect("register");
+
+    // C1 裁剪断言：ctx.request / ctx.transport 应为 nil（表上无此键）。
+    for absent in ["request", "transport"] {
+        let v: mlua::Value = lua
+            .load(format!("return ctx.{absent}"))
+            .eval()
+            .expect(absent);
+        assert_eq!(v, mlua::Value::Nil, "north ctx 应无 {absent}（C1 裁剪）");
+    }
+    // 其余能力保留：C2 set_value / C4 kv_get·secret_get / C3 send_command / C6 log / C0 now。
+    for present in [
+        "set_value",
+        "kv_get",
+        "secret_get",
+        "send_command",
+        "log_info",
+        "now",
+    ] {
+        let is_fn: bool = lua
+            .load(format!("return type(ctx.{present}) == 'function'"))
+            .eval()
+            .expect(present);
+        assert!(is_fn, "north ctx 应有 {present}（§5.2 矩阵 mqtt-north 列）");
+    }
+
+    let _ = crate::db::shutdown_lux(handle).await;
+    let _ = std::fs::remove_dir_all(&data_dir);
+}
+
 /// T5 恒注入（Q4）：无 secrets 配置（键缺失 / 类型不符按空清单降级）的实例
 /// secret_get 仍注册可调，任何引用 → 未授权错误（默认空清单语义；未引用零成本）。
 #[tokio::test]
@@ -1249,7 +1330,8 @@ async fn secret_get_always_registered_with_default_empty_allowlist() {
             &ApiCtx {
                 ctx_host,
                 inst: &inst,
-                io,
+                io: Some(io),
+                role: Role::default(),
                 tx: mock_hub_tx(),
                 runtime_devs: RuntimeDevs::default(),
                 dropped: zero_dropped(),

@@ -10,24 +10,30 @@ use mlua::{Error, HookTriggers, Lua, LuaOptions, StdLib};
 /// - 内存限额：超 `mem_limit_mb` 触发 MemoryError。
 /// - catch_rust_panics(true)：Rust callback panic 转 RuntimeError。
 pub(crate) fn new_vm(cfg: &LuaCfg) -> mlua::Result<Lua> {
+    new_vm_sandboxed(cfg.hook_instr_limit, cfg.mem_limit_mb)
+}
+
+/// 沙箱 VM 构造核心（薄壳共用，B 阶段 T6）：[`new_vm`] 之外，luaNorth 等无传输
+/// 语义的薄壳（无 `LuaCfg` 可借）直接给沙箱参数——护栏三件套（库裁剪/hook/
+/// 内存限额）对所有角色一致（§9「一套沙箱，多种角色」）。
+pub(crate) fn new_vm_sandboxed(hook_instr_limit: u32, mem_limit_mb: usize) -> mlua::Result<Lua> {
     let lua = Lua::new_with(
         StdLib::TABLE | StdLib::STRING | StdLib::MATH | StdLib::COROUTINE,
         LuaOptions::new().catch_rust_panics(true),
     )?;
 
     // 指令 hook：到点抛 RuntimeError 中断（VM 不死，下次 call_async 重新计数）。
-    let limit = cfg.hook_instr_limit;
     lua.set_hook(
-        HookTriggers::new().every_nth_instruction(limit),
+        HookTriggers::new().every_nth_instruction(hook_instr_limit),
         move |_lua, _dbg| {
             Err(Error::RuntimeError(format!(
-                "instruction limit ({limit}) exceeded — 疑似死循环"
+                "instruction limit ({hook_instr_limit}) exceeded — 疑似死循环"
             )))
         },
     )?;
 
     // 内存限额（字节）。
-    lua.set_memory_limit(cfg.mem_limit_mb * 1024 * 1024)?;
+    lua.set_memory_limit(mem_limit_mb * 1024 * 1024)?;
 
     Ok(lua)
 }
