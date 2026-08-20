@@ -1,5 +1,11 @@
 //! rhai 脚本转换 Processor。
 //!
+//! **已冻结（deprecated，演进设计 Q7/D4 终审 2026-08-20）**：rhai 已实现未接线
+//! （pipeline 恒 Passthrough，`lib.rs` 装配处），本设计取 Lua 为唯一脚本体系——
+//! 两套脚本并存必然分裂管理面与文档。不接线、不再投入；Lua transform（阶段 C
+//! luaTransform 订阅型实例）实战半年后复审：移除本模块与 `transform` feature，
+//! 或恢复接线。新增数据加工需求一律走 Lua transform 角色。
+//!
 //! 把 `sample.values` 注入为 rhai 变量（变量名取 tag 末段或整体，非法字符替换为 `_`），
 //! 运行用户脚本，再把变量回读为新的 `SampleValue`。
 //!

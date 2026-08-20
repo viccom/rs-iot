@@ -269,7 +269,9 @@ pub async fn run_app_with_shutdown(
         );
     }
 
-    // pipeline：hub → processor → lux rtdata（不再 fan-out 到 sink）
+    // pipeline：hub → processor → lux rtdata（不再 fan-out 到 sink）。
+    // Processor 恒 Passthrough：rhai 已冻结不接线（Q7，见 transform/rhai.rs 头注）；
+    // 数据加工走 luaTransform 订阅型实例（阶段 C），Processor 插槽留给未来 Rust 原生处理器。
     let processor: Arc<dyn plugin::traits::Processor> =
         Arc::new(transform::passthrough::Passthrough);
     let pipeline_token = shutdown.child_token();

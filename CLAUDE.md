@@ -39,7 +39,7 @@ POST /api/v1/command/send ─┼─► CtlRegistry.try_send(64) ──► 实例
 | `host.rs` | `HostContext`（lux client + hwid + shutdown + `CtlRegistry` 命令路由表 + `BridgeRegistry` 外部连接分发），注入每个插件 task |
 | `plugin/` | `traits.rs`（Source/Sink/Processor 契约）、`registry.rs`（inventory 静态注册）、`instance.rs`（生命周期管理 + `send_ctl` 写命令投递 + **M3 supervisor：task 异常退出标 Failed + 告警**）、`builtin/`（datasim 模拟采集 / opcua_client OPC UA 采集 / modbus_client Modbus TCP/RTU(serial/over-tcp/over-udp) 采集 / s7_client 西门子 S7 全系列采集 / **eip_client 罗克韦尔 AB EtherNet/IP 采集（rust-ethernet-ip，批量读 + tag 位寻址）** / lua_north 北向发布（mqtt-north，`[mqtt]` 兼容迁移） / **sidecar_client 外部插件 bridge**）、`ticker.rs`（采集 ticker jitter helper：FNV-1a 确定性相位错峰，`pipeline::route` 复用同算法 pub(crate)） |
 | `pipeline.rs` | dispatcher（hub 唯一消费者，按 devid FNV-1a 分片）+ N worker（各持 `EmbeddedClient::clone` 独立 session Mutex，攒批 50ms → `db::rtdata::write_batch` B 形态 HSET 多对；worker panic 由 dispatcher join 检测补 gauge + 计死亡；退出 best-effort flush + cancel 级联 + join） |
-| `transform/` | `passthrough`（默认）/ `rhai`（feature `transform`，默认开启） |
+| `transform/` | `passthrough`（默认）/ `rhai`（feature `transform`，默认开启——**已冻结 deprecated** Q7：不接线不投入，数据加工走 luaTransform） |
 | `db/` | `build_lux_config`、`shutdown_lux`（先 SAVE）、`identity::bootstrap`（幂等建 admin）、`rtdata::write_batch`（B 形态：聚合 devid → 逐 devid HSET 多对，per-devid 容错单 devid 失败不丢整批；`write` 单 Sample test-only 兼容入口）、`ext_token::issue/verify/revoke`（外部插件 token，hmac_sha256） |
 | `api/` | axum 路由 + JWT 中间件（auth.rs）+ 各 routes_*.rs + rust-embed 静态前端 |
 | `service/` | Windows Service（`windows-service` dispatch）/ systemd unit 生成 |

@@ -137,7 +137,7 @@ rumqttd = { version = "0.20", default-features = false }
 
 [features]
 default = ["transform", "lua", "lua-http", "opcua", "modbus", "s7", "eip"]
-# L2 数据转换（rhai 脚本，默认开启）
+# L2 数据转换（rhai 脚本——已冻结 deprecated：Q7 定案不接线不投入，数据加工走 luaTransform）
 transform = ["dep:rhai"]
 # Lua 动态脚本采集（luaClient，默认开启）；ed25519-dalek = stdlib sync index 验签（T9）
 lua = ["dep:mlua", "dep:notify", "dep:notify-debouncer-mini", "dep:ed25519-dalek"]
