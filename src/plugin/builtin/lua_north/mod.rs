@@ -204,7 +204,10 @@ impl Sink for LuaNorth {
         // 5. mqtt task + 通道（spike-2 模型：网络 IO 独占，回调全在主循环侧）。
         let (mqtt_cmd_tx, mqtt_cmd_rx) = mpsc::channel::<contract::MqttCmd>(64);
         let (mqtt_evt_tx, mut mqtt_evt_rx) = mpsc::channel::<contract::MqttEvt>(64);
-        let _mqtt_task = contract::spawn_mqtt_task(mqtt_cmd_rx, mqtt_evt_tx, token.clone());
+        // 句柄保留：主循环退出时 abort（pump 独占 poll 不进 select，token 观测
+        // 不到其内部——复审阻塞-1 重构后 handler 虽有 token 分支，abort 作最终
+        // 确定性清理，同 io_join.abort 惯例）。
+        let mqtt_task = contract::spawn_mqtt_task(mqtt_cmd_rx, mqtt_evt_tx, token.clone());
 
         let mut tracker = crate::plugin::stat_tracker::StatTracker::new(
             inst.inst_id.to_string(),
@@ -491,6 +494,8 @@ impl Sink for LuaNorth {
             }
         }
 
+        // mqtt task 确定性终止（token 之外的双保险）
+        mqtt_task.abort();
         // 退出标记 stopped（spec §13；实例生命周期经由 InstanceManager 全套）。
         tracker.set_status("stopped");
         sync_north_stats(&mut tracker, publish_ok, publish_fail, reconnect_count);
@@ -509,6 +514,11 @@ fn sync_north_stats(
     tracker.extra_insert("publish_ok", serde_json::json!(publish_ok));
     tracker.extra_insert("publish_fail", serde_json::json!(publish_fail));
     tracker.extra_insert("reconnect_count", serde_json::json!(reconnect_count));
+    // 订阅失败累计（复审 P2-5）：下行通道静默失效可见化（进程级计数，多实例共用）
+    tracker.extra_insert(
+        "subscribe_fail",
+        serde_json::json!(contract::SUBSCRIBE_FAIL.load(std::sync::atomic::Ordering::Relaxed)),
+    );
 }
 
 // 静态注册到 inventory（编译期，编进单一二进制）——SinkEntry 首个接线者。

@@ -58,14 +58,30 @@ pub(crate) enum MqttEvt {
     PubResult { ok: usize, fail: usize },
 }
 
+/// flume 请求通道容量（AsyncClient::new 第二参）。pump 独立排空（见下）后该值只是
+/// publish 侧的流控背压水位，不再是死锁面（复审阻塞-1：单任务时代 poll 与 publish
+/// 互相卡死，>cap 条必挂死）。64 给大批量留余量。
+const REQUEST_CAP: usize = 64;
+
+/// 订阅失败累计（stat extra `subscribe_fail` 的数据源；复审 P2-5：下行通道静默失效
+/// 可见化——重试 = 下个 ConnAck，主循环每次 ConnAck 后重发订阅清单）。
+pub(crate) static SUBSCRIBE_FAIL: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
 /// spawn mqtt task（网络 IO 独占；不触 VM/回调——回调全在主循环侧）。
 ///
-/// pump 语义（spike-2 实测）：`EventLoop::poll()` 由本 task 独占（与 mqtt_pub 同在
-/// select! 中驱动）；poll Err / broker Disconnect 后**停转并丢弃 client+eventloop**
-/// （不依赖 rumqttc 自带重连——其 MqttOptions 已定死，凭证刷新必须重建），置
-/// disconnected 等 [`MqttCmd::Connect`]（主循环重走 auth 序列后发来）。
-/// Disconnected 事件用 `send().await`（必达，驱动主循环重连），其余事件 try_send
-/// （满通道丢弃可忍，Down/PubResult 单条非关键）。
+/// **双任务形态（复审阻塞-1 重构，回归 spike-2 核心决策）**：
+/// - **pump 任务**：独占 `eventloop.poll()`——不进任何 select!（规避 poll 取消安全
+///   未知问题）、绝不 await publish。事件路由：ConnAck/Disconnected 为状态迁移事件
+///   用 `send().await` **必达**（复审 P2-2：ConnAck try_send 满丢会让 connected
+///   永假、发布停摆直至下次断连）；Down 单条非关键 try_send。
+/// - **handler 任务**（返回的 JoinHandle）：持 client 处理命令。publish/subscribe 在
+///   本任务 await，pump 并发排空通道——两者互不阻塞（单任务时代的死锁面消除）；
+///   批操作整体包 token select（pump 停转通道满时批内 await 仍可被取消）。
+/// - Connect：abort 旧 pump + drop 旧连接（在飞排队请求随之丢弃——fire-and-forget
+///   语义），用新 MqttOptions 重建（Q5 凭证刷新）并 respawn pump。pump 在
+///   Disconnect/poll Err 后自行退出（不依赖 rumqttc 自带重连——MqttOptions 已定死，
+///   重连必须走主循环 auth 序列）；pump 退出后 publish 因通道无接收端立即 Err 计 fail。
 pub(crate) fn spawn_mqtt_task(
     mut cmd_rx: mpsc::Receiver<MqttCmd>,
     evt_tx: mpsc::Sender<MqttEvt>,
@@ -73,28 +89,66 @@ pub(crate) fn spawn_mqtt_task(
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut client: Option<rumqttc::AsyncClient> = None;
-        let mut eventloop: Option<rumqttc::EventLoop> = None;
+        let mut pump: Option<tokio::task::JoinHandle<()>> = None;
         loop {
             tokio::select! {
+                biased;
                 _ = token.cancelled() => break,
                 cmd = cmd_rx.recv() => match cmd {
                     None => break,
-                    // 重建连接：drop 旧 client+eventloop（重新赋值即释放），Q5 凭证
-                    // 刷新经新 MqttOptions 生效。
+                    // 重建连接：abort 旧 pump + drop 旧 client（在飞请求丢弃），
+                    // Q5 凭证刷新经新 MqttOptions 生效。
                     Some(MqttCmd::Connect(opts)) => {
-                        let (c, e) = rumqttc::AsyncClient::new(*opts, 16);
+                        if let Some(p) = pump.take() {
+                            p.abort();
+                        }
+                        let (c, e) = rumqttc::AsyncClient::new(*opts, REQUEST_CAP);
                         client = Some(c);
-                        eventloop = Some(e);
+                        let evt = evt_tx.clone();
+                        pump = Some(tokio::spawn(async move {
+                            let mut e = e;
+                            loop {
+                                match e.poll().await {
+                                    Ok(rumqttc::Event::Incoming(rumqttc::Packet::ConnAck(_))) => {
+                                        tracing::info!("[luaNorth] MQTT ConnAck（已连接）");
+                                        // 状态迁移事件必达（阻塞 send = 对主循环的正确背压）
+                                        let _ = evt.send(MqttEvt::ConnAck).await;
+                                    }
+                                    Ok(rumqttc::Event::Incoming(rumqttc::Packet::Publish(p))) => {
+                                        // T7 down() 全量路由（命令 topic 是 T8 兼容脚本概念）。
+                                        let _ = evt.try_send(MqttEvt::Down {
+                                            topic: p.topic.clone(),
+                                            payload: p.payload.to_vec(),
+                                        });
+                                    }
+                                    Ok(rumqttc::Event::Incoming(rumqttc::Packet::Disconnect)) => {
+                                        let _ = evt
+                                            .send(MqttEvt::Disconnected("broker 发送 Disconnect".into()))
+                                            .await;
+                                        break; // 停转：重连走主循环 Connect（auth 序列）
+                                    }
+                                    Ok(_) => {}
+                                    Err(e) => {
+                                        let _ = evt.send(MqttEvt::Disconnected(e.to_string())).await;
+                                        break;
+                                    }
+                                }
+                            }
+                        }));
                     }
                     // 逐条投递（fire-and-forget）：publish Ok = 入队/投递接受（rumqttc
-                    // 未连接时排队返回 Ok，spike-2 实测）；Err 记 fail 不中断。
+                    // 未连接时排队返回 Ok，spike-2 实测）；Err 记 fail 不中断。pump 并发
+                    // 排空，通道满只是背压等待（不再死锁）；整批包 token（可取消）。
                     Some(MqttCmd::Publish(items)) => {
                         let mut ok = 0usize;
                         let mut fail = 0usize;
-                        match &client {
-                            Some(c) => {
+                        if let Some(c) = &client {
+                            let batch = async {
                                 for it in items {
-                                    match c.publish(it.topic.clone(), it.qos, false, it.payload.clone()).await {
+                                    match c
+                                        .publish(it.topic.clone(), it.qos, false, it.payload.clone())
+                                        .await
+                                    {
                                         Ok(()) => ok += 1,
                                         Err(e) => {
                                             fail += 1;
@@ -102,51 +156,40 @@ pub(crate) fn spawn_mqtt_task(
                                         }
                                     }
                                 }
+                            };
+                            tokio::select! {
+                                _ = token.cancelled() => break,
+                                _ = batch => {}
                             }
-                            None => fail = items.len(),
+                        } else {
+                            fail = items.len();
                         }
                         let _ = evt_tx.try_send(MqttEvt::PubResult { ok, fail });
                     }
                     Some(MqttCmd::Subscribe(topics)) => {
                         if let Some(c) = &client {
-                            for t in topics {
-                                if let Err(e) = c.subscribe(t.clone(), rumqttc::QoS::AtMostOnce).await {
-                                    tracing::warn!("[luaNorth] subscribe {t} 失败：{e}");
+                            let batch = async {
+                                for t in topics {
+                                    if let Err(e) =
+                                        c.subscribe(t.clone(), rumqttc::QoS::AtMostOnce).await
+                                    {
+                                        SUBSCRIBE_FAIL.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                        tracing::warn!("[luaNorth] subscribe {t} 失败（累计 {}）：{e}",
+                                            SUBSCRIBE_FAIL.load(std::sync::atomic::Ordering::Relaxed));
+                                    }
                                 }
+                            };
+                            tokio::select! {
+                                _ = token.cancelled() => break,
+                                _ = batch => {}
                             }
                         }
                     }
                 },
-                // poll 分支仅在持有 eventloop 时启用（前置条件守卫；expect 与守卫一致）。
-                ev = async { eventloop.as_mut().expect("guarded by select condition").poll().await }, if eventloop.is_some() => {
-                    match ev {
-                        Ok(rumqttc::Event::Incoming(rumqttc::Packet::ConnAck(_))) => {
-                            tracing::info!("[luaNorth] MQTT ConnAck（已连接）");
-                            let _ = evt_tx.try_send(MqttEvt::ConnAck);
-                        }
-                        Ok(rumqttc::Event::Incoming(rumqttc::Packet::Publish(p))) => {
-                            // T7 down() 全量路由（命令 topic 是 T8 兼容脚本概念）。
-                            let _ = evt_tx.try_send(MqttEvt::Down {
-                                topic: p.topic.clone(),
-                                payload: p.payload.to_vec(),
-                            });
-                        }
-                        Ok(rumqttc::Event::Incoming(rumqttc::Packet::Disconnect)) => {
-                            client = None;
-                            eventloop = None;
-                            let _ = evt_tx
-                                .send(MqttEvt::Disconnected("broker 发送 Disconnect".into()))
-                                .await;
-                        }
-                        Ok(_) => {}
-                        Err(e) => {
-                            client = None;
-                            eventloop = None;
-                            let _ = evt_tx.send(MqttEvt::Disconnected(e.to_string())).await;
-                        }
-                    }
-                }
             }
+        }
+        if let Some(p) = pump.take() {
+            p.abort();
         }
     })
 }
@@ -1370,6 +1413,147 @@ end"#,
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
         panic!("rumqttd 5s 未就绪（port {port}）");
+    }
+
+    /// 复审阻塞-1 回归（2026-08-20 阶段 B 深度审查）：单批 publish 超过 flume 通道
+    /// 容量（旧 16/新 64）不再死锁——旧单任务形态 publish 在 select 臂内 await 而
+    /// poll 被挂起，第 17 条起永久阻塞且 token 不可达（默认兼容实例 17 设备即触）。
+    /// 双任务重构后 pump 并发排空；本测试 up() 返回 **80 条**（> 任何一档容量），
+    /// 断言对端订阅者全数收到——死锁形态下最多收到 16 条且实例停摆。
+    #[tokio::test]
+    async fn publish_batch_over_channel_cap_no_deadlock() {
+        use crate::host::{BridgeRegistry, CtlRegistry, HostContext};
+        use crate::plugin::traits::Sink;
+        use crate::types::{AppType, DeviceSpec, HostKind, Hwid, InstConfig, PluginName};
+        use rumqttc::{AsyncClient, Event, MqttOptions, Packet, QoS};
+        use serde_json::json;
+
+        const UP: &str = "rsiot/e2e/north/burst";
+        const N: usize = 80; // > REQUEST_CAP(64) > 旧死锁容量 16
+
+        let port = spawn_inproc_broker("north-burst");
+        let tmp = std::env::temp_dir().join(format!("lua-north-burst-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join("burstN")).unwrap();
+        std::fs::write(
+            tmp.join("burstN/main.lua"),
+            format!(
+                r#"-- @role mqtt-north
+local UP = "{UP}"
+local N = {N}
+function auth(cfg) return nil end
+function up(batch)
+  local out = {{}}
+  for i = 1, N do
+    out[#out + 1] = {{ topic = UP, payload = "m-" .. i, qos = 0 }}
+  end
+  return out
+end
+function down(topic, payload) end"#
+            ),
+        )
+        .unwrap();
+
+        let data_dir = std::env::temp_dir()
+            .join(format!("lua-north-burst-lux-{}", std::process::id()))
+            .to_str()
+            .unwrap()
+            .to_string();
+        let cfg_lux = crate::config::AppConfig {
+            lux: crate::config::LuxConfig {
+                port: 0,
+                data_dir,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let handle = lux::run_with_config(crate::db::build_lux_config(&cfg_lux))
+            .await
+            .expect("lux");
+        let client = handle.client();
+
+        let inst = InstConfig {
+            inst_id: "north-burst".into(),
+            inst_name: "burst".into(),
+            app_code: PluginName::new("luaNorth"),
+            app_type: AppType::North,
+            devices: vec![DeviceSpec {
+                label: "d".into(),
+                value: "devB".into(),
+                children: vec![],
+                slave_id: None,
+            }],
+            app_config: json!({
+                "script": "burstN", "host": "127.0.0.1", "port": port,
+                "period": 1, "batch_max_secs": 1,
+                "client_id": "north-burst-it",
+                "scripts_root": tmp.to_str().unwrap()
+            }),
+            auto_start: false,
+            host_kind: HostKind::Builtin,
+        };
+        let (tx, rx) = mpsc::channel::<Sample>(8);
+        let (_cmd_tx, cmd_rx) = mpsc::channel::<crate::types::CtlMessage>(4);
+        let token = CancellationToken::new();
+        let run_token = token.child_token();
+        let ctx = HostContext {
+            lux: client.clone(),
+            hwid: Hwid::new("it"),
+            shutdown: CancellationToken::new(),
+            ctl_registry: CtlRegistry::new(std::sync::Arc::new(
+                crate::process_metrics::ProcessMetrics::new(),
+            )),
+            bridge_registry: BridgeRegistry::new(),
+            metrics: std::sync::Arc::new(crate::process_metrics::ProcessMetrics::new()),
+            trace_registry: crate::io_trace::TraceRegistry::new(),
+            event_tx: crate::event_bus::EventBus::dummy(),
+        };
+        tokio::spawn(async move {
+            crate::plugin::builtin::lua_north::LuaNorth
+                .run(ctx, inst, rx, cmd_rx, run_token)
+                .await;
+        });
+        // 喂一条样本触发 up()（up() 忽略 batch 内容，固定返回 N 条）
+        tx.send(Sample {
+            hwid: crate::types::Hwid::new("it"),
+            devid: "devB".into(),
+            values: [("v".to_string(), crate::types::SampleValue::Int(1))]
+                .into_iter()
+                .collect(),
+            timestamp: 1,
+        })
+        .await
+        .unwrap();
+
+        // 对端订阅者收满 N 条（死锁形态：收到 ≤16 后永久停滞）
+        let mut peer = MqttOptions::new("rsiot-burst-peer", "127.0.0.1", port);
+        peer.set_keep_alive(std::time::Duration::from_secs(30));
+        let (peer_tx, mut peer_ev) = AsyncClient::new(peer, 10);
+        // 等 broker 就绪 + 订阅生效（ConnAck 后重试订阅直至成功）
+        for _ in 0..20 {
+            if peer_tx.subscribe(UP, QoS::AtMostOnce).await.is_ok() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+
+        let mut got = 0usize;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        while got < N && std::time::Instant::now() < deadline {
+            match tokio::time::timeout(std::time::Duration::from_secs(2), peer_ev.poll()).await {
+                Ok(Ok(Event::Incoming(Packet::Publish(p)))) => {
+                    if p.topic == UP {
+                        got += 1;
+                    }
+                }
+                Ok(Ok(_)) => {}
+                Ok(Err(e)) => panic!("peer poll err: {e}"),
+                Err(_) => break, // 总超时——跳出后由断言给结论
+            }
+        }
+        assert_eq!(got, N, "80 条批量发布应全数送达（死锁回归），实得 {got}");
+        token.cancel();
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     /// T10 契约 e2e（进程内 rumqttd 0.20，默认跑——无需外部 broker/环境变量，
