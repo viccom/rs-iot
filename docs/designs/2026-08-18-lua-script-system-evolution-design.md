@@ -364,7 +364,7 @@ end
 
 ### 5.4 MQTT 透传南向（io_engine 第 4 种 backend，Q10 定案）
 
-mqtt 不只是北向。io_engine 增加 **mqtt backend**（与 tcp/serial/udp 并列）：常驻订阅透传 topic → `on_data(frame)`；`ctx:request` = publish `req_topic` + 订阅 `resp_topic` 等首帧、超时弃订（**reply topic 模板**，app_config 配置；correlation id 需协议配合不现实故不取）。**collector 脚本完全不感知链路是 MQTT 还是串口**（`ctx:transport()` 返回 `"mqtt"`），帧解析逻辑全复用。链路形态归宿主，报文语义归脚本——这是对「灵活类型协议」的统一回答。实现注意：rumqttc AsyncClient 自带 poll task，与 io_engine 独占 backend 模型有适配张力，**实施前先 spike**（§9 风险 R2）。
+mqtt 不只是北向。io_engine 增加 **mqtt backend**（与 tcp/serial/udp 并列）：常驻订阅透传 topic → `on_data(frame)`；`ctx:request` = publish `req_topic` + 订阅 `resp_topic` 等首帧、超时弃订（**reply topic 模板**，app_config 配置；correlation id 需协议配合不现实故不取）。**collector 脚本完全不感知链路是 MQTT 还是串口**（`ctx:transport()` 返回 `"mqtt"`），帧解析逻辑全复用。链路形态归宿主，报文语义归脚本——这是对「灵活类型协议」的统一回答。实现注意：rumqttc AsyncClient 自带 poll task，与 io_engine 独占 backend 模型有适配张力，**实施前先 spike**（§9 风险 R2）。spike-2 实测（2026-08-20，`src/plugin/lua_core/io_engine/spike2_mqtt.rs`）：**取方案 a「EventLoop 独立 pump + 内部分路」，模型成立**——pump task 独占 `eventloop.poll()`，出包经 `route_incoming(has_inflight)` 分路（Publish 按在飞二分 resp oneshot/被动帧通道，ConnAck/Ping/Outgoing 忽略；request = 先注册 slot → publish → 等首帧，超时清 slot）。关键行为：① rumqttc 0.25 `AsyncClient::new` 返回 `(client, eventloop)` 且**不带 poll task**，EventLoop 由调用方轮询、持续 poll 即自动重连——「AsyncClient 自带 poll task」的预想张力实不存在，pump 即官方预期用法；② publish 未连接/重连中立即排队返回 Ok（不阻塞不报错），连接失败只经 poll 路径冒出（Io/ConnectionRefused 立即），pump 错误 → 在飞 oneshot 送达使 request 快速失败而非挂死；③ poll 报错后 EventLoop 可继续 poll（内部 clean 后重连），pump 多轮错误存活不 panic；④ T11 注意：断连期间排队的 QoS1 帧重连后补发，超时弃等的请求可能迟到送达设备（slot 已清不会误投下一个 request，但设备侧可能收到迟到帧）。
 
 ### 5.5 北向实例化改造（还旧账）
 

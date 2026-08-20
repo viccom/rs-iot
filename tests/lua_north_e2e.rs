@@ -179,7 +179,11 @@ async fn rest_startinst_north_dispatches_to_start_sink() {
         .await
         .expect("call app");
     assert_eq!(resp.status(), StatusCode::OK);
-    assert_eq!(body_json(resp).await["status"], "ok", "CRUD set 应接受 North 配置");
+    assert_eq!(
+        body_json(resp).await["status"],
+        "ok",
+        "CRUD set 应接受 North 配置"
+    );
 
     // 启动：修复前 400 "only south(source)..."；修复后走 start_sink → 无插件 500。
     let resp = app

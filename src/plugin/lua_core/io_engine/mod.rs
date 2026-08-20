@@ -5,6 +5,8 @@
 
 mod mock;
 mod serial;
+#[cfg(test)]
+mod spike2_mqtt;
 mod tcp;
 mod udp;
 
