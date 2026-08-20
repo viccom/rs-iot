@@ -29,6 +29,23 @@ use tokio::sync::mpsc;
 /// §5.0 分层（B 阶段 luaTransform/luaNorth 复用 api 时会拖进 collector 壳）。
 pub(crate) type RuntimeDevs = std::sync::Arc<std::sync::Mutex<std::collections::BTreeSet<String>>>;
 
+/// 自写点记录表（Q6 自环防护，阶段 C T8）：`(devid, tag)` → 最近一次写入时刻。
+/// 仅 Role::Transform（luaTransform 壳）构造 ApiCtx 时传 Some——api 层
+/// `push_sample` 发送成功后记录，壳层收 Rtdata 时窗口内命中即跳过（自身输出
+/// 不触发自身 on_rtdata）；Collector/North 传 None（不记录零开销）。
+pub(crate) type SelfWrites = std::sync::Arc<
+    std::sync::Mutex<std::collections::HashMap<(String, String), std::time::Instant>>,
+>;
+
+/// 自环防护窗口（Q6，阶段 C T8）：自写记录的保留期——窗口内命中同 `(devid,tag)`
+/// 的 Rtdata 视为自身输出回流，跳过不投。取 10s 覆盖 hub 积压 + pipeline 攒批 +
+/// 订阅端调度延迟的最坏和。
+///
+/// 取舍（计划五项已定取舍第 2 条）：窗口内**其他源**（collector/别的 transform）
+/// 对同 `(devid,tag)` 的并发写入会被一并静默——Q6 宿主保证的是"自身输出不触发
+/// 自身"（per-instance 表），跨源可见性不受保证。
+pub(crate) const SELF_LOOP_GUARD_WINDOW: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// mlua::Value → SampleValue（对标 transform/rhai.rs 的类型映射）。
 ///
 /// 下沉缘由同 [`RuntimeDevs`]：collect 返回值解析（薄壳）与 L2 set_value 解析
@@ -84,12 +101,14 @@ pub(crate) fn try_send_outcome(tx: &mpsc::Sender<Sample>, sample: Sample) -> Sen
 /// `values` 空 → 直接返回（无点不上报）。send 经 [`send_with_deadline`]（2s 背压
 /// 超时，hub 关 → warn，超时 → 丢样 + `dropped` 计数；对标 `run()` collect 推 hub
 /// 容错语义）。timestamp 取当前本地秒。上报的 devid 记入 `runtime_devs`
-/// （运行时设备集，collect 与 L2 上报共用出口）。
+/// （运行时设备集，collect 与 L2 上报共用出口）。发送成功且 `self_writes` 为 Some
+/// 时记自写点（Q6 自环防护——丢样/关闭不产生回流，不记）。
 async fn push_sample(
     tx: &mpsc::Sender<Sample>,
     hwid: &crate::types::Hwid,
     runtime_devs: &RuntimeDevs,
     dropped: &std::sync::atomic::AtomicU64,
+    self_writes: &Option<SelfWrites>,
     devid: String,
     values: std::collections::BTreeMap<String, SampleValue>,
 ) {
@@ -99,6 +118,11 @@ async fn push_sample(
     if let Ok(mut set) = runtime_devs.lock() {
         set.insert(devid.clone());
     }
+    // Q6 自环防护（T8）：发送成功才记录——键先快照（sample 构造后 devid/values
+    // 已 move；None（Collector/North）不分配）。
+    let sw_keys = self_writes
+        .as_ref()
+        .map(|_| self_write_keys(&devid, &values));
     let sample = Sample {
         hwid: hwid.clone(),
         devid,
@@ -106,7 +130,11 @@ async fn push_sample(
         timestamp: chrono::Local::now().timestamp(),
     };
     match send_with_deadline(tx, sample).await {
-        SendOutcome::Sent => {}
+        SendOutcome::Sent => {
+            if let (Some(sw), Some(keys)) = (self_writes.as_ref(), sw_keys) {
+                record_self_writes(sw, keys);
+            }
+        }
         SendOutcome::Closed => tracing::warn!("[luaClient] set_value(s): hub 关闭，值未上报"),
         SendOutcome::Dropped => {
             dropped.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -114,6 +142,39 @@ async fn push_sample(
                 "[luaClient] set_value(s): hub 背压超 2s，丢样（累计 {}）",
                 dropped.load(std::sync::atomic::Ordering::Relaxed)
             );
+        }
+    }
+}
+
+/// 自写键快照（Q6 自环防护，T8）：`(devid,tag)` 对；tag 双形态（"tag" /
+/// "devid.tag"，与 Sample.values 同源）——壳层投递路径剥 dev 前缀后查表，两种
+/// 形态都记保证任一写法可命中。
+fn self_write_keys(
+    devid: &str,
+    values: &std::collections::BTreeMap<String, SampleValue>,
+) -> Vec<(String, String)> {
+    let prefix = format!("{devid}.");
+    let mut keys: Vec<(String, String)> = values
+        .keys()
+        .map(|t| (devid.to_string(), t.clone()))
+        .collect();
+    keys.extend(values.keys().filter_map(|t| {
+        t.strip_prefix(&prefix)
+            .map(|s| (devid.to_string(), s.to_string()))
+    }));
+    keys
+}
+
+/// 自写点记入（Q6 自环防护，T8）：`键 -> now`；顺带 retain 清理窗口外条目（防
+/// map 无界膨胀，计划 T8 要求）：写入点数有界（窗口 10s 内的活跃点，通常几十），
+/// 全量 O(n) 扫描即可，不引入后台清理任务（取舍：低频写场景下简单性优于每次
+/// 多扫几十项的微开销）。
+fn record_self_writes(self_writes: &SelfWrites, keys: Vec<(String, String)>) {
+    if let Ok(mut m) = self_writes.lock() {
+        let now = std::time::Instant::now();
+        m.retain(|_, t| now.duration_since(*t) < SELF_LOOP_GUARD_WINDOW);
+        for k in keys {
+            m.insert(k, now);
         }
     }
 }
@@ -158,6 +219,10 @@ pub(crate) struct ApiCtx<'a> {
     /// 丢样计数（`push_sample` 背压超时分支 fetch_add；与 collect 分支共享同一
     /// 实例，flush 时落 stat `dropped_samples`）。
     pub(crate) dropped: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// 自写点记录（Q6 自环防护，T8）：Some 仅 Transform——[`push_sample`] 发送
+    /// 成功后记 `(devid,tag) -> Instant`；luaTransform 壳在 Rtdata 投递路径消费
+    ///（窗口内命中跳过该点）。Collector/North 传 None（详见 [`SelfWrites`]）。
+    pub(crate) self_writes: Option<SelfWrites>,
     /// 底层链路类型字符串（`cfg.transport.as_str()`，"tcp"/"serial"/"udp"），供
     /// `ctx:transport()` 暴露给脚本（脚本据此选帧格式：serial 加 CRC16、tcp 加
     /// MBAP 头）。North 角色不注册 transport，值不被消费（占位 "mqtt"）。
@@ -371,12 +436,14 @@ pub(crate) fn register(lua: &Lua, ac: &ApiCtx<'_>) -> mlua::Result<()> {
     let hwid_set = ac.ctx_host.hwid.clone();
     let rt_set = ac.runtime_devs.clone();
     let drop_set = ac.dropped.clone();
+    let sw_set = ac.self_writes.clone();
     let set_value_fn = lua.create_async_function(
         move |_lua, (_self, devid, tag, v): (Value, LuaString, LuaString, Value)| {
             let tx = tx_set.clone();
             let hwid = hwid_set.clone();
             let rt = rt_set.clone();
             let dropped = drop_set.clone();
+            let self_writes = sw_set.clone();
             async move {
                 let devid = devid.to_string_lossy().to_string();
                 let tag = tag.to_string_lossy().to_string();
@@ -384,7 +451,7 @@ pub(crate) fn register(lua: &Lua, ac: &ApiCtx<'_>) -> mlua::Result<()> {
                     .ok_or_else(|| mlua::Error::RuntimeError("set_value: 不支持的值类型".into()))?;
                 let mut values = std::collections::BTreeMap::new();
                 values.insert(tag, sv);
-                push_sample(&tx, &hwid, &rt, &dropped, devid, values).await;
+                push_sample(&tx, &hwid, &rt, &dropped, &self_writes, devid, values).await;
                 Ok(())
             }
         },
@@ -398,12 +465,14 @@ pub(crate) fn register(lua: &Lua, ac: &ApiCtx<'_>) -> mlua::Result<()> {
     let hwid_sv = ac.ctx_host.hwid.clone();
     let rt_sv = ac.runtime_devs.clone();
     let drop_sv = ac.dropped.clone();
+    let sw_sv = ac.self_writes.clone();
     let set_values_fn = lua.create_async_function(
         move |_lua, (_self, devid, table): (Value, LuaString, mlua::Table)| {
             let tx = tx_sv.clone();
             let hwid = hwid_sv.clone();
             let rt = rt_sv.clone();
             let dropped = drop_sv.clone();
+            let self_writes = sw_sv.clone();
             async move {
                 let devid = devid.to_string_lossy().to_string();
                 let mut values = std::collections::BTreeMap::new();
@@ -413,7 +482,7 @@ pub(crate) fn register(lua: &Lua, ac: &ApiCtx<'_>) -> mlua::Result<()> {
                         values.insert(k, sv);
                     }
                 }
-                push_sample(&tx, &hwid, &rt, &dropped, devid, values).await;
+                push_sample(&tx, &hwid, &rt, &dropped, &self_writes, devid, values).await;
                 Ok(())
             }
         },

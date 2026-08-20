@@ -5,7 +5,8 @@
 //! 全套（生命周期/stat/热加载）：
 //!
 //! - **输入面**：`cfg.subscribe` 非空才订 EventBus（Q6：空 = 纯定时）；Rtdata 事件
-//!   经 [`config::SubMatcher`] 宿主侧模式过滤 → `on_rtdata(devid, tag, value)`
+//!   经 [`config::SubMatcher`] 宿主侧模式过滤 → 自环防护（T8 self-write tracker
+//!   窗口过滤——自身输出回流不触发自身）→ `on_rtdata(devid, tag, value)`
 //!   逐点回调（每次独立预算，超时/出错跳过该点继续）；非 Rtdata 变体忽略，
 //!   Lagged → debug + 继续（broadcast 慢消费覆写旧值语义）。
 //! - **节拍面**：`on_timer()` 周期回调（`period` 秒，jitter 相位散布，MissedTick
@@ -19,8 +20,9 @@
 //!   transport 占位 "none"（不注册不被消费）；
 //! - manifest 契约 `@role transform` → on_timer/on_rtdata any-of（T5）。
 //!
-//! 自环防护（self-write tracker 窗口过滤）是 T8：投递路径插入点已标注
-//! （匹配之后、逐点回调之前）。
+//! 自环防护（Q6 硬性验收，T8）：[`core_::api::SelfWrites`] per-instance 表——
+//! api 层 `push_sample` 记自写点，投递路径窗口（[`core_::api::SELF_LOOP_GUARD_WINDOW`]）
+//! 内命中即跳过（跨源同 tag 静默取舍见 const 注释）。
 
 mod config;
 
@@ -89,8 +91,12 @@ impl Source for LuaTransform {
 
         // 2. ApiCtx（Transform 角色）：io=None（无传输层，C1 随角色裁剪不注册）；
         //    tx=hub 发送端——脚本 set_value 写派生点经此回 hub → pipeline 全链路。
+        //    self_writes 传 Some（Q6 自环防护，T8）：本实例独享一份——api 层
+        //    push_sample 发送成功后记 (devid,tag)，本壳在 Rtdata 投递路径消费
+        //   （窗口内命中即跳过）；Collector/North 无订阅面恒传 None。
         let runtime_devs: core_::api::RuntimeDevs = Default::default();
         let dropped: std::sync::Arc<std::sync::atomic::AtomicU64> = Default::default();
+        let self_writes: core_::api::SelfWrites = Default::default();
         let ac = core_::api::ApiCtx {
             ctx_host: ctx.clone(),
             inst: &inst,
@@ -98,6 +104,7 @@ impl Source for LuaTransform {
             tx: tx.clone(),
             runtime_devs: runtime_devs.clone(),
             dropped: dropped.clone(),
+            self_writes: Some(self_writes.clone()),
             transport: "none",
             scripts_root: &scripts_root,
             role: core_::api::Role::Transform,
@@ -278,8 +285,22 @@ impl Source for LuaTransform {
                             if !matcher.matches(&s.devid, tag) {
                                 continue;
                             }
-                            // T8 自环防护插入点（self-write tracker 窗口过滤）：
-                            // 匹配之后、逐点回调之前。
+                            // T8 自环防护（self-write tracker 窗口过滤）：命中点查
+                            // 自写记录，年龄 < SELF_LOOP_GUARD_WINDOW → 跳过——自身
+                            // set_value 输出经 hub→pipeline→publish 回流不触发自身
+                            // on_rtdata（计数入 rtdata_skipped，与超预算/出错跳过同
+                            // 口径）。取舍（五项已定取舍第 2 条）：窗口内其他源对同
+                            // (devid,tag) 的并发写入一并静默——per-instance 表只保证
+                            // "自身输出不触发自身"，跨源可见性不受保证。
+                            let self_written = self_writes
+                                .lock()
+                                .ok()
+                                .and_then(|m| m.get(&(s.devid.clone(), tag.to_string())).copied())
+                                .is_some_and(|t| t.elapsed() < core_::api::SELF_LOOP_GUARD_WINDOW);
+                            if self_written {
+                                rtdata_skipped += 1;
+                                continue;
+                            }
                             match with_budget(
                                 "on_rtdata",
                                 cfg.callback_timeout_ms,

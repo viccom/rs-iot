@@ -142,6 +142,7 @@ impl Sink for LuaNorth {
             transport: "mqtt",
             scripts_root: &scripts_root,
             role: core_::api::Role::North,
+            self_writes: None, // North 无 EventBus 订阅面，无自环（T8）
         };
 
         // 3. VM 组装：沙箱 → register + cfg 表（先于 load_main——脚本顶层可用

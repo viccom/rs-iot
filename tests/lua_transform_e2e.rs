@@ -12,6 +12,9 @@
 //!   + 非 Rtdata 事件（startinst 的 State 事件同总线流经）被忽略。
 //! - manifest 契约：`@role transform` 缺 `on_timer`/`on_rtdata` → 启动拒载（warn +
 //!   不进 Running；run 提前返回 → supervisor 标 Failed，T5 契约的 e2e 面）。
+//! - 自环防护（T8 硬性验收，Q6）：真实链路（hub → pipeline 50ms 攒批 → publish
+//!   Rtdata 回 EventBus）——实例订阅自身会写的 tag，`set_value` 产出回流不触发自身
+//!   `on_rtdata`（kv 计数稳定）；跨实例不误伤（A 写 → B 订阅收到，防护 per-instance）。
 
 mod common;
 
@@ -21,6 +24,8 @@ use rs_iot::api::{build_router, AppState};
 use rs_iot::event_bus::{EventBus, EventPayload, RtdataSample};
 use rs_iot::host::{BridgeRegistry, CtlRegistry, HostContext};
 use rs_iot::plugin::instance::{InstState, InstanceManager};
+use rs_iot::plugin::traits::Processor;
+use rs_iot::transform::passthrough::Passthrough;
 use rs_iot::types::{
     AppType, DeviceSpec, HostKind, Hwid, InstConfig, PluginName, Sample, SampleValue,
 };
@@ -483,6 +488,259 @@ async fn transform_manifest_missing_callbacks_rejected() {
         .expect("read stat");
     assert!(stat.is_none(), "拒载实例不应写 stat: {stat:?}");
 
+    mgr.stop_all().await;
+    common::stop_lux(handle).await;
+    let _ = std::fs::remove_dir_all(&scripts);
+}
+
+// ===== T8：自环防护（Q6 硬性验收）——真实链路 =====
+
+/// HGET rtdata cell 原文（`[ts, localTime, value]` JSON 文本；空串 = 无此 field）。
+async fn hget_cell(client: &lux::EmbeddedClient, key: &str, field: &str) -> String {
+    use lux::EmbeddedValue;
+    match client.execute_value("HGET", &[key, field]).await {
+        Ok(EmbeddedValue::Bulk(b)) => String::from_utf8_lossy(&b).to_string(),
+        Ok(EmbeddedValue::Simple(s)) => s,
+        _ => String::new(),
+    }
+}
+
+/// 真实链路测试底座（T8）：真实 EventBus + 真实 pipeline（hub → 50ms 攒批 → lux
+/// 入库 + Rtdata publish 回 EventBus，`tests/lua_l2_e2e.rs` 的 `pipeline::run` 同款
+/// 接线）——`set_value` 产出经生产路径回流订阅端，非手动等价 publish 模拟。
+/// 返回 (mgr, event_bus, handle, shutdown)；`shutdown.cancel()` 停 pipeline。
+#[allow(clippy::type_complexity)]
+async fn real_chain(
+    tag: &str,
+) -> (
+    Arc<InstanceManager>,
+    EventBus,
+    lux::ServerHandle,
+    CancellationToken,
+) {
+    let data_dir = common::test_data_dir(tag);
+    // 清历史残留（common::test_data_dir 不清理目录：上一轮运行留下的 luakv 会让
+    // 精确断言（kv==1）读到脏值直接假红——先整删再重建，保证本轮从零开始）。
+    let _ = std::fs::remove_dir_all(&data_dir);
+    let (handle, client) = common::start_lux(data_dir.to_str().expect("utf8")).await;
+    rs_iot::db::identity::bootstrap(&client)
+        .await
+        .expect("bootstrap");
+
+    let event_bus = EventBus::new(64);
+    let shutdown = CancellationToken::new();
+    let ctx = HostContext {
+        lux: client.clone(),
+        hwid: Hwid::new("it-hwid"),
+        shutdown: shutdown.clone(),
+        ctl_registry: CtlRegistry::new(Arc::new(rs_iot::process_metrics::ProcessMetrics::new())),
+        bridge_registry: BridgeRegistry::new(),
+        metrics: Arc::new(rs_iot::process_metrics::ProcessMetrics::new()),
+        trace_registry: rs_iot::io_trace::TraceRegistry::new(),
+        event_tx: event_bus.clone(),
+    };
+    // hub → pipeline（1 worker + Passthrough：T8 只验回流链路，无数据加工）。
+    let (hub_tx, hub_rx) = mpsc::channel::<Sample>(64);
+    let mgr = Arc::new(InstanceManager::new(ctx.clone(), hub_tx));
+    let proc: Arc<dyn Processor> = Arc::new(Passthrough);
+    let _pipeline = tokio::spawn(rs_iot::pipeline::run(
+        ctx,
+        hub_rx,
+        proc,
+        1,
+        shutdown.child_token(),
+    ));
+    (mgr, event_bus, handle, shutdown)
+}
+
+/// 自环防护（T8 硬性验收，Q6 路线图 C 行）：实例订阅自身会写的 tag（`devX.*`），
+/// `on_rtdata` 里 `set_value` 写 devX.derived → 外部经真实 EventBus publish devX
+/// 事件 → on_rtdata 触发一次（kv=1）→ 产出样本经真实链路（hub → pipeline 50ms
+/// 攒批 → publish Rtdata）回流自身订阅 → self-write tracker 窗口内命中 → 跳过
+/// 不投——断言 kv 计数稳定不增长（2.5s 轮询五采样）。
+#[tokio::test]
+async fn transform_self_loop_guard_suppresses_own_output() {
+    let (mgr, event_bus, handle, shutdown) = real_chain("lua_transform_selfloop").await;
+
+    let scripts = std::env::temp_dir().join(format!("lua-transform-loop-{}", std::process::id()));
+    let script_dir = scripts.join("loop");
+    std::fs::create_dir_all(&script_dir).expect("mkdir");
+    std::fs::write(
+        script_dir.join("main.lua"),
+        r#"-- @role transform
+function on_rtdata(devid, tag, value)
+  local n = (ctx:kv_get("loop") or 0) + 1
+  ctx:kv_set("loop", n)
+  ctx:set_value("devX", "derived", n)
+end
+"#,
+    )
+    .expect("write");
+
+    // period=0 纯订阅（无 on_timer，计数只来自 on_rtdata）；订阅面覆盖自身写点。
+    mgr.start_source(transform_inst(
+        "transform-loop",
+        "luaTransform",
+        serde_json::json!({
+            "script": "loop",
+            "period": 0,
+            "subscribe": ["devX.*"],
+            "scripts_root": scripts.to_str().expect("utf8"),
+        }),
+    ))
+    .await
+    .expect("start_source");
+
+    // 订阅建立竞态兜底（照上方 rtdata 测试模式）：重发 + 轮询直到 kv 可见（晚订阅
+    // 前的发布自然丢，重发无害）；一旦可见即停发——后续计数增长只可能来自回流。
+    let client = handle.client();
+    let mut first: Option<i64> = None;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
+    while first.is_none() && std::time::Instant::now() < deadline {
+        event_bus.publish(EventPayload::Rtdata {
+            dev_ids: vec!["devX".into()],
+            count: 1,
+            samples: vec![rtdata_sample("devX", &[("temp", SampleValue::Float(20.5))])],
+            ts: "2026-08-20T00:00:00Z".into(),
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        if let Some(s) = kv_str(&client, "transform-loop", "loop").await {
+            if let Ok(n) = s.parse::<i64>() {
+                first = Some(n);
+            }
+        }
+    }
+    let baseline = first.expect("on_rtdata 应至少触发一次（kv loop 可见）");
+    assert_eq!(
+        baseline, 1,
+        "单次外部 publish 应只触发一次 on_rtdata（kv=1）"
+    );
+
+    // 防假绿：devX.derived 已落 lux——set_value → hub → pipeline 真实回流发生过
+    //（publish 与入库同一 flush，field 在即回流事件已发出，防护缺失则二次触发
+    // 已在路上，下方稳定性窗口会捕获）。
+    let mut derived = String::new();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while derived.is_empty() && std::time::Instant::now() < deadline {
+        derived = hget_cell(&client, "rtdata:devX", "devX.derived").await;
+        if derived.is_empty() {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+    }
+    assert!(
+        !derived.is_empty(),
+        "派生点应经真实链路落库（防回流未发生的假绿）"
+    );
+
+    // 稳定性窗口：2.5s 五次采样 kv 恒等于 baseline（自身回流被窗口过滤，不触发）。
+    for _ in 0..5 {
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        let n = kv_str(&client, "transform-loop", "loop")
+            .await
+            .and_then(|s| s.parse::<i64>().ok())
+            .unwrap_or(-1);
+        assert_eq!(n, baseline, "自环防护应跳过自身回流，kv 计数稳定不增长");
+    }
+
+    shutdown.cancel();
+    mgr.stop_all().await;
+    common::stop_lux(handle).await;
+    let _ = std::fs::remove_dir_all(&scripts);
+}
+
+/// 跨实例不误伤（T8）：transform A（无订阅、period=1s，`on_timer` 里 `set_value`
+/// 写 devB.derived）+ transform B（订阅 devB）→ A 的产出经真实链路（hub →
+/// pipeline → publish Rtdata）到达 B 的 `on_rtdata`（kv 计数增长）——自环防护是
+/// per-instance self-write 表（A 记 (devB,derived) 只挡 A 自己），不挡正常跨实例
+/// 传播（单跳）。
+#[tokio::test]
+async fn transform_cross_instance_propagation_not_blocked() {
+    let (mgr, _event_bus, handle, shutdown) = real_chain("lua_transform_cross").await;
+
+    let scripts = std::env::temp_dir().join(format!("lua-transform-x-{}", std::process::id()));
+    for (dir, src) in [
+        (
+            "a",
+            r#"-- @role transform
+function on_timer()
+  local n = (ctx:kv_get("t") or 0) + 1
+  ctx:kv_set("t", n)
+  ctx:set_value("devB", "derived", n)
+end
+"#,
+        ),
+        (
+            "b",
+            r#"-- @role transform
+function on_rtdata(devid, tag, value)
+  local n = (ctx:kv_get("got") or 0) + 1
+  ctx:kv_set("got", n)
+  ctx:kv_set("last_tag", tag)
+end
+"#,
+        ),
+    ] {
+        let script_dir = scripts.join(dir);
+        std::fs::create_dir_all(&script_dir).expect("mkdir");
+        std::fs::write(script_dir.join("main.lua"), src).expect("write");
+    }
+
+    mgr.start_source(transform_inst(
+        "transform-a",
+        "luaTransform",
+        serde_json::json!({
+            "script": "a",
+            "period": 1,
+            "scripts_root": scripts.to_str().expect("utf8"),
+        }),
+    ))
+    .await
+    .expect("start A");
+    mgr.start_source(transform_inst(
+        "transform-b",
+        "luaTransform",
+        serde_json::json!({
+            "script": "b",
+            "period": 0,
+            "subscribe": ["devB"],
+            "scripts_root": scripts.to_str().expect("utf8"),
+        }),
+    ))
+    .await
+    .expect("start B");
+
+    // A 首 tick（jitter 相位 <1s，此后 1s 一拍）→ set_value → hub → pipeline
+    // flush(50ms) → publish → B 订阅命中 → on_rtdata。轮询 B 的 kv got ≥1；
+    // A 侧 kv t 可见佐证生产端真跑（非空即够）。
+    let client = handle.client();
+    let mut got: i64 = 0;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while std::time::Instant::now() < deadline {
+        if let Some(s) = kv_str(&client, "transform-b", "got").await {
+            if let Ok(n) = s.parse::<i64>() {
+                got = n;
+                if n >= 1 {
+                    break;
+                }
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    }
+    assert!(
+        got >= 1,
+        "跨实例传播不误伤：B 的 on_rtdata 应收到 A 的产出（got 实测 {got}）"
+    );
+    assert_eq!(
+        kv_str(&client, "transform-b", "last_tag").await.as_deref(),
+        Some("derived"),
+        "B 收到的应是 A 写的派生点 tag"
+    );
+    assert!(
+        kv_str(&client, "transform-a", "t").await.is_some(),
+        "A 的 on_timer 应真跑（生产端佐证）"
+    );
+
+    shutdown.cancel();
     mgr.stop_all().await;
     common::stop_lux(handle).await;
     let _ = std::fs::remove_dir_all(&scripts);

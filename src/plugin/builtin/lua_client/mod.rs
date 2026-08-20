@@ -186,6 +186,7 @@ impl Source for LuaClient {
             transport: cfg.transport.as_str(),
             scripts_root: &scripts_root,
             role: core_::api::Role::default(),
+            self_writes: None, // Collector 无 EventBus 订阅面，无自环（T8）
         };
         if let Err(e) = core_::api::register(&lua, &ac) {
             tracing::warn!("[luaClient] inst {} ctx API 注册失败：{e}", inst.inst_id);
