@@ -389,8 +389,20 @@ pub(crate) fn build_mqtt_options(
     let mut opts = rumqttc::MqttOptions::new(client_id, cfg.host.clone(), cfg.port);
     opts.set_keep_alive(std::time::Duration::from_secs(keepalive));
     opts.set_clean_session(true);
-    if let (Some(u), Some(p)) = (&username, &password) {
-        opts.set_credentials(u, p);
+    match (&username, &password) {
+        (Some(u), Some(p)) => {
+            opts.set_credentials(u, p);
+        }
+        // 复审 P2-4：单项声明被 MQTT 协议约束丢弃（set_credentials 无法表达
+        // username-only/password-only）——fail 可见而非静默匿名连接后无限重连
+        // 「not authorized」查因无门。
+        (Some(_), None) => tracing::warn!(
+            "[luaNorth] 仅声明 username（password 缺失）——MQTT 协议要求成对，             本次按匿名连接（如需认证请补 password 或 auth() 返回两项）"
+        ),
+        (None, Some(_)) => tracing::warn!(
+            "[luaNorth] 仅声明 password（username 缺失）——MQTT 协议要求成对，             本次按匿名连接（token 型 broker 若支持无用户名密码请经 broker 侧适配）"
+        ),
+        (None, None) => {}
     }
     if let Some(w) = will {
         opts.set_last_will(w);
@@ -568,7 +580,12 @@ pub(crate) fn parse_up_result(v: mlua::Value) -> Result<(Vec<PubItem>, usize), S
             let mut items = Vec::new();
             let mut fail = 0usize;
             for entry in t.sequence_values::<mlua::Value>() {
-                let Ok(entry) = entry else { break };
+                // 复审 P3-3：数组空洞（{1=ok, 3=ok} 的 2=nil）与坏条目同语义——
+                // 计 parse_fail 跳过，不再静默截断其后全部条目。
+                let Ok(entry) = entry else {
+                    fail += 1;
+                    continue;
+                };
                 let mlua::Value::Table(e) = entry else {
                     fail += 1;
                     continue;

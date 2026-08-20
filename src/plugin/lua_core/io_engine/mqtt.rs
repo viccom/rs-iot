@@ -216,7 +216,14 @@ impl IoBackend for MqttIo {
     async fn recv_idle(&mut self) -> Option<Vec<u8>> {
         match tokio::time::timeout(self.idle, self.passive_rx.recv()).await {
             Ok(Some(frame)) => Some(frame),
-            Ok(None) | Err(_) => None,
+            Err(_) => None, // idle 窗口无帧 → 重 select（正常节拍）
+            // 复审（阶段 B 深度审查）：通道关闭（pump panic/退出，tx 全 drop）若也
+            // 返 None，外层 select! 会立即重进 recv_idle → recv 立即再返 None →
+            // 忙循环烧 CPU。挂起等到 idle 窗口满再返 None，节拍与无帧一致。
+            Ok(None) => {
+                tokio::time::sleep(self.idle).await;
+                None
+            }
         }
     }
 }

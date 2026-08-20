@@ -179,7 +179,8 @@ impl Sink for LuaNorth {
             stdlib_ver.as_deref(),
         ) {
             Ok(summary) => {
-                tracing::warn!(
+                // 复审 P3-4：成功路径 warn → info（成功消息不污染 warn 流）
+                tracing::info!(
                     "[luaNorth] inst {} manifest dry-run 通过：{summary}",
                     inst.inst_id
                 )
