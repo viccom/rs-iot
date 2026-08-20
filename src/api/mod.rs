@@ -23,6 +23,7 @@ pub mod routes_logs;
 pub mod routes_lua;
 pub mod routes_metrics;
 pub mod routes_rtdata;
+pub mod routes_secret;
 pub mod routes_stat;
 pub mod routes_sys;
 pub mod routes_trace;
@@ -92,10 +93,15 @@ pub async fn hget(lux: &lux::EmbeddedClient, key: &str, field: &str) -> Option<S
 }
 
 pub fn build_router(state: AppState) -> axum::Router {
-    use axum::routing::{get, post};
+    use axum::routing::{delete, get, post};
     let app = axum::Router::new()
         // Prometheus 抓取端点（免 JWT，机器出口；spec §3）
         .route("/metrics", get(routes_metrics::metrics))
+        // secret 管理（阶段 B Q4/D6：lux secrets 表写入/掩码读/删除；默认 JWT
+        // 保护，list 绝不回显明文、审计 ref 级不落值；脚本侧读取是 T5）
+        .route("/api/v1/secret/set", post(routes_secret::set))
+        .route("/api/v1/secret/list", get(routes_secret::list))
+        .route("/api/v1/secret", delete(routes_secret::delete))
         // 系统信息与插件实例
         .route("/api/v1/sysinfo", get(routes_sys::sysinfo))
         .route("/api/v1/sysstatus", get(routes_sys::sysstatus))
