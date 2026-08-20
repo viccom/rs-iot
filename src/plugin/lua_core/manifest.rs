@@ -15,7 +15,8 @@
 //! 1. **API_VER 协商**：`@api_ver` > [`CUR_API_VER`]（capability.rs 单一事实源）
 //!    拒载（请升级宿主）；< [`MIN_API_VER`] 拒载（请升级脚本）。
 //! 2. **role 契约**（§5.1，B 阶段 T6 起多角色）：显式 `@role collector` → 全局
-//!    `collect` 必须存在；`@role mqtt-north` → `auth`+`up` 必须存在。
+//!    `collect` 必须存在；`@role mqtt-north` → `auth`+`up` 必须存在；`@role
+//!    transform` → `on_timer`/`on_rtdata` 至少其一（any-of，§2.2 C 阶段 T5）。
 //! 3. **stdlib 范围**：`@stdlib >=X.Y <Z`（空格组合，全部满足）vs 本地 index
 //!    版本（`stdlib_sync::read_index`；None = 种子兜底态，跳过版本比对），
 //!    不满足给可行动提示（请 sync）。
@@ -147,6 +148,15 @@ fn parse_param(value: &str) -> Option<ParamDecl> {
     Some(p)
 }
 
+/// 角色必需回调契约形态（§2.2）：清单内全部必须（All）或至少其一（Any）。
+enum Required {
+    /// 清单内全部必须（collector→`collect`、mqtt-north→`auth`+`up`；缺哪个点名哪个）。
+    All(&'static [&'static str]),
+    /// 至少声明其一（transform→`on_timer`/`on_rtdata`，C 阶段 T5——纯定时/纯订阅
+    /// 两形态都合法；`on_init` 恒可选不参与契约）。
+    Any(&'static [&'static str]),
+}
+
 /// dry-run 契约校验（Q1/§2.2/§4.4）：api_ver 协商 + role 契约 + stdlib 范围。
 ///
 /// `lua` 为已加载 main.lua 的 VM（globals 含脚本定义的函数）；
@@ -154,8 +164,9 @@ fn parse_param(value: &str) -> Option<ParamDecl> {
 /// 不满足给可行动错误消息（含"请升级宿主/升级脚本/请 sync"）。
 ///
 /// role 契约按角色查必需回调（§5.1；B 阶段 T6 起多角色）：collector→`collect`、
-/// mqtt-north→`auth`+`up`（down/will/on_connack/on_disconnect 可选）。仅显式声明
-/// `@role` 时启用（存量无头脚本豁免，见模块文档兼容决策）。
+/// mqtt-north→`auth`+`up`（down/will/on_connack/on_disconnect 可选）、transform→
+/// `on_timer`/`on_rtdata` any-of（§2.2，C 阶段 T5）。仅显式声明 `@role` 时启用
+///（存量无头脚本豁免，见模块文档兼容决策）。
 pub(crate) fn dry_run(m: &Manifest, lua: &Lua, stdlib_ver: Option<&str>) -> Result<(), String> {
     // 1) API_VER 协商（§4.4；CUR/MIN 单一事实源在 capability.rs，与 stdlib sync 预检共用）
     if m.api_ver > CUR_API_VER {
@@ -170,25 +181,41 @@ pub(crate) fn dry_run(m: &Manifest, lua: &Lua, stdlib_ver: Option<&str>) -> Resu
             m.api_ver
         ));
     }
-    // 2) role 契约（§5.1/§5.2）：角色 → 必需全局回调清单；仅显式声明时校验。
+    // 2) role 契约（§5.1/§5.2）：角色 → 必需全局回调契约（All/Any，C 阶段 T5）；
+    //    仅显式声明时校验。
     let role = m.role.as_deref();
-    let required: &[&str] = match role {
-        Some("collector") => &["collect"],
-        Some("mqtt-north") => &["auth", "up"],
+    let required = match role {
+        Some("collector") => Required::All(&["collect"]),
+        Some("mqtt-north") => Required::All(&["auth", "up"]),
+        Some("transform") => Required::Any(&["on_timer", "on_rtdata"]),
         Some(other) => {
             return Err(format!(
-                "@role {other} 未知（本宿主支持：collector、mqtt-north）"
+                "@role {other} 未知（本宿主支持：collector、mqtt-north、transform）"
             ));
         }
-        None => &[],
+        None => Required::All(&[]),
     };
-    for f in required {
-        if lua.globals().get::<mlua::Function>(*f).is_err() {
-            // required 非空 ⟺ role 是 Some（None 分支清单为空，循环不进）。
-            return Err(format!(
-                "{} 角色缺少 {f}()：显式 @role 需定义全局 {f}",
-                role.unwrap_or_default()
-            ));
+    let has = |f: &str| lua.globals().get::<mlua::Function>(f).is_ok();
+    match required {
+        Required::All(list) => {
+            for f in list {
+                if !has(f) {
+                    // required 非空 ⟺ role 是 Some（None 分支清单为空，循环不进）。
+                    return Err(format!(
+                        "{} 角色缺少 {f}()：显式 @role 需定义全局 {f}",
+                        role.unwrap_or_default()
+                    ));
+                }
+            }
+        }
+        Required::Any(list) => {
+            if !list.iter().any(|f| has(f)) {
+                let names = list.join(" 或 ");
+                return Err(format!(
+                    "{} 角色需至少声明 {names} 其一：显式 @role 需定义对应全局回调",
+                    role.unwrap_or_default()
+                ));
+            }
         }
     }
     // 3) @stdlib 范围 vs 本地 index 版本（§3.5；None = 种子兜底态跳过——冷启动不拒载）
@@ -475,5 +502,42 @@ mod tests {
         let m = parse("-- @role mqtt-north").unwrap();
         let e = dry_run(&m, &lua, None).unwrap_err();
         assert!(e.contains("auth"), "collect 不能替代 auth：{e}");
+    }
+
+    /// C 阶段 T5 transform 契约（§2.2 any-of）：on_timer/on_rtdata 至少声明其一
+    ///（纯定时 / 纯订阅两形态都合法）；on_init 恒可选（不参与契约，也不能顶替）。
+    #[test]
+    fn dry_run_transform_any_of_on_timer_or_on_rtdata() {
+        // 只 on_timer（纯定时形态）→ 过。
+        let lua = Lua::new();
+        lua.load("function on_timer() end").exec().unwrap();
+        let m = parse("-- @role transform").unwrap();
+        assert!(dry_run(&m, &lua, None).is_ok(), "只 on_timer 应通过（纯定时）");
+
+        // 只 on_rtdata（纯订阅形态）→ 过。
+        let lua = Lua::new();
+        lua.load("function on_rtdata(devid, tag, value) end").exec().unwrap();
+        let m = parse("-- @role transform").unwrap();
+        assert!(dry_run(&m, &lua, None).is_ok(), "只 on_rtdata 应通过（纯订阅）");
+
+        // 两者皆无（即使有 on_init）→ 拒，错误可行动：点名角色与两个回调 + 其一语义。
+        let lua = Lua::new();
+        lua.load("function on_init() end").exec().unwrap();
+        let m = parse("-- @role transform").unwrap();
+        let e = dry_run(&m, &lua, None).unwrap_err();
+        assert!(e.contains("transform"), "错误应含角色名：{e}");
+        assert!(
+            e.contains("on_timer") && e.contains("on_rtdata"),
+            "应点名两个候选回调：{e}"
+        );
+        assert!(e.contains("其一"), "应表达 any-of 语义：{e}");
+
+        // 两者皆有 + on_init → 过（on_init 可选，双回调叠加合法形态）。
+        let lua = Lua::new();
+        lua.load("function on_init() end\nfunction on_timer() end\nfunction on_rtdata(d, t, v) end")
+            .exec()
+            .unwrap();
+        let m = parse("-- @role transform").unwrap();
+        assert!(dry_run(&m, &lua, None).is_ok(), "双回调 + on_init 应通过");
     }
 }
