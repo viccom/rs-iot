@@ -119,9 +119,11 @@ async fn push_sample(
 }
 
 /// 实例角色（能力包裁剪，设计 §5.2 角色与能力包矩阵）：[`register`] 按角色跳过
-/// 矩阵中标记 ✗ 的能力注册点。v1 两角色（§5.0 一套沙箱多种角色）：
+/// 矩阵中标记 ✗ 的能力注册点。v1 三角色（§5.0 一套沙箱多种角色）：
 /// - Collector（luaClient）：全量能力（含 C1 request/transport）。
 /// - North（luaNorth / mqtt-north）：无 C1——request/transport 不注册（B 阶段 T6）。
+/// - Transform（luaTransform，C 阶段 T4）：C0/C2/C4/C6 ✓，C1/C3/C5 ✗——
+///   request/transport/send_command/http 不注册（数据加工不出网不下行）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) enum Role {
     /// collector：全量能力（luaClient 构造 ApiCtx 的缺省值，行为零变化）。
@@ -130,6 +132,10 @@ pub(crate) enum Role {
     /// mqtt-north：§5.2 矩阵 mqtt-north 列（C0/C2/C4/C6 ✓、C1 ✗、C3 send_command
     /// 恒注入——Q5 定案 down() 下行依赖，R3 显式授权收紧排后续 task）。
     North,
+    /// transform：§5.2 矩阵 transform 列（C 阶段 T4）——C0/C2/C4/C6 ✓、
+    /// C1/C3/C5 ✗（订阅型数据加工：读 Rtdata 写派生点，无传输层/下行/出网）。
+    /// secret_get 恒注入（Q4/R3 授权清单门控，非角色裁剪）。
+    Transform,
 }
 
 /// [`register`] 的组装上下文（阶段 A 审查遗留收敛：9 参 → struct；B 阶段 north
@@ -332,27 +338,31 @@ pub(crate) fn register(lua: &Lua, ac: &ApiCtx<'_>) -> mlua::Result<()> {
     // --- L3 ctx:send_command(inst_id, devid, cmd, data) -> bool ---
     // 经 CtlRegistry::send 投到目标实例 cmd_rx（与 MQTT/REST 写入口同总线）。
     // send 是同步 try_send → create_function（非 async）；_self 吸收冒号隐式 self。
-    let ctl = ac.ctx_host.ctl_registry.clone();
-    let send_fn = lua.create_function(
-        move |_lua,
-              (_self, inst_id, devid, cmd, data): (
-            Value,
-            LuaString,
-            LuaString,
-            LuaString,
-            LuaString,
-        )| {
-            let msg = CtlMessage {
-                instance: InstId::from(inst_id.to_string_lossy().to_string()),
-                devid: devid.to_string_lossy().to_string(),
-                cmd: cmd.to_string_lossy().to_string(),
-                data: data.to_string_lossy().to_string(),
-            };
-            let inst_str = msg.instance.to_string();
-            Ok(ctl.send(&inst_str, msg))
-        },
-    )?;
-    ctx.set("send_command", send_fn)?;
+    // 角色裁剪（§5.2 矩阵 transform ✗，C 阶段 T4）：Transform 不注册 send_command
+    //（订阅型数据加工无下行）；north 恒注入不受影响（Q5 定案 down() 下行依赖）。
+    if ac.role != Role::Transform {
+        let ctl = ac.ctx_host.ctl_registry.clone();
+        let send_fn = lua.create_function(
+            move |_lua,
+                  (_self, inst_id, devid, cmd, data): (
+                Value,
+                LuaString,
+                LuaString,
+                LuaString,
+                LuaString,
+            )| {
+                let msg = CtlMessage {
+                    instance: InstId::from(inst_id.to_string_lossy().to_string()),
+                    devid: devid.to_string_lossy().to_string(),
+                    cmd: cmd.to_string_lossy().to_string(),
+                    data: data.to_string_lossy().to_string(),
+                };
+                let inst_str = msg.instance.to_string();
+                Ok(ctl.send(&inst_str, msg))
+            },
+        )?;
+        ctx.set("send_command", send_fn)?;
+    }
 
     // --- L2 ctx:set_value(devid, tag, v) → 推 Sample 到 hub（数据上行总线）---
     // devid 由脚本显式传入（多设备支持：脚本可对 ctx:list_devices() 的任一 devid 上报）。
@@ -537,8 +547,12 @@ pub(crate) fn register(lua: &Lua, ac: &ApiCtx<'_>) -> mlua::Result<()> {
 
     // --- L5 ctx:http_get/http_post（feature lua-http）---
     // 实现移 http.rs（守 <500）；此处委托 http::register 注册到同一 ctx 表。
+    // 角色裁剪（§5.2 矩阵 C5，C 阶段 T4）：collector ✓ north ✓ transform ✗——
+    // 订阅型数据加工不出网。
     #[cfg(feature = "lua-http")]
-    http::register(lua, &ctx, ac.inst)?;
+    if ac.role != Role::Transform {
+        http::register(lua, &ctx, ac.inst)?;
+    }
 
     // --- 全局 stdlib 表（T9 §3.5）：stdlib.list()/info(mod) 只读清单 ---
     // 本地 index + embed 种子合并视图（读盘即时，sync 后 reload 即见新版）。

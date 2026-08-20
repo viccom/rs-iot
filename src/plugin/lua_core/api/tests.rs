@@ -1297,6 +1297,79 @@ async fn north_role_skips_c1_request_transport() {
     let _ = std::fs::remove_dir_all(&data_dir);
 }
 
+/// C 阶段 T4 角色裁剪（§5.2 矩阵 transform 列）：Transform 角色注册的 ctx 表**无**
+/// C1（request/transport——与 north 同因：无传输层，io=None）、C3 send_command、
+/// C5 http_get/http_post（feature lua-http 开启时断言）；**有** C0/C2/C4/C6
+/// （set_value/get_value/get_device/list_devices/kv_set/kv_get/secret_get/log_info/
+/// now——secret_get 恒注入是 Q4 授权清单门控，非角色裁剪）。
+#[tokio::test]
+async fn transform_role_trims_c1_c3_c5() {
+    let lua = Lua::new();
+    let (ctx_host, handle, data_dir) = setup_ctx("transform-role").await;
+    let inst = InstConfig {
+        inst_id: "it".into(),
+        inst_name: "it".into(),
+        app_code: PluginName::new("luaTransform"),
+        app_type: AppType::South, // Source 订阅型实例（Q19/D1），不走 Processor
+        auto_start: false,
+        app_config: serde_json::json!({"script":"a"}),
+        devices: vec![DeviceSpec {
+            label: "d".into(),
+            value: "d".into(),
+            children: vec![],
+            slave_id: None,
+        }],
+        host_kind: HostKind::Builtin,
+    };
+    register(
+        &lua,
+        &ApiCtx {
+            ctx_host,
+            inst: &inst,
+            io: None, // transform 无传输层（同 north：C1 不注册，IO 引擎不构建）
+            tx: mock_hub_tx(),
+            runtime_devs: RuntimeDevs::default(),
+            dropped: zero_dropped(),
+            transport: "none", // 占位（transform 不注册 transport，值不被消费）
+            scripts_root: Path::new("scripts"),
+            role: Role::Transform,
+        },
+    )
+    .expect("register");
+
+    // 裁剪断言：C1/C3/C5 应为 nil（表上无此键）；http 卡仅 feature 开时断言
+    //（关闭时 http::register 不编译，capability 卡的 feature 字段即门控事实源）。
+    let mut absent = vec!["request", "transport", "send_command"];
+    if cfg!(feature = "lua-http") {
+        absent.extend(["http_get", "http_post"]);
+    }
+    for a in absent {
+        let v: mlua::Value = lua.load(format!("return ctx.{a}")).eval().expect(a);
+        assert_eq!(v, mlua::Value::Nil, "transform ctx 应无 {a}（§5.2 矩阵 ✗）");
+    }
+    // 保留断言：C0/C2/C4/C6（§5.2 矩阵 transform 列 ✓）。
+    for present in [
+        "set_value",
+        "get_value",
+        "get_device",
+        "list_devices",
+        "kv_set",
+        "kv_get",
+        "secret_get",
+        "log_info",
+        "now",
+    ] {
+        let is_fn: bool = lua
+            .load(format!("return type(ctx.{present}) == 'function'"))
+            .eval()
+            .expect(present);
+        assert!(is_fn, "transform ctx 应有 {present}（§5.2 矩阵 ✓）");
+    }
+
+    let _ = crate::db::shutdown_lux(handle).await;
+    let _ = std::fs::remove_dir_all(&data_dir);
+}
+
 /// T5 恒注入（Q4）：无 secrets 配置（键缺失 / 类型不符按空清单降级）的实例
 /// secret_get 仍注册可调，任何引用 → 未授权错误（默认空清单语义；未引用零成本）。
 #[tokio::test]
