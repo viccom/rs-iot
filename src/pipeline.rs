@@ -13,11 +13,12 @@
 //! SAVE 期间全 worker 变慢会触发全局背压(端到端背压特性，非 bug)。
 
 use crate::db;
-use crate::event_bus::{now_iso8601, EventPayload};
+use crate::event_bus::{now_iso8601, EventPayload, RtdataSample};
 use crate::host::HostContext;
 use crate::plugin::ticker::fnv1a_64;
 use crate::plugin::traits::Processor;
-use crate::types::Sample;
+use crate::types::{Sample, SampleValue};
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
@@ -213,10 +214,11 @@ async fn flush_batch(
                     &format!("write_batch {n_failed} devid 写失败(其余成功)"),
                 );
             }
-            // rtdata 变更通知（批次级聚合，模块 M2b）：一批一次 publish，不含 value。
-            // 50万点/秒下每点 publish 会爆 SSE——此处仅发"哪些 dev 变了"，前端轮询拉值。
-            // dev_ids 去重 + 截断 RTDATA_NOTIFY_MAX_DEVS（现场极端多设备时防 payload 过大，
-            // count 仍标真实点数总量）。无 SSE 消费者时 publish 静默零开销（broadcast 特性）。
+            // rtdata 变更通知（批次级聚合，模块 M2b）：一批一次 publish。
+            // 50万点/秒下每点 publish 会爆 SSE——按 dev 聚合带最新值（Q6：前端直用
+            // 即时刷新），dev_ids/samples 去重 + 截断 RTDATA_NOTIFY_MAX_DEVS（现场极端
+            // 多设备时防 payload 过大，count 仍标真实点数总量）。无 SSE 消费者时
+            // publish 静默零开销（broadcast 特性）。
             publish_rtdata_notify(ctx, buf);
         }
         Err(e) => {
@@ -229,25 +231,55 @@ async fn flush_batch(
 }
 
 /// rtdata 变更通知 payload 的 devid 列表截断上限（现场极端多设备时防 payload 过大）。
-/// 超出的 dev 不进 dev_ids，但 count 仍记录真实点数总量（前端据此判断是否回退全量拉取）。
+/// 超出的 dev 不进 dev_ids/samples，但 count 仍记录真实点数总量（前端据此判断是否回退全量拉取）。
 const RTDATA_NOTIFY_MAX_DEVS: usize = 50;
 
-/// 发一批 rtdata 变更通知（去重 + 截断 dev_ids，不带 value）。
+/// 聚合一批 Sample 为 Rtdata 事件载荷（Q6 带值扩展，C 阶段 T1）。纯函数便于单测。
 ///
-/// 从 `buf` 聚合唯一 devid（同批多点同设备只列一次），截断到 RTDATA_NOTIFY_MAX_DEVS，
-/// 经 `ctx.event_tx.publish` 投递。`count` 始终是 buf 真实点数（未截断），前端据此
-/// 估算变更规模。无 SSE 消费者时 publish 静默（broadcast::send 无 receiver 返 Err 被忽略）。
-fn publish_rtdata_notify(ctx: &HostContext, buf: &[Sample]) {
-    let mut seen = std::collections::HashSet::new();
-    let dev_ids: Vec<String> = buf
-        .iter()
-        .map(|s| s.devid.clone())
-        .filter(|d| seen.insert(d.clone()))
-        .take(RTDATA_NOTIFY_MAX_DEVS)
+/// 语义：
+/// - 同批同 dev 合并为一个 `RtdataSample`——同 tag 后写覆盖（与 `write_batch` 的
+///   HSET 同 field 覆盖语义一致），不同 tag 保留；
+/// - `ts` 取该 dev 本批最后一笔 `Sample.timestamp`（buf 顺序）；
+/// - dev 按首次出现序去重，唯一 dev 数截断到 `RTDATA_NOTIFY_MAX_DEVS`——
+///   **samples 与 dev_ids 同步截断**（同前 N 个 dev、按下标对齐，两字段永不漂移）；
+/// - `count` 仍是 buf 真实点数（Sample 条数，未截断——沿用旧 dev_ids 实现语义）。
+fn aggregate_rtdata(buf: &[Sample]) -> (Vec<String>, usize, Vec<RtdataSample>) {
+    // dev 首次出现序（保序去重）；聚合态：tag 最新值 + 该 dev 最后一笔 ts。
+    let mut order: Vec<String> = Vec::new();
+    let mut by_dev: HashMap<String, (BTreeMap<String, SampleValue>, i64)> = HashMap::new();
+    for s in buf {
+        if !by_dev.contains_key(&s.devid) {
+            order.push(s.devid.clone());
+        }
+        let e = by_dev.entry(s.devid.clone()).or_insert((BTreeMap::new(), s.timestamp));
+        // 同 tag 后写覆盖（extend 后值覆盖先值），不同 tag 保留。
+        e.0.extend(s.values.iter().map(|(k, v)| (k.clone(), v.clone())));
+        e.1 = s.timestamp; // 每笔更新，循环结束即该 dev 本批最后一笔
+    }
+    order.truncate(RTDATA_NOTIFY_MAX_DEVS);
+    let dev_ids = order.clone();
+    let samples = order
+        .into_iter()
+        .map(|devid| {
+            let (values, ts) = by_dev.remove(&devid).expect("order 内的 dev 必在 by_dev");
+            RtdataSample { devid, values, ts }
+        })
         .collect();
+    (dev_ids, buf.len(), samples)
+}
+
+/// 发一批 rtdata 变更通知（按 dev 聚合带最新值 + 截断防 payload 过大）。
+///
+/// 从 `buf` 经 `aggregate_rtdata` 聚合（同 dev 合并、dev_ids/samples 同步截断到
+/// `RTDATA_NOTIFY_MAX_DEVS`），经 `ctx.event_tx.publish` 投递。`count` 始终是 buf
+/// 真实点数（未截断），前端据此估算变更规模。无 SSE 消费者时 publish 静默
+/// （broadcast::send 无 receiver 返 Err 被忽略）。
+fn publish_rtdata_notify(ctx: &HostContext, buf: &[Sample]) {
+    let (dev_ids, count, samples) = aggregate_rtdata(buf);
     ctx.event_tx.publish(EventPayload::Rtdata {
         dev_ids,
-        count: buf.len(),
+        count,
+        samples,
         ts: now_iso8601(),
     });
 }
@@ -318,5 +350,138 @@ mod tests {
                 );
             }
         }
+    }
+
+    // ---- aggregate_rtdata（Q6 带值扩展，C 阶段 T1）----
+
+    use crate::event_bus::RtdataSample;
+    use crate::types::{Hwid, SampleValue};
+    use std::collections::BTreeMap;
+
+    /// 测试辅助：构造 Sample（单 dev 多 tag，ts 显式）。
+    fn smp(devid: &str, ts: i64, pts: &[(&str, SampleValue)]) -> Sample {
+        Sample {
+            hwid: Hwid::from("h"),
+            devid: devid.to_string(),
+            values: pts
+                .iter()
+                .map(|(t, v)| (t.to_string(), v.clone()))
+                .collect(),
+            timestamp: ts,
+        }
+    }
+
+    /// 同批同 dev 合并为一个 RtdataSample：同 tag 后写覆盖、不同 tag 保留、
+    /// ts 取该 dev 本批最后一笔 Sample.timestamp；count 仍是 buf 真实点数
+    /// （Sample 条数，与旧 dev_ids 实现的 buf.len() 语义一致，未截断）。
+    #[test]
+    fn aggregate_rtdata_merges_same_dev_last_write_wins() {
+        let buf = [
+            smp(
+                "d1",
+                100,
+                &[
+                    ("t1", SampleValue::Float(1.0)),
+                    ("t2", SampleValue::Int(2)),
+                ],
+            ),
+            smp("d2", 200, &[("t1", SampleValue::Bool(true))]),
+            smp(
+                "d1",
+                300,
+                &[
+                    ("t1", SampleValue::Float(9.0)),
+                    ("t3", SampleValue::Str("s".into())),
+                ],
+            ),
+        ];
+        let (dev_ids, count, samples) = aggregate_rtdata(&buf);
+        assert_eq!(count, 3, "count 为 buf 真实点数（Sample 条数，未截断）");
+        assert_eq!(dev_ids, vec!["d1".to_string(), "d2".to_string()]);
+        assert_eq!(samples.len(), 2, "同 dev 合并为一个 RtdataSample");
+        // d1：t1 后写覆盖为 9.0，t2/t3 保留；ts 取 d1 最后一笔（300）。
+        assert_eq!(samples[0].devid, "d1");
+        assert_eq!(samples[0].ts, 300);
+        let expect: BTreeMap<String, SampleValue> = [
+            ("t1".to_string(), SampleValue::Float(9.0)),
+            ("t2".to_string(), SampleValue::Int(2)),
+            ("t3".to_string(), SampleValue::Str("s".to_string())),
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(samples[0].values, expect, "同 tag 后写覆盖，不同 tag 保留");
+        // d2 未被覆盖：ts 与值原样。
+        assert_eq!(samples[1].devid, "d2");
+        assert_eq!(samples[1].ts, 200);
+        assert_eq!(
+            samples[1].values.get("t1"),
+            Some(&SampleValue::Bool(true))
+        );
+        // 空 buf：三件套全空、count 0（不 panic）。
+        let (ids0, c0, s0) = aggregate_rtdata(&[]);
+        assert_eq!((ids0.len(), c0, s0.len()), (0, 0, 0));
+    }
+
+    /// 唯一 dev 数 > RTDATA_NOTIFY_MAX_DEVS 时截断：samples 与 dev_ids **同步**截断
+    /// （同前 50 个 dev、按下标对齐），count 仍记真实点数总量（截断 dev 的点也计入）。
+    #[test]
+    fn aggregate_rtdata_truncates_devs_in_sync() {
+        let buf: Vec<Sample> = (0..60)
+            .map(|i| smp(&format!("d{i}"), 100 + i, &[("t", SampleValue::Int(i))]))
+            .collect();
+        let (dev_ids, count, samples) = aggregate_rtdata(&buf);
+        assert_eq!(dev_ids.len(), RTDATA_NOTIFY_MAX_DEVS, "dev_ids 截断 50");
+        assert_eq!(samples.len(), RTDATA_NOTIFY_MAX_DEVS, "samples 同步截断 50");
+        assert_eq!(count, 60, "count 仍是真实点数总量（未截断）");
+        // 两字段按 dev 首次出现序对齐（同下标同 dev）。
+        for (i, (d, s)) in dev_ids.iter().zip(samples.iter()).enumerate() {
+            assert_eq!(d, &s.devid, "dev_ids[{i}] 与 samples[{i}].devid 必须对齐");
+            assert_eq!(d, &format!("d{i}"), "dev 首次出现顺序保留");
+        }
+        // 截断掉的 dev 不出现在 samples（d50..d59 全部丢弃）。
+        assert!(
+            samples.iter().all(|s| s.devid.as_str() != "d50"),
+            "超限 dev 不入 samples"
+        );
+    }
+
+    /// serde 形状锁：Rtdata 序列化 JSON 同时含新字段 samples（元素 {devid, values, ts}，
+    /// SampleValue untagged——值直接是 JSON 数字/布尔/字符串）与兼容字段 dev_ids/count
+    /// （前端旧消费零破坏）。EventPayload 无 Deserialize，用 to_value 断言字段。
+    #[test]
+    fn rtdata_payload_json_keeps_compat_fields_and_adds_samples() {
+        let values: BTreeMap<String, SampleValue> = [
+            ("temp".to_string(), SampleValue::Float(1.5)),
+            ("on".to_string(), SampleValue::Bool(true)),
+        ]
+        .into_iter()
+        .collect();
+        let payload = EventPayload::Rtdata {
+            dev_ids: vec!["d1".to_string()],
+            count: 7,
+            samples: vec![RtdataSample {
+                devid: "d1".to_string(),
+                values,
+                ts: 123,
+            }],
+            ts: "t".to_string(),
+        };
+        let v = serde_json::to_value(&payload).unwrap();
+        assert_eq!(v["kind"], "rtdata", "SSE tag 序列化保持");
+        assert_eq!(v["dev_ids"], serde_json::json!(["d1"]), "兼容字段 dev_ids 不丢");
+        assert_eq!(v["count"], serde_json::json!(7), "兼容字段 count 不丢");
+        assert_eq!(v["ts"], serde_json::json!("t"), "兼容字段 ts 不丢");
+        assert_eq!(v["samples"][0]["devid"], "d1");
+        assert_eq!(
+            v["samples"][0]["values"]["temp"],
+            serde_json::json!(1.5),
+            "SampleValue untagged：浮点直接序列化为 JSON 数字"
+        );
+        assert_eq!(
+            v["samples"][0]["values"]["on"],
+            serde_json::json!(true),
+            "布尔同理"
+        );
+        assert_eq!(v["samples"][0]["ts"], serde_json::json!(123));
     }
 }

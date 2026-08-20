@@ -61,12 +61,24 @@ export interface StateEvent {
 /** rtdata cell：`[ts, localTime, value]`（经 lux JSON 序列化，数值可能是字符串）。 */
 export type RtdataCell = [number, string, string | number]
 
+/** rtdata 事件带的单设备最新值（后端 RtdataSample，pipeline 按 dev 聚合）。
+ *  values 值对标 SampleValue serde untagged：直接是数字/布尔/字符串。 */
+export interface RtdataSample {
+  devid: string
+  values: Record<string, string | number | boolean>
+  /** 该 dev 本批最后一笔的 Unix 秒时间戳。 */
+  ts: number
+}
+
 /** rtdata 变更通知事件（SSE `rtdata` kind，pipeline flush_batch 批次级聚合）。
- *  dev_ids 去重 + 截断 50；count 是本批真实点数（未截断）。不含 value——前端收到后
- *  用现有 2s 轮询 /rtdatas 拉最新值，推送只作刷新触发（防 50万点/秒爆 SSE）。 */
+ *  dev_ids 去重 + 截断 50；count 是本批真实点数（未截断）。Q6 带值扩展：samples 按
+ *  dev 聚合携带最新值（与 dev_ids 同步截断）——前端直用即时刷新；lagged 丢帧 / 截断
+ *  / 旧后端缺失时数据不全或没有，仍靠既有 2s 轮询 /rtdatas 兜底（可选字段零破坏）。 */
 export interface RtdataEvent {
   dev_ids: string[]
   count: number
+  /** 按 dev 聚合的最新值（旧后端无此字段 → 可选，缺失时回退纯轮询语义）。 */
+  samples?: RtdataSample[]
   ts: string
 }
 

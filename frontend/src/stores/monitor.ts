@@ -8,6 +8,7 @@ import type {
   StateEvent,
   RtdataCell,
   RtdataEvent,
+  RtdataSample,
   InstConfig,
   InstanceConfigs,
 } from '../types'
@@ -25,7 +26,8 @@ const RTDATA_NOTIFY_DEBOUNCE_MS = 200
  * 监控 store：rs-iot SSE 事件分发 + rtdata/sysstatus 轮询 + 实例 CRUD。
  *
  * **订阅模型（M3 改动）**：
- * - rtdata：登录即起 2s 轮询 + rtdata SSE 通知（通知仅触发立即补拉，不含 value）。
+ * - rtdata：登录即起 2s 轮询 + rtdata SSE 通知（Q6 带值：samples 直合入即时刷新，
+ *   去抖补拉 + 轮询兜底 lagged/截断丢帧）。
  * - log/packet：**默认不订阅**，由诊断 Tab 手动 `subscribeLog()`/`subscribePacket()`
  *   激活（用户要求"默认不激活推送，手动选实例激活后才推送"）。
  *
@@ -140,8 +142,36 @@ export const useMonitorStore = defineStore('monitor', () => {
     }
   }
 
-  /** 收到 rtdata 变更通知：去抖触发 loadRtdata 补拉最新值（不含 value，只作刷新触发）。 */
-  function onRtdataNotify(_e: RtdataEvent) {
+  /**
+   * SSE samples 直合入 rtdata store（Q6 带值直用，C 阶段 T1）。
+   *
+   * 值形状严格对齐 loadRtdata 产物：cell `[ts, localTime, value]`——
+   * - ts 用样本自身时间戳（Unix 秒）；
+   * - localTime 按后端 write_batch 同格式（chrono "%Y-%m-%d %H:%M:%S" 本地时间）生成；
+   * - value 字符串化（对齐 lux cell 的 valStr——数字/布尔经 String()，字符串原样）；
+   * - field key 对齐 db::rtdata 落库规则：tag 已含 devid 时原样，否则 `${devid}.${tag}`。
+   * 仅合入推送值，不删既有 dev/tag（增量覆盖；全量刷新靠轮询整包替换）。
+   */
+  function applyRtdataSamples(samples: RtdataSample[]) {
+    const now = new Date()
+    const p2 = (n: number) => String(n).padStart(2, '0')
+    const localTime = `${now.getFullYear()}-${p2(now.getMonth() + 1)}-${p2(now.getDate())} ${p2(now.getHours())}:${p2(now.getMinutes())}:${p2(now.getSeconds())}`
+    for (const s of samples) {
+      const dev = rtdata.value[s.devid] ?? (rtdata.value[s.devid] = {})
+      for (const [tag, v] of Object.entries(s.values)) {
+        const field = tag.includes(s.devid) ? tag : `${s.devid}.${tag}`
+        dev[field] = [s.ts, localTime, typeof v === 'string' ? v : String(v)]
+      }
+    }
+  }
+
+  /**
+   * 收到 rtdata 变更通知：payload 带 samples 时直合入 rtdata store（即时刷新），
+   * 并保留去抖补拉 loadRtdata（lagged 丢帧 / dev 截断 / 旧后端无 samples 时数据
+   * 不全或没有，轮询兜底数据正确性——Q6「尽量处理」语义）。
+   */
+  function onRtdataNotify(e: RtdataEvent) {
+    if (e.samples?.length) applyRtdataSamples(e.samples)
     if (rtdataDebounce) clearTimeout(rtdataDebounce)
     rtdataDebounce = setTimeout(() => {
       rtdataDebounce = null
@@ -364,7 +394,7 @@ export const useMonitorStore = defineStore('monitor', () => {
    * 启动：rtdata 轮询 + rtdata SSE 通知 + sysstatus 轮询。
    *
    * **M3 改动**：不再自动订阅 log/packet（移到诊断 Tab 手动 subscribe*）。
-   * rtdata SSE 通知（dev_ids 不含 value）仅触发 loadRtdata 去抖补拉，加速刷新感知。
+   * rtdata SSE 通知（Q6 带值）samples 直合入即时刷新 + loadRtdata 去抖补拉兜底。
    */
   function start() {
     if (sse) stop()

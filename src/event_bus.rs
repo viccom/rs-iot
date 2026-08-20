@@ -15,8 +15,24 @@
 
 use crate::log_ringbuffer::LogEntry;
 use crate::plugin::instance::InstState;
-use crate::types::HostKind;
+use crate::types::{HostKind, SampleValue};
+use std::collections::BTreeMap;
 use tokio::sync::broadcast;
+
+/// Rtdata 事件带的单设备最新值（Q6 带值扩展，C 阶段 T1）。
+///
+/// 由 pipeline `aggregate_rtdata` 从 50ms 攒批窗口聚合：同批同 dev 合并为一个
+/// （tag 后写覆盖），`ts` 取该 dev 本批最后一笔时间戳。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RtdataSample {
+    /// 设备 ID（与 `Rtdata::dev_ids` 元素同源、同步截断）。
+    pub devid: String,
+    /// 该 dev 本批最新值（tag 形如 "tag" 或 "devId.tag"，与 `Sample.values` 同源；
+    /// `SampleValue` serde untagged——值直接序列化为 JSON 数字/布尔/字符串）。
+    pub values: BTreeMap<String, SampleValue>,
+    /// 该 dev 本批最后一笔的 Unix 秒时间戳。
+    pub ts: i64,
+}
 
 /// SSE 推送的事件载荷。
 ///
@@ -59,13 +75,16 @@ pub enum EventPayload {
     ///
     /// **批次级聚合**：一批（50ms 攒批窗口）一次事件，**不是每点一次**——50万点/秒下
     /// 每点 publish 会爆 SSE（broadcast 256 容量 Lagged 雪崩 + 50万次 JSON 序列化）。
-    /// payload 只带"哪些 dev 变了 + 本批点数"，**不含 value**——前端收到后用现有 2s
-    /// 轮询 `GET /rtdatas` 拉最新值。推送只作"刷新触发"，数据正确性靠轮询兜底。
+    /// Q6 带值扩展：`samples` 按 dev 聚合携带最新值（前端直用即时刷新）；lagged 丢帧 /
+    /// dev 超限截断时数据不全，仍靠前端既有 2s 轮询 `GET /rtdatas` 兜底，推送只是加速。
     Rtdata {
         /// 本批变更的 devid 列表（去重；现场极端多设备时截断，count 仍标真实总量）。
         dev_ids: Vec<String>,
         /// 本批点数（供前端估算变更量级，未截断的真实值）。
         count: usize,
+        /// 按 dev 聚合的最新值（与 dev_ids 同步截断；旧前端可忽略——缺失/不全时
+        /// 轮询兜底不变，兼容字段零破坏）。
+        samples: Vec<RtdataSample>,
         /// 时间戳（ISO8601/RFC3339）。
         ts: String,
     },

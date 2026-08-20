@@ -107,7 +107,7 @@ describe('monitor store', () => {
     // M3 改动：start() 只订 rtdata,state（log/packet 移到诊断 Tab 手动订阅）。
     expect(FakeEventSource.last!.url).toContain('types=rtdata,state')
     expect(FakeEventSource.last!.url).not.toContain('log')
-    // rtdata 通知分发（去抖触发 loadRtdata，不含 value）；state 仍联动实例状态。
+    // rtdata 通知分发（Q6：带 samples 直合入 + 去抖补拉兜底）；state 仍联动实例状态。
     const evt: RtdataEvent = { dev_ids: ['devA'], count: 3, ts: 't' }
     expect(() => FakeEventSource.last!.emit('rtdata', evt)).not.toThrow()
     FakeEventSource.last!.emit('state', { inst_id: 'i1', app_code: 'a', host_kind: 'b', state: 'running', ts: 't' })
@@ -115,6 +115,38 @@ describe('monitor store', () => {
     // start() 不订 log/packet，emit 这两类到 rtdata SSE 不应填充 ring buffer。
     s.stop()
     fetchSpy.mockRestore()
+  })
+
+  it('onRtdataNotify 带 samples 直合入 rtdata store（Q6 带值直用），缺 samples 行为不变', () => {
+    // 锁的不变量：payload 带 samples 时按 loadRtdata 产物形状合入——cell `[ts, localTime, value]`，
+    // field key 对齐后端落库规则（tag 已含 devid 时原样，否则 `${devid}.${tag}`），
+    // value 字符串化（对齐 lux cell 的 valStr），localTime 为 "YYYY-MM-DD HH:mm:ss" 本地时间。
+    // 缺 samples（旧后端/lagged）：不写 rtdata、不抛错（去抖补拉路径照旧）。
+    const s = useMonitorStore()
+    const evt: RtdataEvent = {
+      dev_ids: ['devA'], count: 2, ts: 't',
+      samples: [
+        { devid: 'devA', values: { temp: 1.5, ok: true, label: 'x', 'devA.dup': 7 }, ts: 1700000000 },
+      ],
+    }
+    s.onRtdataNotify(evt)
+    const dev = s.rtdata['devA']
+    expect(dev).toBeTruthy()
+    expect(dev['devA.temp']).toEqual([1700000000, expect.any(String), '1.5'])
+    expect(dev['devA.ok']).toEqual([1700000000, expect.any(String), 'true'])
+    expect(dev['devA.label']).toEqual([1700000000, expect.any(String), 'x'])
+    // tag 已含 devid → field 原样（对齐 db::rtdata write_batch 的 field 规则）。
+    expect(dev['devA.dup']).toEqual([1700000000, expect.any(String), '7'])
+    // localTime 形状 "YYYY-MM-DD HH:mm:ss"（对齐 chrono "%Y-%m-%d %H:%M:%S"）。
+    expect(dev['devA.temp'][1]).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/)
+    // 缺 samples：不写 rtdata、不抛错。
+    const before = JSON.stringify(s.rtdata)
+    expect(() => s.onRtdataNotify({ dev_ids: ['devB'], count: 1, ts: 't' })).not.toThrow()
+    expect(JSON.stringify(s.rtdata)).toBe(before)
+    // samples 空数组：同样不写（空批无意义，与缺失同路径）。
+    expect(() => s.onRtdataNotify({ dev_ids: ['devB'], count: 1, ts: 't', samples: [] })).not.toThrow()
+    expect(JSON.stringify(s.rtdata)).toBe(before)
+    s.stop()
   })
 
   it('subscribeLog 激活日志 SSE + 初始拉取 logs/recent（M3 按需订阅）', async () => {
