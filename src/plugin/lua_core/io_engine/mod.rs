@@ -4,6 +4,7 @@
 //! 处理 → oneshot 回执；timeout 包 oneshot，超时丢弃迟到回包。
 
 mod mock;
+mod mqtt;
 mod serial;
 #[cfg(test)]
 mod spike2_mqtt;
@@ -17,6 +18,7 @@ use tokio::time::timeout;
 #[allow(unused_imports)]
 // MockIoTask：luaClient run 不再用（Task 4 去占位）；io_engine/api tests 用，dual-build
 pub(super) use mock::MockIoTask;
+pub(crate) use mqtt::MqttIo;
 pub(crate) use serial::SerialIo;
 pub(crate) use tcp::TcpIo;
 pub(crate) use udp::UdpIo;

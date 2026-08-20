@@ -14,6 +14,9 @@ pub(crate) enum Transport {
     Serial,
     /// UDP datagram（部分 DTU）。
     Udp,
+    /// MQTT 透传（Q10/spike-2 方案 a，T11）：request 走 req_topic 发布 + resp_topic
+    /// 首帧即响应；passive_topics 无在飞 request 时的推送 → on_data。
+    Mqtt,
 }
 
 impl Transport {
@@ -25,6 +28,7 @@ impl Transport {
             Transport::Tcp => "tcp",
             Transport::Serial => "serial",
             Transport::Udp => "udp",
+            Transport::Mqtt => "mqtt",
         }
     }
 }
@@ -63,8 +67,14 @@ pub(crate) enum FlowControl {
 #[derive(Debug)]
 pub(crate) struct LuaCfg {
     pub(crate) transport: Transport,
-    /// tcp/udp 的 `ip:port`（serial 时为空）。
+    /// tcp/udp/mqtt 的地址（serial 时为空；mqtt = broker `host:port`）。
     pub(crate) endpoint: String,
+    /// mqtt 透传 req topic（`ctx:request` 发布目的地，T11）。
+    pub(crate) req_topic: String,
+    /// mqtt 透传 resp topic（在飞 request 期间首帧即响应，T11）。
+    pub(crate) resp_topic: String,
+    /// mqtt 透传被动帧 topics（无在飞 request 时收到 → on_data，可空，T11）。
+    pub(crate) passive_topics: Vec<String>,
     /// serial 串口名。
     pub(crate) serial_port: Option<String>,
     /// serial 波特率（默认 9600）。
@@ -118,7 +128,8 @@ pub(crate) fn parse_cfg(app: &serde_json::Value) -> Result<LuaCfg, String> {
         "tcp" => Transport::Tcp,
         "serial" => Transport::Serial,
         "udp" => Transport::Udp,
-        other => return Err(format!("unsupported kind '{other}'（tcp/serial/udp）")),
+        "mqtt" => Transport::Mqtt,
+        other => return Err(format!("unsupported kind '{other}'（tcp/serial/udp/mqtt）")),
     };
     let (endpoint, serial_port) = match transport {
         Transport::Serial => {
@@ -137,6 +148,33 @@ pub(crate) fn parse_cfg(app: &serde_json::Value) -> Result<LuaCfg, String> {
                 .to_string();
             (ep, None)
         }
+    };
+    // mqtt 透传 topics（T11）：req/resp 必填（request 闭环两端）；passive 可选（空 =
+    // 纯 request/resp 场景，on_data 不触发）。topic 模板占位符（`{devid}` 等）列后续
+    // （设计 §5.4），当前为固定字符串直用。
+    let (req_topic, resp_topic, passive_topics) = if transport == Transport::Mqtt {
+        let req = app
+            .get("req_topic")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| "mqtt 需要 req_topic（request 发布目的地）".to_string())?
+            .to_string();
+        let resp = app
+            .get("resp_topic")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| "mqtt 需要 resp_topic（在飞 request 首帧即响应）".to_string())?
+            .to_string();
+        let passive = app
+            .get("passive_topics")
+            .and_then(|v| v.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        (req, resp, passive)
+    } else {
+        (String::new(), String::new(), Vec::new())
     };
 
     let baud_rate = app
@@ -203,6 +241,9 @@ pub(crate) fn parse_cfg(app: &serde_json::Value) -> Result<LuaCfg, String> {
     Ok(LuaCfg {
         transport,
         endpoint,
+        req_topic,
+        resp_topic,
+        passive_topics,
         serial_port,
         baud_rate,
         data_bits,
@@ -292,6 +333,54 @@ mod tests {
         assert_eq!(cfg.parity, Parity::None);
         assert_eq!(cfg.stop_bits, 1);
         assert_eq!(cfg.flow_control, FlowControl::None);
+    }
+
+    /// T11：kind=mqtt 透传传输——req_topic/resp_topic 必填，passive_topics 可选，
+    /// endpoint（broker addr）必填，transport() 返 "mqtt"。
+    #[test]
+    fn parse_mqtt_kind_topics() {
+        // 缺 req_topic/resp_topic → Err（两者均为必填）。
+        assert!(
+            parse_cfg(&json!({"script":"a","kind":"mqtt","endpoint":"127.0.0.1:1883"})).is_err()
+        );
+        assert!(parse_cfg(&json!({
+            "script":"a","kind":"mqtt","endpoint":"127.0.0.1:1883","req_topic":"dev/req"
+        }))
+        .is_err());
+        assert!(parse_cfg(&json!({
+            "script":"a","kind":"mqtt","endpoint":"127.0.0.1:1883","resp_topic":"dev/resp"
+        }))
+        .is_err());
+        // 缺 endpoint（broker addr）→ Err（tcp/udp 同款必填）。
+        assert!(parse_cfg(&json!({
+            "script":"a","kind":"mqtt","req_topic":"dev/req","resp_topic":"dev/resp"
+        }))
+        .is_err());
+
+        // 全量：transport=mqtt + topics 落位 + passive_topics 解析。
+        let cfg = parse_cfg(&json!({
+            "script":"a","kind":"mqtt","endpoint":"127.0.0.1:1883",
+            "req_topic":"dev/req","resp_topic":"dev/resp",
+            "passive_topics":["dev/push","dev/alarm"]
+        }))
+        .unwrap();
+        assert_eq!(cfg.transport, Transport::Mqtt);
+        assert_eq!(cfg.transport.as_str(), "mqtt");
+        assert_eq!(cfg.endpoint, "127.0.0.1:1883");
+        assert_eq!(cfg.req_topic, "dev/req");
+        assert_eq!(cfg.resp_topic, "dev/resp");
+        assert_eq!(
+            cfg.passive_topics,
+            vec!["dev/push".to_string(), "dev/alarm".to_string()]
+        );
+
+        // passive_topics 可缺省（空 vec——仅 request/resp 闭环场景）。
+        let cfg = parse_cfg(&json!({
+            "script":"a","kind":"mqtt","endpoint":"127.0.0.1:1883",
+            "req_topic":"dev/req","resp_topic":"dev/resp"
+        }))
+        .unwrap();
+        assert!(cfg.passive_topics.is_empty());
     }
 
     #[test]

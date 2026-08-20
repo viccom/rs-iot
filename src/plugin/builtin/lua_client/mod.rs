@@ -15,7 +15,7 @@ use tokio_util::sync::CancellationToken;
 
 use core_::api::{lua_value_to_sample, RuntimeDevs};
 use core_::config::parse_cfg;
-use core_::io_engine::{spawn_io_task, IoBackend, SerialIo, TcpIo, UdpIo};
+use core_::io_engine::{spawn_io_task, IoBackend, MqttIo, SerialIo, TcpIo, UdpIo};
 use core_::loader::SCRIPTS_ROOT;
 use core_::script::{load_main, LoadCtx};
 
@@ -131,7 +131,7 @@ impl Source for LuaClient {
             }
         }
 
-        // 3. IO 引擎（按 transport 选 backend：tcp/serial/udp 三传输，spec §8）。
+        // 3. IO 引擎（按 transport 选 backend：tcp/serial/udp/mqtt 四传输，spec §8 + §5.4）。
         let backend: Box<dyn IoBackend> = match cfg.transport {
             core_::config::Transport::Tcp => {
                 Box::new(TcpIo::new(cfg.endpoint.clone(), cfg.recv_idle_ms))
@@ -148,6 +148,13 @@ impl Source for LuaClient {
             core_::config::Transport::Udp => {
                 Box::new(UdpIo::new(cfg.endpoint.clone(), cfg.recv_idle_ms))
             }
+            core_::config::Transport::Mqtt => Box::new(MqttIo::new(
+                cfg.endpoint.clone(),
+                cfg.req_topic.clone(),
+                cfg.resp_topic.clone(),
+                cfg.passive_topics.clone(),
+                cfg.recv_idle_ms,
+            )),
         };
         // IO 引擎 + on_data 被动帧 channel（IO task 无在飞 request 时收到的帧 → 主循环）。
         // dropped_frames：IO task 侧满通道丢帧计数（附录 B P3，flush 落 stat）。

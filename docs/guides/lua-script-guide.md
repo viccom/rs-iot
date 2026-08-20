@@ -71,7 +71,7 @@ ctx API，把收拢的批量数据经 MQTT 发布上云（EMQX/OneNET 等平台�
 
 - `ctx:request(frame, timeout_ms) -> resp|nil, err?`：主动一问一答。`frame` 字符串（含二进制，
   `"\x01\x03..."`）；`timeout_ms` 毫秒；返回响应字节串或 `nil, err`。tcp/serial/udp 统一入口。
-- `ctx:transport() -> str`：返回底层链路类型 `"tcp"`/`"serial"`/`"udp"`（与 `app_config.kind` 一致，
+- `ctx:transport() -> str`：返回底层链路类型 `"tcp"`/`"serial"`/`"udp"`/`"mqtt"`（与 `app_config.kind` 一致，
   同步）。脚本据此**选帧格式**——同一份脚本自适应不同链路：
 
   ```lua
@@ -302,8 +302,11 @@ main.lua 顶部注释块可声明脚本契约（`-- @key value`，逐行扫至�
 | 字段 | 类型 | 默认 | 说明 |
 |---|---|---|---|
 | `script` | str | 必填 | 脚本目录名（→ `scripts/<script>/main.lua`，仅 `[A-Za-z0-9_-]`） |
-| `kind` | str | `tcp` | 传输：`tcp` / `serial` / `udp` |
-| `endpoint` | str | tcp/udp 必填 | `ip:port`（serial 时忽略） |
+| `kind` | str | `tcp` | 传输：`tcp` / `serial` / `udp` / `mqtt`（透传） |
+| `endpoint` | str | tcp/udp/mqtt 必填 | `ip:port`（serial 时忽略；mqtt = broker 地址） |
+| `req_topic` | str | mqtt 必填 | mqtt 透传：`ctx:request` 发布请求帧的 topic |
+| `resp_topic` | str | mqtt 必填 | mqtt 透传：在飞 request 期间收到的首帧即响应 |
+| `passive_topics` | [str] | mqtt 可选 | mqtt 透传被动帧 topics（无在飞 request 时收到 → `on_data`） |
 | `serial_port` | str | serial 必填 | 串口名（如 `COM3` / `/dev/ttyUSB0`） |
 | `baud_rate` | num | `9600` | serial 波特率 |
 | `data_bits` | num | `8` | serial 数据位（5/6/7/8） |
@@ -458,7 +461,7 @@ R5 单通道锁：`[mqtt]` 与 luaNorth 不双通道并存（默认实例已在�
 
 - **链路由 rs-iot 管，脚本不碰**：open/connect/收发/重连/报文 trace 全在宿主 IO task（`io_engine`）。
   脚本只经 `ctx:request(frame, timeout)` 组帧/解帧——**拿不到也不持有任何连接对象**。
-- **一个实例一条链路**：`io_engine` 单 backend（tcp/serial/udp 三选一）。不同厂商协议 / 不同串口参数 /
+- **一个实例一条链路**：`io_engine` 单 backend（tcp/serial/udp/mqtt 四选一）。不同厂商协议 / 不同串口参数 /
   不同物理接口 → 必须不同实例（不同脚本，或同脚本多实例配不同 `serial_port`/`endpoint`）。
 - **同一条链路多从站**（RS485/RS485-like 总线，同协议同参数不同 unit id）：脚本在 `collect()` 里
   循环组不同 uid 帧轮询，经同一个 `ctx:request` 发收；M2 多设备输出（`collect` 嵌套返回 `{[devid]={tag=v}}`）。
@@ -472,13 +475,26 @@ R5 单通道锁：`[mqtt]` 与 luaNorth 不双通道并存（默认实例已在�
 - **serial**（`kind="serial"`，`serial_port=...`）：tokio-serial，RTU 帧走串口（Linux 需 libudev-dev）。
   串口直连（RS485 主站 / RS232 点对点）。
 - **udp**（`kind="udp"`，`endpoint="ip:port"`）：connected `UdpSocket`，datagram 边界天然保帧。**UDP client** 角色。
+- **mqtt 透传**（`kind="mqtt"`，`endpoint="broker的ip:port"` + `req_topic`/`resp_topic` 必填 +
+  `passive_topics` 可选，阶段 B T11）：设备侧是 MQTT 透传 DTU/模组的场景——rs-iot 作 MQTT client
+  连 broker，`ctx:request` 的请求帧发布到 `req_topic`，**等待期间收到的第一帧 Publish（`resp_topic`
+  订阅）即响应**；无在飞 request 时收到的 Publish（`passive_topics` 订阅）即被动帧 → `on_data`。
+  连接/重连/订阅由宿主 EventLoop pump 管（每次连上自动重订阅全集合，clean session 不依赖 broker
+  会话恢复），断连期间 request 立即报错。当前 topic 为固定字符串（`{devid}` 等占位符模板后置）。
 
-三种传输统一 `ctx:request`（IO task 独占处理，spec §8 模式 Z）。`recv_mode` 控被动帧成帧
+四种传输统一 `ctx:request`（IO task 独占处理，spec §8 模式 Z）。`recv_mode` 控被动帧成帧
 （`on_data`）：当前 `timeout`（idle 静默）；length/delimiter/fixed 后置。
+
+**mqtt 透传注意事项**：
+
+- 请求/响应分路按「当前是否有在飞 request」判定——resp 首帧即响应意味着**设备须在请求期间才推
+  `resp_topic`**；周期性状态推送应走 `passive_topics`（on_data），不要混入 resp 通道。
+- QoS1 断连补发可能迟到：`ctx:request` 超时放弃后，设备的响应帧仍可能在下一个 request 在飞期间
+  补达——分路会把它当作当前请求的响应投递。**设备/脚本侧须幂等或带序号校验**（帧内嵌流水号比对）。
 
 ### 链路角色：当前支持 / 后置
 
-当前三种传输都是 **client / 主站**侧（脚本主动发请求、等响应）。
+当前四种传输都是 **client / 主站**侧（脚本主动发请求、等响应；mqtt 为透传 client）。
 
 **TCP Server / UDP Server 本阶段不支持**——rs-iot 做监听服务器、等网络客户端连入的场景。原因：
 `ctx:request` 的"一问一答"模型与 server 的"被动收多客户端"根本冲突。现实里此类场景的约束：
