@@ -1,5 +1,5 @@
 // frontend/src/stores/monitor.test.ts
-import { describe, it, expect, beforeEach, vi } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { setActivePinia, createPinia } from 'pinia'
 import { useMonitorStore } from './monitor'
 import { useAuthStore } from './auth'
@@ -30,6 +30,19 @@ class FakeEventSource {
     (this.listeners[kind] || []).forEach(cb => cb({ data: raw }))
   }
   close() { /* no-op */ }
+}
+
+/** fetch 桩（照 secrets.test.ts 同款）：按 URL 前缀路由响应，返回调用记录。
+ *  key 需带 gateway 前缀（实际 fetch URL 形如 /api/rsiot/api/v1/...，startsWith 匹配）。 */
+function stubFetch(resps: Record<string, { ok: boolean; status: number; body: unknown }>) {
+  const calls: { url: string; init?: RequestInit }[] = []
+  vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+    calls.push({ url, init })
+    const r = Object.entries(resps).find(([k]) => url.startsWith(k))?.[1]
+    if (!r) throw new Error('unexpected url: ' + url)
+    return { ok: r.ok, status: r.status, json: async () => r.body } as unknown as Response
+  }))
+  return calls
 }
 
 describe('monitor store', () => {
@@ -662,5 +675,32 @@ describe('monitor store', () => {
     s.onAlarm(alarmEvt('clear', 'dev1.temp_high'))
     expect(s.alarms.length).toBe(0)
     fetchSpy.mockRestore()
+  })
+
+  // ---- 写命令下发（command/send 前端面，routes_command.rs §4.7）----
+
+  describe('sendCommand', () => {
+    // stubFetch 用 vi.stubGlobal，本 describe 结束即还原，防 fetch 桩泄漏到兄弟测试
+    // （其余测试用 vi.spyOn(globalThis,'fetch')，混桩会互相污染）。
+    afterEach(() => vi.unstubAllGlobals())
+
+    it('发 POST command/send，body {instance,devid,cmd:"write",data:<字符串化 JSON>}', async () => {
+      const calls = stubFetch({ '/api/rsiot/api/v1/command/send': { ok: true, status: 200, body: { status: 'ok' } } })
+      const s = useMonitorStore()
+      const r = await s.sendCommand('mb-native', 'mbn', '{"address":"holding:10:u16","value":1}')
+      expect(r.ok).toBe(true)
+      const init = calls[0].init as { method: string; body: string }
+      expect(init.method).toBe('POST')
+      expect(JSON.parse(init.body)).toEqual({ instance: 'mb-native', devid: 'mbn', cmd: 'write', data: '{"address":"holding:10:u16","value":1}' })
+    })
+
+    it('非法 JSON data 前置校验失败，不发请求', async () => {
+      const calls = stubFetch({})
+      const s = useMonitorStore()
+      const r = await s.sendCommand('i', 'd', '{bad json')
+      expect(r.ok).toBe(false)
+      expect(r.error).toContain('JSON')
+      expect(calls.length).toBe(0)
+    })
   })
 })
