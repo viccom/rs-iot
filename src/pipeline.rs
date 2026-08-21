@@ -248,16 +248,19 @@ fn aggregate_rtdata(buf: &[Sample]) -> (Vec<String>, usize, Vec<RtdataSample>) {
     let mut order: Vec<String> = Vec::new();
     let mut by_dev: HashMap<String, (BTreeMap<String, SampleValue>, i64)> = HashMap::new();
     for s in buf {
-        if !by_dev.contains_key(&s.devid) {
+        if let Some(e) = by_dev.get_mut(&s.devid) {
+            // 同 tag 后写覆盖（extend 后值覆盖先值），不同 tag 保留。
+            e.0.extend(s.values.iter().map(|(k, v)| (k.clone(), v.clone())));
+            e.1 = s.timestamp; // 每笔更新，循环结束即该 dev 本批最后一笔
+        } else if by_dev.len() < RTDATA_NOTIFY_MAX_DEVS {
+            // 新 dev 在截断线内：入聚合（首笔 values 即其克隆，语义同旧 entry+extend）。
             order.push(s.devid.clone());
+            by_dev.insert(s.devid.clone(), (s.values.clone(), s.timestamp));
         }
-        let e = by_dev
-            .entry(s.devid.clone())
-            .or_insert((BTreeMap::new(), s.timestamp));
-        // 同 tag 后写覆盖（extend 后值覆盖先值），不同 tag 保留。
-        e.0.extend(s.values.iter().map(|(k, v)| (k.clone(), v.clone())));
-        e.1 = s.timestamp; // 每笔更新，循环结束即该 dev 本批最后一笔
+        // 复审 P2-3：截断线外的新 dev 必被丢弃——不聚合不克隆（旧实现对全量点
+        // 克隆后才 truncate，>50 dev 时是纯浪费的 flush 热路径开销）。
     }
+    // 防御性截断（不变量已在插入处保证；防后续改动漂移）。
     order.truncate(RTDATA_NOTIFY_MAX_DEVS);
     let dev_ids = order.clone();
     let samples = order
@@ -274,14 +277,20 @@ fn aggregate_rtdata(buf: &[Sample]) -> (Vec<String>, usize, Vec<RtdataSample>) {
 ///
 /// 从 `buf` 经 `aggregate_rtdata` 聚合（同 dev 合并、dev_ids/samples 同步截断到
 /// `RTDATA_NOTIFY_MAX_DEVS`），经 `ctx.event_tx.publish` 投递。`count` 始终是 buf
-/// 真实点数（未截断），前端据此估算变更规模。无 SSE 消费者时 publish 静默
-/// （broadcast::send 无 receiver 返 Err 被忽略）。
+/// 真实点数（未截断），前端据此估算变更规模。
 fn publish_rtdata_notify(ctx: &HostContext, buf: &[Sample]) {
+    // 复审 P2-3：无消费者（无 SSE 连接且无订阅型实例）时聚合白付——每点的
+    // key/value 克隆 + BTreeMap 插入在 flush 热路径上，直接跳过。竞态窗口一批
+    // 可容忍（检查后新订阅者到达：订阅者本就收不到订阅前事件）。
+    if ctx.event_tx.receiver_count() == 0 {
+        return;
+    }
     let (dev_ids, count, samples) = aggregate_rtdata(buf);
     ctx.event_tx.publish(EventPayload::Rtdata {
         dev_ids,
         count,
-        samples,
+        // Arc 包裹（复审 P2-4）：broadcast 逐接收者 Clone，Arc 后降为引用计数。
+        samples: std::sync::Arc::new(samples),
         ts: now_iso8601(),
     });
 }
@@ -455,11 +464,11 @@ mod tests {
         let payload = EventPayload::Rtdata {
             dev_ids: vec!["d1".to_string()],
             count: 7,
-            samples: vec![RtdataSample {
+            samples: std::sync::Arc::new(vec![RtdataSample {
                 devid: "d1".to_string(),
                 values,
                 ts: 123,
-            }],
+            }]),
             ts: "t".to_string(),
         };
         let v = serde_json::to_value(&payload).unwrap();

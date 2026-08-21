@@ -172,9 +172,11 @@ impl Source for LuaTransform {
         );
         let mut vm_restarts: u64 = 0;
         // on_rtdata 投递面计数（flush 落 extra：points=成功回调数、skipped=超预算/出错
-        // 跳过数——订阅型实例的数据面健康一眼可见）。
+        // 跳过数——订阅型实例的数据面健康一眼可见；lagged=EventBus 慢消费丢帧数，
+        // 复审 P2-4——此前仅 debug 日志，数据面丢失不可观测）。
         let mut rtdata_points: u64 = 0;
         let mut rtdata_skipped: u64 = 0;
+        let mut rtdata_lagged: u64 = 0;
         let mut flush_ticker = tokio::time::interval(std::time::Duration::from_secs(
             crate::plugin::stat_tracker::FLUSH_INTERVAL_SECS,
         ));
@@ -207,6 +209,9 @@ impl Source for LuaTransform {
                 } => match r {
                     Ok(payload) => Evt::Rtdata(payload),
                     Err(broadcast::error::RecvError::Lagged(n)) => {
+                        // 复审 P2-4：丢帧计数入 stat（SSE 侧早有 rs_iot_sse_lagged_total，
+                        // 订阅实例侧此前不可观测）——lag 帧数按批累计。
+                        rtdata_lagged += n as u64;
                         tracing::debug!(
                             "[luaTransform] inst {} EventBus lagged（丢 {n} 帧继续）",
                             inst.inst_id
@@ -221,7 +226,7 @@ impl Source for LuaTransform {
                 },
                 _ = flush_ticker.tick() => {
                     sync_runtime_devs(&mut tracker, &runtime_devs);
-                    sync_transform_stats(&mut tracker, &dropped, rtdata_points, rtdata_skipped);
+                    sync_transform_stats(&mut tracker, &dropped, rtdata_points, rtdata_skipped, rtdata_lagged);
                     tracker.flush().await;
                     continue;
                 }
@@ -262,7 +267,13 @@ impl Source for LuaTransform {
                     }
                     if tracker.should_flush() {
                         sync_runtime_devs(&mut tracker, &runtime_devs);
-                        sync_transform_stats(&mut tracker, &dropped, rtdata_points, rtdata_skipped);
+                        sync_transform_stats(
+                            &mut tracker,
+                            &dropped,
+                            rtdata_points,
+                            rtdata_skipped,
+                            rtdata_lagged,
+                        );
                         tracker.flush().await;
                     }
                 }
@@ -275,7 +286,9 @@ impl Source for LuaTransform {
                     if lua.globals().get::<mlua::Function>("on_rtdata").is_err() {
                         continue;
                     }
-                    'points: for s in &samples {
+                    // samples 是 Arc<Vec<_>>（复审 P2-4）——fan-out 降为引用计数，
+                    // 此处 iter 只读借用，零深克隆。
+                    'points: for s in samples.iter() {
                         // tag 双形态（"tag" / "devid.tag"，与 Sample.values 同源）：
                         // 剥本 dev 前缀（照 lua_north pull_rtdata_batch 语义）。
                         let prefix = format!("{}.", s.devid);
@@ -363,7 +376,13 @@ impl Source for LuaTransform {
                         );
                         tracker.set_status("running");
                         sync_runtime_devs(&mut tracker, &runtime_devs);
-                        sync_transform_stats(&mut tracker, &dropped, rtdata_points, rtdata_skipped);
+                        sync_transform_stats(
+                            &mut tracker,
+                            &dropped,
+                            rtdata_points,
+                            rtdata_skipped,
+                            rtdata_lagged,
+                        );
                         tracker.flush().await;
                         tracing::info!("[luaTransform] inst {} 热加载成功", inst.inst_id);
                     }
@@ -378,7 +397,13 @@ impl Source for LuaTransform {
         // 退出标记 stopped（spec §13；实例生命周期经由 InstanceManager 全套）。
         tracker.set_status("stopped");
         sync_runtime_devs(&mut tracker, &runtime_devs);
-        sync_transform_stats(&mut tracker, &dropped, rtdata_points, rtdata_skipped);
+        sync_transform_stats(
+            &mut tracker,
+            &dropped,
+            rtdata_points,
+            rtdata_skipped,
+            rtdata_lagged,
+        );
         tracker.flush().await;
     }
 }
@@ -494,6 +519,7 @@ fn sync_transform_stats(
     dropped: &std::sync::atomic::AtomicU64,
     rtdata_points: u64,
     rtdata_skipped: u64,
+    rtdata_lagged: u64,
 ) {
     tracker.extra_insert(
         "dropped_samples",
@@ -501,6 +527,7 @@ fn sync_transform_stats(
     );
     tracker.extra_insert("rtdata_points", serde_json::json!(rtdata_points));
     tracker.extra_insert("rtdata_skipped", serde_json::json!(rtdata_skipped));
+    tracker.extra_insert("rtdata_lagged", serde_json::json!(rtdata_lagged));
 }
 
 // 静态注册到 inventory（编译期，编进单一二进制）——transform 角色 SourceEntry

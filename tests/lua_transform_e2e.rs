@@ -384,7 +384,7 @@ end
         event_bus.publish(EventPayload::Rtdata {
             dev_ids: vec!["dev1".into(), "dev2".into(), "dev3".into()],
             count: 4,
-            samples: vec![
+            samples: std::sync::Arc::new(vec![
                 rtdata_sample(
                     "dev1",
                     &[
@@ -394,7 +394,7 @@ end
                 ),
                 rtdata_sample("dev2", &[("p", SampleValue::Str("on".into()))]),
                 rtdata_sample("dev3", &[("x", SampleValue::Int(9))]),
-            ],
+            ]),
             ts: "2026-08-20T00:00:00Z".into(),
         });
         if let Some(v) = kv_str(&handle.client(), "transform-2", "got_dev1_temp").await {
@@ -606,7 +606,10 @@ end
         event_bus.publish(EventPayload::Rtdata {
             dev_ids: vec!["devX".into()],
             count: 1,
-            samples: vec![rtdata_sample("devX", &[("temp", SampleValue::Float(20.5))])],
+            samples: std::sync::Arc::new(vec![rtdata_sample(
+                "devX",
+                &[("temp", SampleValue::Float(20.5))],
+            )]),
             ts: "2026-08-20T00:00:00Z".into(),
         });
         tokio::time::sleep(std::time::Duration::from_millis(400)).await;
@@ -702,7 +705,7 @@ async fn agg_filter_example_end_to_end() {
         event_bus.publish(EventPayload::Rtdata {
             dev_ids: vec!["raw1".into()],
             count: 1,
-            samples: vec![rtdata_sample("raw1", &[("temp", v)])],
+            samples: std::sync::Arc::new(vec![rtdata_sample("raw1", &[("temp", v)])]),
             ts: "2026-08-21T00:00:00Z".into(),
         });
     };
@@ -959,14 +962,14 @@ end
         event_bus.publish(EventPayload::Rtdata {
             dev_ids: vec!["devH".into()],
             count: 3,
-            samples: vec![rtdata_sample(
+            samples: std::sync::Arc::new(vec![rtdata_sample(
                 "devH",
                 &[
                     ("0_marker", SampleValue::Str("seen".into())),
                     ("a_hang", SampleValue::Int(1)),
                     ("z_ok", SampleValue::Str("after".into())),
                 ],
-            )],
+            )]),
             ts: "2026-08-21T00:00:00Z".into(),
         });
         if kv_str(&client, "transform-9", "got_0_marker")
@@ -997,7 +1000,10 @@ end
         event_bus.publish(EventPayload::Rtdata {
             dev_ids: vec!["devH".into()],
             count: 1,
-            samples: vec![rtdata_sample("devH", &[("b_ok2", SampleValue::Int(2))])],
+            samples: std::sync::Arc::new(vec![rtdata_sample(
+                "devH",
+                &[("b_ok2", SampleValue::Int(2))],
+            )]),
             ts: "2026-08-21T00:00:01Z".into(),
         });
         if kv_str(&client, "transform-9", "got_b_ok2").await.as_deref() == Some("2") {

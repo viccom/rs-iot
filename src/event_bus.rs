@@ -83,8 +83,10 @@ pub enum EventPayload {
         /// 本批点数（供前端估算变更量级，未截断的真实值）。
         count: usize,
         /// 按 dev 聚合的最新值（与 dev_ids 同步截断；旧前端可忽略——缺失/不全时
-        /// 轮询兜底不变，兼容字段零破坏）。
-        samples: Vec<RtdataSample>,
+        /// 轮询兜底不变，兼容字段零破坏）。`Arc` 包裹（复审 P2-4）：broadcast 要求
+        /// `T: Clone`，裸 Vec 会给**每个接收者**（K 个 SSE + M 个订阅型实例）深克隆
+        /// 整个载荷——Arc 后 fan-out 克隆降为引用计数（serde `rc` feature 透明序列化）。
+        samples: std::sync::Arc<Vec<RtdataSample>>,
         /// 时间戳（ISO8601/RFC3339）。
         ts: String,
     },
@@ -132,6 +134,13 @@ impl EventBus {
     pub fn new(cap: usize) -> Self {
         let (tx, _) = broadcast::channel(cap);
         Self { tx }
+    }
+
+    /// 当前接收者数（复审 P2-3）：生产侧（pipeline 聚合前）据此跳过无人消费的
+    /// 聚合开销。竞态窗口（检查后新订阅者到达）一批可容忍——订阅者本就收不到
+    /// 订阅前事件。
+    pub fn receiver_count(&self) -> usize {
+        self.tx.receiver_count()
     }
 
     /// 测试用孤立 sender（无 receiver，`publish` 静默）。
