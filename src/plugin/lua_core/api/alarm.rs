@@ -264,29 +264,15 @@ pub(super) fn register(lua: &Lua, ctx: &mlua::Table, ac: &super::ApiCtx<'_>) -> 
             if !stats.check() {
                 return Ok((Value::Boolean(false), Value::Nil));
             }
-            // 清除前取条目（spec §1.1：clear 沿用清除时条目的 level/message；
-            // 无条目空串——value 损坏同样走空串路径，见 db::alarms::get 文档）。
-            let (level, message) = match crate::db::alarms::get(&lux, &key).await {
-                Ok(Some(item)) => (item.level, item.message),
-                Ok(None) => (String::new(), String::new()),
-                Err(e) => return Err(mlua::Error::RuntimeError(format!("clear_event: {e}"))),
-            };
-            crate::db::alarms::clear(&lux, &key)
+            // 宿主域服务（复审 P2-3 收口）：get→HDEL→publish 统一序（与 REST 面
+            // 共用；publish_when_absent=true——脚本面 spec §2 幂等恒发，多客户端
+            // 视图收敛一致）。
+            crate::db::alarms::clear_with_event(&lux, &event, &key, true, &inst)
                 .await
                 .map_err(|e| mlua::Error::RuntimeError(format!("clear_event: {e}")))?;
-            // 恒发 Clear 帧（spec §2 幂等恒发：多客户端视图收敛一致）+ 清抖动
-            // 表（清除后再触发 = 新事件，正常发 Fire 而非被旧窗口吞）。
+            // 清抖动表（清除后再触发 = 新事件，正常发 Fire 而非被旧窗口吞）。
             stats.clear_key(&key);
-            let ts = crate::event_bus::now_iso8601();
             tracing::info!("[alarm] clear key={key} by={inst}");
-            event.publish(crate::event_bus::EventPayload::Alarm {
-                action: crate::event_bus::AlarmAction::Clear,
-                key,
-                level,
-                source: inst,
-                message,
-                ts,
-            });
             Ok((Value::Boolean(true), Value::Nil))
         }
     })?;

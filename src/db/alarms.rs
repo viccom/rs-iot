@@ -124,6 +124,48 @@ pub async fn get(c: &EmbeddedClient, key: &str) -> Result<Option<AlarmItem>, RsI
 }
 
 /// 清除一条告警（幂等：不存在仍 `Ok`——HDEL 对缺失 field 天然无错）。
+/// 宿主侧清除域服务（复审 P2-3 收口：REST 手动清除与脚本 ctx:clear_event 此前
+/// 各写一遍且顺序相反——routes 先 publish 后 HDEL，HDEL 失败时前端已移除而后端
+/// 仍活跃。统一 HDEL→publish：清除失败整轮报错不发帧）。
+///
+/// 层位注记：本函数在 db 模块但编排 EventBus——告警域的宿主服务（存储+多播）
+/// 同属一个域，spec §0「存储与多播归宿主」；不引插件层依赖。
+///
+/// `publish_when_absent`：true = 无条目也发空 level/message 的 Clear 帧（脚本面
+/// spec §2 恒发语义，多客户端视图收敛）；false = 幂等静默（REST 面 spec §1.2/§4）。
+/// `absent_source`：无条目帧的 source（存在条目时恒用条目原 source——告警归属
+/// 不因谁清除而变；脚本面传调用实例 id，REST 面不发无条目帧传空串）。
+/// 返回清除前是否存在条目。
+pub async fn clear_with_event(
+    c: &EmbeddedClient,
+    bus: &crate::event_bus::EventBus,
+    key: &str,
+    publish_when_absent: bool,
+    absent_source: &str,
+) -> Result<bool, RsIotError> {
+    let (existed, level, message, source) = match get(c, key).await? {
+        Some(it) => (true, it.level, it.message, it.source),
+        None => (
+            false,
+            String::new(),
+            String::new(),
+            absent_source.to_string(),
+        ),
+    };
+    clear(c, key).await?;
+    if existed || publish_when_absent {
+        bus.publish(crate::event_bus::EventPayload::Alarm {
+            action: crate::event_bus::AlarmAction::Clear,
+            key: key.to_string(),
+            level,
+            source,
+            message,
+            ts: crate::event_bus::now_iso8601(),
+        });
+    }
+    Ok(existed)
+}
+
 pub async fn clear(c: &EmbeddedClient, key: &str) -> Result<(), RsIotError> {
     c.execute("HDEL", &[HASH, key]).await?;
     Ok(())

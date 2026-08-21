@@ -33,6 +33,7 @@ Alarm {
 ```
 
 - `action` 区分 fire/clear：前端一次订阅覆盖两向事件；clear 事件让多客户端视图收敛一致。
+- Clear 帧的 source 语义（复审 P2-3 定案）：存在条目时恒用**条目原 source**（告警归属不因谁清除而变）；无条目帧（仅脚本面恒发路径）用调用实例 id。两调用面（REST/ctx）统一经宿主域服务 `db::alarms::clear_with_event`（HDEL→publish 序，HDEL 失败不发帧）。
 - `source` 由宿主从 ApiCtx 的 inst_id 注入——脚本无法冒名其他实例。
 - `level` 字符串三档（非数字）：SSE JSON 直读、前端无需映射表；非法值在 ctx API 入口拒绝。
 

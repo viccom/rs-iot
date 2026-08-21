@@ -8,7 +8,6 @@
 
 use crate::api::AppState;
 use crate::db::alarms;
-use crate::event_bus::{now_iso8601, AlarmAction, EventPayload};
 use axum::extract::{Query, State};
 use axum::response::IntoResponse;
 use axum::Json;
@@ -41,33 +40,19 @@ pub async fn delete(
     auth: Option<axum::Extension<crate::api::auth::AuthedUser>>,
     Query(q): Query<KeyQuery>,
 ) -> Response {
-    match alarms::get(&st.lux, &q.key).await {
-        Ok(item) => {
-            if let Some(it) = &item {
-                st.event_bus.publish(EventPayload::Alarm {
-                    action: AlarmAction::Clear,
-                    key: it.key.clone(),
-                    level: it.level.clone(),
-                    source: it.source.clone(),
-                    message: it.message.clone(),
-                    ts: now_iso8601(),
-                });
-            }
-            match alarms::clear(&st.lux, &q.key).await {
-                Ok(()) => {
-                    // 审计（照 routes_secret 形态）：key 级不落 message 全文。
-                    tracing::info!(
-                        "[alarm] clear key={} by={}（via {}）",
-                        q.key,
-                        auth.as_ref()
-                            .map(|a| a.user_id.as_str())
-                            .unwrap_or("accesskey"),
-                        auth.as_ref().map(|a| a.via).unwrap_or("accesskey")
-                    );
-                    Json(serde_json::json!({"status": "ok", "key": q.key})).into_response()
-                }
-                Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
-            }
+    // 复审 P2-3：走宿主域服务（HDEL→publish 统一序；无条目幂等静默不发帧）。
+    match alarms::clear_with_event(&st.lux, &st.event_bus, &q.key, false, "").await {
+        Ok(_existed) => {
+            // 审计（照 routes_secret 形态）：key 级不落 message 全文。
+            tracing::info!(
+                "[alarm] clear key={} by={}（via {}）",
+                q.key,
+                auth.as_ref()
+                    .map(|a| a.user_id.as_str())
+                    .unwrap_or("accesskey"),
+                auth.as_ref().map(|a| a.via).unwrap_or("accesskey")
+            );
+            Json(serde_json::json!({"status": "ok", "key": q.key})).into_response()
         }
         Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
     }
