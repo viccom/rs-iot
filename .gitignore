@@ -5,6 +5,9 @@
 /pki/
 
 # 本地工作/调试产物（不入库）
+# FIELD_E2E_LOCAL.md：本机端到端测试环境说明（虚拟串口对/现场资产路径/真机门控
+# 变量等机器相关，谁使用谁完善——见 CLAUDE.md「本机端到端测试环境说明」条目）
+FIELD_E2E_LOCAL.md
 .bak/
 .playwright-mcp/
 gateway.toml
