@@ -574,6 +574,79 @@ stat 走 InstanceManager 全套（核心 6 字段 + `script_version`/`vm_restart
 transform 专属 extra：`rtdata_points`（on_rtdata 成功回调累计）、`rtdata_skipped`
 （超预算/出错/自环过滤跳过累计）、`runtime_devices`（派生点上报集）、`dropped_samples`。
 
+## 告警（`ctx:fire_event` / `ctx:clear_event`，Q12 最小闭环）
+
+**判定逻辑归脚本**（阈值/持续时间/迟滞全在 Lua 里写，宿主不猜）；宿主只负责存
+（lux `alarms` 活跃清单，跨重启保留）、推（SSE `alarm` 帧）与护栏。全角色注入
+（collector/transform/north 均可调——采集侧判原始点、transform 侧判派生点、north
+侧判平台回执；能力包 §5.2 C6 行）。
+
+| 函数 | 返回 | 说明 |
+|---|---|---|
+| `ctx:fire_event(key, level, message)` | `true`\|`false`\|`nil, err` | 触发/更新告警。`true`=已上报；`false`=被频控（见下）；`nil, err`=参数违例（不落库） |
+| `ctx:clear_event(key)` | `true` | 清除告警（幂等——不存在也成功并恒发 Clear 事件，多客户端视图收敛） |
+
+- **校验**：`key` 非空且 ≤128 字符；`level ∈ {info, warn, error}`（三档字符串，
+  SSE JSON 直读）；`message` ≤512 字符——违例返 `nil, err`（可感知，与 http 频控同错误形态）。
+- **source 不可伪造**：来源实例 ID 由宿主注入，API 无 source 参数。
+- **频控**：每实例 20 次/s（独立额度，不与 http 共享）。超限返 `false`（非错误——
+  风暴不是脚本 bug，静默退避语义）且**不写清单不推 SSE**；计数落 stat `alarm_rate_limited`。
+- **同 key 抖动**：1s 窗口内重复 fire 仍 `count++`（清单风暴可见性）但**不重发 SSE**
+  （前端不被同键闪屏）；`clear` 后再触发视为新事件正常发。
+- **重复 fire 同 key**：清单覆盖写（level/message/ts 取最新）+ count 累计——前端面板
+  显示为「×N」。
+
+### 示例：transform 阈值判定（迟滞防临界抖动）
+
+```lua
+-- @role transform
+local HI, LO = 80, 75   -- 越限触发 / 回落恢复（迟滞带防临界反复触发）
+local hot = false
+function on_rtdata(devid, tag, value)
+  if tag ~= "temp" then return end
+  if not hot and value > HI then
+    hot = true
+    ctx:fire_event(devid .. ".temp_high", "warn",
+                   string.format("%s 温度 %.1f 越限(>%d)", devid, value, HI))
+  elseif hot and value < LO then
+    hot = false
+    ctx:clear_event(devid .. ".temp_high")   -- 判定恢复由脚本决定（宿主不猜）
+  end
+end
+```
+
+### 示例：collector 从站失联（fire/clear 配对）
+
+```lua
+local miss, fired = 0, false
+function collect()
+  local resp = ctx:request(FRAME, 1000)
+  if not resp then
+    miss = miss + 1
+    -- 连续 3 周期无响应才报（单次超时可能是总线抖动，不制造噪声）
+    if miss >= 3 and not fired then
+      if ctx:fire_event("mb1.offline", "error", "连续 3 周期无响应") then fired = true end
+    end
+    return nil   -- 本周期无数据
+  end
+  miss = 0
+  if fired then
+    ctx:clear_event("mb1.offline")   -- 恢复（幂等——重复 clear 无害）
+    fired = false
+  end
+  return decode(resp)
+end
+```
+
+### 运维面（宿主自动完成，脚本无需参与）
+
+- **查看**：前端「数据页 → 活跃告警」面板实时展示（SSE `alarm` 帧收敛 + 登录/断线
+  重连时全量拉取兜底）；REST `GET /api/v1/alarms`（按 ts 倒序）。
+- **手动清除**：面板「清除」按钮 = `DELETE /api/v1/alarms?key=<key>`（运维兜底）——
+  经 REST 手动清除，宿主发 Clear 事件让**所有**客户端面板同步收敛（不本地乐观移除）。
+- 活跃清单跨网关重启保留（lux 持久）；历史时序/通知渠道明确不做（spec §0——历史走
+  日志，出站通知可用 L5 http 脚本自组）。
+
 ## 运行时护栏
 
 脚本错误不应拖垮实例或宿主——五项运行时护栏（参数与能力卡单一事实源一致）：
@@ -582,6 +655,7 @@ transform 专属 extra：`rtdata_points`（on_rtdata 成功回调累计）、`rt
 |---|---|---|
 | 回调时长预算 | `callback_timeout_ms`（默认 10s，可配；覆盖 collect/on_write/on_data/on_init 四类回调） | 本次回调被放弃（协程弃留，VM 不重建）、tick 记失败——连续超时照常走 `fail_threshold` → `degraded`，下一 tick 继续；reload 路径的 on_init 超限 → 回退旧 VM |
 | HTTP 频控 | 20 次/s（`http_get`/`http_post` 共享一个出站窗口；**固定 1s 窗口计数**语义，窗口边界理论可突发 2×——护栏目的等效，token bucket 列为后续优化） | 向脚本返回错误 `rate limited（20/s）`（可感知退避） |
+| 告警频控 | 20 次/s（`ctx:fire_event`，与 http 独立额度；同 key 1s 内重复 fire 不重发 SSE 但清单 count 仍累计） | 返 `false`（静默退避，不写清单不推 SSE）；计数落 stat `alarm_rate_limited`（见告警节） |
 | `ctx:request` 超时上限 | 脚本传值 clamp 至 30s（`0` → 1ms；上限读能力卡 `timeout_cap_ms`） | 防超大超时挂死等待 |
 | HTTP 超时上限 | `timeout` 参数 clamp 至 1-30s（缺省 5s；上限读能力卡） | 同上 |
 | hub 背压防反压 | 样本上送 `send` 超 2s；同一 collect 周期首批丢弃后，剩余样本改即时丢弃（不再逐条各等 2s） | 丢弃该样本并累计计数——stat 扩展字段 `dropped_samples`（见状态监测）；hub 关闭时 warn |

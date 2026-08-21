@@ -3,7 +3,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { setActivePinia, createPinia } from 'pinia'
 import { useMonitorStore } from './monitor'
 import { useAuthStore } from './auth'
-import type { LogEntry, PacketEntry, StateEvent, RtdataEvent } from '../types'
+import type { AlarmEvent, AlarmItem, LogEntry, PacketEntry, StateEvent, RtdataEvent } from '../types'
 import { PREVIEW_AUTH_TOKEN } from '../lib/previewSession'
 
 // jsdom 不实现 EventSource，store.start() 内会 new EventSource，测试需提供桩。
@@ -509,6 +509,121 @@ describe('monitor store', () => {
     expect(traceCall).toBeTruthy()
     s.unsubscribePacket()
     expect(s.packetSubscribed).toBe(false)
+    fetchSpy.mockRestore()
+  })
+
+  // ---- 告警（Q12 最小闭环 T5：SSE alarm 帧收敛 + REST 拉取/手动清除）----
+
+  /** 构造一条 alarm 事件的简写。 */
+  function alarmEvt(action: 'fire' | 'clear', key: string, extra: Partial<AlarmEvent> = {}): AlarmEvent {
+    return { action, key, level: 'warn', source: 'inst-a', message: `msg-${key}`, ts: `2026-08-21T0${key.length}:00:00+00:00`, ...extra }
+  }
+
+  it('start 订 alarm kind，fire 帧直入 alarms（新键 count=1）', () => {
+    // 锁的不变量：告警是运维刚需（照 rtdata 面板模式默认订阅）——start() 的 SSE
+    // types 含 alarm，fire 帧到达即入清单（新键 count=1——事件不带 count，首见置 1）。
+    const auth = useAuthStore()
+    auth.setAuth('tok-abc', 'admin')
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async () =>
+      new Response('[]', { status: 200 }),
+    )
+    ;(globalThis as unknown as { document: unknown }).document = {
+      hidden: false, addEventListener: () => {}, removeEventListener: () => {},
+    }
+    const s = useMonitorStore()
+    s.start()
+    expect(FakeEventSource.last!.url).toContain('types=rtdata,state,alarm')
+    FakeEventSource.last!.emit('alarm', alarmEvt('fire', 'dev1.temp_high', { level: 'error', message: '温度过高' }))
+    expect(s.alarms.length).toBe(1)
+    expect(s.alarms[0]).toMatchObject({ key: 'dev1.temp_high', level: 'error', source: 'inst-a', count: 1 })
+    s.stop()
+    fetchSpy.mockRestore()
+  })
+
+  it('onAlarm 语义：同键 fire 覆盖保 count 置顶 / clear 移除 / 未知 key clear 无害', () => {
+    // 锁的不变量：fire upsert（同 key 替换 level/message/ts，count 保留已见值——宿主
+    // count++ 与前端首见=1 同调近似，全量准确值靠 loadAlarms/重连兜底；条目置顶=最新
+    // 在前，对齐后端清单 ts 倒序）；clear 移除该 key（含未知 key 无害——幂等）。
+    const s = useMonitorStore()
+    s.onAlarm(alarmEvt('fire', 'k1'))
+    s.onAlarm(alarmEvt('fire', 'k2'))
+    expect(s.alarms.map(a => a.key)).toEqual(['k2', 'k1'])  // fire 置顶（最新在前）
+    // 同键再 fire：count 保留、message/level 覆盖为本次值、条目置顶。
+    s.onAlarm(alarmEvt('fire', 'k1', { level: 'error', message: '升级' }))
+    expect(s.alarms.map(a => a.key)).toEqual(['k1', 'k2'])
+    expect(s.alarms[0]).toMatchObject({ level: 'error', message: '升级', count: 1 })
+    s.onAlarm(alarmEvt('clear', 'k2'))
+    expect(s.alarms.map(a => a.key)).toEqual(['k1'])
+    // 未知 key clear：幂等无害（宿主 clear_event 恒发帧）。
+    expect(() => s.onAlarm(alarmEvt('clear', 'missing'))).not.toThrow()
+    expect(s.alarms.map(a => a.key)).toEqual(['k1'])
+  })
+
+  it('loadAlarms GET /alarms 全量替换（旧条目不残留）', async () => {
+    // 锁的不变量：全量替换（后端清单是活跃清单的事实源——被外部 REST 清除/其他端
+    // 收敛的条目以拉取为准，不做合并）；携带 Bearer 鉴权（照 loadRtdata 模式）。
+    const auth = useAuthStore()
+    auth.setAuth('tok', 'admin')
+    const items: AlarmItem[] = [
+      { key: 'b', level: 'warn', source: 'inst-b', message: 'm2', ts: '2026-08-21T02:00:00+00:00', count: 3 },
+      { key: 'a', level: 'info', source: 'inst-a', message: 'm1', ts: '2026-08-21T01:00:00+00:00', count: 1 },
+    ]
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async () =>
+      new Response(JSON.stringify(items), { status: 200 }),
+    )
+    const s = useMonitorStore()
+    s.onAlarm(alarmEvt('fire', 'stale-key'))  // 预置旧条目，验证被全量替换
+    await s.loadAlarms()
+    expect(s.alarms).toEqual(items)
+    const call = fetchSpy.mock.calls.find(c => String(c[0]).includes('/api/v1/alarms'))
+    expect(String(call![0])).toBe('/api/rsiot/api/v1/alarms')
+    expect((call![1] as RequestInit).headers).toMatchObject({ Authorization: 'Bearer tok' })
+    fetchSpy.mockRestore()
+  })
+
+  it('SSE 重连 onopen 补拉 alarms（断线丢帧兜底收敛）', async () => {
+    // 锁的不变量：断线期间丢的 fire/clear 帧在重连成功时经全量拉取收敛（告警无
+    // 轮询，onopen 补拉是唯一兜底点——对齐 rtdata 的断线轮询兜底职责）。
+    const auth = useAuthStore()
+    auth.setAuth('tok', 'admin')
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async () =>
+      new Response('[]', { status: 200 }),
+    )
+    ;(globalThis as unknown as { document: unknown }).document = {
+      hidden: false, addEventListener: () => {}, removeEventListener: () => {},
+    }
+    const s = useMonitorStore()
+    s.start()
+    await new Promise(r => setTimeout(r, 0))  // start 首拉落定
+    fetchSpy.mockClear()
+    FakeEventSource.last!.onopen!()  // 模拟重连成功
+    const alarmCall = fetchSpy.mock.calls.find(c => String(c[0]).includes('/api/v1/alarms'))
+    expect(alarmCall).toBeTruthy()
+    s.stop()
+    fetchSpy.mockRestore()
+  })
+
+  it('clearAlarm DELETE /alarms?key=，不本地移除（由 SSE Clear 帧收敛）', async () => {
+    // 锁的不变量：手动清除走 REST DELETE，本地不乐观移除——后端删除后恒发 Clear
+    // 帧，前端经同一 onAlarm 路径收敛（与脚本 clear_event 单一收敛路径，无双路径
+    // 状态不一致）；key 走 encodeURIComponent。
+    const auth = useAuthStore()
+    auth.setAuth('tok', 'admin')
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async () =>
+      new Response('{"status":"ok"}', { status: 200 }),
+    )
+    const s = useMonitorStore()
+    s.onAlarm(alarmEvt('fire', 'dev1.temp_high'))
+    expect(await s.clearAlarm('dev1.temp_high')).toBe(true)
+    const call = fetchSpy.mock.calls.find(c => String(c[0]).includes('/api/v1/alarms'))
+    expect(String(call![0])).toBe(`/api/rsiot/api/v1/alarms?key=${encodeURIComponent('dev1.temp_high')}`)
+    const init = call![1] as RequestInit
+    expect(init.method).toBe('DELETE')
+    expect(init.headers).toMatchObject({ Authorization: 'Bearer tok' })
+    // DELETE 成功后本地仍保留（等 SSE Clear 帧移除）。
+    expect(s.alarms.length).toBe(1)
+    s.onAlarm(alarmEvt('clear', 'dev1.temp_high'))
+    expect(s.alarms.length).toBe(0)
     fetchSpy.mockRestore()
   })
 })

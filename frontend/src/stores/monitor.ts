@@ -2,6 +2,8 @@
 import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 import type {
+  AlarmEvent,
+  AlarmItem,
   InstanceStat,
   LogEntry,
   PacketEntry,
@@ -75,6 +77,8 @@ export const useMonitorStore = defineStore('monitor', () => {
   const rtdata = ref<Record<string, Record<string, RtdataCell>>>({})
   /** sysstatus 快照（dbsize / metrics / process 等）。 */
   const sysstatus = ref<Record<string, unknown>>({})
+  /** 活跃告警清单（最新在前；来源 GET /alarms 拉取 + SSE alarm 帧收敛，Q12 T5）。 */
+  const alarms = ref<AlarmItem[]>([])
   /** 当前选中实例 ID（组件联动）。 */
   const selectedInstance = ref<string>('')
   /** 当前选中设备 ID（页面感知 AI / rtdata 联动）。 */
@@ -185,6 +189,27 @@ export const useMonitorStore = defineStore('monitor', () => {
     }, RTDATA_NOTIFY_DEBOUNCE_MS)
   }
 
+  /**
+   * SSE alarm 帧收敛（Q12 告警最小闭环，spec §5）。
+   *
+   * - fire → upsert：同 key 替换（level/message/ts 取本次值）并置顶（最新在前，
+   *   对齐后端清单 ts 倒序）；事件不带 count——保留已见计数，新键置 1（宿主
+   *   count++ 与前端首见=1 同调近似，全量准确值靠 loadAlarms 拉取）。
+   * - clear → 移除该 key（脚本 clear_event 与 REST 手动清除同走本路径，多客户端
+   *   视图收敛一致；未知 key 无害——幂等）。
+   */
+  function onAlarm(e: AlarmEvent) {
+    if (e.action === 'clear') {
+      alarms.value = alarms.value.filter(a => a.key !== e.key)
+      return
+    }
+    const cur = alarms.value.find(a => a.key === e.key)
+    alarms.value = [
+      { key: e.key, level: e.level, source: e.source, message: e.message, ts: e.ts, count: cur?.count ?? 1 },
+      ...alarms.value.filter(a => a.key !== e.key),
+    ]
+  }
+
   /** 拉取实例列表（进程级 state + health）。 */
   async function loadInstances() {
     if (isPreviewAuthToken(useAuthStore().token)) {
@@ -239,6 +264,44 @@ export const useMonitorStore = defineStore('monitor', () => {
       if (r.status === 401) { handleUnauthorized(); return }
       if (r.ok) sysstatus.value = await r.json()
     } catch { /* 轮询失败静默，下周期重试 */ }
+  }
+
+  /**
+   * 拉取活跃告警清单（GET /alarms，ts 倒序由后端保证）——**全量替换**：
+   * 后端清单是活跃告警的事实源（外部 REST 清除/其他客户端触发的收敛以拉取为准，
+   * 不做合并）。登录即拉（start 内）+ SSE 重连 onopen 兜底补拉（断线期间丢的
+   * fire/clear 帧收敛——告警无轮询，onopen 是唯一补拉点）。
+   */
+  async function loadAlarms() {
+    if (isPreviewAuthToken(useAuthStore().token)) return
+    try {
+      const r = await fetch('/api/rsiot/api/v1/alarms', {
+        headers: { Authorization: `Bearer ${useAuthStore().token}` },
+      })
+      if (r.status === 401) { handleUnauthorized(); return }
+      // Array.isArray 防御：非数组响应（旧后端/网关错误页）不写——alarm 收敛路径
+      // 依赖数组方法（filter），写入非数组会炸面板渲染。
+      if (r.ok) {
+        const d = await r.json()
+        if (Array.isArray(d)) alarms.value = d as AlarmItem[]
+      }
+    } catch { /* 拉取失败静默（SSE 帧继续收敛） */ }
+  }
+
+  /**
+   * 手动清除一条告警（DELETE /alarms?key=，运维兜底）。**不本地乐观移除**——
+   * 后端删除后恒发 Clear 事件，经与脚本 clear_event 相同的 SSE 路径收敛（onAlarm
+   * 移除），避免"本地移除 + SSE Clear"双路径状态不一致。
+   */
+  async function clearAlarm(key: string): Promise<boolean> {
+    try {
+      const r = await fetch(`/api/rsiot/api/v1/alarms?key=${encodeURIComponent(key)}`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${useAuthStore().token}` },
+      })
+      if (r.status === 401) { handleUnauthorized(); return false }
+      return r.ok
+    } catch { return false }
   }
 
   /**
@@ -410,13 +473,19 @@ export const useMonitorStore = defineStore('monitor', () => {
       offline.value = false
       return
     }
-    // rtdata 变更通知 SSE（订阅 state 用于实例状态联动；log/packet 不在此订阅）。
+    // rtdata 变更通知 SSE（订阅 state 用于实例状态联动；alarm 告警默认订阅——运维
+    // 刚需，照 rtdata 面板模式不做按需激活；log/packet 不在此订阅）。
     sse = new EventSource(
-      `/api/rsiot/api/v1/events?types=rtdata,state&token=${encodeURIComponent(tok)}`,
+      `/api/rsiot/api/v1/events?types=rtdata,state,alarm&token=${encodeURIComponent(tok)}`,
     )
     sse.addEventListener('rtdata', e => safe(() => onRtdataNotify(JSON.parse((e as MessageEvent).data) as RtdataEvent)))
     sse.addEventListener('state', e => safe(() => onState(JSON.parse((e as MessageEvent).data) as StateEvent)))
-    sse.onopen = () => { offline.value = false }
+    sse.addEventListener('alarm', e => safe(() => onAlarm(JSON.parse((e as MessageEvent).data) as AlarmEvent)))
+    sse.onopen = () => {
+      offline.value = false
+      // 重连兜底：断线期间丢的 fire/clear 帧经全量拉取收敛（告警无轮询）。
+      void loadAlarms()
+    }
     sse.onerror = () => {
       offline.value = true
       // 浏览器自动重连；rtdata 轮询兜底数据正确性。
@@ -429,6 +498,7 @@ export const useMonitorStore = defineStore('monitor', () => {
     void loadInstanceConfigs()
     void loadRtdata()
     void loadSysstatus()
+    void loadAlarms()
     rtdataTimer = setInterval(loadRtdata, 2000)
     sysstatusTimer = setInterval(loadSysstatus, 5000)
     rosterTimer = setInterval(() => { void loadInstances(); void loadInstanceConfigs() }, 5000)
@@ -532,6 +602,7 @@ export const useMonitorStore = defineStore('monitor', () => {
     packets,
     rtdata,
     sysstatus,
+    alarms,
     selectedInstance,
     selectedDevice,
     offline,
@@ -541,11 +612,14 @@ export const useMonitorStore = defineStore('monitor', () => {
     onPacket,
     onState,
     onRtdataNotify,
+    onAlarm,
     loadInstances,
     loadInstanceConfigs,
     loadRtdata,
     loadSysstatus,
     loadLogsRecent,
+    loadAlarms,
+    clearAlarm,
     saveInstance,
     deleteInstance,
     purge,

@@ -58,6 +58,36 @@ export interface StateEvent {
   ts: string
 }
 
+/** 告警动作（SSE `alarm` 事件 action 字段，后端 AlarmAction serde 小写）。 */
+export type AlarmAction = 'fire' | 'clear'
+
+/**
+ * SSE `alarm` 事件 payload（Q12 告警最小闭环，spec §1.1）。
+ *
+ * fire/clear 双向同一事件（action 区分）——一次 `addEventListener("alarm")` 覆盖两向，
+ * 多客户端视图经 clear 帧收敛一致。source 由宿主从实例 ID 注入（脚本不可伪造）；
+ * ts 为 ISO8601 字符串。**事件不带 count**（计数事实源在宿主清单——前端 upsert
+ * 保留已见值，全量准确值靠 `GET /alarms` 拉取/重连兜底）。
+ */
+export interface AlarmEvent {
+  action: AlarmAction
+  key: string
+  level: string
+  source: string
+  message: string
+  ts: string
+}
+
+/** 活跃告警条目（`GET /api/v1/alarms` 清单项，后端按 ts 倒序）。count 为累计触发次数。 */
+export interface AlarmItem {
+  key: string
+  level: string
+  source: string
+  message: string
+  ts: string
+  count: number
+}
+
 /** rtdata cell：`[ts, localTime, value]`（经 lux JSON 序列化，数值可能是字符串）。 */
 export type RtdataCell = [number, string, string | number]
 

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, watch } from 'vue'
 import RtdataPanel from '../components/monitor/RtdataPanel.vue'
+import AlarmPanel from '../components/monitor/AlarmPanel.vue'
 import { useWorkspacePage } from '../composables/useWorkspacePage'
 import { useMonitorStore } from '../stores/monitor'
 import { buildDeviceOwnership, unclaimedDevices } from '../lib/instRelations'
@@ -176,6 +177,18 @@ useWorkspacePage(() => ({
         }}</span>
       </div>
       <RtdataPanel />
+    </article>
+
+    <!-- 活跃告警（Q12 最小闭环）：rtdata 面板近旁——数据异常（点位越限）时告警就近可见。 -->
+    <article class="page-panel">
+      <div class="panel-head">
+        <div>
+          <p class="panel-label">告警面板</p>
+          <h3>活跃告警</h3>
+        </div>
+        <span>脚本 fire / 手动或脚本 clear，SSE 实时收敛</span>
+      </div>
+      <AlarmPanel />
     </article>
   </section>
 </template>
