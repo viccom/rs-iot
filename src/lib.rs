@@ -302,6 +302,16 @@ pub async fn run_app_with_shutdown(
     let started = try_start_from_lux(&mgr, &client).await;
     tracing::info!("started {started} source instance(s) from lux");
 
+    // D-CLN-1：lux `devices` Hash 是历史遗留死表（权威源=实例配置 ∪ dev2inst，见
+    // routes_device）——存量非空仅提示，不自动删数据（保守）。
+    if let Ok(lux::EmbeddedValue::Int(n)) = client.execute_value("HLEN", &["devices"]).await {
+        if n > 0 {
+            tracing::warn!(
+                "[startup] lux `devices` Hash 存在 {n} 条历史遗留数据（已废弃，设备权威源=实例配置；可 DEL devices 清理）"
+            );
+        }
+    }
+
     // selfMonitor：rs-iot 自身即设备（devid=rsiot，17 只读+3 可写标签），随进程
     // 无条件自启（不落 lux instances——重启恒在；stopinst 可临时停）。
     let _ = mgr.start_source(self_monitor_config()).await;

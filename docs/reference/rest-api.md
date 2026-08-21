@@ -259,7 +259,7 @@ mqtt-north password 的 `secret:` 引用走宿主连接序列）。
 | GET | `/api/v1/secret/list` | JWT | — | `[{"ref":"secret:mqtt_pwd","masked":"****"}, ...]`（ref 字典序） |
 | DELETE | `/api/v1/secret` | JWT | `?ref=secret:onenet_key` | `{"status":"ok","ref":...}`（幂等：不存在仍 200） |
 
-- **掩码规则**（list 绝不回显明文，D6）：值 >8 字符 → 前 4 + `****` + 后 4；≤8 → 全 `****`。
+- **掩码规则**（list 绝不回显明文，D6）：值 >4 字符 → `****` + 后 4；≤4 → 全 `****`。
 - **审计**（Q4 ref 级、不落值）：set/delete 各落一条 `[secret][audit] set/delete ref=...`
   日志——日志与响应里**绝不出现明文**（who 由 JWT 访问日志侧承载）；脚本侧读取不落日志。
 - **加密存储**（D-SEC-1）：值经 chacha20poly1305 AEAD 加密落库（密钥由 `jwt_secret` 经
