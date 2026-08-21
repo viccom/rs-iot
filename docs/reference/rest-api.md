@@ -130,7 +130,7 @@ curl -s -XPOST -H "Authorization: $TOKEN" -H 'Content-Type: application/json' \
   }'   # → {"status":"ok","plugin_token":"<hex>"}
 ```
 
-### 4.3 设备 CRUD（`routes_device.rs`，lux Hash `devices`）
+### 4.3 设备 CRUD（`routes_device.rs`，实例配置聚合 ∪ lux Hash `dev2inst`）
 
 | Method | Path | Body/Query | 成功响应 |
 |---|---|---|---|
@@ -140,6 +140,7 @@ curl -s -XPOST -H "Authorization: $TOKEN" -H 'Content-Type: application/json' \
 | POST | `/api/v1/device/delete` | `{"dev_id":"..."}` | `{"status":"deleted"}` |
 
 - `device/set` **无 schema 校验**（裸 JSON 写入），建议仍按 `DeviceSpec` 结构写
+- `GET /devices` / `device/get` 响应可能含**运行时设备**条目（lua `set_value` 等运行时产生、无配置点表，经 `dev2inst` 归属表并入）：额外带 `"runtime": true` 与 `"owner_inst": "<宿主实例>"`（多宿主逗号串）字段；同 devid 存在配置时以配置为准（不带这两字段）
 
 ### 4.4 用户 / 登录（`routes_user.rs`，lux Hash `users`/`passwords`）
 

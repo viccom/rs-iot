@@ -84,6 +84,32 @@ pub async fn devices_of(c: &EmbeddedClient, inst_id: &str) -> Result<Vec<String>
     Ok(out)
 }
 
+/// 读全表 `(devid, 宿主列表)` 对（`GET /devices` 运行时补集入口；空表 → `vec![]`）。
+///
+/// 宿主保持登记顺序（多宿主逗号列表原序拆分）。
+pub async fn all(c: &EmbeddedClient) -> Result<Vec<(String, Vec<String>)>, RsIotError> {
+    let v = c.execute_value("HGETALL", &[HASH]).await?;
+    let mut out = Vec::new();
+    if let lux::EmbeddedValue::Array(arr) = v {
+        // RESP 扁平序列：k1, v1, k2, v2, ...（同 devices_of 解析形态）。
+        let mut i = 0;
+        while i + 1 < arr.len() {
+            let devid = embedded_to_string(arr[i].clone()).unwrap_or_default();
+            let raw = embedded_to_string(arr[i + 1].clone()).unwrap_or_default();
+            if !devid.is_empty() {
+                let owners: Vec<String> = raw
+                    .split(',')
+                    .filter(|s| !s.is_empty())
+                    .map(String::from)
+                    .collect();
+                out.push((devid, owners));
+            }
+            i += 2;
+        }
+    }
+    Ok(out)
+}
+
 /// 整表清除（`DEL dev2inst`，purge 用）。
 pub async fn clear(c: &EmbeddedClient) -> Result<(), RsIotError> {
     c.execute("DEL", &[HASH]).await?;
@@ -224,6 +250,33 @@ mod tests {
         assert!(
             devices_of(&c, "inst-none").await.unwrap().is_empty(),
             "无归属宿主应返空"
+        );
+    }
+
+    /// 全表读取（GET /devices 运行时补集入口）：每条目 (devid, 宿主列表)，
+    /// 宿主保持登记顺序；空表返空 vec。
+    #[tokio::test]
+    async fn all_lists_entries_with_owner_lists() {
+        let c = test_client("all").await;
+        assert!(
+            all(&c).await.unwrap().is_empty(),
+            "空表应返空 vec（GET /devices 退化为纯配置聚合）"
+        );
+        note(&c, "dev1", "inst-a").await.unwrap();
+        note(&c, "dev1", "inst-b").await.unwrap();
+        note(&c, "dev2", "inst-b").await.unwrap();
+        let mut entries = all(&c).await.unwrap();
+        entries.sort();
+        assert_eq!(
+            entries,
+            vec![
+                (
+                    "dev1".to_string(),
+                    vec!["inst-a".to_string(), "inst-b".to_string()]
+                ),
+                ("dev2".to_string(), vec!["inst-b".to_string()]),
+            ],
+            "每 devid 带全部宿主，保持登记顺序"
         );
     }
 

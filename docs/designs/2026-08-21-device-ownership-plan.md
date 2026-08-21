@@ -1,7 +1,10 @@
 # 设备归属模型 + lux/RESP 收口 + secrets 加密 实施计划
 
 > 日期：2026-08-21
-> **状态**：planned
+> **状态**：partially-implemented（Task 1-4 已实施）
+> **实施**：T1 `64635eb` / T2 `4eadce3` / T3 `b5fac22` / T4 本提交（GET /devices 并入运行时设备）
+> **代码**：`src/db/dev_registry.rs`、`src/plugin/sample_sender.rs`、`src/api/routes_inst.rs`、`src/api/routes_device.rs`
+> **遗留**：Task 5（D-LUX-1 非 loopback 强制认证）/ Task 6（D-SEC-1 secrets AEAD）/ Task 7（D-CLN-1 死表 WARN + 文档收口）/ Task 8（全量回归 + 冒烟）
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 > 设计定案见同日 `2026-08-21-device-ownership-design.md`（D-OWN-1..4 / D-LUX-1 / D-SEC-1 / D-CLN-1，本计划不重复论证）。
 

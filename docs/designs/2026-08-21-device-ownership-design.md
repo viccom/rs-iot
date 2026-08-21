@@ -1,7 +1,11 @@
 # 设备归属模型设计（device ownership）+ lux/RESP 收口 + secrets 加密
 
 > 日期：2026-08-21
-> **状态**：drafted（设计定案，待实施）
+> **状态**：partially-implemented（D-OWN-1/2/3 已实施，D-LUX-1/D-SEC-1/D-CLN-1 待实施）
+> **实施**：T1 `64635eb` dev_registry + T2 `4eadce3` SampleSender 归属登记 + T3 `b5fac22` 级联闭环 + T4 本提交（GET /devices 并入运行时设备）
+> **代码**：`src/db/dev_registry.rs`、`src/plugin/sample_sender.rs`、`src/api/routes_inst.rs`、`src/api/routes_device.rs`
+> **测试**：dev_registry/routes_device/routes_inst 单测（归属登记/级联/补集并入）
+> **遗留**：D-LUX-1 非 loopback 强制认证、D-SEC-1 secrets AEAD、D-CLN-1 devices 死表 WARN（计划 Task 5-7）
 > 前文：2026-08-21 深度审查（采集器→设备→标签约束关系四缺陷）——本 spec 是其修复设计
 > 关联：`2026-08-18-lua-script-system-evolution-design.md`（ADR D1「Sample 结构不动」约束的本仓宪法级决策）
 
