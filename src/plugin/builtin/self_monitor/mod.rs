@@ -5,6 +5,7 @@
 //! 完整标签表见 docs/designs/2026-08-21-self-monitor-device-plan.md。
 
 use crate::host::HostContext;
+use crate::plugin::sample_sender::SampleSender;
 use crate::plugin::traits::Source;
 use crate::types::{CtlMessage, InstConfig, Sample, SampleValue};
 use async_trait::async_trait;
@@ -108,7 +109,7 @@ impl Source for SelfMonitor {
         &self,
         ctx: HostContext,
         inst: InstConfig,
-        tx: mpsc::Sender<Sample>,
+        tx: SampleSender,
         mut cmd_rx: mpsc::Receiver<CtlMessage>,
         token: CancellationToken,
     ) {

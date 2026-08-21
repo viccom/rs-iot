@@ -9,6 +9,7 @@
 use crate::error::RsIotError;
 use crate::host::HostContext;
 use crate::plugin::registry;
+use crate::plugin::sample_sender::SampleSender;
 use crate::types::{CtlMessage, InstConfig, Sample};
 use dashmap::DashMap;
 use std::collections::HashMap;
@@ -95,7 +96,9 @@ impl InstanceManager {
         self.emit_state(&id_key, InstState::Starting);
 
         let ctx = self.ctx.clone();
-        let tx = self.hub_tx.clone();
+        // D-OWN-1 唯一包装点：Source 出口经 SampleSender 遮蔽 send/try_send 登记
+        // dev2inst（归属 = 本实例）；seen 去重防每 tick 旁路写，详见 sample_sender。
+        let tx = SampleSender::new(self.hub_tx.clone(), self.ctx.lux.clone(), id_key.clone());
         let token_run = token.clone();
         let id_for_log = id_key.clone();
         let source_join = tokio::spawn(async move {

@@ -239,6 +239,7 @@ mod tests {
     use super::*;
     use crate::host::{BridgeRegistry, CtlRegistry, HostContext};
     use crate::plugin::lua_core as core_;
+    use crate::plugin::sample_sender::SampleSender;
     use crate::types::{CtlMessage, Hwid, Sample, SampleValue};
     use core_::script::LoadCtx;
     use mlua::LuaSerdeExt;
@@ -329,7 +330,7 @@ mod tests {
             ctx_host: ctx.clone(),
             inst,
             io: None,
-            tx: stub_tx,
+            tx: SampleSender::untracked(stub_tx),
             runtime_devs: Default::default(),
             dropped: Default::default(),
             transport: "mqtt",

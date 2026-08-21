@@ -70,6 +70,7 @@
 //!   后续按需加 REST 端点而非插件配置。
 
 use crate::host::HostContext;
+use crate::plugin::sample_sender::SampleSender;
 use crate::plugin::traits::Source;
 use crate::types::{CtlMessage, InstConfig, Sample, SampleValue};
 use async_trait::async_trait;
@@ -396,7 +397,7 @@ impl Source for S7Client {
         &self,
         ctx: HostContext,
         inst: InstConfig,
-        tx: mpsc::Sender<Sample>,
+        tx: SampleSender,
         mut cmd_rx: mpsc::Receiver<CtlMessage>,
         token: CancellationToken,
     ) {

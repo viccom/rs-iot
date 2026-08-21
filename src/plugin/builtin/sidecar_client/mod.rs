@@ -17,6 +17,7 @@
 
 use crate::db::ext_token;
 use crate::host::{BridgeRegistry, HostContext};
+use crate::plugin::sample_sender::SampleSender;
 use crate::plugin::traits::Source;
 use crate::types::{CtlMessage, HostKind, InstConfig, Sample, SampleValue};
 use async_trait::async_trait;
@@ -202,7 +203,7 @@ impl Source for SidecarClient {
         &self,
         ctx: HostContext,
         inst: InstConfig,
-        tx: mpsc::Sender<Sample>,
+        tx: SampleSender,
         mut cmd_rx: mpsc::Receiver<CtlMessage>,
         token: CancellationToken,
     ) {

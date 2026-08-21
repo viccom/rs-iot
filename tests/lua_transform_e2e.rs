@@ -951,7 +951,13 @@ end
     tokio::spawn(async move {
         use rs_iot::plugin::traits::Source;
         rs_iot::plugin::builtin::lua_transform::LuaTransform
-            .run(ctx, inst, tx, cmd_rx, run_token)
+            .run(
+                ctx,
+                inst,
+                rs_iot::plugin::sample_sender::SampleSender::untracked(tx),
+                cmd_rx,
+                run_token,
+            )
             .await;
     });
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;

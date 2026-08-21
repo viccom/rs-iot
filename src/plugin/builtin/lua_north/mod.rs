@@ -26,6 +26,7 @@ mod contract;
 
 use crate::host::HostContext;
 use crate::plugin::lua_core as core_;
+use crate::plugin::sample_sender::SampleSender;
 use crate::plugin::traits::Sink;
 use crate::types::{CtlMessage, InstConfig, Sample};
 use async_trait::async_trait;
@@ -131,6 +132,8 @@ impl Sink for LuaNorth {
         //    注册（保留函数面——脚本无差别可用），但 north 是 Sink（数据消费者）写
         //    hub 概念上不成立——接收端保活不消费 = send 成功即弃（零噪音；缓冲打满
         //    才 dropped 计数，语义同慢消费者，容量 1024 实际打不满）。
+        //    untracked（不登记 dev2inst）：黑洞样本不入 hub 无归属语义（D-OWN-1
+        //    登记点只在 mgr 的 Source 出口）。
         let (stub_tx, _stub_rx) = mpsc::channel::<Sample>(1024);
         // 告警护栏（Q12 T4）：fire 频控 + 抖动表 + 频控计数（flush 落 stat）。
         let alarm: core_::api::AlarmStats = Default::default();
@@ -138,7 +141,7 @@ impl Sink for LuaNorth {
             ctx_host: ctx.clone(),
             inst: &inst,
             io: None,
-            tx: stub_tx,
+            tx: SampleSender::untracked(stub_tx),
             runtime_devs: Default::default(),
             dropped: Default::default(),
             transport: "mqtt",

@@ -31,6 +31,7 @@
 //! udint/ulint/real/lreal/string；缺省推断 bool→Bool、整数→Dint、浮点→Real、串→String。
 
 use crate::host::HostContext;
+use crate::plugin::sample_sender::SampleSender;
 use crate::plugin::traits::Source;
 use crate::types::{CtlMessage, InstConfig, Sample, SampleValue};
 use async_trait::async_trait;
@@ -290,7 +291,7 @@ impl Source for EipClientPlugin {
         &self,
         ctx: HostContext,
         inst: InstConfig,
-        tx: mpsc::Sender<Sample>,
+        tx: SampleSender,
         mut cmd_rx: mpsc::Receiver<CtlMessage>,
         token: CancellationToken,
     ) {
