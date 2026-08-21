@@ -191,10 +191,10 @@ enum Evt { Cmd(Option<CtlMessage>), Reload, Tick, Rtdata(EventPayload) }
 
 **Step 1:** 示例脚本（滑动窗用 kv 存窗口状态，演示 C4；纯定时 + 订阅双模式注释说明）。
 **Step 2:** 文档五处同步 + `python scripts/check_docs.py` 过。
-**Step 3:** 验收清单核对（对照路线图 C 行，实测留证）：
-- [ ] 一个清洗/聚合脚本上线（agg-filter 经 e2e 实跑，产出派生点可见）
-- [ ] 自环测试通过（transform 输出不触发自身——T8 测试名）
-- [ ] pipeline 零改动（口径：`git diff` 中 `src/pipeline.rs` 仅 `publish_rtdata_notify`/聚合函数与常量，dispatcher/worker/背压链零触碰）
+**Step 3:** 验收清单核对（对照路线图 C 行，实测留证；2026-08-21 完成，证据见文末验收清单与核对记录）：
+- [x] 一个清洗/聚合脚本上线（agg-filter 经 e2e 实跑，产出派生点可见——`agg_filter_example_end_to_end`：窗口均值 20.0 落库断言）
+- [x] 自环测试通过（transform 输出不触发自身——`transform_self_loop_guard_suppresses_own_output`，真实链路回流）
+- [x] pipeline 零改动（口径：`git diff` 中 `src/pipeline.rs` 仅 `publish_rtdata_notify`/聚合函数与常量，dispatcher/worker/背压链零触碰——diff stat 见核对记录）
 
 **Step 4:** Commit `docs(lua)+examples: 阶段 C 收口——示例/指南/schema/发布说明`
 

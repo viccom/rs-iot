@@ -171,9 +171,10 @@ impl Source for LuaTransform {
             serde_json::json!(core_::script::script_version(&scripts_root, &cfg.script)),
         );
         let mut vm_restarts: u64 = 0;
-        // on_rtdata 投递面计数（flush 落 extra：points=成功回调数、skipped=超预算/出错
-        // 跳过数——订阅型实例的数据面健康一眼可见；lagged=EventBus 慢消费丢帧数，
-        // 复审 P2-4——此前仅 debug 日志，数据面丢失不可观测）。
+        // on_rtdata 投递面计数（flush 落 extra：points=成功回调数；skipped=三类
+        // 跳过合计——自环抑制/超预算弃批/脚本出错（构成看日志 warn，量级在此）；
+        // lagged=EventBus 慢消费丢帧数，复审 P2-4——此前仅 debug 日志不可观测）。
+        // 订阅型实例的数据面健康一眼可见。
         let mut rtdata_points: u64 = 0;
         let mut rtdata_skipped: u64 = 0;
         let mut rtdata_lagged: u64 = 0;

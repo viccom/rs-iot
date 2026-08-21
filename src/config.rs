@@ -35,7 +35,8 @@ pub struct AppConfig {
     pub lua_stdlib_pin: Option<String>,
     /// EventBus broadcast 容量（R6/C 阶段 T2）。Rtdata 载荷带 samples 后事件
     /// 变大，慢 SSE 消费者更易 lagged 丢帧；持续增长 `rs_iot_sse_lagged_total`
-    /// 时可调大此值（默认 256 对标 hub）。
+    /// 时可调大此值（默认 256 对标 hub）。**内存口径**：ring 常驻 ≈ 容量 × 单事件
+    /// 体积（带值 Rtdata 可达数十 KB，256 上限约数十 MB）——调大前先估内存。
     pub event_bus_capacity: usize,
 }
 

@@ -20,7 +20,8 @@
 >   - **EventBus 订阅者 fan-out 成本**：每个订阅型实例一个 broadcast 接收端，随实例数线性增长；实例数大时关注 `event_bus_capacity` 与 `rs_iot_sse_lagged_total`（R6 可观测已备，聚合分发优化未做）
 >   - **T8 窗口过期边界未专测**：自环防护 10s 窗口过期后，延迟超窗的自回流会再次触发 on_rtdata（正常链路 50ms 攒批 + 秒级周期远低于窗口，风险低；延迟 >10s 的 lagged 场景未专测）
 >   - **阶段 C 复审（2026-08-21 深度审查）已修项**：P1-1 超预算弃批+批内 token 检查；P2-2 on_rtdata 批级记账 → degraded（fail_threshold 可配）；P2-3/P2-4 聚合条件化 + samples Arc 化 + transform lagged 计数；P2-1 with_budget/缺省下沉 lua_core::budget；P3 批（前端 ts 旧值保护/localTime 由样本 ts 推导/count 口径统一为 Sample 条数/subscribe 元素级收紧/warn 1s 限流/计划取舍 3 回写）
->   - **阶段 C 复审登记未修项**：前端极值浮点字符串化与 Rust `f64::to_string` 在 `1e-7`/`NaN` 形态不一致（去抖补拉整包替换前短暂窗口，低危）；自环窗口以「处理时刻」判窗（慢消费 >10s 防护失效，可改事件自带 ts 对比，与 T8 边界同源）；e2e `baseline==1` 精确断言满载竞态（T8 已报存量 flaky 同类）；glob/自环查表热路径每点分配可预编译（10 万点/s 量级才显著）；ring 内存上界 256×payload 数十 MB（`event_bus_capacity` 调大前须知，配置注释已提）
+>   - **阶段 C 复审登记未修项**：前端极值浮点字符串化与 Rust `f64::to_string` 在 `1e-7`/`NaN` 形态不一致（去抖补拉整包替换前短暂窗口，低危）；自环窗口以「处理时刻」判窗（慢消费 >10s 防护失效，可改事件自带 ts 对比，与 T8 边界同源）；e2e `baseline==1` 精确断言满载竞态（T8 已报存量 flaky 同类）；glob/自环查表热路径每点分配可预编译（10 万点/s 量级才显著）；ring 内存上界 256×payload 数十 MB（config.rs 注释已补内存口径）
+>   - **杂项登记（终审计 2026-08-21）**：tag 剥前缀 `strip_prefix("{devid}.")` 语义在 4 处出现（transform shell/api self_write_keys/get_device/north pull）可提 lua_core helper（弱建议，现状各自有注释）；`tests/common/mod.rs::stop_lux` doc 称清理临时 data_dir 实际未清（存量，误导测试编写者）；存量满载 flaky 两处（`routes_secret`/`lua_client ctl_reload` 时序竞态，单独跑均过，非 lua 路径）
 > - sync 管理员权限（平台无角色模型）、`min_host_ver` 预检、sync 后 selftest 抽样、json encode 深度护栏、reqwest 复用、stdlib 与 lua-http 解耦、默认 upstream 占位 URL（A 遗留，均未变）
 > 流程：调研（mlua 生态 / FreeIOE / IIoT 趋势）→ 本 spec → 分章深化 → writing-plans → 分阶段实施
 > 前置：`2026-08-06-lua-script-collector-design.md`（luaClient 采集系统，已落地，本文是其演进）
