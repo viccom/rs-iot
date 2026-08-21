@@ -1,8 +1,8 @@
 # rs-iot Lua 脚本系统演进设计（多角色脚本平台）
 
 > 日期：2026-08-18（v0.5 更新于 2026-08-19：全部 Open Questions 定案 + 冲突/风险分析 + 附录 B；2026-08-20 阶段 A 落地 + 审查修复回填；2026-08-20 阶段 B 落地；2026-08-21 阶段 C 落地）
-> 版本：v0.7（Q1-Q19 全部决议；阶段 A/B 已实施合入，C 已实施待合并，D 规划中）
-> **状态**：implemented（阶段 A、B 已合入 master——B 于 2026-08-20 快进合并，21 commit；阶段 C 于 2026-08-21 落地 worktree `feat/lua-stage-c`，9 task，验收清单实测见 `2026-08-20-lua-script-system-stage-c-plan.md` 文末）
+> 版本：v0.7（Q1-Q19 全部决议；阶段 A/B/C 已实施合入 master，D 规划中）
+> **状态**：implemented（阶段 A、B、C 均已合入 master——B 于 2026-08-20 快进合并 21 commit；C 于 2026-08-21 快进合并 17 commit：9 task + 深度审查修复 7 项 + 终审计补遗，验收清单实测见 `2026-08-20-lua-script-system-stage-c-plan.md` 文末）
 > **实施**：阶段 A（2026-08-19~20，13 task + 审查修复，见 v0.5.1 行）；阶段 B（2026-08-20，12 task，`2026-08-20-lua-script-system-stage-b-plan.md`）：luaNorth 薄壳（Sink 首个接线）/ mqtt-north 契约（Q5 六回调 + 混合批量 + 重连重调 auth）/ secret 链路（Q4：lux secrets 表 + REST + ctx:secret_get 授权清单）/ MqttPublisher 无损迁移（R5 单通道锁，旧代码删除）/ cloud 配方 emqx+onenet（Q8，源仓 1.2.0）/ io_engine mqtt 透传 backend（Q10，spike-2 方案 a）/ ApiCtx 参数收敛 / manifest 多角色契约；阶段 C（2026-08-21，9 task，`2026-08-20-lua-script-system-stage-c-plan.md`）：EventBus Rtdata 载荷带 values（Q6 同 PR：pipeline 聚合/SSE/前端直用）+ 容量配置化与 lagged 可观测（R6）/ rhai 冻结标注（Q7/D4）/ Role::Transform 能力包裁剪（C1/C3/C5 不注册）/ manifest transform any-of 契约 / luaTransform 薄壳（Q19 三薄插件之三，Source 订阅型 + InstanceManager 全套 + on_timer/on_rtdata 预算）/ subscribe 宿主过滤 + 自环防护（Q6 硬性验收，e2e 实测）/ agg-filter 示例（e2e 锁定防漂移）
 > **代码**：`src/plugin/lua_core/`（公共层）+ `src/plugin/builtin/{lua_client,lua_north,lua_transform}/`（三薄插件）+ `src/db/secrets.rs` + `src/api/routes_secret.rs`；源仓 `E:/Rs_Codes/rsiot-lualib`（stdlib 至 1.3.0：种子 4 库 + hashings 子集 + cloud/emqx + cloud/onenet + oo/middleclass + proto/stream_buffer + codec/bcd——后三件为 1.3.0 现场调研 freeioe fork）
 > **测试**：`cargo test -p rs-iot --features lua,lua-http`（阶段 B 末：lib 366 通过 / 5 ignored[需外部资源] + 29 个测试目标全绿；B 契约闭环经进程内 rumqttd broker e2e 实测）；阶段 C 末数字见阶段 C 计划文末核对记录；C 自环/订阅/示例经真实链路 e2e（EventBus → subscribe 过滤 → on_rtdata → set_value → hub → pipeline → lux 落库）实测

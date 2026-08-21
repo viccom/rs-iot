@@ -62,7 +62,7 @@
 | [2026-08-18-lua-script-system-evolution-design.md](designs/2026-08-18-lua-script-system-evolution-design.md) | Lua 脚本系统演进：多角色脚本平台 v0.7（阶段 A/B/C 已实施） | **已实施**（A/B 已合入 master；C 于 worktree feat/lua-stage-c 待合并） |
 | [2026-08-19-lua-script-system-stage-a-plan.md](designs/2026-08-19-lua-script-system-stage-a-plan.md) | 阶段 A 实施计划：13 task TDD（lua_core/护栏/stdlib/manifest/源仓） | **已实施** |
 | [2026-08-20-lua-script-system-stage-b-plan.md](designs/2026-08-20-lua-script-system-stage-b-plan.md) | 阶段 B 实施计划：12 task（luaNorth/Sink 接线/mqtt-north 契约/secret/cloud 配方/透传 spike-2） | **已实施** |
-| [2026-08-20-lua-script-system-stage-c-plan.md](designs/2026-08-20-lua-script-system-stage-c-plan.md) | 阶段 C 实施计划：9 task（luaTransform 订阅型/EventBus 带值/subscribe 过滤/自环防护/on_timer/rhai 冻结） | **已实施**（worktree feat/lua-stage-c，验收核对见文末） |
+| [2026-08-20-lua-script-system-stage-c-plan.md](designs/2026-08-20-lua-script-system-stage-c-plan.md) | 阶段 C 实施计划：9 task（luaTransform 订阅型/EventBus 带值/subscribe 过滤/自环防护/on_timer/rhai 冻结） | **已实施**（已合入 master） |
 
 ## ops/ — 部署与运维（怎么跑起来）
 
