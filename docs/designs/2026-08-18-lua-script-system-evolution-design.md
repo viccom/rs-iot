@@ -12,7 +12,7 @@
 > - **`IoBackend` request 兜底超时独占 IO task**（B 发现）：连接健康但响应丢失时 backend 层 30s 兜底会占住 IO task（上层 timeout 只释放 Lua 侧）；与 TcpIo 语义一致，属 trait 架构层面，评估 spawn_io_task 对 reply_to.closed() 竞速
 > - **串口 backend 异步安全改造**（2026-08-20 现场实测发现，专项）：串口对端接错/无人监听时 SerialIo 卡死在 poll 内部阻塞调用（serialport/驱动层）——select 臂内 token 包裹与 task abort 均无法抢占永不返回的 poll，stopinst 后 COM 口仍被占（杀进程才释放）；同场景旧代码还会因 `tx.send` 无超时保护进入预算死循环（已修，f46a15c）。完整修复：serial open 走 spawn_blocking + 限时、读写经专用线程/通道桥接；缓解：配置正确的对端口、stop 后端口被占即重启进程
 > - **mqtt-north 的 send_command 恒注入**（Q5 兼容依赖）：R3 收紧（显式授权）待角色能力包机制完善后做——复审 H1（明文 MQTT + `<hwid>/command` 任意实例控制链 + 凭证明文过网）与此同源，建议与 NorthCfg TLS 选项、broker ACL 一并提级排期
-> - **阶段 B 复审（2026-08-20 深度审查）登记未修项**：M3（实例 REST 原样回显字面 password，与 /config 遮蔽双标）；M4（secret 授权清单撤销不即时——改清单须 stop/start，热加载也不刷新）；M5（north password 的 `secret:` 引用不受实例授权清单约束，可作存在性 oracle）；poll 取消安全性随阻塞-1 双任务重构已消（pump 独占不再被取消）；其余 P3 项（PubResult 语义注明/Down 丢弃计数/will 重调契约说明/lux 错误 Fatal 归类）见审查记录，随 C 阶段顺带
+> - **阶段 B 复审（2026-08-20 深度审查）登记未修项**：M3（实例 REST 原样回显字面 password，与 /config 遮蔽双标）；M4（secret 授权清单撤销不即时——改清单须 stop/start，热加载也不刷新）；M5（north password 的 `secret:` 引用不受实例授权清单约束，可作存在性 oracle）；poll 取消安全性随阻塞-1 双任务重构已消（pump 独占不再被取消）；其余 P3 项（PubResult 语义注明/Down 丢弃计数/will 重调契约说明/lux 错误 Fatal 归类）见审查记录，随 D 阶段顺带（C 收官未涉及 north 面，原「随 C」标签作废）
 > - **纯 Lua hmac 指令成本**（B 实测量化）：hmac_sha1 ~70 万指令 > 默认 1M hook 护栏，OneNET 生产须 `hook_instr_limit≥2M`（指南已注明）；Rust 侧 builtin 哈希（C7）列远期
 > - **阶段 C 登记（2026-08-21）**：
 >   - **自环防护窗口的跨源同 tag 静默**（Q6 已定取舍，落档）：self-write 10s 窗口内其他源对同 `(devid,tag)` 的并发写入一并静默——per-instance 表只保证「自身输出不触发自身」，跨源可见性不受保证；高频同 tag 多源写场景需知晓（正常 collector 原始点 / transform 派生点不同 tag，无影响）
