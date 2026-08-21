@@ -19,7 +19,19 @@ pub(crate) struct SerialIo {
     stop_bits: u8,
     flow_control: FlowControl,
     idle: std::time::Duration,
+    /// 连续 open 超时计数（复审 P2-1：达 [`POISON_AFTER`] 次后端口标记 poisoned，
+    /// 退避 [`POISON_BACKOFF`] 再试——驱动真卡死时每轮 request 盲 spawn 会在
+    /// ~8.5 分钟饱和 tokio 512 blocking 池）。
+    consecutive_open_timeouts: u32,
+    /// poisoned 生效期（None = 未 poisoned；Some(时刻) = 退避截止，过期自动解封）。
+    poisoned_until: Option<std::time::Instant>,
 }
+
+/// 连续 open 超时达此值 → poisoned（复审 P2-1）。
+const POISON_AFTER: u32 = 3;
+/// poisoned 退避时长：窗口内 ensure_connected 直接报错不 spawn；过期自动解封
+/// （实例 stop/start 亦天然复位——SerialIo 随 IO task 重建）。
+const POISON_BACKOFF: std::time::Duration = std::time::Duration::from_secs(30);
 
 impl SerialIo {
     /// 构造（不立即 open，首次 request 才 open）。
@@ -41,6 +53,31 @@ impl SerialIo {
             stop_bits,
             flow_control,
             idle: std::time::Duration::from_millis(recv_idle_ms),
+            consecutive_open_timeouts: 0,
+            poisoned_until: None,
+        }
+    }
+
+    /// 复审 P2-1：超时记账——连续达 [`POISON_AFTER`] 次置 poisoned（退避截止
+    /// = now + [`POISON_BACKOFF`]）并清零计数（退避结束后重新计）。
+    fn note_open_timeout(&mut self) {
+        self.consecutive_open_timeouts += 1;
+        if self.consecutive_open_timeouts >= POISON_AFTER {
+            self.poisoned_until = Some(std::time::Instant::now() + POISON_BACKOFF);
+            self.consecutive_open_timeouts = 0;
+        }
+    }
+
+    /// 复审 P2-1：poisoned 门——生效期返回剩余秒数（调用方直接报错不 spawn）；
+    /// 过期自动解封返回 None。成功 open 处清零计数（ensure_connected Ok 臂）。
+    fn poison_gate(&mut self) -> Option<u64> {
+        let deadline = self.poisoned_until?;
+        let now = std::time::Instant::now();
+        if now < deadline {
+            Some((deadline - now).as_secs())
+        } else {
+            self.poisoned_until = None;
+            None
         }
     }
 
@@ -59,6 +96,14 @@ impl SerialIo {
         if self.stream.is_some() {
             return Ok(());
         }
+        // 复审 P2-1：poisoned 窗口内直接报错不 spawn（防 blocking 池被卡死线程
+        // 灌满）；过期自动解封重试——驱动偶发卡死可自愈，真坏口 30s 一试。
+        if let Some(deadline) = self.poison_gate() {
+            return Err(mlua::Error::RuntimeError(format!(
+                "serial open {}: poisoned（连续 {POISON_AFTER} 次超时，退避中，{}s 后重试）",
+                self.port, deadline
+            )));
+        }
         let builder = tokio_serial::new(&self.port, self.baud_rate)
             .data_bits(map_data_bits(self.data_bits))
             .parity(map_parity(self.parity))
@@ -75,6 +120,7 @@ impl SerialIo {
         match opened {
             Ok(Ok(Ok(s))) => {
                 self.stream = Some(s);
+                self.consecutive_open_timeouts = 0;
                 Ok(())
             }
             Ok(Ok(Err(e))) => Err(mlua::Error::RuntimeError(format!(
@@ -86,10 +132,13 @@ impl SerialIo {
                 "serial open {}: blocking task {e}",
                 self.port
             ))),
-            Err(_) => Err(mlua::Error::RuntimeError(format!(
-                "serial open {}: 超时（5s）——IO task 不冻结，句柄由 blocking 线程结束时释放",
-                self.port
-            ))),
+            Err(_) => {
+                self.note_open_timeout();
+                Err(mlua::Error::RuntimeError(format!(
+                    "serial open {}: 超时（5s）——IO task 不冻结，句柄由 blocking 线程结束时释放",
+                    self.port
+                )))
+            }
         }
     }
 }
@@ -207,6 +256,36 @@ mod tests {
     /// 测试标配参数（9600 8N1 + 50ms idle 成帧窗）。
     fn test_io(port: String) -> SerialIo {
         SerialIo::new(port, 9600, 8, Parity::None, 1, FlowControl::None, 50)
+    }
+
+    /// 复审 P2-1：连续 3 次 open 超时 → poisoned（门生效期内 ensure_connected
+    /// 即时报错不 spawn，剩余秒数递减）；退避过期自动解封；成功 open 清零计数。
+    /// note_open_timeout/poison_gate 抽出为方法正是为可测（无需真等 5s 超时）。
+    #[tokio::test]
+    async fn open_timeout_poisons_after_three_with_backoff() {
+        let mut io = test_io("COM_TEST_POISON".into());
+        assert_eq!(io.poison_gate(), None, "初始未 poisoned");
+        // 前两次：计数但不 poisoned。
+        io.note_open_timeout();
+        io.note_open_timeout();
+        assert_eq!(io.poison_gate(), None, "连续 2 次未达阈值");
+        // 第 3 次：poisoned，门返回剩余秒数（≤30）。
+        io.note_open_timeout();
+        let secs = io.poison_gate().expect("第 3 次后应 poisoned");
+        assert!(secs <= 30 && secs >= 29, "退避剩余秒数应 ~30：{secs}");
+        // 门再次查询仍生效（未过期）。
+        assert!(io.poison_gate().is_some(), "退避期内持续拦截");
+        // 模拟退避过期：手工把截止拨到过去 → 自动解封。
+        if let Some(d) = io.poisoned_until.as_mut() {
+            *d = Instant::now() - Duration::from_secs(1);
+        }
+        assert_eq!(io.poison_gate(), None, "退避过期自动解封");
+        // 成功路径清零：直接置 stream（不走真 open）验证 Ok 臂计数清零语义由
+        // ensure_connected 维护——此处锁 note 语义：清零后再 2 次不 poisoned。
+        io.consecutive_open_timeouts = 0;
+        io.note_open_timeout();
+        io.note_open_timeout();
+        assert_eq!(io.poison_gate(), None, "清零后重新计数");
     }
 
     /// SerialIo 包成 IO task（on_data 丢弃；token 可控）——真机②③用（断言 IO task 不被
