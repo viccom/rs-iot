@@ -117,7 +117,10 @@ async fn get_list(app: &axum::Router, tok: &str) -> (StatusCode, serde_json::Val
     let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20)
         .await
         .unwrap();
-    (code, serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null))
+    (
+        code,
+        serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null),
+    )
 }
 
 // ---------- JWT 保护（spec §4：照 routes_secret 默认 JWT）----------
@@ -163,15 +166,36 @@ async fn alarms_list_shape_and_ts_desc() {
     let tok = jwt(&app).await;
 
     // 直写宿主路径（fire 无 REST 端点，脚本面是 T4）：两键不同 ts，old 重复 fire 一次。
-    alarms::fire(&lux, "old.key", "info", "inst-a", "旧告警", "2026-08-21T01:00:00+00:00")
-        .await
-        .unwrap();
-    alarms::fire(&lux, "old.key", "warn", "inst-a", "旧告警升级", "2026-08-21T01:05:00+00:00")
-        .await
-        .unwrap();
-    alarms::fire(&lux, "new.key", "error", "inst-b", "新告警", "2026-08-21T02:00:00+00:00")
-        .await
-        .unwrap();
+    alarms::fire(
+        &lux,
+        "old.key",
+        "info",
+        "inst-a",
+        "旧告警",
+        "2026-08-21T01:00:00+00:00",
+    )
+    .await
+    .unwrap();
+    alarms::fire(
+        &lux,
+        "old.key",
+        "warn",
+        "inst-a",
+        "旧告警升级",
+        "2026-08-21T01:05:00+00:00",
+    )
+    .await
+    .unwrap();
+    alarms::fire(
+        &lux,
+        "new.key",
+        "error",
+        "inst-b",
+        "新告警",
+        "2026-08-21T02:00:00+00:00",
+    )
+    .await
+    .unwrap();
 
     let (code, body) = get_list(&app, &tok).await;
     assert_eq!(code, StatusCode::OK);
@@ -200,9 +224,16 @@ async fn alarm_delete_clears_list_and_publishes_sse_clear() {
     let (app, lux, handle) = test_app().await;
     let tok = jwt(&app).await;
 
-    alarms::fire(&lux, "dev1.temp_high", "warn", "inst-a", "温度过高", "2026-08-21T03:00:00+00:00")
-        .await
-        .unwrap();
+    alarms::fire(
+        &lux,
+        "dev1.temp_high",
+        "warn",
+        "inst-a",
+        "温度过高",
+        "2026-08-21T03:00:00+00:00",
+    )
+    .await
+    .unwrap();
 
     // 先建 SSE 连接（?types=alarm），handler 已 subscribe 后再 DELETE（resp 单独
     // 持有——不被后续 DELETE 响应遮蔽，流从本响应体读）。
@@ -239,7 +270,11 @@ async fn alarm_delete_clears_list_and_publishes_sse_clear() {
     assert_eq!(resp.status(), StatusCode::OK, "不存在 key 幂等 200");
     let (code, body) = get_list(&app, &tok).await;
     assert_eq!(code, StatusCode::OK);
-    assert_eq!(body.as_array().map(|a| a.len()), Some(1), "幂等 DELETE 不动清单");
+    assert_eq!(
+        body.as_array().map(|a| a.len()),
+        Some(1),
+        "幂等 DELETE 不动清单"
+    );
     let _ = tokio::time::timeout(std::time::Duration::from_millis(300), async {
         while let Some(chunk) = stream.next().await {
             buf.push_str(&String::from_utf8_lossy(&chunk.unwrap()));
@@ -277,12 +312,12 @@ async fn alarm_delete_clears_list_and_publishes_sse_clear() {
         false
     })
     .await;
-    assert!(
-        found.unwrap_or(false),
-        "应含 alarm clear 事件帧: {buf}"
-    );
+    assert!(found.unwrap_or(false), "应含 alarm clear 事件帧: {buf}");
     assert!(buf.contains("dev1.temp_high"), "帧应含被清 key: {buf}");
-    assert!(buf.contains("\"level\":\"warn\""), "level 沿用清除前条目: {buf}");
+    assert!(
+        buf.contains("\"level\":\"warn\""),
+        "level 沿用清除前条目: {buf}"
+    );
     assert!(buf.contains("温度过高"), "message 沿用清除前条目: {buf}");
 
     // 清除后清单空。

@@ -135,7 +135,11 @@ fn embedded_to_string(v: lux::EmbeddedValue) -> Option<String> {
     match v {
         lux::EmbeddedValue::Bulk(b) => {
             let s = String::from_utf8_lossy(&b).into_owned();
-            if s.is_empty() { None } else { Some(s) }
+            if s.is_empty() {
+                None
+            } else {
+                Some(s)
+            }
         }
         lux::EmbeddedValue::Simple(s) if !s.is_empty() => Some(s),
         _ => None,
@@ -170,9 +174,16 @@ mod tests {
     #[tokio::test]
     async fn fire_new_key_starts_count_1() {
         let c = test_client("fire-new").await;
-        let n = fire(&c, "dev1.temp_high", "warn", "inst-a", "温度过高", "2026-08-21T01:00:00+00:00")
-            .await
-            .unwrap();
+        let n = fire(
+            &c,
+            "dev1.temp_high",
+            "warn",
+            "inst-a",
+            "温度过高",
+            "2026-08-21T01:00:00+00:00",
+        )
+        .await
+        .unwrap();
         assert_eq!(n, 1, "首次 fire count 应为 1");
 
         let item = get(&c, "dev1.temp_high").await.unwrap().expect("应存在");
@@ -187,7 +198,9 @@ mod tests {
     #[tokio::test]
     async fn fire_same_key_increments_and_overwrites() {
         let c = test_client("fire-inc").await;
-        fire(&c, "k", "info", "s1", "m1", "2026-08-21T01:00:00+00:00").await.unwrap();
+        fire(&c, "k", "info", "s1", "m1", "2026-08-21T01:00:00+00:00")
+            .await
+            .unwrap();
         let n = fire(&c, "k", "error", "s1", "m2", "2026-08-21T02:00:00+00:00")
             .await
             .unwrap();
@@ -206,7 +219,9 @@ mod tests {
         let c = test_client("clear").await;
         clear(&c, "missing").await.unwrap();
 
-        fire(&c, "k", "warn", "s", "m", "2026-08-21T01:00:00+00:00").await.unwrap();
+        fire(&c, "k", "warn", "s", "m", "2026-08-21T01:00:00+00:00")
+            .await
+            .unwrap();
         clear(&c, "k").await.unwrap();
         assert!(list(&c).await.unwrap().is_empty(), "清除后清单应空");
         clear(&c, "k").await.unwrap();
@@ -216,9 +231,15 @@ mod tests {
     #[tokio::test]
     async fn list_orders_by_ts_desc() {
         let c = test_client("list-desc").await;
-        fire(&c, "old", "info", "s", "m", "2026-08-21T01:00:00+00:00").await.unwrap();
-        fire(&c, "mid", "warn", "s", "m", "2026-08-21T02:00:00+00:00").await.unwrap();
-        fire(&c, "new", "error", "s", "m", "2026-08-21T03:00:00+00:00").await.unwrap();
+        fire(&c, "old", "info", "s", "m", "2026-08-21T01:00:00+00:00")
+            .await
+            .unwrap();
+        fire(&c, "mid", "warn", "s", "m", "2026-08-21T02:00:00+00:00")
+            .await
+            .unwrap();
+        fire(&c, "new", "error", "s", "m", "2026-08-21T03:00:00+00:00")
+            .await
+            .unwrap();
 
         let items = list(&c).await.unwrap();
         let keys: Vec<&str> = items.iter().map(|i| i.key.as_str()).collect();
@@ -228,8 +249,7 @@ mod tests {
     /// lux 持久语义（spec §1.2）：shutdown + 同 data_dir 重启 → 活跃清单与 count 保留。
     #[tokio::test]
     async fn list_persists_across_lux_restart() {
-        let data_dir = std::env::temp_dir()
-            .join(format!("alarms-restart-{}", std::process::id()));
+        let data_dir = std::env::temp_dir().join(format!("alarms-restart-{}", std::process::id()));
         let cfg = crate::config::AppConfig {
             lux: crate::config::LuxConfig {
                 port: 0,
@@ -242,12 +262,26 @@ mod tests {
             .await
             .expect("lux");
         let c = handle.client();
-        fire(&c, "dev1.temp_high", "warn", "inst-a", "m", "2026-08-21T01:00:00+00:00")
-            .await
-            .unwrap();
-        fire(&c, "dev1.temp_high", "warn", "inst-a", "m", "2026-08-21T01:01:00+00:00")
-            .await
-            .unwrap();
+        fire(
+            &c,
+            "dev1.temp_high",
+            "warn",
+            "inst-a",
+            "m",
+            "2026-08-21T01:00:00+00:00",
+        )
+        .await
+        .unwrap();
+        fire(
+            &c,
+            "dev1.temp_high",
+            "warn",
+            "inst-a",
+            "m",
+            "2026-08-21T01:01:00+00:00",
+        )
+        .await
+        .unwrap();
         crate::db::shutdown_lux(handle).await.unwrap();
 
         // 重启（同 data_dir）：清单保留、count 不丢——告警不因网关重启而消失。
