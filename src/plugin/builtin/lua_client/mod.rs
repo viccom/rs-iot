@@ -19,17 +19,6 @@ use core_::io_engine::{spawn_io_task, IoBackend, MqttIo, SerialIo, TcpIo, UdpIo}
 use core_::loader::SCRIPTS_ROOT;
 use core_::script::{load_main, LoadCtx};
 
-/// 把运行时设备集快照写进 tracker extra（每个 flush 点前调用，不留陈旧）。
-///
-/// BTreeSet 有序 → Vec 稳定，前端 diff 不抖动。
-fn sync_runtime_devs(tracker: &mut crate::plugin::stat_tracker::StatTracker, devs: &RuntimeDevs) {
-    let snapshot: Vec<String> = devs
-        .lock()
-        .map(|s| s.iter().cloned().collect())
-        .unwrap_or_default();
-    tracker.extra_insert("runtime_devices", serde_json::json!(snapshot));
-}
-
 /// 把丢样计数快照写进 tracker extra（每个 flush 点前调用，与 [`sync_runtime_devs`]
 /// 并排；Q3 护栏可观测：背压丢了几样一眼可见）。
 fn sync_dropped_samples(
@@ -198,7 +187,7 @@ impl Source for LuaClient {
         //    纯计算死循环，挂起型 await（如反复 ctx:request）防不住——启动路径超限
         //    仅告警放行（本回调无重试语义，失败=脚本自己的事）。
         if lua.globals().get::<mlua::Function>("on_init").is_ok() {
-            match with_budget(
+            match core_::budget::with_budget(
                 "on_init",
                 cfg.callback_timeout_ms,
                 lua.load("on_init()").eval_async::<()>(),
@@ -268,13 +257,13 @@ impl Source for LuaClient {
                 },
                 Some(frame) = data_rx.recv() => Evt::Data(frame),
                 Some(()) = reload_rx.recv() => Evt::Reload, // None（watcher 退出/失败）忽略，不忙循环
-                _ = flush_ticker.tick() => { sync_runtime_devs(&mut tracker, &runtime_devs); sync_dropped_samples(&mut tracker, &dropped, &dropped_frames); tracker.flush().await; continue; }
+                _ = flush_ticker.tick() => { core_::budget::sync_runtime_devs(&mut tracker, &runtime_devs); sync_dropped_samples(&mut tracker, &dropped, &dropped_frames); tracker.flush().await; continue; }
                 _ = ticker.tick() => Evt::Tick,
             };
             match evt {
                 Evt::Cmd(Some(m)) => {
                     if m.cmd == "write" {
-                        match with_budget(
+                        match core_::budget::with_budget(
                             "on_write",
                             cfg.callback_timeout_ms,
                             call_on_write(&lua, &m.data),
@@ -295,7 +284,7 @@ impl Source for LuaClient {
                 }
                 Evt::Cmd(None) => break,
                 Evt::Data(frame) => {
-                    match with_budget(
+                    match core_::budget::with_budget(
                         "on_data",
                         cfg.callback_timeout_ms,
                         call_on_data(&lua, &frame),
@@ -322,7 +311,7 @@ impl Source for LuaClient {
                     // 副作用翻倍）；返回值按 spec §3.3 自动判定嵌套多设备 / 平铺单设备。
                     // 平铺模式归口 devices[0]（与 ctx:set_value 的 devices.first() 语义一致，
                     // spec §7 L2「自己当前 devid」）。
-                    match with_budget(
+                    match core_::budget::with_budget(
                         "collect",
                         cfg.callback_timeout_ms,
                         call_collect(
@@ -398,7 +387,7 @@ impl Source for LuaClient {
                         consecutive_fail = 0;
                     }
                     if tracker.should_flush() {
-                        sync_runtime_devs(&mut tracker, &runtime_devs);
+                        core_::budget::sync_runtime_devs(&mut tracker, &runtime_devs);
                         sync_dropped_samples(&mut tracker, &dropped, &dropped_frames);
                         tracker.flush().await;
                     }
@@ -421,7 +410,7 @@ impl Source for LuaClient {
                             );
                             consecutive_fail = 0;
                             tracker.set_status("running");
-                            sync_runtime_devs(&mut tracker, &runtime_devs);
+                            core_::budget::sync_runtime_devs(&mut tracker, &runtime_devs);
                             sync_dropped_samples(&mut tracker, &dropped, &dropped_frames);
                             tracker.flush().await;
                             tracing::info!("[luaClient] inst {} 热加载成功", inst.inst_id);
@@ -441,7 +430,7 @@ impl Source for LuaClient {
         // token 分支覆盖 select 层，abort 兜底 backend 内部不可取消的卡死。
         io_join.abort();
         tracker.set_status("stopped");
-        sync_runtime_devs(&mut tracker, &runtime_devs);
+        core_::budget::sync_runtime_devs(&mut tracker, &runtime_devs);
         sync_dropped_samples(&mut tracker, &dropped, &dropped_frames);
         tracker.flush().await;
     }
@@ -546,29 +535,6 @@ async fn call_on_data(lua: &mlua::Lua, frame: &[u8]) -> mlua::Result<()> {
     Ok(())
 }
 
-/// 单回调时长预算包装（Q3/§4.5-1，T5）：collect/on_write/on_data/**on_init** 每次调用
-/// 统一包 `tokio::time::timeout(callback_timeout_ms)`；Elapsed → 外层 `Err(RuntimeError
-/// ("callback timeout: {kind} 超预算 {budget}ms，跳过本轮"))`——消息含回调名与预算，
-/// 供 warn 日志与 tick_err/tick_fail 记账。脚本自身的错误（内层 Result 的 Err）原样
-/// 透传，与超时严格区分。on_init 同纳入预算（阶段 A 审查修复，§4.5-1 "每次回调"）：
-/// 指令 hook 只能熔断纯计算死循环，挂起型 await（反复 ctx:request / 满 hub 的
-/// set_value）只有预算能切断。
-///
-/// spike-1 方案 a：超时仅跳过本轮 + 计数（连续超限走 collect 的 fail_threshold →
-/// degraded），不重建 VM——被 drop 的协程弃留在 await 点，全局态半途，要求脚本幂等。
-async fn with_budget<T>(
-    kind: &str,
-    budget_ms: u64,
-    f: impl std::future::Future<Output = T>,
-) -> Result<T, mlua::Error> {
-    match tokio::time::timeout(std::time::Duration::from_millis(budget_ms), f).await {
-        Ok(v) => Ok(v),
-        Err(_) => Err(mlua::Error::RuntimeError(format!(
-            "callback timeout: {kind} 超预算 {budget_ms}ms，跳过本轮"
-        ))),
-    }
-}
-
 /// 重建 VM：new_vm + load_main + register ctx + dry-run on_init（spec §5.3 热加载）。
 ///
 /// IO engine / ctx_host / 丢样计数随 `ac` 复用（不随 VM 替换——dropped 是实例生命
@@ -592,7 +558,7 @@ async fn reload_vm(
     // 被轮询；超限 → Err → 主循环回退旧 VM）。
     if lua.globals().get::<mlua::Function>("on_init").is_ok() {
         // 双层 Result：外层 = 预算 Elapsed（→ Err → 回退旧 VM），内层 = 脚本错误
-        with_budget(
+        core_::budget::with_budget(
             "on_init",
             cfg.callback_timeout_ms,
             lua.load("on_init()").eval_async::<()>(),

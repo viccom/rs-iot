@@ -125,7 +125,7 @@ impl Source for LuaTransform {
         //    只有预算能切断）。脚本自身失败 = 脚本自己的事：warn 放行（本回调无重试
         //    语义），与 lua_client 启动路径一致。
         if lua.globals().get::<mlua::Function>("on_init").is_ok() {
-            match with_budget(
+            match core_::budget::with_budget(
                 "on_init",
                 cfg.callback_timeout_ms,
                 lua.load("on_init()").eval_async::<()>(),
@@ -229,7 +229,7 @@ impl Source for LuaTransform {
                     }
                 },
                 _ = flush_ticker.tick() => {
-                    sync_runtime_devs(&mut tracker, &runtime_devs);
+                    core_::budget::sync_runtime_devs(&mut tracker, &runtime_devs);
                     sync_transform_stats(&mut tracker, &dropped, rtdata_points, rtdata_skipped, rtdata_lagged);
                     tracker.flush().await;
                     continue;
@@ -253,8 +253,12 @@ impl Source for LuaTransform {
                         continue;
                     }
                     let started = std::time::Instant::now();
-                    match with_budget("on_timer", cfg.callback_timeout_ms, call_on_timer(&lua))
-                        .await
+                    match core_::budget::with_budget(
+                        "on_timer",
+                        cfg.callback_timeout_ms,
+                        call_on_timer(&lua),
+                    )
+                    .await
                     {
                         Ok(Ok(())) => {
                             tracker.tick_ok(started.elapsed().as_millis() as u64);
@@ -270,7 +274,7 @@ impl Source for LuaTransform {
                         }
                     }
                     if tracker.should_flush() {
-                        sync_runtime_devs(&mut tracker, &runtime_devs);
+                        core_::budget::sync_runtime_devs(&mut tracker, &runtime_devs);
                         sync_transform_stats(
                             &mut tracker,
                             &dropped,
@@ -327,7 +331,7 @@ impl Source for LuaTransform {
                                 rtdata_skipped += 1;
                                 continue;
                             }
-                            match with_budget(
+                            match core_::budget::with_budget(
                                 "on_rtdata",
                                 cfg.callback_timeout_ms,
                                 call_on_rtdata(&lua, &s.devid, tag, value),
@@ -404,7 +408,7 @@ impl Source for LuaTransform {
                             )),
                         );
                         tracker.set_status("running");
-                        sync_runtime_devs(&mut tracker, &runtime_devs);
+                        core_::budget::sync_runtime_devs(&mut tracker, &runtime_devs);
                         sync_transform_stats(
                             &mut tracker,
                             &dropped,
@@ -425,7 +429,7 @@ impl Source for LuaTransform {
 
         // 退出标记 stopped（spec §13；实例生命周期经由 InstanceManager 全套）。
         tracker.set_status("stopped");
-        sync_runtime_devs(&mut tracker, &runtime_devs);
+        core_::budget::sync_runtime_devs(&mut tracker, &runtime_devs);
         sync_transform_stats(
             &mut tracker,
             &dropped,
@@ -469,7 +473,7 @@ async fn reload_vm(
     let lua = build_vm(cfg, lctx, ac)?;
     if lua.globals().get::<mlua::Function>("on_init").is_ok() {
         // 双层 Result：外层 = 预算 Elapsed（→ Err → 回退旧 VM），内层 = 脚本错误。
-        with_budget(
+        core_::budget::with_budget(
             "on_init",
             cfg.callback_timeout_ms,
             lua.load("on_init()").eval_async::<()>(),
@@ -510,36 +514,6 @@ fn sample_to_lua(lua: &mlua::Lua, v: &SampleValue) -> mlua::Result<mlua::Value> 
         SampleValue::Bool(b) => mlua::Value::Boolean(*b),
         SampleValue::Str(s) => mlua::Value::String(lua.create_string(s.as_bytes())?),
     })
-}
-
-/// 单回调时长预算包装（照 lua_client/north with_budget 模式）：on_init/on_timer/
-/// on_rtdata 每次调用统一包 `tokio::time::timeout(callback_timeout_ms)`；Elapsed →
-/// `Err(RuntimeError("callback timeout: {kind} 超预算 …"))`——消息含回调名与预算，
-/// 供 warn 日志与 tick_fail 记账。脚本自身错误原样透传（严格区分）。
-async fn with_budget<T>(
-    kind: &str,
-    budget_ms: u64,
-    f: impl std::future::Future<Output = T>,
-) -> Result<T, mlua::Error> {
-    match tokio::time::timeout(std::time::Duration::from_millis(budget_ms), f).await {
-        Ok(v) => Ok(v),
-        Err(_) => Err(mlua::Error::RuntimeError(format!(
-            "callback timeout: {kind} 超预算 {budget_ms}ms，跳过本轮"
-        ))),
-    }
-}
-
-/// 运行时设备集快照 → tracker extra（照 lua_client：BTreeSet 有序 → Vec 稳定，
-/// 前端 diff 不抖动；transform 的派生点上报集经 set_value 记入）。
-fn sync_runtime_devs(
-    tracker: &mut crate::plugin::stat_tracker::StatTracker,
-    devs: &core_::api::RuntimeDevs,
-) {
-    let snapshot: Vec<String> = devs
-        .lock()
-        .map(|s| s.iter().cloned().collect())
-        .unwrap_or_default();
-    tracker.extra_insert("runtime_devices", serde_json::json!(snapshot));
 }
 
 /// transform 投递面计数快照 → tracker extra（每个 flush 点前调用，不留陈旧）。

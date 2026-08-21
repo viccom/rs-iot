@@ -349,7 +349,7 @@ impl Sink for LuaNorth {
                         connected = true;
                         tracker.set_status("running");
                         // on_connack（可选回调；超预算 warn 不影响连接态）。
-                        if let Err(e) = contract::with_budget(
+                        if let Err(e) = core_::budget::with_budget(
                             "on_connack",
                             cfg.callback_timeout_ms,
                             contract::call_on_connack(&lua),
@@ -381,7 +381,7 @@ impl Sink for LuaNorth {
                             reconnect_backoff.as_secs()
                         );
                         // on_disconnect（可选回调；超预算 warn 不影响重连节奏）。
-                        if let Err(e) = contract::with_budget(
+                        if let Err(e) = core_::budget::with_budget(
                             "on_disconnect",
                             cfg.callback_timeout_ms,
                             contract::call_on_disconnect(&lua),
@@ -400,7 +400,7 @@ impl Sink for LuaNorth {
                         // down(topic, payload)（可选回调；T7 全量路由——命令 topic 是
                         // T8 兼容脚本概念）。超预算记 tick_fail（同 lua_client 事件驱动
                         // 回调语义）。
-                        if let Err(e) = contract::with_budget(
+                        if let Err(e) = core_::budget::with_budget(
                             "down",
                             cfg.callback_timeout_ms,
                             contract::call_down(&lua, &topic, &payload),

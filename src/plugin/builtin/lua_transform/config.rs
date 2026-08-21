@@ -13,6 +13,7 @@
 //! 非法 pattern（空串 / 含 `..` / 超 2 段 / 空段 / dev 段部分通配如 `"dev*"`）→
 //! 解析报错——坏声明比静默缺省更危险（订阅写错 = 数据面静默丢失，必须可见）。
 
+use crate::plugin::lua_core as core_;
 use crate::plugin::lua_core::loader::SCRIPTS_ROOT;
 
 /// transform 实例配置（`app_config` 解析产物）。
@@ -64,7 +65,7 @@ pub(crate) fn parse_transform_cfg(app: &serde_json::Value) -> Result<TransformCf
     let callback_timeout_ms = app
         .get("callback_timeout_ms")
         .and_then(|v| v.as_u64())
-        .unwrap_or(10_000)
+        .unwrap_or(core_::budget::DEFAULT_CALLBACK_TIMEOUT_MS)
         .max(1);
     // 复审 P2-2：连续失败降级阈值可配（照 collector lua_core config 缺省 10）。
     let fail_threshold = app
@@ -75,11 +76,11 @@ pub(crate) fn parse_transform_cfg(app: &serde_json::Value) -> Result<TransformCf
     let mem_limit_mb = app
         .get("mem_limit_mb")
         .and_then(|v| v.as_u64())
-        .unwrap_or(32) as usize;
-    let hook_instr_limit = app
-        .get("hook_instr_limit")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(1_000_000) as u32;
+        .unwrap_or(core_::budget::DEFAULT_MEM_LIMIT_MB as u64) as usize;
+    let hook_instr_limit =
+        app.get("hook_instr_limit")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(core_::budget::DEFAULT_HOOK_INSTR_LIMIT as u64) as u32;
     let scripts_root = app
         .get("scripts_root")
         .and_then(|v| v.as_str())

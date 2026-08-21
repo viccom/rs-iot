@@ -16,6 +16,7 @@
 //! 缺省，auth 返回优先）→ password 的 `secret:` 引用经 [`resolve_password_opt`] 解析
 //! （auth 返回与 NorthCfg.password 都支持）→ 组 [`rumqttc::MqttOptions`] 连接。
 
+use crate::plugin::lua_core as core_;
 use std::collections::BTreeMap;
 
 use crate::types::Sample;
@@ -219,10 +220,11 @@ pub(crate) async fn start_connect(
 ) -> Result<(), ConnectErr> {
     let retry = |msg: String| ConnectErr { fatal: false, msg };
     // 1. will()（可选回调；globals 无则跳过，返回 nil → 无 LWT）。
-    let will_v = with_budget("will", cfg.callback_timeout_ms, call_optional(lua, "will"))
-        .await
-        .map_err(|e| retry(format!("will() {e}")))?
-        .map_err(|e| retry(format!("will() {e}")))?;
+    let will_v =
+        core_::budget::with_budget("will", cfg.callback_timeout_ms, call_optional(lua, "will"))
+            .await
+            .map_err(|e| retry(format!("will() {e}")))?
+            .map_err(|e| retry(format!("will() {e}")))?;
     let will = will_to_lastwill(will_v).map_err(|e| retry(format!("will() 返回值 {e}")))?;
     // 2. auth(cfg)（必需回调，manifest @role mqtt-north 已锁；幂等要求见设计 §5.1）。
     if lua.globals().get::<mlua::Function>("auth").is_err() {
@@ -231,10 +233,11 @@ pub(crate) async fn start_connect(
         ));
     }
     let cfg_json = cfg.to_script_cfg(hwid, inst_id);
-    let auth_v = with_budget("auth", cfg.callback_timeout_ms, call_auth(lua, &cfg_json))
-        .await
-        .map_err(|e| retry(format!("auth() {e}")))?
-        .map_err(|e| retry(format!("auth() {e}")))?;
+    let auth_v =
+        core_::budget::with_budget("auth", cfg.callback_timeout_ms, call_auth(lua, &cfg_json))
+            .await
+            .map_err(|e| retry(format!("auth() {e}")))?
+            .map_err(|e| retry(format!("auth() {e}")))?;
     let ov = apply_auth_overrides(auth_v).map_err(|e| retry(format!("auth() 返回值 {e}")))?;
     // 3. password 解析（auth 返回优先 / cfg 缺省；`secret:` 引用经 lux 解析）。
     //    解析 Err（ref 非法 / lux 错误）= 配置级错误，重试也不会好 → Fatal。
@@ -651,7 +654,7 @@ async fn flush_inner(
     cmd_tx: &mpsc::Sender<MqttCmd>,
 ) -> Result<FlushOutcome, String> {
     let batch_t = batch_to_lua(lua, entries, samples).map_err(|e| format!("batch 组装 {e}"))?;
-    let up_v = with_budget("up", cfg.callback_timeout_ms, call_up(lua, batch_t))
+    let up_v = core_::budget::with_budget("up", cfg.callback_timeout_ms, call_up(lua, batch_t))
         .await
         .map_err(|e| format!("up() {e}"))?
         .map_err(|e| format!("up() {e}"))?;
@@ -714,22 +717,6 @@ pub(crate) async fn call_on_connack(lua: &mlua::Lua) -> mlua::Result<()> {
 pub(crate) async fn call_on_disconnect(lua: &mlua::Lua) -> mlua::Result<()> {
     let _: mlua::Value = call_optional(lua, "on_disconnect").await?;
     Ok(())
-}
-
-/// 单回调时长预算包装（照 lua_client with_budget 模式，north 本地实现）：超预算 →
-/// `Err(RuntimeError("callback timeout: {kind} …"))`，供 warn 日志与 tick_fail 记账；
-/// 脚本自身错误原样透传（严格区分）。auth/will/up/down/on_* 全走此包装。
-pub(crate) async fn with_budget<T>(
-    kind: &str,
-    budget_ms: u64,
-    f: impl std::future::Future<Output = T>,
-) -> Result<T, mlua::Error> {
-    match tokio::time::timeout(std::time::Duration::from_millis(budget_ms), f).await {
-        Ok(v) => Ok(v),
-        Err(_) => Err(mlua::Error::RuntimeError(format!(
-            "callback timeout: {kind} 超预算 {budget_ms}ms，跳过本轮"
-        ))),
-    }
 }
 
 #[cfg(test)]
@@ -1087,7 +1074,7 @@ mod tests {
         lua.load("function up(batch) hang() end").exec().unwrap();
         let batch = lua.create_table().unwrap();
         let started = std::time::Instant::now();
-        let r = with_budget("up", 200, call_up(&lua, batch)).await;
+        let r = core_::budget::with_budget("up", 200, call_up(&lua, batch)).await;
         assert!(r.is_err(), "挂起 up 应在预算处被切断：{r:?}");
         assert!(
             started.elapsed() < std::time::Duration::from_secs(2),
@@ -1096,7 +1083,7 @@ mod tests {
         // 切断后下一轮仍活：快路径 up 正常返回。
         lua.load("function up(batch) return {} end").exec().unwrap();
         let batch = lua.create_table().unwrap();
-        let v = with_budget("up", 1_000, call_up(&lua, batch))
+        let v = core_::budget::with_budget("up", 1_000, call_up(&lua, batch))
             .await
             .expect("下一轮 up 应正常")
             .expect("快路径 up 返回值透传");

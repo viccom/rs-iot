@@ -9,6 +9,8 @@
 ///
 /// 连接序列与回调契约（T7）已消费全部连接/批量字段；`secrets` 例外——register 期
 /// `ctx:secret_get` 经 `app_config` 原文消费（T5 接线），本字段仅保留契约可见性。
+use crate::plugin::lua_core as core_;
+
 #[derive(Debug)]
 pub(crate) struct NorthCfg {
     /// 脚本目录名（→ `scripts/<script>/main.lua`，与 collector 同校验规则）。
@@ -92,16 +94,16 @@ pub(crate) fn parse_north_cfg(app: &serde_json::Value) -> Result<NorthCfg, Strin
     let callback_timeout_ms = app
         .get("callback_timeout_ms")
         .and_then(|v| v.as_u64())
-        .unwrap_or(10_000)
+        .unwrap_or(core_::budget::DEFAULT_CALLBACK_TIMEOUT_MS)
         .max(1);
     let mem_limit_mb = app
         .get("mem_limit_mb")
         .and_then(|v| v.as_u64())
-        .unwrap_or(32) as usize;
-    let hook_instr_limit = app
-        .get("hook_instr_limit")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(1_000_000) as u32;
+        .unwrap_or(core_::budget::DEFAULT_MEM_LIMIT_MB as u64) as usize;
+    let hook_instr_limit =
+        app.get("hook_instr_limit")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(core_::budget::DEFAULT_HOOK_INSTR_LIMIT as u64) as u32;
 
     // 字符串数组键（subscribe/secrets）：非数组 → Err（坏声明比静默缺省更危险，
     // 与 secret 授权清单语义对齐——漏授权即拒绝，配置错误必须可见）。

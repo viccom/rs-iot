@@ -222,20 +222,20 @@ pub(crate) fn parse_cfg(app: &serde_json::Value) -> Result<LuaCfg, String> {
     let mem_limit_mb = app
         .get("mem_limit_mb")
         .and_then(|v| v.as_u64())
-        .unwrap_or(32) as usize;
-    let hook_instr_limit = app
-        .get("hook_instr_limit")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(1_000_000) as u32;
+        .unwrap_or(super::budget::DEFAULT_MEM_LIMIT_MB as u64) as usize;
+    let hook_instr_limit =
+        app.get("hook_instr_limit")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(super::budget::DEFAULT_HOOK_INSTR_LIMIT as u64) as u32;
     let fail_threshold = app
         .get("fail_threshold")
         .and_then(|v| v.as_u64())
-        .unwrap_or(10) as u32;
+        .unwrap_or(super::budget::DEFAULT_FAIL_THRESHOLD as u64) as u32;
     // Q3/§4.5-1：缺省 10s；max(1) 钳下限（0 会把每个回调打成必超时）。
     let callback_timeout_ms = app
         .get("callback_timeout_ms")
         .and_then(|v| v.as_u64())
-        .unwrap_or(10_000)
+        .unwrap_or(super::budget::DEFAULT_CALLBACK_TIMEOUT_MS)
         .max(1);
 
     Ok(LuaCfg {

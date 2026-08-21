@@ -178,7 +178,8 @@ async fn watcher_exits_on_cancel() {
 async fn with_budget_times_out_pending_future() {
     let started = std::time::Instant::now();
     let r: Result<(), mlua::Error> =
-        super::with_budget("collect", 200, std::future::pending::<()>()).await;
+        crate::plugin::lua_core::budget::with_budget("collect", 200, std::future::pending::<()>())
+            .await;
     let e = r.expect_err("pending future 应在 200ms 预算耗尽时进 Elapsed 分支");
     let msg = e.to_string();
     assert!(msg.contains("callback timeout"), "消息应可辨识超时：{msg}");
@@ -196,7 +197,8 @@ async fn with_budget_times_out_pending_future() {
 /// T5 时长预算——快路径透传：预算内完成的 future 返回值原样传出（不吞不错）。
 #[tokio::test]
 async fn with_budget_passes_through_completed_future() {
-    let r: Result<i32, mlua::Error> = super::with_budget("on_write", 200, async { 7 }).await;
+    let r: Result<i32, mlua::Error> =
+        crate::plugin::lua_core::budget::with_budget("on_write", 200, async { 7 }).await;
     assert_eq!(r.expect("快路径应透传"), 7);
 }
 
@@ -224,7 +226,7 @@ async fn collect_budget_timeout_skips_round_and_vm_stays_usable() {
         )
         .unwrap();
     lua.load("function collect() hang() end").exec().unwrap();
-    let r = super::with_budget(
+    let r = crate::plugin::lua_core::budget::with_budget(
         "collect",
         c.callback_timeout_ms,
         super::call_collect(&lua, "d"),
