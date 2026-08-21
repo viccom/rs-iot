@@ -14,8 +14,8 @@
  * 字段类型决定表单控件：string→文本框 / number→数字框 / select→下拉 / bool→勾选。
  */
 
-/** 表单字段类型。 */
-export type FieldType = 'string' | 'number' | 'bool' | 'select'
+/** 表单字段类型。string[] = 字符串数组（逗号分隔输入，写入时拆数组——如订阅模式清单）。 */
+export type FieldType = 'string' | 'number' | 'bool' | 'select' | 'string[]'
 
 /** 单个 app_config 字段定义。 */
 export interface PluginField {
@@ -93,6 +93,18 @@ export const PLUGIN_SCHEMAS: Record<string, PluginField[]> = {
     { key: 'hook_instr_limit', label: '指令数上限', type: 'number', default: 1000000 },
     { key: 'fail_threshold', label: '连续失败降级阈值', type: 'number', default: 10 },
   ],
+  // Lua 数据加工（lua_transform/config.rs，阶段 C）——transform 角色订阅型 Source：
+  // 订阅 EventBus 实时数据（subscribe 模式过滤）→ on_rtdata 逐点回调；period=0 纯订阅。
+  // 默认值与 TransformCfg parse 对齐：period 3 / callback_timeout_ms 10000 / 沙箱参数同 collector。
+  luaTransform: [
+    { key: 'script', label: '脚本目录名', type: 'string', hint: 'scripts/<name>，对应 main.lua（@role transform，示例见 examples/lua-scripts/agg-filter）', required: true },
+    { key: 'period', label: 'on_timer 周期(秒)', type: 'number', default: 3, hint: '0=纯订阅（不调 on_timer）；修改后需重启实例生效' },
+    { key: 'subscribe', label: '订阅模式', type: 'string[]', hint: '逗号分隔：dev1 / dev2.temp* / *；空=纯定时（不订 EventBus）。devid 不含点（模式以 . 分段）' },
+    { key: 'callback_timeout_ms', label: '单回调预算(ms)', type: 'number', default: 10000, hint: 'on_init/on_timer/on_rtdata 每次调用时长预算' },
+    { key: 'scripts_root', label: '脚本根目录', type: 'string', hint: '缺省 scripts（per-instance 覆盖，多用于测试隔离）' },
+    { key: 'mem_limit_mb', label: '内存上限(MB)', type: 'number', default: 32 },
+    { key: 'hook_instr_limit', label: '指令数上限', type: 'number', default: 1000000 },
+  ],
 }
 
 /** 模拟采集（dataSim，demo 用）。dataSim 无 devices 会直接退出（必须配点表）。 */
@@ -100,8 +112,9 @@ export const DATASIM_SCHEMA: PluginField[] = [
   { key: 'period', label: '采集周期(秒)', type: 'number', default: 3, hint: '全插件统一秒（非毫秒）；修改后需重启实例生效' },
 ]
 
-/** 内置 app_code 选项（新建实例下拉）。北向 luaNorth 不在此（实例管理聚焦南向采集）。 */
-export const SOUTH_APP_CODES = ['modbusClient', 'opcuaClient', 's7Client', 'luaClient', 'dataSim']
+/** 内置 app_code 选项（新建实例下拉）。北向 luaNorth 不在此（实例管理聚焦南向采集）；
+ * luaTransform 是订阅型 Source（South），数据加工实例在此列。 */
+export const SOUTH_APP_CODES = ['modbusClient', 'opcuaClient', 's7Client', 'luaClient', 'luaTransform', 'dataSim']
 
 /** 取某 app_code 的 schema；未匹配返空数组（InstanceForm 回退 JSON 文本框）。 */
 export function schemaFor(appCode: string): PluginField[] {

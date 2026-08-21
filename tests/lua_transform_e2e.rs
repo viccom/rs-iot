@@ -15,6 +15,9 @@
 //! - 自环防护（T8 硬性验收，Q6）：真实链路（hub → pipeline 50ms 攒批 → publish
 //!   Rtdata 回 EventBus）——实例订阅自身会写的 tag，`set_value` 产出回流不触发自身
 //!   `on_rtdata`（kv 计数稳定）；跨实例不误伤（A 写 → B 订阅收到，防护 per-instance）。
+//! - agg-filter 示例实测（T9 硬性验收——「一个清洗/聚合脚本上线」）：读
+//!   `examples/lua-scripts/agg-filter/main.lua` 文件本体（非内嵌副本，防示例与实现
+//!   漂移），真实链路跑通野点剔除 + 滑动窗口均值（kv cfg_window 可配窗口大小）。
 
 mod common;
 
@@ -641,6 +644,141 @@ end
             .unwrap_or(-1);
         assert_eq!(n, baseline, "自环防护应跳过自身回流，kv 计数稳定不增长");
     }
+
+    shutdown.cancel();
+    mgr.stop_all().await;
+    common::stop_lux(handle).await;
+    let _ = std::fs::remove_dir_all(&scripts);
+}
+
+// ===== T9：agg-filter 示例实测（真实链路，硬性验收「一个清洗/聚合脚本上线」）=====
+
+/// examples 下的示例脚本文件本体（include_str 读仓库文件——非内嵌副本，
+/// 示例与实现漂移时本测试直接红，防示例腐化）。
+const AGG_FILTER_EXAMPLE: &str = include_str!("../examples/lua-scripts/agg-filter/main.lua");
+
+/// agg-filter 示例端到端（T9）：真实链路（EventBus publish → subscribe 宿主过滤 →
+/// on_rtdata → set_value → hub → pipeline → lux 落库）跑通示例文件本体：
+/// - 窗口大小可配（C4 kv 持久配置）：预写 kv `cfg_window=3`，on_init 读 kv 覆盖脚本
+///   默认 5——窗口大小不是编译期常量；
+/// - 限幅清洗：999 探针（超上限 120 被剔——探测订阅就绪且不污染窗口）+ 200 野点
+///   → `rejected` 计数增长、不进窗口不产出；
+/// - 滑动窗口均值：喂 10 → 20 → 200(野点) → 30 → 窗 [10,20,30]（窗口 3 恰满，
+///   脚本默认 5 若未被 kv 覆盖则窗为 [10,20,30] 之外形态——cfg_window 生效的旁证）
+///   → 派生点 `dev.agg.temp_avg` 落库值 = 20（均值），窗口 kv = [10,20,30]。
+#[tokio::test]
+async fn agg_filter_example_end_to_end() {
+    let (mgr, event_bus, handle, shutdown) = real_chain("lua_transform_aggfilter").await;
+
+    let scripts = std::env::temp_dir().join(format!("lua-transform-agg-{}", std::process::id()));
+    let script_dir = scripts.join("agg-filter");
+    std::fs::create_dir_all(&script_dir).expect("mkdir");
+    std::fs::write(script_dir.join("main.lua"), AGG_FILTER_EXAMPLE).expect("写示例文件本体");
+
+    // C4 持久配置演示：预写 kv cfg_window=3（on_init 读取覆盖脚本默认 5）。
+    rs_iot::db::luakv::set(&handle.client(), "agg-filter-1", "cfg_window", "3")
+        .await
+        .expect("预写 cfg_window");
+
+    mgr.start_source(transform_inst(
+        "agg-filter-1",
+        "luaTransform",
+        serde_json::json!({
+            "script": "agg-filter",
+            "period": 0,
+            "subscribe": ["raw1.temp*"],
+            "scripts_root": scripts.to_str().expect("utf8"),
+        }),
+    ))
+    .await
+    .expect("start agg-filter");
+
+    let client = handle.client();
+    // 单点发布 helper：raw1.temp = v（devid 不含 "."——subscribe 模式以 "." 分段）。
+    let pub_temp = |v: SampleValue| {
+        event_bus.publish(EventPayload::Rtdata {
+            dev_ids: vec!["raw1".into()],
+            count: 1,
+            samples: vec![rtdata_sample("raw1", &[("temp", v)])],
+            ts: "2026-08-21T00:00:00Z".into(),
+        });
+    };
+
+    // 订阅就绪探测：野点 999（超 CLAMP_HI=120 被剔除——探测点不进窗口），
+    // rejected 计数可见即订阅已通（重发无害：野点幂等剔除）。
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
+    loop {
+        pub_temp(SampleValue::Int(999));
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        let rejected = kv_str(&client, "agg-filter-1", "rejected")
+            .await
+            .and_then(|s| s.parse::<i64>().ok())
+            .unwrap_or(0);
+        if rejected >= 1 || std::time::Instant::now() > deadline {
+            break;
+        }
+    }
+    assert!(
+        std::time::Instant::now() <= deadline,
+        "订阅就绪探测超时（rejected 计数始终不可见）"
+    );
+    // 探针停发缓冲：最后一批在途回调落地，再进数据面（避免与数据点交错）。
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    // 数据面：10 → 20 → 200(野点) → 30。窗口 3：[10,20,30] → 均值 20。
+    for v in [10, 20, 200, 30] {
+        pub_temp(SampleValue::Int(v));
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    }
+
+    // 派生点落库值 = 窗口均值 20（cell JSON [ts, localTime, value]——value 是字符串
+    // 形态，write_batch 的 val_str 序列化语义，见 db::rtdata.rs）。
+    let mut derived: f64 = f64::NAN;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while std::time::Instant::now() < deadline {
+        let cell = hget_cell(&client, "rtdata:agg1", "agg1.temp_avg").await;
+        if !cell.is_empty() {
+            if let Some(v) = serde_json::from_str::<serde_json::Value>(&cell)
+                .ok()
+                .and_then(|arr| arr.get(2).and_then(|v| v.as_str()).map(str::to_string))
+            {
+                if let Ok(n) = v.parse::<f64>() {
+                    derived = n;
+                    break;
+                }
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    }
+    assert_eq!(
+        derived, 20.0,
+        "派生点 agg1.temp_avg 应为窗口均值 20（实测 {derived}）"
+    );
+
+    // 窗口状态（kv 持久，C4）：恰 [10,20,30]——200 被剔除 + 窗口 3 生效（默认 5 会
+    // 是 [10,20,30] 同形但语义靠 cfg_window 覆盖路径保证，见上方 cfg_window 预写）。
+    assert_eq!(
+        kv_str(&client, "agg-filter-1", "win").await.as_deref(),
+        Some("[10,20,30]"),
+        "滑动窗口应为 [10,20,30]（200 剔除 + 窗口大小 3）"
+    );
+    // 野点计数：探测期 ≥1 + 数据面 200 一笔 ≥2（探测重发次数不定，下界断言）。
+    let rejected = kv_str(&client, "agg-filter-1", "rejected")
+        .await
+        .and_then(|s| s.parse::<i64>().ok())
+        .unwrap_or(0);
+    assert!(
+        rejected >= 2,
+        "野点剔除计数应 ≥2（探测 + 200，实测 {rejected}）"
+    );
+    // 自身输出不回流触发（订阅面 raw1.*，输出 agg1.* 不相交——无回调放大）：
+    // rejected/win 在停发后稳定（500ms 双采样）。
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    assert_eq!(
+        kv_str(&client, "agg-filter-1", "win").await.as_deref(),
+        Some("[10,20,30]"),
+        "停发后窗口应稳定（无自环放大）"
+    );
 
     shutdown.cancel();
     mgr.stop_all().await;

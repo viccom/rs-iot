@@ -1,11 +1,11 @@
 # Lua 脚本系统演进 · 阶段 C（数据加工）实施计划
 
 > 日期：2026-08-20
-> **状态**：planned（依据 `2026-08-18-lua-script-system-evolution-design.md` v0.6 §7 路线图 C 行 + Q6/Q7/Q19/D1 定案拆分）
-> **实施**：（执行时回填）
-> **代码**：（执行时回填）
-> **测试**：（执行时回填）
-> **遗留**：（执行时回填）
+> **状态**：implemented（2026-08-21 于 worktree `feat/lua-stage-c` 执行完毕，9 task 全落地，待合并 master）
+> **实施**：2026-08-21，9 task（`aac7cb9..` 分支首末：T1 aac7cb9 → T9 本分支末位 commit），全程 worktree 隔离 + task 间审查
+> **代码**：`src/event_bus.rs`（RtdataSample/载荷带值）+ `src/pipeline.rs`（aggregate_rtdata，仅 publish 路径——dispatcher/worker/背压零触碰，diff 留证见文末）+ `src/config.rs`/`src/process_metrics.rs`/`src/api/routes_{events,metrics}/`（容量配置化 + lagged 可观测）+ `src/transform/rhai.rs`/`Cargo.toml`（冻结标注）+ `src/plugin/lua_core/{api,manifest}.rs`（Role::Transform 能力裁剪 + any-of 契约 + self-write tracker）+ `src/plugin/builtin/lua_transform/`（薄壳：mod.rs + config.rs）+ `frontend/`（types/monitor 直用 samples + luaTransform 表单 schema）+ `examples/lua-scripts/agg-filter/`
+> **测试**：`cargo test -p rs-iot --features lua,lua-http -j 4` 全绿（数字见文末核对记录）；lua_transform_e2e 6 例（生命周期/订阅过滤/拒载/自环/跨实例/示例实测）全绿
+> **遗留**：见设计文档头部「阶段 C 登记」（跨源同 tag 静默取舍 / reload 不重评估订阅模式 / EventBus fan-out 成本 / 自环窗口过期边界未专测）
 
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
@@ -199,16 +199,75 @@ enum Evt { Cmd(Option<CtlMessage>), Reload, Tick, Rtdata(EventPayload) }
 
 ---
 
-## 验收清单（对照路线图阶段 C——执行完回填）
+## 验收清单（对照路线图阶段 C——已逐项实测核对）
 
-- [ ] Rtdata 载荷带 values：pipeline 聚合/SSE/前端直用，旧字段兼容（T1）
-- [ ] event_bus 容量可配 + SSE lagged 可观测（T2）
-- [ ] rhai 冻结标注（Q7）（T3）
-- [ ] Role::Transform 能力包 = C0/C2/C4/C6，一致性测试锁（T4）
-- [ ] manifest `@role transform` any-of 契约（T5）
-- [ ] luaTransform 走 InstanceManager 全套（生命周期/stat/热加载）（T7）
-- [ ] subscribe 宿主过滤 + on_timer + on_rtdata 逐点预算（T6/T7）
-- [ ] 自环测试通过（硬性验收）；跨实例单跳不误伤（T8）
-- [ ] 清洗/聚合示例上线 + 文档五处同步 + CI 三组合全绿（T9）
+- [x] Rtdata 载荷带 values：pipeline 聚合/SSE/前端直用，旧字段兼容（T1）
+  ——测试：`pipeline.rs::aggregate_rtdata_merges_same_dev_last_write_wins` /
+  `aggregate_rtdata_truncates_devs_in_sync` /
+  `rtdata_payload_json_keeps_compat_fields_and_adds_samples`；前端
+  `types.ts` samples 类型 + `monitor.ts::applyRtdataSamples`（带 samples 直合入，
+  轮询兜底保留）
+- [x] event_bus 容量可配 + SSE lagged 可观测（T2）
+  ——测试：`config.rs::event_bus_capacity_default_and_override`（默认 256/可覆盖）+
+  `render.rs::render_process_has_help_type_and_values`（sse_lagged_count=3 → 输出含
+  `rs_iot_sse_lagged_total 3` + TYPE 行）+ `routes_events.rs` Lagged 分支累加
+- [x] rhai 冻结标注（Q7）（T3）
+  ——`rg` 验证在位：`src/transform/rhai.rs:3`（模块 doc「已冻结（deprecated，演进设计
+  Q7/D4 终审 2026-08-20）」）+ `Cargo.toml:140`（feature 注释「已冻结 deprecated：Q7
+  定案不接线不投入，数据加工走 luaTransform」）；零行为变化（恒 Passthrough 不变）
+- [x] Role::Transform 能力包 = C0/C2/C4/C6，一致性测试锁（T4）
+  ——测试：`api/tests.rs::transform_role_trims_c1_c3_c5`（C1/C3/C5 ✗ + C0/C2/C4 ✓）+
+  e2e 顶层探针（`lua_transform_e2e.rs::transform_lifecycle_running_stats_stop` 内
+  assert 探针——探针失败不进 Running）
+- [x] manifest `@role transform` any-of 契约（T5）
+  ——测试：`manifest.rs::dry_run_transform_any_of_on_timer_or_on_rtdata`（仅
+  on_timer 过/仅 on_rtdata 过/皆无拒）+ e2e
+  `transform_manifest_missing_callbacks_rejected`（拒载 → Failed，stat 不写）
+- [x] luaTransform 走 InstanceManager 全套（生命周期/stat/热加载）（T7）
+  ——e2e：`transform_lifecycle_running_stats_stop`（lux 写实例 → startinst → Running
+  → on_timer kv ticks ≥1 → `/inst/stats` state=running + script_version → stopinst
+  → Stopped + stat flush stopped）；热加载 watcher/VM 级 reload 路径在
+  `lua_transform/mod.rs`（照 lua_client 模式接线）
+- [x] subscribe 宿主过滤 + on_timer + on_rtdata 逐点预算（T6/T7）
+  ——测试：`lua_transform/config.rs` tests（parse_defaults/parse_rejects_bad_patterns/
+  matcher_any_of/glob 语义 + 非法 pattern 拒载六形）+ e2e
+  `transform_on_rtdata_matching_and_filtered`（dev1.temp*/dev2 命中、dev1.hum/dev3
+  不投递）；预算：on_init/on_timer/on_rtdata 统一 `with_budget(callback_timeout_ms)`
+  包装（超时跳过本轮/该点 + 计数，与 collect 同语义）
+- [x] 自环测试通过（硬性验收）；跨实例单跳不误伤（T8）
+  ——e2e：`transform_self_loop_guard_suppresses_own_output`（真实链路回流，kv 计数
+  2.5s 五采样恒稳定不增长）+ `transform_cross_instance_propagation_not_blocked`
+  （A 写 devB.derived → B on_rtdata 收到，got ≥1 + last_tag=derived）
+- [x] 清洗/聚合示例上线 + 文档五处同步 + CI 三组合全绿（T9）
+  ——e2e：`agg_filter_example_end_to_end`（读 `examples/lua-scripts/agg-filter/main.lua`
+  文件本体跑真实链路：野点剔除 + 窗口 [10,20,30] 均值 20.0 落库 + cfg_window=3 生效）；
+  文档五处：指南 transform 章 / pluginSchemas luaTransform schema / docs 索引 /
+  发布说明 `2026-08-21-lua-stage-c.md` / 设计文档 v0.7 回填；验证四件套见下核对记录
 
 > D 阶段计划待 C 落地后按同法拆分（D：Sparkplug Q9/alarm 角色 Q12 独立 spec/脚本包导入导出 Q14；透传正式版已随 B 提前完成）。
+
+## 核对记录（T9，2026-08-21）
+
+- **全量测试**：`cargo test -p rs-iot --features lua,lua-http -j 4` → **30 个测试目标
+  全绿，467 passed / 0 failed / 7 ignored**（ignored 为需外部资源的既有项）；其中
+  `tests/lua_transform_e2e.rs` 6/6（生命周期/订阅过滤/any-of 拒载/自环/跨实例/示例实测）。
+- **agg-filter 示例实测数字**（`agg_filter_example_end_to_end`，真实链路 EventBus →
+  subscribe 过滤 → on_rtdata → set_value → hub → pipeline → lux）：预写 kv
+  `cfg_window=3`（on_init 读取覆盖脚本默认 5——窗口可配生效）；喂 `999`（探针，超上限
+  剔除）/ `10` / `20` / `200`（野点剔除）/ `30` → 派生点 `rtdata:agg1` 的
+  `agg1.temp_avg` 落库值 = **20.0**（窗口 [10,20,30] 均值）、窗口 kv = `[10,20,30]`、
+  `rejected` 计数 ≥ 2、停发后窗口稳定（无自环放大）。
+- **pipeline 零改动口径**：`git diff 13875a6..HEAD --stat -- src/pipeline.rs` →
+
+  ```text
+  src/pipeline.rs | 203 ++++++++++++++++++++++++++++++++++++++++++++++++++------
+  1 file changed, 184 insertions(+), 19 deletions(-)
+  ```
+
+  hunk 落点逐一核对：imports（`RtdataSample`/`SampleValue`/`BTreeMap`+`HashMap`）、
+  `flush_batch` 内注释更新（`publish_rtdata_notify` 调用不变）、`RTDATA_NOTIFY_MAX_DEVS`
+  doc 注释、`publish_rtdata_notify` 重写（改调 `aggregate_rtdata`）+ 新增纯函数
+  `aggregate_rtdata`、tests 模块追加 3 测试——**dispatcher（route/auto_workers/run）、
+  worker_run、背压链零触碰**。
+- **其余验证**：`cargo fmt --all --check` 过；`python scripts/check_docs.py` 过
+  （32 个 md）；`cd frontend && npm run build` 过（vue-tsc -b + vite，含类型检查）。

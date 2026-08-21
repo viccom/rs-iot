@@ -68,9 +68,11 @@ function onAppCodeChange() {
   resetJsonText()
 }
 
-/** app_config 字段取值（string/number/bool 统一字符串化供 v-model，select 同 string）。 */
-function fieldValue(key: string): string {
+/** app_config 字段取值（string/number/bool 统一字符串化供 v-model，select 同 string；
+ *  string[] 数组 join(',') 供逗号分隔输入框显示）。 */
+function fieldValue(key: string, type?: string): string {
   const v = form.value.app_config[key]
+  if (type === 'string[]' && Array.isArray(v)) return v.join(',')
   return v === undefined || v === null ? '' : String(v)
 }
 /** app_config 字段写入（按 schema 类型转换）。 */
@@ -79,6 +81,10 @@ function setField(key: string, type: string, raw: string) {
     form.value.app_config[key] = raw === '' ? undefined : Number(raw)
   } else if (type === 'bool') {
     form.value.app_config[key] = raw === 'true'
+  } else if (type === 'string[]') {
+    // 逗号分隔 → 字符串数组（去空白去空段）；空输入 = 移除键（走后端缺省语义）。
+    const arr = raw.split(',').map(s => s.trim()).filter(s => s !== '')
+    form.value.app_config[key] = arr.length ? arr : undefined
   } else {
     form.value.app_config[key] = raw
   }
@@ -192,9 +198,9 @@ function submit() {
             <label v-for="f in fields" :key="f.key" class="field">
               <span>{{ f.label }}<em v-if="f.required">*</em></span>
               <input
-                v-if="f.type === 'string' || f.type === 'number'"
+                v-if="f.type === 'string' || f.type === 'number' || f.type === 'string[]'"
                 :type="f.type === 'number' ? 'number' : 'text'"
-                :value="fieldValue(f.key)"
+                :value="fieldValue(f.key, f.type)"
                 :placeholder="f.hint"
                 @input="setField(f.key, f.type, ($event.target as HTMLInputElement).value)"
               />

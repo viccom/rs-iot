@@ -1,11 +1,11 @@
 # rs-iot Lua 脚本系统演进设计（多角色脚本平台）
 
-> 日期：2026-08-18（v0.5 更新于 2026-08-19：全部 Open Questions 定案 + 冲突/风险分析 + 附录 B；2026-08-20 阶段 A 落地 + 审查修复回填；2026-08-20 阶段 B 落地）
-> 版本：v0.6（Q1-Q19 全部决议；阶段 A/B 已实施，C/D 规划中）
-> **状态**：implemented（阶段 A、B 均已合入 master——B 于 2026-08-20 快进合并，21 commit，含现场真实 E2E 两轮与深度审查 6 项修复）
-> **实施**：阶段 A（2026-08-19~20，13 task + 审查修复，见 v0.5.1 行）；阶段 B（2026-08-20，12 task，`2026-08-20-lua-script-system-stage-b-plan.md`）：luaNorth 薄壳（Sink 首个接线）/ mqtt-north 契约（Q5 六回调 + 混合批量 + 重连重调 auth）/ secret 链路（Q4：lux secrets 表 + REST + ctx:secret_get 授权清单）/ MqttPublisher 无损迁移（R5 单通道锁，旧代码删除）/ cloud 配方 emqx+onenet（Q8，源仓 1.2.0）/ io_engine mqtt 透传 backend（Q10，spike-2 方案 a）/ ApiCtx 参数收敛 / manifest 多角色契约
-> **代码**：`src/plugin/lua_core/`（公共层）+ `src/plugin/builtin/{lua_client,lua_north}/`（薄壳）+ `src/db/secrets.rs` + `src/api/routes_secret.rs`；源仓 `E:/Rs_Codes/rsiot-lualib`（stdlib 至 1.3.0：种子 4 库 + hashings 子集 + cloud/emqx + cloud/onenet + oo/middleclass + proto/stream_buffer + codec/bcd——后三件为 1.3.0 现场调研 freeioe fork）
-> **测试**：`cargo test -p rs-iot --features lua,lua-http`（阶段 B 末：lib 366 通过 / 5 ignored[需外部资源] + 29 个测试目标全绿）；`--no-default-features --features lua` 同绿；契约闭环经进程内 rumqttd broker e2e（auth/订阅/up/down/LWT/takeover 断连/重连）实测
+> 日期：2026-08-18（v0.5 更新于 2026-08-19：全部 Open Questions 定案 + 冲突/风险分析 + 附录 B；2026-08-20 阶段 A 落地 + 审查修复回填；2026-08-20 阶段 B 落地；2026-08-21 阶段 C 落地）
+> 版本：v0.7（Q1-Q19 全部决议；阶段 A/B 已实施合入，C 已实施待合并，D 规划中）
+> **状态**：implemented（阶段 A、B 已合入 master——B 于 2026-08-20 快进合并，21 commit；阶段 C 于 2026-08-21 落地 worktree `feat/lua-stage-c`，9 task，验收清单实测见 `2026-08-20-lua-script-system-stage-c-plan.md` 文末）
+> **实施**：阶段 A（2026-08-19~20，13 task + 审查修复，见 v0.5.1 行）；阶段 B（2026-08-20，12 task，`2026-08-20-lua-script-system-stage-b-plan.md`）：luaNorth 薄壳（Sink 首个接线）/ mqtt-north 契约（Q5 六回调 + 混合批量 + 重连重调 auth）/ secret 链路（Q4：lux secrets 表 + REST + ctx:secret_get 授权清单）/ MqttPublisher 无损迁移（R5 单通道锁，旧代码删除）/ cloud 配方 emqx+onenet（Q8，源仓 1.2.0）/ io_engine mqtt 透传 backend（Q10，spike-2 方案 a）/ ApiCtx 参数收敛 / manifest 多角色契约；阶段 C（2026-08-21，9 task，`2026-08-20-lua-script-system-stage-c-plan.md`）：EventBus Rtdata 载荷带 values（Q6 同 PR：pipeline 聚合/SSE/前端直用）+ 容量配置化与 lagged 可观测（R6）/ rhai 冻结标注（Q7/D4）/ Role::Transform 能力包裁剪（C1/C3/C5 不注册）/ manifest transform any-of 契约 / luaTransform 薄壳（Q19 三薄插件之三，Source 订阅型 + InstanceManager 全套 + on_timer/on_rtdata 预算）/ subscribe 宿主过滤 + 自环防护（Q6 硬性验收，e2e 实测）/ agg-filter 示例（e2e 锁定防漂移）
+> **代码**：`src/plugin/lua_core/`（公共层）+ `src/plugin/builtin/{lua_client,lua_north,lua_transform}/`（三薄插件）+ `src/db/secrets.rs` + `src/api/routes_secret.rs`；源仓 `E:/Rs_Codes/rsiot-lualib`（stdlib 至 1.3.0：种子 4 库 + hashings 子集 + cloud/emqx + cloud/onenet + oo/middleclass + proto/stream_buffer + codec/bcd——后三件为 1.3.0 现场调研 freeioe fork）
+> **测试**：`cargo test -p rs-iot --features lua,lua-http`（阶段 B 末：lib 366 通过 / 5 ignored[需外部资源] + 29 个测试目标全绿；B 契约闭环经进程内 rumqttd broker e2e 实测）；阶段 C 末数字见阶段 C 计划文末核对记录；C 自环/订阅/示例经真实链路 e2e（EventBus → subscribe 过滤 → on_rtdata → set_value → hub → pipeline → lux 落库）实测
 > **遗留**（阶段 A 审查项 + 阶段 B 新增登记）：
 > - **官方脚本模板安装器**（Q18/D1 半体，A 遗留）：模板已分发到 `_stdlib/scripts/`，安装器 + `@source` 徽标待 C/D
 > - **OneNET 真平台端到端待现场**（Q8）：token 向量与进程内契约闭环已验，真实平台（认证→上报→下行）需现场凭证手动验收（`RSIOT_NORTH_E2E_BROKER` 真机 e2e 就绪）
@@ -14,6 +14,11 @@
 > - **mqtt-north 的 send_command 恒注入**（Q5 兼容依赖）：R3 收紧（显式授权）待角色能力包机制完善后做——复审 H1（明文 MQTT + `<hwid>/command` 任意实例控制链 + 凭证明文过网）与此同源，建议与 NorthCfg TLS 选项、broker ACL 一并提级排期
 > - **阶段 B 复审（2026-08-20 深度审查）登记未修项**：M3（实例 REST 原样回显字面 password，与 /config 遮蔽双标）；M4（secret 授权清单撤销不即时——改清单须 stop/start，热加载也不刷新）；M5（north password 的 `secret:` 引用不受实例授权清单约束，可作存在性 oracle）；poll 取消安全性随阻塞-1 双任务重构已消（pump 独占不再被取消）；其余 P3 项（PubResult 语义注明/Down 丢弃计数/will 重调契约说明/lux 错误 Fatal 归类）见审查记录，随 C 阶段顺带
 > - **纯 Lua hmac 指令成本**（B 实测量化）：hmac_sha1 ~70 万指令 > 默认 1M hook 护栏，OneNET 生产须 `hook_instr_limit≥2M`（指南已注明）；Rust 侧 builtin 哈希（C7）列远期
+> - **阶段 C 登记（2026-08-21）**：
+>   - **自环防护窗口的跨源同 tag 静默**（Q6 已定取舍，落档）：self-write 10s 窗口内其他源对同 `(devid,tag)` 的并发写入一并静默——per-instance 表只保证「自身输出不触发自身」，跨源可见性不受保证；高频同 tag 多源写场景需知晓（正常 collector 原始点 / transform 派生点不同 tag，无影响）
+>   - **reload 后订阅模式不重评估**：`subscribe` 是实例配置级（parse 于 start），热加载只换 VM——改订阅清单须 stop/start 实例（指南已注明）
+>   - **EventBus 订阅者 fan-out 成本**：每个订阅型实例一个 broadcast 接收端，随实例数线性增长；实例数大时关注 `event_bus_capacity` 与 `rs_iot_sse_lagged_total`（R6 可观测已备，聚合分发优化未做）
+>   - **T8 窗口过期边界未专测**：自环防护 10s 窗口过期后，延迟超窗的自回流会再次触发 on_rtdata（正常链路 50ms 攒批 + 秒级周期远低于窗口，风险低；延迟 >10s 的 lagged 场景未专测）
 > - sync 管理员权限（平台无角色模型）、`min_host_ver` 预检、sync 后 selftest 抽样、json encode 深度护栏、reqwest 复用、stdlib 与 lua-http 解耦、默认 upstream 占位 URL（A 遗留，均未变）
 > 流程：调研（mlua 生态 / FreeIOE / IIoT 趋势）→ 本 spec → 分章深化 → writing-plans → 分阶段实施
 > 前置：`2026-08-06-lua-script-collector-design.md`（luaClient 采集系统，已落地，本文是其演进）
@@ -29,6 +34,7 @@
 | v0.5 | 2026-08-19 | 全部 OQ 定案（用户「全按推荐」）：Q1-Q17/Q19 决议登记见上表；§5.3 mqtt-north 契约定稿、§5.1 on_timer 澄清 + 反馈环路防护、§5.0 插件形态（lua_core+三薄插件）、§4.5 护栏参数定稿；新增 §9 架构冲突与实施风险分析、附录 B 性能/死锁评估摘要 |
 | v0.5.1 | 2026-08-20 | 阶段 A 落地后四轮独立审查的修复回填：Windows `:` 段路径逃逸封堵（loader/safe_rel_path）、on_init 纳入回调时长预算（§4.5-1 补全）、批量 reload 改 VM 级（不复活已停实例 + 失败回退旧 VM，Q11 语义对齐）、io_engine on_data 改 try_send+计数（附录 B P3 落地，`dropped_frames`）、pin 默认锁定语义落地（`lua_stdlib_pin` 配置键 + 本地已装版本锁定）、`GET /lua/script` 支持 kind=lib（Q13 读回补全）、`RuntimeDevs`/`lua_value_to_sample` 下沉 lua_core（解除反向依赖）、sync 审计日志（§3.7）、clamp 上限读能力卡（单一事实源）、sync 进程级互斥、模板条目不列入 stdlib 清单；头部实施块与遗留清单更新 |
 | v0.6 | 2026-08-20 | 阶段 B 落地：§5.4 修订（spike-2 实测纠正「AsyncClient 自带 poll task」前提——EventLoop 由调用方轮询为官方预期用法，EventLoop 独立 pump + 内部分路模型成立，迟到 QoS1 补发风险落档）；Q5 契约全项实现（六回调/混合批量/重连必重调 auth/宿主逐条投递）；Q4 secret 链路（lux secrets 表/REST 掩码读+审计/ctx:secret_get 授权清单）；Q19 三薄插件之二 luaNorth 接线 Sink（manifest 多角色契约、register Role 裁剪 C1）；MqttPublisher 无损迁移默认 luaNorth 实例（R5 单通道锁、旧代码删除）；Q8 cloud/ 配方（emqx + onenet token，源仓 1.2.0，hashings 子集在线分发）；Q10 mqtt 透传 backend（io_engine 第四传输）；新增遗留登记见头部（OneNET 真平台现场验收/IO 兜底超时独占/send_command 收紧/hmac 指令成本） |
+| v0.7 | 2026-08-21 | 阶段 C 落地：Q19 三薄插件之三 luaTransform 接线 Source（订阅型，ADR D1——不进 pipeline Processor）；Q6 全项（EventBus Rtdata 载荷带 values：pipeline 按 dev 聚合 + SSE/前端直用，旧字段兼容；subscribe 宿主模式过滤 + 非法 pattern 拒载；on_timer/on_rtdata any-of 契约；自环防护 = api 层 self-write 10s 窗口过滤，e2e 硬性验收实测）；R6 可观测（event_bus_capacity 配置化 + rs_iot_sse_lagged_total）；Q7 rhai 冻结标注（deprecated 不接线不投入，D4）；Role::Transform 能力包裁剪（C1/C3/C5 不注册）；agg-filter 清洗/聚合示例（真实链路 e2e 锁定防漂移）；新增遗留登记见头部（跨源同 tag 静默/reload 不重评估订阅/fan-out 成本/窗口过期边界） |
 
 ## 设计问题决议登记（Q1-Q19，v0.5 全部定案）
 
@@ -39,8 +45,8 @@
 | Q3 | 频控/时长预算 | `callback_timeout_ms` 可配（默认 10s）；超限**跳过本轮 + stat 计数 + 连续超限走 fail_threshold → degraded**；R2 频控超限**向脚本返回错误**（可感知退避）；同族护栏全收：`ctx:request`/http 超时宿主 clamp ≤30s、hub `tx.send` 包 2s 超时丢样计数（防控制面反压） | §4.5 |
 | Q4 | secret 链路 | **lux 全局 `secrets` Hash**（凭证天然跨实例共享）+ 实例配置 `secrets: []` 显式授权清单；`ctx:secret_get(ref)` 函数恒注入、越权引用报错；REST 写入管理员/读取只返掩码；审计 ref 级不落值 | §5.3（独立 spec） |
 | Q5 | mqtt-north 契约 | **混合批量**（满 N 条或 T 秒先到先触发，`batch_max_count`/`batch_max_secs`）；up 返回数组**宿主逐条投递**、失败记 stat 不中断；**重连必重调 auth()**（token 型认证刷新）；可选 `will()` 回调出 LWT payload；宿主另注入全局 `cfg` 表 | §5.3 |
-| Q6 | transform 触发 | `subscribe: ["dev1", "dev2.temp*"]` **宿主过滤**（可选，空 = 纯定时计算）；**EventBus Rtdata 载荷扩展带 values**（SSE 前端实时值同步受益；lagged 丢帧=尽量处理语义）；周期回调统一 **`on_timer`**；**反馈环路防护**：宿主保证实例上报的样本不再触发自身订阅（自环），跨实例环靠配置责任 + 异常频率告警 | §5.1 |
-| Q7 | rhai 处置 | **冻结**：标 deprecated、不接线不投入；Lua transform 实战半年后复审（移除或接线） | §5.1 |
+| Q6 | transform 触发 | `subscribe: ["dev1", "dev2.temp*"]` **宿主过滤**（可选，空 = 纯定时计算）；**EventBus Rtdata 载荷扩展带 values**（SSE 前端实时值同步受益；lagged 丢帧=尽量处理语义）；周期回调统一 **`on_timer`**；**反馈环路防护**：宿主保证实例上报的样本不再触发自身订阅（自环），跨实例环靠配置责任 + 异常频率告警 | §5.1（C 已实施：自环防护 = self-write 10s 窗口过滤，跨源同 tag 静默取舍落档遗留） |
+| Q7 | rhai 处置 | **冻结**：标 deprecated、不接线不投入；Lua transform 实战半年后复审（移除或接线） | §5.1（C 已实施：模块 doc + feature 注释冻结标注，不删代码） |
 | Q8 | 首发平台 | **EMQX（契约验证，不依赖外部账号）→ OneNET（平台适配实战）双首发**；aliyun 列第二批 | §3.2 |
 | Q9 | Sparkplug 范围 | **编解码 + 有限 state-aware**：宿主管 NBIRTH/NDEATH 证书与 keepalive，`birth_payload()` 脚本回调出点表模板；Store-Forward 远期。protobuf 依赖走 feature 门控 | §6 |
 | Q10 | MQTT 透传 request | **reply topic 模板**：app_config 配 `req_topic`/`resp_topic`，request = publish + 订阅 resp 等首帧、超时弃订；实现前先 spike（§9 风险表 R2） | §5.4 |

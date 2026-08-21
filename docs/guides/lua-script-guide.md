@@ -1,6 +1,6 @@
 # Lua 脚本开发指南
 
-> **状态**：活文档（随 luaClient 演进同步）
+> **状态**：活文档（随 luaClient/luaTransform 演进同步）
 > rs-iot luaClient 动态脚本采集——覆盖长尾工业协议（自定义报文、串口/以太网、一问一答/广播推送）。
 > 随改随用、无需编译；沙箱护栏（库裁剪 + 指令 hook + 内存限额）挡脚本错误。
 
@@ -13,10 +13,17 @@ luaClient 是 rs-iot 的南向 `Source`（与 modbus/opcua/s7 同构，`inventor
 - **数据上行**：`collect` 返 table / `on_data` 调 `ctx:set_value` → hub → pipeline → lux `rtdata:<devid>`。
 - **控制下行**：写命令经 `CtlRegistry` → 实例 `cmd_rx` → `on_write(cmd)`。
 
-北向另有 **mqtt-north 角色**（`luaNorth` 实例，`@role mqtt-north`）：同一套沙箱与
-ctx API，把收拢的批量数据经 MQTT 发布上云（EMQX/OneNET 等平台配方见
-「mqtt-north 角色」章节）。详见 `docs/designs/2026-08-06-lua-script-collector-design.md`
-与 `docs/designs/2026-08-20-lua-script-system-stage-b-plan.md`。
+另有两类角色（同一套沙箱与 ctx API）：
+
+- **mqtt-north 角色**（`luaNorth` 实例，`@role mqtt-north`）：北向把收拢的批量数据经
+  MQTT 发布上云（EMQX/OneNET 等平台配方见「mqtt-north 角色」章节）。
+- **transform 角色**（`luaTransform` 实例，`@role transform`，阶段 C）：订阅 EventBus
+  实时数据做清洗/聚合，输出派生点与 collector 同出口（见「transform 角色」章节）。
+
+设计详见 `docs/designs/2026-08-06-lua-script-collector-design.md`、
+`docs/designs/2026-08-18-lua-script-system-evolution-design.md` 与
+`docs/designs/2026-08-20-lua-script-system-stage-b-plan.md` /
+`docs/designs/2026-08-20-lua-script-system-stage-c-plan.md`。
 
 ## 快速开始
 
@@ -276,7 +283,7 @@ main.lua 顶部注释块可声明脚本契约（`-- @key value`，逐行扫至�
 
 | 键 | 含义 | 缺省 |
 |---|---|---|
-| `@role` | 脚本角色：`collector`（南向采集，必需 `collect`）/ `mqtt-north`（北向 MQTT，必需 `auth`+`up`，见「mqtt-north 角色」） | 不声明（缺省语义 collector，但不强制契约，见下） |
+| `@role` | 脚本角色：`collector`（南向采集，必需 `collect`）/ `mqtt-north`（北向 MQTT，必需 `auth`+`up`，见「mqtt-north 角色」）/ `transform`（数据加工，必需 `on_timer`/`on_rtdata` **至少其一**，见「transform 角色」） | 不声明（缺省语义 collector，但不强制契约，见下） |
 | `@api_ver` | 要求的宿主 API 版本（整数） | `1`（非法值报错，不静默放行） |
 | `@stdlib` | stdlib 版本范围：`>=1.0`、`>=1.0 <2`（空格组合，全部满足） | 不限 |
 | `@param` | 参数声明，可多行（B 阶段参数面板消费） | — |
@@ -291,7 +298,8 @@ main.lua 顶部注释块可声明脚本契约（`-- @key value`，逐行扫至�
 - `api_ver` > 宿主当前（见兼容矩阵）→ 拒载，提示"请升级宿主"；< 宿主最低 → 拒载，提示"请升级脚本"。
 - **仅当显式声明 `@role`** 时强制角色契约（显式声明 = 作者签署契约 → 严格校验）：
   `collector` → 全局 `collect` 必需；`mqtt-north` → `auth`+`up` 必需
-  （down/will/on_connack/on_disconnect 可选）。无 manifest 头的存量脚本豁免——
+  （down/will/on_connack/on_disconnect 可选）；`transform` → `on_timer`/`on_rtdata`
+  **any-of**（至少声明其一，on_init 恒可选）。无 manifest 头的存量脚本豁免——
   可能只定义 `on_data`，向后兼容放行。未知角色名拒载。
 - `@stdlib` 范围 vs 本地 index 版本，不满足提示"请 sync"；未 sync（种子兜底态）跳过比对——
   内网冷启动不拒载。
@@ -444,6 +452,128 @@ OneNET token 签名含一次纯 Lua hmac_sha1（实测 ~70 万条 VM 指令，�
 R5 单通道锁：`[mqtt]` 与 luaNorth 不双通道并存（默认实例已在运行则跳过二次启动）；
 `cfg.mqtt.host` 留空 = 显式关闭不生成。迁移细节见 stage-b 设计 §7。
 
+## transform 角色（南向 `luaTransform` 实例）
+
+阶段 C 起脚本系统支持第三角色：`luaTransform`（**Source 订阅型**——与 collector
+同为 South 实例，但输入不是通讯链路而是 **EventBus 实时数据**）。同一套沙箱、
+manifest/热加载/stdlib require 机制；聚焦**数据加工**：清洗（野点剔除/限幅）、聚合
+（滑动窗口均值）、派生点产出。输出经 `ctx:set_value` → hub → pipeline → lux
+`rtdata:<devid>`——与 collector 同出口，前端/北向零差别消费派生点。
+
+设计约束（ADR D1）：transform 不进 pipeline Processor（`Sample` 结构不动是硬约束），
+做成订阅型实例——EventBus 的 Rtdata 事件（带值，pipeline 攒批后按 dev 聚合发布）
+经宿主 `subscribe` 模式过滤后逐点投给脚本。
+
+### 回调契约（三回调，on_timer/on_rtdata any-of）
+
+main.lua 头部声明 `-- @role transform`（dry-run 校验 `on_timer`/`on_rtdata` 至少其一，
+两者皆无拒载——纯定时与纯订阅都合法，啥都不做不合法）：
+
+| 函数 | 必需 | 调用时机 | 返回 |
+|---|---|---|---|
+| `on_init()` | 可选 | 启动时一次（reload 后新 VM 同样调） | 忽略 |
+| `on_timer()` | any-of | 每 `period` 秒（`period=0` 不调——纯订阅模式） | 忽略 |
+| `on_rtdata(devid, tag, value)` | any-of | 订阅命中一个数据点一次（批量事件由宿主拆点逐调；`value` 为 Lua 标量 int/float/bool/string） | 忽略 |
+
+- 每次回调独立包 `callback_timeout_ms` 预算（默认 10s）：`on_rtdata` 单点超预算/出错
+  → warn + `rtdata_skipped` 计数 + **跳过该点继续**（一点坏不弃整批）；`on_timer`
+  超限走 tick_fail → 连续失败 `degraded`（与 collector 同语义）。
+- **顶层可用 `ctx`**（register 先于 load_main，同 luaNorth；区别于 collector——collector
+  顶层不可用 ctx，初始化须在 `on_init`）。
+- 非 Rtdata 事件（State/Log 等同总线流经）忽略；EventBus lagged（慢消费覆写旧值）
+  → debug 日志继续收（broadcast 尽量处理语义）。
+
+### 能力包（§5.2 矩阵 transform 列）
+
+| 能力 | 注入 | 说明 |
+|---|---|---|
+| C0 json | ✓ | `require("json")` |
+| C2 数据 | ✓ | `set_value`/`set_values`/`get_value`/`get_device`/`list_devices` |
+| C4 持久 | ✓ | `kv_set`/`kv_get`/`secret_get`（推荐滑窗/计数器状态的载体） |
+| C6 工具 | ✓ | `log_*`/`now`/`time` |
+| C1 通讯 / C3 控制 / C5 HTTP | **✗** | `request`/`transport`/`send_command`/`http_get` 不注册——transform 无链路无出站，数据进出全走宿主 |
+
+### 配置（TransformCfg，`app_config`）
+
+`app_code="luaTransform"`（`app_type` South）。**无传输项**（kind/endpoint/serial_*）：
+
+| 字段 | 类型 | 默认 | 说明 |
+|---|---|---|---|
+| `script` | str | 必填 | 脚本目录名（校验同 collector，仅 `[A-Za-z0-9_-]`） |
+| `period` | num | `3` | on_timer 周期秒；**0 = 纯订阅**（不调 on_timer、不占节拍） |
+| `subscribe` | str[] | `[]` | 订阅模式清单（见下）；**空 = 纯定时**（不订 EventBus） |
+| `callback_timeout_ms` | num | `10000` | 单回调预算（on_init/on_timer/on_rtdata） |
+| `scripts_root` | str | `scripts` | 脚本根目录（per-instance 覆盖，多用于测试隔离） |
+| `mem_limit_mb` / `hook_instr_limit` | num | `32` / `1000000` | 沙箱参数（同 collector） |
+
+### subscribe 订阅语法（Q6 宿主过滤）
+
+`subscribe` 是 transform 的**数据面入口**——模式在宿主侧匹配，不命中的点根本不进
+脚本（脚本不用再判来源）。每条模式两段，以 `.` 分隔：
+
+| 模式 | 语义 |
+|---|---|
+| `"dev1"` | dev1 的**全部 tag** |
+| `"dev2.temp*"` | dev2 的 temp 开头 tag（tag 段仅 `*` 通配，无 `?`；中缀 `t*p` 亦可） |
+| `"*"` | 全部设备（dev 段整段通配） |
+| `"dev.*"` | 等价 `"dev"`（tag 段 `*` 全匹配） |
+
+多模式 any-of（清单内任一命中即投递）。**非法 pattern 启动拒载**（坏声明可见——
+订阅写错 = 数据面静默丢失，必须点名）：空串、`.`、`..`、超 2 段（`a.b.c`）、空段
+（`.tag` / `dev.`）、dev 段部分通配（`dev*`——dev 段只支持精确名或整段 `*`）。
+
+> **devid 命名注意**：模式以 `.` 分段，**devid 本身不要含 `.`**（如 `dev.raw` 无法用
+> 模式表达——`dev.raw.temp` 会被拆三段拒载）。
+
+### 自环防护与跨实例环（Q6）
+
+- **自环（宿主硬保证）**：实例 `ctx:set_value` 写出的点，经 hub → pipeline →
+  publish Rtdata 回流 EventBus 后，**不触发自身的 `on_rtdata`**——api 层 per-instance
+  self-write 记录 + 10s 窗口过滤（`SELF_LOOP_GUARD_WINDOW`）。脚本订阅自身输出 tag
+  是安全的（不产生回调放大）。
+- **已知取舍**：窗口内**其他源**对同 `(devid,tag)` 的并发写入会被一并静默——防护
+  只保证「自身输出不触发自身」，跨源对同 tag 的可见性不受保证（高频同 tag 双写场景
+  需知晓；正常场景 collector 写原始点、transform 写派生点不同 tag，无影响）。
+- **跨实例环（配置责任）**：A 订阅 B 的输出、B 订阅 A 的输出会形成互触环——宿主
+  **不做静态消除**（Q6 定案），由配置者保证派生关系是 DAG（派生点用独立 devid/tag
+  命名是最简单防法）。环异常表现为回调频率异常升高，可经 `/inst/stats` 的
+  `rtdata_points` 增速与 EventBus lagged 观测；异常频率告警依赖 Q12 告警模型（D 阶段）。
+- reload（文件 watcher 或控制命令）只换 VM：**订阅模式不重评估**（模式是实例配置级，
+  改 `subscribe` 须 stop/start 实例）。
+
+### 示例：agg-filter（滑动窗口均值 + 野点剔除）
+
+`examples/lua-scripts/agg-filter/main.lua`（完整可跑，e2e 实测见
+`tests/lua_transform_e2e.rs::agg_filter_example_end_to_end`）：
+
+```lua
+-- @role transform
+-- @api_ver 1
+-- @param window number 可选 滑动窗口点数 默认5 范围:1-100（kv 键 cfg_window 优先，reload 生效）
+function on_rtdata(devid, tag, value)
+  if value < CLAMP_LO or value > CLAMP_HI then  -- 限幅：野点剔除（不进窗不产出）
+    ctx:kv_set("rejected", (ctx:kv_get("rejected") or 0) + 1)
+    return
+  end
+  local win = ctx:kv_get("win") or {}           -- 滑动窗口状态存 kv（C4：跨重启/热加载不丢）
+  win[#win + 1] = value
+  while #win > WINDOW do table.remove(win, 1) end
+  ctx:kv_set("win", win)
+  local sum = 0
+  for _, v in ipairs(win) do sum = sum + v end
+  ctx:set_value(OUT_DEV, OUT_TAG, sum / #win)   -- 派生点 → hub → pipeline 全链路
+end
+```
+
+实例配置：`{"script": "agg-filter", "period": 0, "subscribe": ["raw1.temp*"]}`。
+窗口大小默认 5，写 kv `cfg_window` 后 reload 生效（on_init 读取——窗口可配演示）。
+
+### 状态监测扩展
+
+stat 走 InstanceManager 全套（核心 6 字段 + `script_version`/`vm_restart_count`），
+transform 专属 extra：`rtdata_points`（on_rtdata 成功回调累计）、`rtdata_skipped`
+（超预算/出错/自环过滤跳过累计）、`runtime_devices`（派生点上报集）、`dropped_samples`。
+
 ## 运行时护栏
 
 脚本错误不应拖垮实例或宿主——五项运行时护栏（参数与能力卡单一事实源一致）：
@@ -520,6 +650,8 @@ backend 可解决。触发条件：现场出现明确的 server 侧协议需求�
   头部带 manifest 声明，CRC16 用 `require("algo.crc16")`（官方 stdlib，见上）。
 - `custom-on-data/`：自定义协议 + `on_data` 被动广播上报（`set_value` + `kv_set` 持久化）。
 - `multi-device/`：单实例多设备（一条 RS485 总线多从站），`collect` 嵌套返回（M2）。
+- `agg-filter/`：transform 角色完整示例——订阅原始点 → 野点剔除 + 滑动窗口均值 →
+  `set_value` 写派生点；窗口状态 kv 持久、窗口大小 kv 可配（见「transform 角色」章）。
 
 ## 沙箱限制
 
@@ -582,10 +714,11 @@ curl -H "Authorization: <token>" "localhost:8790/api/v1/logs/recent?target=io_tr
 
 脚本契约版本协商面（manifest `@api_ver`/`@stdlib` 与之对应；能力卡是单一事实源）：
 
-| 宿主版本 | API_VER（MIN / CUR） | STDLIB | builtin 模块 |
-|---|---|---|---|
-| 阶段 A | 1 / 1 | 种子 4 库（freeioe@1398d47 vendored，随宿主内嵌、无独立版本轴）；官方源 index 首发版本 **1.0.0**（sync 后本地 index 为准） | `json` |
-| 阶段 B（本版） | 1 / 1 | 种子不变；官方源在线分发：**1.1.0**（`algo.hashings` 子集 uintn/md5/sha1/sha256/hmac + `cloud.emqx`）→ **1.2.0**（+`cloud.onenet` token 配方）。sync 后本地 index 为准 | `json` |
+| 宿主版本 | API_VER（MIN / CUR） | STDLIB | builtin 模块 | 实例类型（app_code） |
+|---|---|---|---|---|
+| 阶段 A | 1 / 1 | 种子 4 库（freeioe@1398d47 vendored，随宿主内嵌、无独立版本轴）；官方源 index 首发版本 **1.0.0**（sync 后本地 index 为准） | `json` | luaClient |
+| 阶段 B | 1 / 1 | 种子不变；官方源在线分发：**1.1.0**（`algo.hashings` 子集 uintn/md5/sha1/sha256/hmac + `cloud.emqx`）→ **1.2.0**（+`cloud.onenet` token 配方）。sync 后本地 index 为准 | `json` | luaClient、luaNorth |
+| 阶段 C（本版） | 1 / 1 | 不变 | `json` | luaClient、luaNorth、**luaTransform**（`@role transform`，on_timer/on_rtdata any-of） |
 
 - 脚本 `@api_ver 1`（或缺省）在本版通过；宿主升级 CUR 后旧脚本不受影响（MIN 锁下界）。
 - `@stdlib >=1.0`：种子兜底态跳过比对（冷启动不拒载）；sync 后 `>=1.0 <2` 区间均满足
