@@ -14,6 +14,7 @@ use std::sync::Arc;
 
 pub mod auth;
 pub mod frontend;
+pub mod routes_alarm;
 pub mod routes_command;
 pub mod routes_device;
 pub mod routes_events;
@@ -102,6 +103,12 @@ pub fn build_router(state: AppState) -> axum::Router {
         .route("/api/v1/secret/set", post(routes_secret::set))
         .route("/api/v1/secret/list", get(routes_secret::list))
         .route("/api/v1/secret", delete(routes_secret::delete))
+        // 活跃告警查询/清除（Q12 告警最小闭环，spec §4：默认 JWT 保护；clear 发
+        // Clear 事件让 SSE 前端收敛；触发面是脚本 ctx:fire_event——T4，无 REST 端点）
+        .route(
+            "/api/v1/alarms",
+            get(routes_alarm::list).delete(routes_alarm::delete),
+        )
         // 系统信息与插件实例
         .route("/api/v1/sysinfo", get(routes_sys::sysinfo))
         .route("/api/v1/sysstatus", get(routes_sys::sysstatus))

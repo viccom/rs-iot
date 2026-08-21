@@ -34,6 +34,18 @@ pub struct RtdataSample {
     pub ts: i64,
 }
 
+/// 告警动作（Q12 告警最小闭环，spec §1.1）：fire=触发/更新，clear=清除。
+///
+/// serde 小写（`"fire"`/`"clear"`）——SSE JSON 直读，前端无映射表。
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AlarmAction {
+    /// 触发/更新（脚本判定成立；同 key 重复 fire 仍是本动作）。
+    Fire,
+    /// 清除（脚本判定恢复或 REST 手动清除；幂等语义由清除方保证）。
+    Clear,
+}
+
 /// SSE 推送的事件载荷。
 ///
 /// `#[serde(flatten)]` 让 `Log` 变体展开 `LogEntry` 字段，与 `/api/v1/logs/recent`
@@ -90,6 +102,26 @@ pub enum EventPayload {
         /// 时间戳（ISO8601/RFC3339）。
         ts: String,
     },
+    /// 一条告警事件（Q12 告警最小闭环，spec §1.1）。
+    ///
+    /// fire/clear 双向同一变体（`action` 区分）——前端一次 `addEventListener("alarm")`
+    /// 覆盖两向，多客户端视图经 clear 帧收敛一致。`source` 由宿主从实例 ID 注入
+    /// （脚本不可伪造）；发布方：脚本面 `ctx:fire_event`/`clear_event`（T4）+
+    /// REST 手动清除。
+    Alarm {
+        /// 动作（fire/clear）。
+        action: AlarmAction,
+        /// 告警键（脚本自定义，如 "dev1.temp_high"）。
+        key: String,
+        /// 级别（"info"/"warn"/"error"；clear 沿用清除时条目的 level）。
+        level: String,
+        /// 来源实例 ID（宿主填，脚本不可伪造）。
+        source: String,
+        /// 人类可读描述（fire 时）。
+        message: String,
+        /// 时间戳（ISO8601/RFC3339，宿主填）。
+        ts: String,
+    },
 }
 
 impl EventPayload {
@@ -100,6 +132,7 @@ impl EventPayload {
             Self::Packet { .. } => "packet",
             Self::State { .. } => "state",
             Self::Rtdata { .. } => "rtdata",
+            Self::Alarm { .. } => "alarm",
         }
     }
 }
