@@ -27,7 +27,8 @@ pub struct AppConfig {
     pub pipeline: PipelineConfig,
     /// Lua stdlib 官方源/镜像 upstream 基址（设计 §3.6 D1/D2）。
     /// `POST /api/v1/lua/stdlib/sync` body 未传 upstream 时用它；内网镜像 =
-    /// 官方静态目录完整拷贝，改此键指向镜像即切换。v1 占位官方 Pages URL（T13 建置）。
+    /// 官方静态目录完整拷贝，改此键指向镜像即切换。v1 占位官方 Pages URL（T13 建置）；
+    /// 正式发布后此处改正式 URL（rsiot-lualib docs/PUBLISH.md runbook）。
     pub lua_stdlib_upstream: String,
     /// Lua stdlib 持久化 pin 版本（§3.3：默认锁定；`auto` 跟随 latest 须显式）。
     /// sync 解析顺序：body.pin（显式版本或 "auto"）> 此键 > 锁定本地已装版本。

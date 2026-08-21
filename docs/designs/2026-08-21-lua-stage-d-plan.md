@@ -117,6 +117,18 @@
 **Step:** 源仓本地全链演练（dev 钥 sign → 本地静态目录 → 主仓 sync 验签通过——复用 A 阶段 T13 的 python http.server 手法）→ 两仓分别 commit（源仓 `chore: 发布就绪——release CI 硬化 + PUBLISH runbook`；主仓 `docs(lua): upstream 发布就绪注记`）。
 **用户检查点（不代办）：** 正式 ed25519 钥生成（组织流程）、GitHub 仓公开/Pages 开启、首版 tag 发布。完成后按 PUBLISH.md 回填公钥。
 
+> **执行回填（2026-08-20，Task 8 完成）：**
+>
+> - **release.yml 硬化**（源仓已有基础版，按计划补全）：新增 `release` job（dist zip + index.json/.sig attach GitHub Release，tag-only，`contents: write`）与 `verify-online` job（发布后 curl 线上 Pages 拉 index → 仓内 pub.key 验签 + 版本核对，Pages 未传播 10×30s 重试，fail closed）；私钥还原 step 补 secret 缺失/空值 fail-fast；`verify_index.sh` 加目录参数（缺省 dist 不变，供在线自检复用）。YAML/脚本语法校验通过。
+> - **index 字段核对**：主仓 `stdlib_sync.rs::LocalIndex` 消费 `version`/`min_api_ver`(default 1)/`files{sha256,ver}`——gen_index.sh 三者齐备；`min_host_ver` 演进设计 §3.3 提及但主仓实现**无消费者**，不生成（结论与依据写入 PUBLISH.md §2，将来要加须双侧同步）。
+> - **PUBLISH.md**（源仓 `docs/PUBLISH.md` 新建）：用户检查点置顶 + 发布全链 runbook + 正式钥双审批/CI secret 保管制责任边界 + Q17 双钥过渡与 dev 钥 v1 退役步骤 + 镜像（wget --mirror/rclone，§3.6 D2）+ 版本策略（STDLIB_VER MAJOR.MINOR 轴 + CHANGELOG 要求）+ 本地演练手法。
+> - **本地全链演练（dev 钥）真实输出**：
+>   - 源仓：`./gen_index.sh 1.3.0 && ./sign_index.sh && ./verify_index.sh` → `gen_index: 1.3.0，15 个文件 → dist/`、`sign_index: dist/index.json.sig（64 字节裸 ed25519）`、`Signature Verified Successfully`；index 字段实查 `version=1.3.0 / min_api_ver=1 / files=15`。
+>   - 在线自检路径（CI verify-online 等价）：curl 8765 拉 index.json/.sig（200, 2241B/64B）→ `./verify_index.sh /tmp/online-check` → `Signature Verified Successfully`。
+>   - 主仓真 HTTP e2e（生产 VERIFY_KEYS）：`RSIOT_E2E_UPSTREAM=http://127.0.0.1:8765 cargo test -p rs-iot --features lua,lua-http -j 4 --lib -- --ignored e2e_sync` → `e2e_sync_official_dist_over_http ... ok (1 passed)`——内置断言：验签通过、1.3.0 全量 15 文件落 `_stdlib/`、清单（stdlib.list 背后 inventory）ver=1.3.0 + crc16 徽标 synced、require 取同步版且 selftest 过。
+>   - 篡改场景（fail-closed 证据）：`printf '\n-- tampered' >> dist/algo/crc16.lua` 重跑 → `FAILED ... sha256 不符：index 声明 83bf11cc…，实际 f6308e83…（内容被篡改，拒装）`；随后 dist 已重建自验通过。
+> - **主仓侧**：`src/config.rs` `lua_stdlib_upstream` 注释补「正式发布后此处改正式 URL（rsiot-lualib docs/PUBLISH.md runbook）」（一行注释，零行为变化）。
+
 ---
 
 ## 组 5：收口
