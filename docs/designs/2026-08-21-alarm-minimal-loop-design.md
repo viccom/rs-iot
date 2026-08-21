@@ -51,12 +51,14 @@ ctx:clear_event(key) -> bool                  -- true=清除成功（幂等）
 ```
 
 - `key` 非空、≤128 字符；`level ∈ {info, warn, error}`；`message` ≤512 字符——超限返回 `nil, err`（可感知，与 R2 频控同错误形态）。
+- **clear 同频控**（复审 P1-2 补全，2026-08-21）：`clear_event` 与 `fire_event` 共用每实例 20/s 桶——超限返 `false`，不 HDEL 不发帧（原 spec 仅 fire 有频控属设计缺口：脚本循环 clear 可刷 SSE/日志/lux 无上限）。
 - 注入矩阵（§5.2 C6 行）：collector/transform/north **全部注入**（判定场景可能在任一角色：采集侧判原始点、transform 侧判派生点、north 侧判平台回执）。
 - 审计：fire/clear 各落一条 `tracing::info!("[alarm] fire key={} level={} by={}")`（key 级不落 message 全文——防日志洪水，message 看 REST/SSE）。
 
 ## 3. 护栏（防告警风暴）
 
-- **每实例频控**：token bucket 20 次/s（照 C5 http 的 R2 频控模式）；超限 `fire_event` 返回 `false` + stat `alarm_rate_limited` 计数——风暴时清单不被刷爆，SSE 不被挤爆。
+- **每实例频控**：token bucket 20 次/s（照 C5 http 的 R2 频控模式），**fire 与 clear 共用同桶**；超限返 `false` + stat `alarm_rate_limited` 计数（共用）——风暴时清单不被刷爆，SSE 不被挤爆。
+- **清单基数上限**（复审 P1-1 补全，2026-08-21）：全局活跃告警键 ≤1000——fire 新键达上限时返 `false` + `alarm_hash_capped` 计数（频控限速率不限基数，失控脚本可线性撑爆持久存储与 HGETALL；既有键更新不受限）。
 - **同 key 抖动**：同 key 1s 窗口内重复 fire 仍计数（count++）但**不重复发 SSE**——前端不被同键闪屏；1s 后再 fire 正常发。
 - EventBus 容量共享既有 256 ring（Alarm 事件小，挤占可忽略；lagged 有既有计数）。
 

@@ -143,8 +143,9 @@ fn validate_message(message: &str) -> Result<(), String> {
 ///   true=已上报；false=被频控（spec §2/§3）；nil,err=参数违例（可感知，不落库）。
 ///   路径：校验 → 频控（超限即拒不写清单）→ lux 覆盖写 count++（[`crate::db::alarms::fire`]）
 ///   → 同 key 1s 抖动决定是否 publish Fire 帧 → 审计（key 级，不落 message 全文）。
-/// - `ctx:clear_event(key) -> true`：幂等恒发 Clear 帧（level/message 沿用条目值，
-///   无条目空串——多客户端视图收敛），HDEL 后清抖动表条目（清除后再触发=新事件）。
+/// - `ctx:clear_event(key) -> true | false`：频控超限返 false（复审 P1-2——与 fire
+///   同 20/s 桶）；放行则幂等恒发 Clear 帧（level/message 沿用条目值，无条目空串
+///   ——多客户端视图收敛），HDEL 后清抖动表条目（清除后再触发=新事件）。
 ///
 /// 两者均 async（lux 操作 await）→ `create_async_function`（照 kv_set 桥接模式）；
 /// `_self` 首参吸收冒号隐式 self；`source` 一律取 `ac.inst.inst_id`（宿主填，
@@ -232,6 +233,12 @@ pub(super) fn register(lua: &Lua, ctx: &mlua::Table, ac: &super::ApiCtx<'_>) -> 
                     Value::Nil,
                     Value::String(lua.create_string(format!("clear_event: {e}"))?),
                 ));
+            }
+            // 复审 P1-2：clear 与 fire 同频控（此前仅 fire 有护栏——脚本在回调内
+            // 循环 clear 可刷 SSE 帧/审计日志/lux ops 无上限）。超限返 false、
+            // 不 HDEL 不发帧（与 fire 超限同形态），rate_limited 计数共用。
+            if !stats.check() {
+                return Ok((Value::Boolean(false), Value::Nil));
             }
             // 清除前取条目（spec §1.1：clear 沿用清除时条目的 level/message；
             // 无条目空串——value 损坏同样走空串路径，见 db::alarms::get 文档）。

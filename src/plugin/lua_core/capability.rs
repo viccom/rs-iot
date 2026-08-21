@@ -289,7 +289,9 @@ pub(crate) static CAPABILITIES: &[CapabilityCard] = &[
         risk: Risk::R1,
         feature: None,
         timeout_cap_ms: 0,
-        rate_per_sec: 0,
+        // 复审 P1-2：clear 与 fire 同频控限值（单一事实源经 alarm_rate_per_sec 查
+        // ctx:fire_event 卡——此处 20 为文档值，消费见 api/alarm.rs）。
+        rate_per_sec: 20,
         api_ver: 1,
         desc: "清除告警（幂等，恒发 Clear 事件）",
     },

@@ -1694,6 +1694,48 @@ async fn fire_event_rate_limited_returns_false() {
     let _ = std::fs::remove_dir_all(&data_dir);
 }
 
+/// 复审 P1-2：clear 与 fire 同频控（同 20/s 桶，注入 2/s 测）——超限返 false
+/// 不 HDEL 不发帧（此前 clear 无护栏，脚本循环 clear 可刷 SSE/日志/lux 无上限）。
+#[tokio::test]
+async fn clear_event_rate_limited_returns_false() {
+    let (lua, _rx, ctx_host, alarm, handle, data_dir) = alarm_vm(
+        "alarm-clear-rate",
+        Role::Collector,
+        Some(std::sync::Arc::new(super::alarm::AlarmState::new(2))),
+    )
+    .await;
+    // 占满额度：fire + clear（同桶）各一次。
+    let ok: bool = lua
+        .load("return ctx:fire_event('k0', 'warn', 'm')")
+        .eval_async()
+        .await
+        .unwrap();
+    assert!(ok);
+    let ok: bool = lua
+        .load("return ctx:clear_event('k0')")
+        .eval_async()
+        .await
+        .unwrap();
+    assert!(ok, "额度内 clear 应 true（k0 已被清除）");
+    // 第 3 次（超 2/s）：clear 一个不存在的键也被限流返 false（护栏先于幂等语义）。
+    let limited: bool = lua
+        .load("local ok, err = ctx:clear_event('k9'); return ok == false and err == nil")
+        .eval_async()
+        .await
+        .expect("第 3 次调用");
+    assert!(limited, "clear 超限应返 false（非 nil,err）");
+    assert_eq!(
+        alarm.rate_limited_count(),
+        1,
+        "clear 超限计入共用 rate_limited"
+    );
+    let items = crate::db::alarms::list(&ctx_host.lux).await.unwrap();
+    assert!(items.is_empty(), "限流 clear 不应有任何清单副作用");
+
+    let _ = crate::db::shutdown_lux(handle).await;
+    let _ = std::fs::remove_dir_all(&data_dir);
+}
+
 /// spec §3 同 key 抖动：1s 窗口内重复 fire 仍计数（lux count=2——风暴可见性）
 /// 但只发一次 Alarm Fire 帧（前端不被同键闪屏）；帧 source 是 inst_id（宿主填，
 /// 脚本不可伪造——API 无 source 参数）。
