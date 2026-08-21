@@ -1,4 +1,5 @@
 pub mod alarms;
+pub mod dev_registry;
 pub mod ext_token;
 pub mod identity;
 pub mod luakv;
