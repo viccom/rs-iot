@@ -86,6 +86,43 @@ describe('monitor store', () => {
     expect(s.instances[0]).toMatchObject({ inst_id: 'i2', state: 'running', health: null })
   })
 
+  it('start 后 30s 告警轮询兜底（复审 P2-2——SSE 丢帧后低频收敛）', async () => {
+    vi.useFakeTimers()
+    try {
+      const auth = useAuthStore()
+      auth.setAuth('tok-abc', 'admin')
+      // 桩 fetch：alarms 端点返回空清单；计数该 URL 的调用次数。
+      let alarmFetches = 0
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+        if (String(input).includes('/alarms')) alarmFetches++
+        return new Response('[]', { status: 200 })
+      })
+      // 照既有 start 测试桩 document（start 末尾注册 visibilitychange）。
+      vi.stubGlobal('document', {
+        hidden: false,
+        addEventListener: () => {},
+        removeEventListener: () => {},
+      })
+      const s = useMonitorStore()
+      s.start()
+      // start 立即拉一次（登录即拉）。
+      expect(alarmFetches).toBe(1)
+      // 推进 30s × 2：轮询再拉两次（丢帧兜底闭环；不推进时零额外调用）。
+      await vi.advanceTimersByTimeAsync(30_000)
+      expect(alarmFetches).toBe(2)
+      await vi.advanceTimersByTimeAsync(30_000)
+      expect(alarmFetches).toBe(3)
+      s.stop()
+      await vi.advanceTimersByTimeAsync(60_000)
+      // stop 后轮询停：仍为 3（不随 60s 推进增长）。
+      expect(alarmFetches).toBe(3)
+      fetchSpy.mockRestore()
+      vi.unstubAllGlobals()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('start wires SSE listeners for rtdata/state (M3: log/packet 改按需订阅)', () => {
     const auth = useAuthStore()
     auth.setAuth('tok-abc', 'admin')

@@ -98,6 +98,9 @@ export const useMonitorStore = defineStore('monitor', () => {
   /** 实例名册轮询：感知外部增删（如 AI 经 REST 直接改后端），SSE state 事件覆盖不到
    *  未运行实例的删除（stop no-op 不 emit）。5s 一次，补拉 instances + configs。 */
   let rosterTimer: ReturnType<typeof setInterval> | null = null
+  /** 告警清单低频轮询（30s——复审 P2-2：SSE Lagged 丢 Fire 帧后面板会无限期缺条目，
+   * rtdata 有 2s 轮询兜底而告警此前只有登录/onopen/手动三个触发点）。 */
+  let alarmTimer: ReturnType<typeof setInterval> | null = null
   /** rtdata 通知去抖句柄（风暴期间只触发一次 loadRtdata）。 */
   let rtdataDebounce: ReturnType<typeof setTimeout> | null = null
 
@@ -452,10 +455,12 @@ export const useMonitorStore = defineStore('monitor', () => {
       if (rtdataTimer) { clearInterval(rtdataTimer); rtdataTimer = null }
       if (sysstatusTimer) { clearInterval(sysstatusTimer); sysstatusTimer = null }
       if (rosterTimer) { clearInterval(rosterTimer); rosterTimer = null }
-    } else if (!rtdataTimer || !sysstatusTimer || !rosterTimer) {
+      if (alarmTimer) { clearInterval(alarmTimer); alarmTimer = null }
+    } else if (!rtdataTimer || !sysstatusTimer || !rosterTimer || !alarmTimer) {
       rtdataTimer = setInterval(loadRtdata, 2000)
       sysstatusTimer = setInterval(loadSysstatus, 5000)
       rosterTimer = setInterval(() => { void loadInstances(); void loadInstanceConfigs() }, 5000)
+      alarmTimer = setInterval(() => void loadAlarms(), 30_000)
     }
   }
 
@@ -502,6 +507,8 @@ export const useMonitorStore = defineStore('monitor', () => {
     rtdataTimer = setInterval(loadRtdata, 2000)
     sysstatusTimer = setInterval(loadSysstatus, 5000)
     rosterTimer = setInterval(() => { void loadInstances(); void loadInstanceConfigs() }, 5000)
+    // 复审 P2-2：告警低频轮询兜底（SSE 丢帧后 30s 内收敛；可见性联动同其它 timer）。
+    alarmTimer = setInterval(() => void loadAlarms(), 30_000)
     document.addEventListener('visibilitychange', onVisibility)
   }
 
@@ -580,6 +587,7 @@ export const useMonitorStore = defineStore('monitor', () => {
     if (rtdataTimer) { clearInterval(rtdataTimer); rtdataTimer = null }
     if (sysstatusTimer) { clearInterval(sysstatusTimer); sysstatusTimer = null }
     if (rosterTimer) { clearInterval(rosterTimer); rosterTimer = null }
+    if (alarmTimer) { clearInterval(alarmTimer); alarmTimer = null }
     if (rtdataDebounce) { clearTimeout(rtdataDebounce); rtdataDebounce = null }
     document.removeEventListener('visibilitychange', onVisibility)
   }
