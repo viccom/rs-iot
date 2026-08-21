@@ -67,6 +67,8 @@
 | [2026-08-21-lua-stage-d-plan.md](designs/2026-08-21-lua-stage-d-plan.md) | 阶段 D 实施计划（评估收窄：安全最小集 M3+TLS/告警 Q12/清偿批/串口 open 异步安全/upstream 发布准备） | **已实施**（已合入 master） |
 | [2026-08-21-api-doc-frontend-gap-closure-plan.md](designs/2026-08-21-api-doc-frontend-gap-closure-plan.md) | REST 文档与前端 UI 缺口补齐计划（5 端点文档/apitest 按钮/secret·stdlib·写命令三 UI + vitest） | **已实施**（已合入 master `736333f`） |
 | [2026-08-21-self-monitor-device-plan.md](designs/2026-08-21-self-monitor-device-plan.md) | rs-iot 自监控设备计划（selfMonitor：rsiot 设备 17 只读+3 可写标签/删 sim1 demo/hwid 覆盖键） | **已实施**（待合并） |
+| [2026-08-21-device-ownership-design.md](designs/2026-08-21-device-ownership-design.md) | 设备归属模型设计（dev2inst 软关联/SampleSender 拦截/级联闭环 + lux 非 loopback 强制认证 + secrets AEAD + devices 死表废弃） | 定案待实施 |
+| [2026-08-21-device-ownership-plan.md](designs/2026-08-21-device-ownership-plan.md) | 设备归属 + lux/RESP 收口 + secrets 加密实施计划（8 task） | 计划 |
 
 ## ops/ — 部署与运维（怎么跑起来）
 
