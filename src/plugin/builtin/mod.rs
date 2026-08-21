@@ -15,4 +15,5 @@ pub mod modbus_client;
 pub mod opcua_client;
 #[cfg(feature = "s7")]
 pub mod s7_client;
+pub mod self_monitor;
 pub mod sidecar_client;
