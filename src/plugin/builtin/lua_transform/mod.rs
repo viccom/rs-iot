@@ -311,15 +311,14 @@ impl Source for LuaTransform {
                     let (mut batch_ok, mut batch_fail) = (0u64, 0u64);
                     'points: for s in samples.iter() {
                         // tag 双形态（"tag" / "devid.tag"，与 Sample.values 同源）：
-                        // 剥本 dev 前缀（照 lua_north pull_rtdata_batch 语义）。
-                        let prefix = format!("{}.", s.devid);
+                        // 剥本 dev 前缀（core_::api::strip_dev_prefix 单一事实源）。
                         for (raw_tag, value) in &s.values {
                             // 批内取消可见性（复审 P1-1）：token 只在 select! 臂轮询，
                             // 长批逐点 await 期间不可见——逐点补查，stop 即时生效。
                             if token.is_cancelled() {
                                 break 'points;
                             }
-                            let tag = raw_tag.strip_prefix(&prefix).unwrap_or(raw_tag.as_str());
+                            let tag = core_::api::strip_dev_prefix(&s.devid, raw_tag);
                             // Q6 宿主过滤：模式不命中的点不进脚本。
                             if !matcher.matches(&s.devid, tag) {
                                 continue;

@@ -55,7 +55,15 @@ pub(crate) enum MqttEvt {
     Disconnected(String),
     /// 下行消息（订阅 topic 上的 Publish；T7 全量路由 down()——命令 topic 是 T8 概念）。
     Down { topic: String, payload: Vec<u8> },
-    /// 批量发布结果计数（publish Ok 只代表入队/投递接受，见 rumqttc 语义）。
+    /// 批量发布结果计数——**异步回执**（fire-and-forget，不阻塞 up 返回）：up()
+    /// 返回后逐条发布才在 mqtt task 执行，计数经本事件**事后**回传、主循环累加
+    /// publish_ok/publish_fail——不是「up 同步得知发布成败」的同步结果。口径：
+    /// - ok = `publish` Ok（入队/投递接受：rumqttc 0.25.1 走 `send_async`，请求通道
+    ///   满时背压等待不丢弃；未连接时排队也返回 Ok，spike-2 实测注记）；
+    /// - fail = `publish` Err（非法 topic / 请求通道关闭——pump 退出后），以及
+    ///   Connect 前无 client 时的整批条数；
+    /// - 回执自身经 try_send 发送：evt 通道满时**整条回执被丢**（该批计数少记
+    ///   一次，不会误记——计数是可见性口径而非精确账目）。
     PubResult { ok: usize, fail: usize },
 }
 
@@ -219,7 +227,10 @@ pub(crate) async fn start_connect(
     cmd_tx: &mpsc::Sender<MqttCmd>,
 ) -> Result<(), ConnectErr> {
     let retry = |msg: String| ConnectErr { fatal: false, msg };
-    // 1. will()（可选回调；globals 无则跳过，返回 nil → 无 LWT）。
+    // 1. will()（可选回调；globals 无则跳过，返回 nil → 无 LWT）。重连契约：每次
+    //    connect（含重连/reload 换 VM 后的下次重连）前都会**重新调用** will()——
+    //    脚本须幂等（勿在此累积副作用），返回值变化生效于下一次连接（LWT 随
+    //    MqttOptions 逐次重组，Q5「重连必重调 auth」的同语义）。
     let will_v =
         core_::budget::with_budget("will", cfg.callback_timeout_ms, call_optional(lua, "will"))
             .await
@@ -603,9 +614,9 @@ pub(crate) async fn pull_rtdata_batch(
             Ok(lux::EmbeddedValue::Array(a)) => a,
             _ => continue, // per-devid 容错
         };
-        // field=<devid>.<tag>（或 <tag>）→ 剥前缀得 tag（同 ctx:get_device 语义）；
-        // cell=[ts, localTime, value] → value 原样 + ts 取最大（同 mqtt_pub parse_rtdata_hash）。
-        let prefix = format!("{devid}.");
+        // field=<devid>.<tag>（或 <tag>）→ 剥前缀得 tag（core_::api::strip_dev_prefix
+        // 单一事实源，同 ctx:get_device 语义）；cell=[ts, localTime, value] → value
+        // 原样 + ts 取最大（同 mqtt_pub parse_rtdata_hash）。
         let mut values = BTreeMap::new();
         let mut ts: i64 = 0;
         let mut i = 0;
@@ -627,7 +638,7 @@ pub(crate) async fn pull_rtdata_batch(
                     continue;
                 }
             };
-            let tag = field.strip_prefix(&prefix).unwrap_or(&field).to_string();
+            let tag = core_::api::strip_dev_prefix(&devid, &field).to_string();
             match serde_json::from_str::<serde_json::Value>(&raw) {
                 Ok(cell) if cell.as_array().is_some_and(|a| a.len() >= 3) => {
                     let cell = cell.as_array().expect("just checked");

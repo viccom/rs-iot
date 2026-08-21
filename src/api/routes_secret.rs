@@ -120,14 +120,16 @@ mod tests {
     use super::*;
 
     async fn test_client(tag: &str) -> lux::EmbeddedClient {
+        let data_dir =
+            std::env::temp_dir().join(format!("routes-secret-{tag}-{}", std::process::id()));
+        // 满载 flaky 加固（终审计杂项登记）：data_dir 键含 pid，pid 回收复用时上一轮
+        // 残留 WAL 会带出旧 secret 键 → 精确相等断言假红。起跑先整删（照
+        // lua_transform_e2e test_app 复审 P2-5 同款修法，不改被测行为）。
+        let _ = std::fs::remove_dir_all(&data_dir);
         let cfg = crate::config::AppConfig {
             lux: crate::config::LuxConfig {
                 port: 0,
-                data_dir: std::env::temp_dir()
-                    .join(format!("routes-secret-{tag}-{}", std::process::id()))
-                    .to_str()
-                    .unwrap()
-                    .to_string(),
+                data_dir: data_dir.to_str().unwrap().to_string(),
                 ..Default::default()
             },
             ..Default::default()

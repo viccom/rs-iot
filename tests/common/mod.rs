@@ -30,8 +30,10 @@ pub async fn start_lux(data_dir: &str) -> (lux::ServerHandle, lux::EmbeddedClien
     (handle, client)
 }
 
-/// 优雅关闭 lux（内部先 SAVE 再 shutdown），并清理临时 data_dir。
-/// 清理失败忽略（Windows 上文件句柄释放可能有延迟）。
+/// 优雅关闭 lux（内部先 SAVE 再 shutdown）。**不清理 data_dir**——临时目录的清理
+/// 责任在调用方：复用目录的套件（real_chain 模式）起跑前先整删（见
+/// lua_transform_e2e `real_chain` 先例）；且 Windows 上 lux 句柄释放有延迟，关闭后
+/// 立即删除也可能失败，故不在本 helper 内顺带删。
 pub async fn stop_lux(handle: lux::ServerHandle) {
     let _ = rs_iot::db::shutdown_lux(handle).await;
 }

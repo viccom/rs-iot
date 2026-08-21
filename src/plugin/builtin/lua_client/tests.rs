@@ -661,8 +661,10 @@ async fn ctl_reload_message_triggers_vm_reload() {
         LuaClient.run(ctx, inst, tx, cmd_rx, run_token).await;
     });
 
-    // 首轮样本：boots=1（首启 on_init）
-    let first = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+    // 首轮样本：boots=1（首启 on_init）。满载 flaky 加固（终审计杂项登记）：超时
+    // 5s→10s——满载下 VM 组装 + manifest + 首个 collect 周期的调度抖动可超 5s，
+    // 单独跑恒过的偶发红即此窗口（不改被测行为）。
+    let first = tokio::time::timeout(std::time::Duration::from_secs(10), rx.recv())
         .await
         .expect("首个样本")
         .expect("Sample 非 None");
@@ -679,18 +681,22 @@ async fn ctl_reload_message_triggers_vm_reload() {
         .await
         .unwrap();
 
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(6);
+    // 满载 flaky 加固（终审计杂项登记，不改被测行为）：外层 deadline 6s→15s；
+    // 且内层 2s 空转不提前退——原实现样本间隔 >2s 即 break（满载下 collect 周期
+    // 抖动可超 2s，即使 deadline 未到也早退假红）。通道关闭（Ok(None)，实例任务
+    // 退出）才立即退，再等无效。
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
     let mut saw_two = false;
     while std::time::Instant::now() < deadline {
-        if let Ok(Some(s)) =
-            tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv()).await
-        {
-            if format!("{:?}", s.values).contains('2') {
-                saw_two = true;
-                break;
+        match tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv()).await {
+            Ok(Some(s)) => {
+                if format!("{:?}", s.values).contains('2') {
+                    saw_two = true;
+                    break;
+                }
             }
-        } else {
-            break;
+            Ok(None) => break,
+            Err(_) => {}
         }
     }
     assert!(saw_two, "reload 后 on_init 应重跑（boots=2）");

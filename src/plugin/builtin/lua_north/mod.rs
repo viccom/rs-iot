@@ -230,6 +230,9 @@ impl Sink for LuaNorth {
         let mut publish_ok: u64 = 0;
         let mut publish_fail: u64 = 0;
         let mut reconnect_count: u64 = 0;
+        // down 丢弃计数（复审 P3 清偿）：down 失败/超预算跳过的下行条数——本地
+        // 累计，flush 时经 sync_north_stats 落 extra（照 transform rtdata_skipped 模式）。
+        let mut down_skipped: u64 = 0;
 
         // 初始连接（Q5 序列：will → auth → password 解析 → MqttOptions → Connect）。
         // Fatal（password secret ref 非法 / lux 错误 / 通道关闭）= 启动失败 warn 退出；
@@ -304,7 +307,14 @@ impl Sink for LuaNorth {
                     Evt::ReconnectNow
                 }
                 _ = flush_ticker.tick() => {
-                    sync_north_stats(&mut tracker, publish_ok, publish_fail, reconnect_count, &alarm);
+                    sync_north_stats(
+                        &mut tracker,
+                        publish_ok,
+                        publish_fail,
+                        reconnect_count,
+                        down_skipped,
+                        &alarm,
+                    );
                     tracker.flush().await;
                     continue;
                 }
@@ -401,20 +411,26 @@ impl Sink for LuaNorth {
                     }
                     contract::MqttEvt::Down { topic, payload } => {
                         // down(topic, payload)（可选回调；T7 全量路由——命令 topic 是
-                        // T8 兼容脚本概念）。超预算记 tick_fail（同 lua_client 事件驱动
-                        // 回调语义）。
-                        if let Err(e) = core_::budget::with_budget(
+                        // T8 兼容脚本概念）。脚本错误与超预算同口径：warn + tick_fail
+                        //（degraded 判定，同 lua_client 事件驱动回调语义）+ down_skipped
+                        // 计数（丢弃量可见）。此前 `if let Err` 只捕 with_budget 的
+                        // 超预算层，脚本错误以 Ok(Err) 形态被静默吞——本批补双层处理。
+                        match core_::budget::with_budget(
                             "down",
                             cfg.callback_timeout_ms,
                             contract::call_down(&lua, &topic, &payload),
                         )
                         .await
                         {
-                            tracing::warn!(
-                                "[luaNorth] inst {} down 失败（topic={topic}）：{e}",
-                                inst.inst_id
-                            );
-                            tracker.tick_fail(&e.to_string());
+                            Ok(Ok(())) => {}
+                            Ok(Err(e)) | Err(e) => {
+                                down_skipped += 1;
+                                tracing::warn!(
+                                    "[luaNorth] inst {} down 失败（topic={topic}）：{e}",
+                                    inst.inst_id
+                                );
+                                tracker.tick_fail(&e.to_string());
+                            }
                         }
                     }
                     contract::MqttEvt::PubResult { ok, fail } => {
@@ -510,6 +526,7 @@ impl Sink for LuaNorth {
                         publish_ok,
                         publish_fail,
                         reconnect_count,
+                        down_skipped,
                         &alarm,
                     );
                     tracker.flush().await;
@@ -526,6 +543,7 @@ impl Sink for LuaNorth {
             publish_ok,
             publish_fail,
             reconnect_count,
+            down_skipped,
             &alarm,
         );
         tracker.flush().await;
@@ -533,17 +551,21 @@ impl Sink for LuaNorth {
 }
 
 /// T7 stat 计数快照（Q5）：publish_ok/publish_fail/reconnect_count 落 tracker
-/// extra（每个 flush 点前调用，不留陈旧）。告警频控计数同出口（Q12 T4）。
+/// extra（每个 flush 点前调用，不留陈旧）。告警频控计数同出口（Q12 T4）；
+/// down_skipped 同出口（复审 P3 清偿：down 丢弃量可见，照 transform
+/// rtdata_skipped 模式——本地累计 u64 快照落 extra）。
 fn sync_north_stats(
     tracker: &mut crate::plugin::stat_tracker::StatTracker,
     publish_ok: u64,
     publish_fail: u64,
     reconnect_count: u64,
+    down_skipped: u64,
     alarm: &core_::api::AlarmStats,
 ) {
     tracker.extra_insert("publish_ok", serde_json::json!(publish_ok));
     tracker.extra_insert("publish_fail", serde_json::json!(publish_fail));
     tracker.extra_insert("reconnect_count", serde_json::json!(reconnect_count));
+    tracker.extra_insert("down_skipped", serde_json::json!(down_skipped));
     // Q12 T4（spec alarm §3）：fire_event 被频控拒绝累计（风暴可见性）。
     tracker.extra_insert(
         "alarm_rate_limited",

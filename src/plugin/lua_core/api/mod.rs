@@ -151,6 +151,22 @@ async fn push_sample(
     }
 }
 
+/// 剥 tag 的 `<devid>.` 设备前缀（终审计杂项登记：该语义原先 4 处各自展开，收敛
+/// 单一事实源）。tag 双形态（"tag" / "devid.tag"，与 Sample.values 同源）：前缀命中
+/// 返回剥后 tag，不命中原样返回（不可剥形态如 devid=dev1 时的 "dev2.temp"）。
+/// 消费方：本文件 [`self_write_keys`]/get_device、luaTransform 投递点、luaNorth
+/// `pull_rtdata_batch`。手写字节比较而非 `strip_prefix(&format!(...))`：投递热路径
+/// 逐点调用，免每次分配；`starts_with` 保证 `devid.len()` 是 tag 的字符边界，
+/// `[n] == b'.'` 命中后 `n+1` 亦是边界，切片安全。
+pub(crate) fn strip_dev_prefix<'a>(devid: &str, tag: &'a str) -> &'a str {
+    let n = devid.len();
+    if tag.len() > n && tag.as_bytes()[n] == b'.' && tag.starts_with(devid) {
+        &tag[n + 1..]
+    } else {
+        tag
+    }
+}
+
 /// 自写键快照（Q6 自环防护，T8）：`(devid,tag)` 对；tag 双形态（"tag" /
 /// "devid.tag"，与 Sample.values 同源）——壳层投递路径剥 dev 前缀后查表，两种
 /// 形态都记保证任一写法可命中。
@@ -158,14 +174,14 @@ fn self_write_keys(
     devid: &str,
     values: &std::collections::BTreeMap<String, SampleValue>,
 ) -> Vec<(String, String)> {
-    let prefix = format!("{devid}.");
     let mut keys: Vec<(String, String)> = values
         .keys()
         .map(|t| (devid.to_string(), t.clone()))
         .collect();
+    // 第二形态仅当真的剥短了（无前缀时 helper 原样返回，长度不变）。
     keys.extend(values.keys().filter_map(|t| {
-        t.strip_prefix(&prefix)
-            .map(|s| (devid.to_string(), s.to_string()))
+        let s = strip_dev_prefix(devid, t);
+        (s.len() < t.len()).then(|| (devid.to_string(), s.to_string()))
     }));
     keys
 }
@@ -551,7 +567,6 @@ pub(crate) fn register(lua: &Lua, ac: &ApiCtx<'_>) -> mlua::Result<()> {
             async move {
                 let devid = devid.to_string_lossy().to_string();
                 let key = format!("rtdata:{devid}");
-                let prefix = format!("{devid}.");
                 match lux.execute_value("HGETALL", &[&key]).await {
                     Ok(lux::EmbeddedValue::Array(arr)) => {
                         if arr.is_empty() {
@@ -582,7 +597,7 @@ pub(crate) fn register(lua: &Lua, ac: &ApiCtx<'_>) -> mlua::Result<()> {
                                     continue;
                                 }
                             };
-                            let tag = field.strip_prefix(&prefix).unwrap_or(&field);
+                            let tag = strip_dev_prefix(&devid, &field);
                             if let Some(v) = parse_rtdata_value(&raw) {
                                 t.set(tag, v)?;
                             }

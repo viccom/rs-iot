@@ -502,6 +502,24 @@ fn clamp_timeout_secs_bounds() {
     assert_eq!(super::http::clamp_timeout_secs(Some(3600)), 30);
 }
 
+/// strip_dev_prefix 单测锁（终审计杂项登记收拢，4 处消费共用语义）：
+/// 双形态（"tag" / "devid.tag"）与不可剥形态（他设备前缀 / 裸 devid / 空串）。
+#[test]
+fn strip_dev_prefix_dual_forms() {
+    use super::strip_dev_prefix;
+    // 全形态：带本 dev 前缀 → 剥；裸 tag → 原样。
+    assert_eq!(strip_dev_prefix("dev1", "dev1.temp"), "temp");
+    assert_eq!(strip_dev_prefix("dev1", "temp"), "temp");
+    // 不可剥：他设备前缀 / tag 即 devid（无点分隔）/ devid 是 tag 前缀但非点界。
+    assert_eq!(strip_dev_prefix("dev1", "dev2.temp"), "dev2.temp");
+    assert_eq!(strip_dev_prefix("dev1", "dev1"), "dev1");
+    assert_eq!(strip_dev_prefix("dev1", "dev10.temp"), "dev10.temp");
+    // 边界：空 devid（前缀 "."）/ 空 tag。
+    assert_eq!(strip_dev_prefix("", ".t"), "t");
+    assert_eq!(strip_dev_prefix("", "t"), "t");
+    assert_eq!(strip_dev_prefix("dev1", ""), "");
+}
+
 /// Q2 一致性锁（真注册断言）：每张 "ctx:" 能力卡必须真注册在 ctx 表上（mock VM）。
 ///
 /// 与 [`crate::plugin::lua_core::capability`] 常量表反向对齐——新增 ctx API 而不登卡
