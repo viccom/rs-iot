@@ -91,10 +91,16 @@ pub(crate) fn parse_transform_cfg(app: &serde_json::Value) -> Result<TransformCf
     // 更危险——订阅是 transform 的数据面入口，漏配 = 数据静默丢失，必须可见）。
     let subscribe = match app.get("subscribe") {
         None => Vec::new(),
-        Some(serde_json::Value::Array(arr)) => arr
-            .iter()
-            .filter_map(|v| v.as_str().map(String::from))
-            .collect::<Vec<_>>(),
+        // 复审 P3-4：元素级非字符串 → Err（此前 filter_map 静默丢——坏声明可见，
+        // 与模块头「订阅是数据面入口」原则一致；north str_vec 同步收紧）。
+        Some(serde_json::Value::Array(arr)) => {
+            if let Some(bad) = arr.iter().find(|v| !v.is_string()) {
+                return Err(format!("app_config.subscribe 含非字符串元素（实 {bad}）"));
+            }
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect::<Vec<_>>()
+        }
         Some(other) => {
             return Err(format!(
                 "app_config.subscribe 类型不符（期望字符串数组，实 {other}）"
@@ -384,5 +390,16 @@ mod tests {
         for bad in ["", ".", "..", "a..b", "a.b.c", ".b", "a.", "a*b"] {
             assert!(parse_pattern(bad).is_err(), "'{bad}' 应拒");
         }
+    }
+
+    /// 复审 P3-4：subscribe 数组含非字符串元素 → Err（此前 filter_map 静默丢）。
+    #[test]
+    fn parse_subscribe_non_string_element_errors() {
+        let r = parse_transform_cfg(&serde_json::json!({
+            "script": "t", "subscribe": ["dev1", 42]
+        }));
+        assert!(r.is_err(), "非字符串元素应拒: {r:?}");
+        let msg = r.unwrap_err();
+        assert!(msg.contains("非字符串元素"), "错误应点名元素问题：{msg}");
     }
 }

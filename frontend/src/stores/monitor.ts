@@ -153,13 +153,19 @@ export const useMonitorStore = defineStore('monitor', () => {
    * 仅合入推送值，不删既有 dev/tag（增量覆盖；全量刷新靠轮询整包替换）。
    */
   function applyRtdataSamples(samples: RtdataSample[]) {
-    const now = new Date()
     const p2 = (n: number) => String(n).padStart(2, '0')
-    const localTime = `${now.getFullYear()}-${p2(now.getMonth() + 1)}-${p2(now.getDate())} ${p2(now.getHours())}:${p2(now.getMinutes())}:${p2(now.getSeconds())}`
     for (const s of samples) {
       const dev = rtdata.value[s.devid] ?? (rtdata.value[s.devid] = {})
+      // localTime 由样本 ts 推导（复审 P3-2：此前用接收时刻——事件迟到/积压时
+      // 显示时间与数据时刻偏差；与后端轮询产物同以数据时刻为准）。
+      const t = new Date(s.ts * 1000)
+      const localTime = `${t.getFullYear()}-${p2(t.getMonth() + 1)}-${p2(t.getDate())} ${p2(t.getHours())}:${p2(t.getMinutes())}:${p2(t.getSeconds())}`
       for (const [tag, v] of Object.entries(s.values)) {
         const field = tag.includes(s.devid) ? tag : `${s.devid}.${tag}`
+        // 旧值保护（复审 P3-1）：SSE 迟到旧事件 vs 轮询已取新值的两条路径时序
+        // 交叉，无条件覆盖会短暂倒退显示——ts 不新于现值时跳过（轮询兜底不变）。
+        const cur = dev[field]
+        if (cur && s.ts < cur[0]) continue
         dev[field] = [s.ts, localTime, typeof v === 'string' ? v : String(v)]
       }
     }

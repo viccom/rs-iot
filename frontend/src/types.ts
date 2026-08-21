@@ -71,9 +71,10 @@ export interface RtdataSample {
 }
 
 /** rtdata 变更通知事件（SSE `rtdata` kind，pipeline flush_batch 批次级聚合）。
- *  dev_ids 去重 + 截断 50；count 是本批真实点数（未截断）。Q6 带值扩展：samples 按
- *  dev 聚合携带最新值（与 dev_ids 同步截断）——前端直用即时刷新；lagged 丢帧 / 截断
- *  / 旧后端缺失时数据不全或没有，仍靠既有 2s 轮询 /rtdatas 兜底（可选字段零破坏）。 */
+ *  dev_ids 去重 + 截断 50；count 是本批真实 Sample 条数（未截断；多 tag 的 Sample 记 1）。
+ *  Q6 带值扩展：samples 按 dev 聚合携带最新值（与 dev_ids 同步截断）——前端直用即时
+ *  刷新；lagged 丢帧 / 截断 / 旧后端缺失时数据不全或没有，仍靠既有 2s 轮询 /rtdatas
+ *  兜底（可选字段零破坏）。 */
 export interface RtdataEvent {
   dev_ids: string[]
   count: number

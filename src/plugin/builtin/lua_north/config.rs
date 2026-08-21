@@ -110,10 +110,17 @@ pub(crate) fn parse_north_cfg(app: &serde_json::Value) -> Result<NorthCfg, Strin
     let str_vec = |key: &str| -> Result<Vec<String>, String> {
         match app.get(key) {
             None => Ok(Vec::new()),
-            Some(serde_json::Value::Array(arr)) => Ok(arr
-                .iter()
-                .filter_map(|v| v.as_str().map(String::from))
-                .collect()),
+            // 复审 P3-4：元素级非字符串 → Err（此前 filter_map 静默丢——subscribe/
+            // secrets 都是语义关键清单，坏元素必须可见；transform 同步收紧）。
+            Some(serde_json::Value::Array(arr)) => {
+                if let Some(bad) = arr.iter().find(|v| !v.is_string()) {
+                    return Err(format!("app_config.{key} 含非字符串元素（实 {bad}）"));
+                }
+                Ok(arr
+                    .iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect())
+            }
             Some(other) => Err(format!(
                 "app_config.{key} 类型不符（期望字符串数组，实 {other}）"
             )),
@@ -293,5 +300,16 @@ mod tests {
         assert_eq!(c.batch_max_count, 1, "0 抬到 1（空 Vec remove panic 预防）");
         let c = parse_north_cfg(&json!({"script":"t","host":"h","batch_max_count":7})).unwrap();
         assert_eq!(c.batch_max_count, 7, "合法值原样");
+    }
+
+    /// 复审 P3-4：字符串数组键（subscribe/secrets）含非字符串元素 → Err（此前静默丢）。
+    #[test]
+    fn parse_str_vec_non_string_element_errors() {
+        let r = parse_north_cfg(&serde_json::json!({
+            "script": "t", "host": "h", "port": 1883,
+            "subscribe": ["a/topic", true]
+        }));
+        assert!(r.is_err(), "非字符串元素应拒: {r:?}");
+        assert!(r.unwrap_err().contains("非字符串元素"));
     }
 }

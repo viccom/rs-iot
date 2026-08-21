@@ -181,6 +181,10 @@ impl Source for LuaTransform {
         // cfg.fail_threshold → degraded，照 lua_client 记账语义——此前 on_rtdata
         // 纯订阅实例的数据面全灭只在 extra 计数可见，状态恒 running）。
         let mut consecutive_fail: u32 = 0;
+        // on_rtdata 失败 warn 限流（复审 P3：照 pipeline maybe_warn 模式——高频点全
+        // 失败时每点一条 warn 会洪水，且回灌同一条 EventBus 挤占 Rtdata；1s 去重后
+        // 首条必达，量级看 rtdata_skipped 计数）。
+        let mut last_fail_warn: Option<std::time::Instant> = None;
         let mut flush_ticker = tokio::time::interval(std::time::Duration::from_secs(
             crate::plugin::stat_tracker::FLUSH_INTERVAL_SECS,
         ));
@@ -215,7 +219,7 @@ impl Source for LuaTransform {
                     Err(broadcast::error::RecvError::Lagged(n)) => {
                         // 复审 P2-4：丢帧计数入 stat（SSE 侧早有 rs_iot_sse_lagged_total，
                         // 订阅实例侧此前不可观测）——lag 帧数按批累计。
-                        rtdata_lagged += n as u64;
+                        rtdata_lagged += n;
                         tracing::debug!(
                             "[luaTransform] inst {} EventBus lagged（丢 {n} 帧继续）",
                             inst.inst_id
@@ -347,12 +351,18 @@ impl Source for LuaTransform {
                                     //（一点坏不弃整批）。
                                     rtdata_skipped += 1;
                                     batch_fail += 1;
-                                    tracing::warn!(
-                                        "[luaTransform] inst {} on_rtdata 失败（dev={}, tag={}，跳过该点）：{e}",
-                                        inst.inst_id,
-                                        s.devid,
-                                        tag
-                                    );
+                                    if last_fail_warn
+                                        .map(|t| t.elapsed() >= std::time::Duration::from_secs(1))
+                                        .unwrap_or(true)
+                                    {
+                                        last_fail_warn = Some(std::time::Instant::now());
+                                        tracing::warn!(
+                                            "[luaTransform] inst {} on_rtdata 失败（dev={}, tag={}，跳过该点，1s 内同类不重记——量级看 rtdata_skipped）：{e}",
+                                            inst.inst_id,
+                                            s.devid,
+                                            tag
+                                        );
+                                    }
                                 }
                                 Err(e) => {
                                     // 预算超限（await 型挂起被切断）：**弃批**——跳过
@@ -362,12 +372,18 @@ impl Source for LuaTransform {
                                     // stop/reload/cmd 全程不可见。
                                     rtdata_skipped += 1;
                                     batch_fail += 1;
-                                    tracing::warn!(
-                                        "[luaTransform] inst {} on_rtdata 超预算（dev={}, tag={}）：{e}，整批剩余点跳过（弃批）",
-                                        inst.inst_id,
-                                        s.devid,
-                                        tag
-                                    );
+                                    if last_fail_warn
+                                        .map(|t| t.elapsed() >= std::time::Duration::from_secs(1))
+                                        .unwrap_or(true)
+                                    {
+                                        last_fail_warn = Some(std::time::Instant::now());
+                                        tracing::warn!(
+                                            "[luaTransform] inst {} on_rtdata 超预算（dev={}, tag={}）：{e}，整批剩余点跳过（弃批）",
+                                            inst.inst_id,
+                                            s.devid,
+                                            tag
+                                        );
+                                    }
                                     break 'points;
                                 }
                             }

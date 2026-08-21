@@ -80,7 +80,7 @@ pub enum EventPayload {
     Rtdata {
         /// 本批变更的 devid 列表（去重；现场极端多设备时截断，count 仍标真实总量）。
         dev_ids: Vec<String>,
-        /// 本批点数（供前端估算变更量级，未截断的真实值）。
+        /// 本批 Sample 条数（供前端估算变更量级，未截断的真实值；一个多 tag 的 Sample 记 1——与旧实现口径一致）。
         count: usize,
         /// 按 dev 聚合的最新值（与 dev_ids 同步截断；旧前端可忽略——缺失/不全时
         /// 轮询兜底不变，兼容字段零破坏）。`Arc` 包裹（复审 P2-4）：broadcast 要求

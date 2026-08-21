@@ -146,6 +146,23 @@ describe('monitor store', () => {
     // samples 空数组：同样不写（空批无意义，与缺失同路径）。
     expect(() => s.onRtdataNotify({ dev_ids: ['devB'], count: 1, ts: 't', samples: [] })).not.toThrow()
     expect(JSON.stringify(s.rtdata)).toBe(before)
+    // 旧值保护（复审 P3-1）：SSE 迟到旧事件（ts 旧于现值）不倒退覆盖。
+    s.onRtdataNotify({
+      dev_ids: ['devA'], count: 1, ts: 't',
+      samples: [{ devid: 'devA', values: { temp: 0.1 }, ts: 1699999000 }],
+    })
+    expect(s.rtdata['devA']['devA.temp'][2]).toBe('1.5')
+    // 新值正常覆盖 + localTime 由样本 ts 推导（复审 P3-2：期望值用同 Date 逻辑
+    // 推导——不依赖测试机时区，且证明与接收时刻无关：ts 是确定的历史/未来时刻）。
+    const ts2 = 1800000000 // 2027 年某确定时刻
+    s.onRtdataNotify({
+      dev_ids: ['devA'], count: 1, ts: 't',
+      samples: [{ devid: 'devA', values: { temp: 2.5 }, ts: ts2 }],
+    })
+    const d2 = new Date(ts2 * 1000)
+    const p2 = (n: number) => String(n).padStart(2, '0')
+    const expectLt = `${d2.getFullYear()}-${p2(d2.getMonth() + 1)}-${p2(d2.getDate())} ${p2(d2.getHours())}:${p2(d2.getMinutes())}:${p2(d2.getSeconds())}`
+    expect(s.rtdata['devA']['devA.temp']).toEqual([ts2, expectLt, '2.5'])
     s.stop()
   })
 

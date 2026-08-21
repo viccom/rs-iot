@@ -217,7 +217,7 @@ async fn flush_batch(
             // rtdata 变更通知（批次级聚合，模块 M2b）：一批一次 publish。
             // 50万点/秒下每点 publish 会爆 SSE——按 dev 聚合带最新值（Q6：前端直用
             // 即时刷新），dev_ids/samples 去重 + 截断 RTDATA_NOTIFY_MAX_DEVS（现场极端
-            // 多设备时防 payload 过大，count 仍标真实点数总量）。无 SSE 消费者时
+            // 多设备时防 payload 过大，count 仍标真实 Sample 条数总量）。无 SSE 消费者时
             // publish 静默零开销（broadcast 特性）。
             publish_rtdata_notify(ctx, buf);
         }
@@ -231,7 +231,7 @@ async fn flush_batch(
 }
 
 /// rtdata 变更通知 payload 的 devid 列表截断上限（现场极端多设备时防 payload 过大）。
-/// 超出的 dev 不进 dev_ids/samples，但 count 仍记录真实点数总量（前端据此判断是否回退全量拉取）。
+/// 超出的 dev 不进 dev_ids/samples，但 count 仍记录真实 Sample 条数总量（前端据此判断是否回退全量拉取）。
 const RTDATA_NOTIFY_MAX_DEVS: usize = 50;
 
 /// 聚合一批 Sample 为 Rtdata 事件载荷（Q6 带值扩展，C 阶段 T1）。纯函数便于单测。
@@ -242,7 +242,7 @@ const RTDATA_NOTIFY_MAX_DEVS: usize = 50;
 /// - `ts` 取该 dev 本批最后一笔 `Sample.timestamp`（buf 顺序）；
 /// - dev 按首次出现序去重，唯一 dev 数截断到 `RTDATA_NOTIFY_MAX_DEVS`——
 ///   **samples 与 dev_ids 同步截断**（同前 N 个 dev、按下标对齐，两字段永不漂移）；
-/// - `count` 仍是 buf 真实点数（Sample 条数，未截断——沿用旧 dev_ids 实现语义）。
+/// - `count` 仍是 buf 真实 **Sample 条数**（未截断；多 tag 的 Sample 记 1——沿用旧实现口径）。
 fn aggregate_rtdata(buf: &[Sample]) -> (Vec<String>, usize, Vec<RtdataSample>) {
     // dev 首次出现序（保序去重）；聚合态：tag 最新值 + 该 dev 最后一笔 ts。
     let mut order: Vec<String> = Vec::new();
@@ -277,7 +277,7 @@ fn aggregate_rtdata(buf: &[Sample]) -> (Vec<String>, usize, Vec<RtdataSample>) {
 ///
 /// 从 `buf` 经 `aggregate_rtdata` 聚合（同 dev 合并、dev_ids/samples 同步截断到
 /// `RTDATA_NOTIFY_MAX_DEVS`），经 `ctx.event_tx.publish` 投递。`count` 始终是 buf
-/// 真实点数（未截断），前端据此估算变更规模。
+/// 真实 Sample 条数（未截断），前端据此估算变更规模。
 fn publish_rtdata_notify(ctx: &HostContext, buf: &[Sample]) {
     // 复审 P2-3：无消费者（无 SSE 连接且无订阅型实例）时聚合白付——每点的
     // key/value 克隆 + BTreeMap 插入在 flush 热路径上，直接跳过。竞态窗口一批
@@ -383,7 +383,7 @@ mod tests {
     }
 
     /// 同批同 dev 合并为一个 RtdataSample：同 tag 后写覆盖、不同 tag 保留、
-    /// ts 取该 dev 本批最后一笔 Sample.timestamp；count 仍是 buf 真实点数
+    /// ts 取该 dev 本批最后一笔 Sample.timestamp；count 仍是 buf 真实 Sample 条数
     /// （Sample 条数，与旧 dev_ids 实现的 buf.len() 语义一致，未截断）。
     #[test]
     fn aggregate_rtdata_merges_same_dev_last_write_wins() {
@@ -404,7 +404,7 @@ mod tests {
             ),
         ];
         let (dev_ids, count, samples) = aggregate_rtdata(&buf);
-        assert_eq!(count, 3, "count 为 buf 真实点数（Sample 条数，未截断）");
+        assert_eq!(count, 3, "count 为 buf 真实 Sample 条数（未截断）");
         assert_eq!(dev_ids, vec!["d1".to_string(), "d2".to_string()]);
         assert_eq!(samples.len(), 2, "同 dev 合并为一个 RtdataSample");
         // d1：t1 后写覆盖为 9.0，t2/t3 保留；ts 取 d1 最后一笔（300）。
@@ -428,7 +428,7 @@ mod tests {
     }
 
     /// 唯一 dev 数 > RTDATA_NOTIFY_MAX_DEVS 时截断：samples 与 dev_ids **同步**截断
-    /// （同前 50 个 dev、按下标对齐），count 仍记真实点数总量（截断 dev 的点也计入）。
+    /// （同前 50 个 dev、按下标对齐），count 仍记真实 Sample 条数总量（截断 dev 的点也计入）。
     #[test]
     fn aggregate_rtdata_truncates_devs_in_sync() {
         let buf: Vec<Sample> = (0..60)
@@ -437,7 +437,7 @@ mod tests {
         let (dev_ids, count, samples) = aggregate_rtdata(&buf);
         assert_eq!(dev_ids.len(), RTDATA_NOTIFY_MAX_DEVS, "dev_ids 截断 50");
         assert_eq!(samples.len(), RTDATA_NOTIFY_MAX_DEVS, "samples 同步截断 50");
-        assert_eq!(count, 60, "count 仍是真实点数总量（未截断）");
+        assert_eq!(count, 60, "count 仍是真实 Sample 条数总量（未截断）");
         // 两字段按 dev 首次出现序对齐（同下标同 dev）。
         for (i, (d, s)) in dev_ids.iter().zip(samples.iter()).enumerate() {
             assert_eq!(d, &s.devid, "dev_ids[{i}] 与 samples[{i}].devid 必须对齐");

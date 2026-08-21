@@ -23,7 +23,7 @@
 
 1. **Rtdata 带值形状**：`EventPayload::Rtdata` 新增 `samples: Vec<RtdataSample>`（`{devid, values: BTreeMap<tag, SampleValue>, ts}`）；同批同 dev 合并（后写覆盖 tag），**dev 数沿用 `RTDATA_NOTIFY_MAX_DEVS`(50) 截断**，`count` 仍记真实点数；`dev_ids`/`count` 字段原样保留（前端旧消费零破坏）。
 2. **自环防护 = api 层 self-write tracker**：`ApiCtx` 加 `self_writes: Option<Arc<Mutex<HashMap<(devid,tag), Instant>>>>`（仅 Role::Transform 传 Some），`push_sample` 记录自身写点，shell 收 Rtdata 时窗口（10s）内命中即跳过该点。备选「Sample 加 origin 字段」被 `pipeline.rs:6`「Sample 结构不动」硬约束否决。取舍：窗口内**其他源**对同 tag 的并发写入会被一并静默（文档注明；跨源不误自环是宿主保证，跨源可见性不受保证）。
-3. **on_rtdata 单点形态**（Q6 定案原文 `on_rtdata(devid,tag,value)`）：批量事件由宿主拆点逐调，每次调用独立包 `callback_timeout_ms` 预算；超预算跳过剩余点 + 计数（与 collect 超时同语义）。
+3. **on_rtdata 单点形态**（Q6 定案原文 `on_rtdata(devid,tag,value)`）：批量事件由宿主拆点逐调，每次调用独立包 `callback_timeout_ms` 预算；**超预算（await 型挂起被切断）跳过批内剩余点** + 计数（与 collect 超时同语义）；脚本即时错误（不产生停摆）逐点继续。（复审 P1-1 后定稿：T7 首版曾误实现为"超预算逐点继续"——会把整批停摆放大到 命中点数×预算，已修复并加回归锁 `transform_on_rtdata_budget_exceeded_abandons_batch`。）
 4. **跨实例环不做静态消除**（Q6 定案「配置责任」）：异常频率告警依赖 Q12 告警模型（D 阶段独立 spec），C 阶段指南写明配置责任 + 复用既有 stat 体系可观测，不建半成品告警。
 5. **rhai 冻结 = 文档标注**（Q7「标 deprecated、不接线不投入」）：模块 doc + Cargo feature 注释 + 文档一致性，不删代码不摘 feature（`#[deprecated]` 会响编译警告，不取）。
 
@@ -156,7 +156,8 @@ enum Evt { Cmd(Option<CtlMessage>), Reload, Tick, Rtdata(EventPayload) }
 // run()：VM 组装（Role::Transform、io=None、manifest dry_run 校验 @role transform）
 //   biased select!：token / cmd_rx（"reload" → Evt::Reload，VM 级热加载回退）
 //     / reload_rx（hotload watcher，照 lua_client:216） / ticker（period → on_timer）
-//     / event_rx（EventBus subscribe——仅 subscribe 非空 && 脚本有 on_rtdata 时订阅）
+//     / event_rx（EventBus subscribe——subscribe 非空即订阅；on_rtdata 存在性
+//       批级检查——计划初稿的"订阅即查 on_rtdata"会使 reload 后新增回调收不到事件）
 // on_rtdata 投递：EventPayload::Rtdata.samples 展开 → matches() 过滤 → 逐点
 //   call_on_rtdata(lua, devid, tag, value)（with_budget 同款预算包装；超时跳过剩余点+计数）
 // on_timer()：无参回调，同预算包装
