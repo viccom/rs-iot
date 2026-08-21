@@ -262,6 +262,9 @@ mqtt-north password 的 `secret:` 引用走宿主连接序列）。
 - **掩码规则**（list 绝不回显明文，D6）：值 >8 字符 → 前 4 + `****` + 后 4；≤8 → 全 `****`。
 - **审计**（Q4 ref 级、不落值）：set/delete 各落一条 `[secret][audit] set/delete ref=...`
   日志——日志与响应里**绝不出现明文**（who 由 JWT 访问日志侧承载）；脚本侧读取不落日志。
+- **加密存储**（D-SEC-1）：值经 chacha20poly1305 AEAD 加密落库（密钥由 `jwt_secret` 经
+  HKDF-SHA256 派生）——RESP 直读 `HGETALL secrets` 只见 `enc:v1:` 密文；旧明文值读兼容
+  （懒迁移：读到不回写，下次 set 覆盖时才加密）。
 - 删除后引用该 ref 的实例下一轮 auth/重连按"认证失败"退避重试（补写即救活，无需重启）。
 
 ```bash

@@ -205,6 +205,10 @@ pub async fn run_app_with_shutdown(
     });
     tracing::info!(%hwid, "rs-iot starting");
 
+    // D-SEC-1：secrets AEAD 密钥进程级初始化（jwt_secret 恒定）——先于任何
+    // secrets 读写（REST/脚本/北向路径共享同一派生键）。
+    db::secrets::init_key(&cfg.jwt_secret);
+
     std::fs::create_dir_all(&cfg.lux.data_dir)?;
     // D-LUX-1：非 loopback 绑定强制认证的前置校验。走 Err 而非 panic——
     // run_app 返回 Result 且 create_dir_all? 是既有启动失败惯例（main 经

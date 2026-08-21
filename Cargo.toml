@@ -51,6 +51,13 @@ toml = "0.8"
 sysinfo = "0.32"
 sha2 = "0.10"
 
+# D-SEC-1 secrets 值 AEAD 加密存储：chacha20poly1305 + HKDF-SHA256(jwt_secret)。
+# 版本对齐树内（hkdf 0.12/base64 0.22 经 jsonwebtoken 栈 lock 已有，不新增编译；
+# hkdf 0.13 强制 sha2 0.11，会连带 hwid/ext_token 迁移，不值）；chacha20 0.10 树内已有。
+chacha20poly1305 = "0.11"
+hkdf = "0.12"
+base64 = "0.22"
+
 # CLI
 clap = { version = "4", features = ["derive"] }
 
