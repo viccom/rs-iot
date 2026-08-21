@@ -275,11 +275,16 @@ impl Source for LuaTransform {
                     if lua.globals().get::<mlua::Function>("on_rtdata").is_err() {
                         continue;
                     }
-                    for s in &samples {
+                    'points: for s in &samples {
                         // tag 双形态（"tag" / "devid.tag"，与 Sample.values 同源）：
                         // 剥本 dev 前缀（照 lua_north pull_rtdata_batch 语义）。
                         let prefix = format!("{}.", s.devid);
                         for (raw_tag, value) in &s.values {
+                            // 批内取消可见性（复审 P1-1）：token 只在 select! 臂轮询，
+                            // 长批逐点 await 期间不可见——逐点补查，stop 即时生效。
+                            if token.is_cancelled() {
+                                break 'points;
+                            }
                             let tag = raw_tag.strip_prefix(&prefix).unwrap_or(raw_tag.as_str());
                             // Q6 宿主过滤：模式不命中的点不进脚本。
                             if !matcher.matches(&s.devid, tag) {
@@ -309,9 +314,9 @@ impl Source for LuaTransform {
                             .await
                             {
                                 Ok(Ok(())) => rtdata_points += 1,
-                                Ok(Err(e)) | Err(e) => {
-                                    // 单点超预算/出错：warn + 计数跳过该点继续
-                                    //（取舍 3：批量事件逐点独立预算，一点坏不弃整批）。
+                                Ok(Err(e)) => {
+                                    // 脚本即时错误（非挂起）：不产生停摆，逐点继续
+                                    //（一点坏不弃整批）。
                                     rtdata_skipped += 1;
                                     tracing::warn!(
                                         "[luaTransform] inst {} on_rtdata 失败（dev={}, tag={}，跳过该点）：{e}",
@@ -319,6 +324,21 @@ impl Source for LuaTransform {
                                         s.devid,
                                         tag
                                     );
+                                }
+                                Err(e) => {
+                                    // 预算超限（await 型挂起被切断）：**弃批**——跳过
+                                    // 批内剩余点（计划取舍 3 原文「跳过剩余点」，与
+                                    // collect 超时同语义）。复审 P1-1：此前逐点继续会把
+                                    // 整批停摆放大到 命中点数 × callback_timeout_ms，
+                                    // stop/reload/cmd 全程不可见。
+                                    rtdata_skipped += 1;
+                                    tracing::warn!(
+                                        "[luaTransform] inst {} on_rtdata 超预算（dev={}, tag={}）：{e}，整批剩余点跳过（弃批）",
+                                        inst.inst_id,
+                                        s.devid,
+                                        tag
+                                    );
+                                    break 'points;
                                 }
                             }
                         }

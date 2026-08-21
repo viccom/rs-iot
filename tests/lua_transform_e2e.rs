@@ -883,3 +883,131 @@ end
     common::stop_lux(handle).await;
     let _ = std::fs::remove_dir_all(&scripts);
 }
+
+/// 复审 P1-1 回归锁：on_rtdata 单点**超预算**（await 型挂起——满 hub 的 set_value）
+/// → 弃批（跳过批内剩余点，计划取舍 3 原文语义），实例不死（后续事件正常处理）。
+/// 修复前行为：超预算点跳过后继续处理剩余点（z_ok 会被回调）→ 断言 got_z_ok
+/// 为 None 红。0_marker（BTreeMap 序在 a_hang 之前）作「事件确已送达」正向佐证，
+/// 防订阅竞态下的假绿（broadcast 不回放，重发兜底）。
+#[tokio::test]
+async fn transform_on_rtdata_budget_exceeded_abandons_batch() {
+    let event_bus = EventBus::new(64);
+    let data_dir =
+        std::env::temp_dir().join(format!("lua-transform-budget-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&data_dir);
+    let (handle, client) = common::start_lux(data_dir.to_str().expect("utf8")).await;
+    let ctx = test_ctx(client.clone(), event_bus.clone());
+
+    let scripts =
+        std::env::temp_dir().join(format!("lua-transform-budget-src-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&scripts);
+    let script_dir = scripts.join("t9");
+    std::fs::create_dir_all(&script_dir).expect("mkdir");
+    std::fs::write(
+        script_dir.join("main.lua"),
+        r#"-- @role transform
+-- a_hang：set_value 挂在满 hub 上（send_with_deadline 2s > 预算 200ms）
+-- 0_marker / z_ok / b_ok2：快速 kv 落痕（BTreeMap 序：0_marker < a_hang < z_ok）
+function on_rtdata(devid, tag, value)
+  if string.sub(tag, 1, 2) == "a_" then
+    ctx:set_value("devH", "x", 1)
+  else
+    ctx:kv_set("got_" .. tag, tostring(value))
+  end
+end
+"#,
+    )
+    .expect("write");
+
+    // 容量 1 且预填占满 + rx 保活：a_hang 分支的 set_value 挂起 → 200ms 预算切断
+    //（lua_client on_init_budget_timeout 同款确定性手法，无时序竞态）。
+    let (tx, mut rx) = mpsc::channel::<Sample>(1);
+    tx.try_send(Sample {
+        hwid: Hwid::new("it"),
+        devid: "placeholder".into(),
+        values: BTreeMap::new(),
+        timestamp: 0,
+    })
+    .unwrap();
+
+    let inst = transform_inst(
+        "transform-9",
+        "luaTransform",
+        serde_json::json!({
+            "script": "t9", "period": 0, "subscribe": ["devH"],
+            "scripts_root": scripts.to_str().expect("utf8"),
+            "callback_timeout_ms": 200
+        }),
+    );
+    let (_cmd_tx, cmd_rx) = mpsc::channel::<rs_iot::types::CtlMessage>(4);
+    let token = CancellationToken::new();
+    let run_token = token.child_token();
+    tokio::spawn(async move {
+        use rs_iot::plugin::traits::Source;
+        rs_iot::plugin::builtin::lua_transform::LuaTransform
+            .run(ctx, inst, tx, cmd_rx, run_token)
+            .await;
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    // 重发 + 轮询正向佐证（0_marker 落痕 = 事件已送达且 0_marker 点已处理）。
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(6);
+    while std::time::Instant::now() < deadline {
+        event_bus.publish(EventPayload::Rtdata {
+            dev_ids: vec!["devH".into()],
+            count: 3,
+            samples: vec![rtdata_sample(
+                "devH",
+                &[
+                    ("0_marker", SampleValue::Str("seen".into())),
+                    ("a_hang", SampleValue::Int(1)),
+                    ("z_ok", SampleValue::Str("after".into())),
+                ],
+            )],
+            ts: "2026-08-21T00:00:00Z".into(),
+        });
+        if kv_str(&client, "transform-9", "got_0_marker")
+            .await
+            .is_some()
+        {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    }
+    assert!(
+        kv_str(&client, "transform-9", "got_0_marker")
+            .await
+            .is_some(),
+        "正向佐证：0_marker 点应被处理（事件送达证明，防假绿）"
+    );
+    // 给「修复前继续行为」留出显形窗口：a_hang 200ms 切断后 z_ok 即时落痕。
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    assert!(
+        kv_str(&client, "transform-9", "got_z_ok").await.is_none(),
+        "超预算弃批：a_hang 之后的 z_ok 不应被处理（P1-1 修复前此处红——逐点继续会落痕）"
+    );
+
+    // 实例不死：后续事件（无挂起点）正常处理——VM 与订阅存活。
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let mut recovered = false;
+    while std::time::Instant::now() < deadline {
+        event_bus.publish(EventPayload::Rtdata {
+            dev_ids: vec!["devH".into()],
+            count: 1,
+            samples: vec![rtdata_sample("devH", &[("b_ok2", SampleValue::Int(2))])],
+            ts: "2026-08-21T00:00:01Z".into(),
+        });
+        if kv_str(&client, "transform-9", "got_b_ok2").await.as_deref() == Some("2") {
+            recovered = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    }
+    assert!(recovered, "弃批后实例应存活并处理后续事件");
+
+    token.cancel();
+    let _ = rx.recv().await;
+    common::stop_lux(handle).await;
+    let _ = std::fs::remove_dir_all(&scripts);
+    let _ = std::fs::remove_dir_all(&data_dir);
+}
