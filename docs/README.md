@@ -59,12 +59,12 @@
 | [2026-08-11-ai-agent-integration-v3-design.md](designs/2026-08-11-ai-agent-integration-v3-design.md) | AI Agent 集成 v3：独立 API Gateway 程序（v1/v2 已归档） | 已实施 |
 | [2026-08-17-eip-client-design.md](designs/2026-08-17-eip-client-design.md) | eipClient：罗克韦尔 AB EtherNet/IP 南向插件（rust-ethernet-ip 1.2.0） | 已实施（真机待验） |
 | [2026-08-18-multi-system-gateway-design.md](designs/2026-08-18-multi-system-gateway-design.md) | 多系统网关分层：gateway-core 通用引擎 + rsiot-gateway 薄组装 | **待实施** |
-| [2026-08-18-lua-script-system-evolution-design.md](designs/2026-08-18-lua-script-system-evolution-design.md) | Lua 脚本系统演进：多角色脚本平台 v0.7（阶段 A/B/C 已实施） | **已实施**（A/B 已合入 master；C 于 worktree feat/lua-stage-c 待合并） |
+| [2026-08-18-lua-script-system-evolution-design.md](designs/2026-08-18-lua-script-system-evolution-design.md) | Lua 脚本系统演进：多角色脚本平台 v0.8（阶段 A/B/C/D 已实施） | **已实施**（A/B/C 已合入 master；D 于 worktree feat/lua-stage-d 待合并） |
 | [2026-08-19-lua-script-system-stage-a-plan.md](designs/2026-08-19-lua-script-system-stage-a-plan.md) | 阶段 A 实施计划：13 task TDD（lua_core/护栏/stdlib/manifest/源仓） | **已实施** |
 | [2026-08-20-lua-script-system-stage-b-plan.md](designs/2026-08-20-lua-script-system-stage-b-plan.md) | 阶段 B 实施计划：12 task（luaNorth/Sink 接线/mqtt-north 契约/secret/cloud 配方/透传 spike-2） | **已实施** |
 | [2026-08-20-lua-script-system-stage-c-plan.md](designs/2026-08-20-lua-script-system-stage-c-plan.md) | 阶段 C 实施计划：9 task（luaTransform 订阅型/EventBus 带值/subscribe 过滤/自环防护/on_timer/rhai 冻结） | **已实施**（已合入 master） |
-| [2026-08-21-alarm-minimal-loop-design.md](designs/2026-08-21-alarm-minimal-loop-design.md) | 告警最小闭环设计（Q12 独立 spec：fire/clear 跨角色能力 + lux alarms + SSE/REST，不建独立角色壳） | **已定案**（D 阶段实施） |
-| [2026-08-21-lua-stage-d-plan.md](designs/2026-08-21-lua-stage-d-plan.md) | 阶段 D 实施计划（评估收窄：安全最小集 M3+TLS/告警 Q12/清偿批/串口 open 异步安全/upstream 发布准备） | **待实施** |
+| [2026-08-21-alarm-minimal-loop-design.md](designs/2026-08-21-alarm-minimal-loop-design.md) | 告警最小闭环设计（Q12 独立 spec：fire/clear 跨角色能力 + lux alarms + SSE/REST，不建独立角色壳） | **已实施**（随阶段 D，待合并） |
+| [2026-08-21-lua-stage-d-plan.md](designs/2026-08-21-lua-stage-d-plan.md) | 阶段 D 实施计划（评估收窄：安全最小集 M3+TLS/告警 Q12/清偿批/串口 open 异步安全/upstream 发布准备） | **已实施**（worktree feat/lua-stage-d 待合并） |
 
 ## ops/ — 部署与运维（怎么跑起来）
 
@@ -76,6 +76,7 @@
 | [releases/2026-08-20-lua-stage-a.md](ops/releases/2026-08-20-lua-stage-a.md) | 发布说明：Lua 阶段 A（机制地基）——升级必读/新能力/已知限制 | 已发布 |
 | [releases/2026-08-20-lua-stage-b.md](ops/releases/2026-08-20-lua-stage-b.md) | 发布说明：Lua 阶段 B（北向突破）——luaNorth/secret/cloud 配方/透传 | 已发布（待合并） |
 | [releases/2026-08-21-lua-stage-c.md](ops/releases/2026-08-21-lua-stage-c.md) | 发布说明：Lua 阶段 C（数据加工）——luaTransform/EventBus 带值/自环防护/rhai 冻结 | 已发布（待合并） |
+| [releases/2026-08-21-lua-stage-d.md](ops/releases/2026-08-21-lua-stage-d.md) | 发布说明：Lua 阶段 D（安全与告警）——M3 回显遮蔽/TLS 选项/告警最小闭环/串口 open 行为变化 | 已发布（待合并） |
 
 ## docs 之外的文档
 

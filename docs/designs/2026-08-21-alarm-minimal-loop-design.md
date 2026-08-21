@@ -1,8 +1,10 @@
 # 告警最小闭环设计（Q12 独立 spec · D 阶段前置）
 
 > 日期：2026-08-21
-> **状态**：decided（Q12 于演进设计 v0.5 定案，本文为实施级 spec；2026-08-21 D 阶段评估采纳简化：**不建独立 alarm 角色薄壳**，fire_event/clear_event 作为跨角色 C6 能力注入——判定逻辑用既有 collector/transform/north 实例承载，专职告警实例需求出现再独立角色）
-> **代码**：`src/event_bus.rs`（Alarm 变体）+ `src/db/alarms.rs`（lux Hash）+ `src/api/routes_alarm.rs` + `src/plugin/lua_core/api/mod.rs`（fire_event/clear_event）
+> **状态**：implemented（D 阶段 2026-08-21 落地，worktree `feat/lua-stage-d`，待合并 master）
+> **实施**：T3 宿主面（EventBus Alarm + lux alarms + REST）`72b0b94` + T4 脚本面（fire_event/clear_event + 频控/抖动）`e979173` + T5 前端面（SSE 接线 + 告警面板 + 指南）`b74de2a`（含 T3/T4 间 fmt 收口 `187e740`）
+> **代码**：`src/event_bus.rs`（Alarm 变体）+ `src/db/alarms.rs`（lux Hash）+ `src/api/routes_alarm.rs` + `src/plugin/lua_core/api/mod.rs`（fire_event/clear_event + AlarmStats 频控/抖动状态）+ `frontend/src/{types.ts,stores/monitor.ts,components/monitor/AlarmPanel.vue}`；指南告警节 `docs/guides/lua-script-guide.md`
+> **测试**：`tests/alarm_e2e.rs` 4 项（JWT 401/空清单/形状 ts 倒序/DELETE+SSE Clear 幂等）+ `lua_core/api/tests.rs` 5 项（三角色注入矩阵/校验拒绝/频控 20/s/同 key 抖动/clear 幂等恒发）+ vitest `monitor.test.ts` 5 项（fire upsert/clear 移除/loadAlarms 全量替换/重连补拉/手动清除）——T9 收口实测全过（数字见 `2026-08-21-lua-stage-d-plan.md` Step 1）
 > **前置**：`2026-08-18-lua-script-system-evolution-design.md` Q12/§5.1（alarm 行注记简化决策）
 
 ## 0. 定位与边界

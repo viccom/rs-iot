@@ -1,11 +1,11 @@
 # Lua 脚本系统演进 · 阶段 D（按 2026-08-21 评估收窄）实施计划
 
 > 日期：2026-08-21
-> **状态**：planned（依据 2026-08-21 评估定案：必须做 + 值得做进本阶段；Sparkplug Q9/脚本包 Q14/模板安装器 Q18/M4-M5/alarm 角色壳/OneNET 现场验收**挂按需**，触发条件见演进设计遗留清单）
-> **实施**：（执行时回填）
-> **代码**：（执行时回填）
-> **测试**：（执行时回填）
-> **遗留**：（执行时回填）
+> **状态**：implemented（2026-08-21 执行完毕，worktree `feat/lua-stage-d`（`38a37e4..`，基于 master `c82c86f`），9 task + T3/T4 间 fmt 收口（`187e740`），待合并 master）
+> **实施**：T1 `2af6f61`（M3 实例回显遮蔽 + set 回写恢复）/ T2 `5db2fd8`（NorthCfg TLS 三键 + Transport 组装）/ T3 `72b0b94`（EventBus Alarm 变体 + lux alarms Hash + REST）/ T4 `e979173`（ctx:fire_event/clear_event：跨角色 + 20/s 频控 + 同 key 1s 抖动）/ T5 `b74de2a`（SSE alarm 接线 + 前端活跃告警面板 + 指南告警节）/ T6 `60fa416`（清偿批：north P3 四项 + tag helper 收拢 + flaky 加固）/ T7 `f03b144`（serial open spawn_blocking + 5s 限时 + 真机 3 项）/ T8 `682486c`（upstream 发布就绪注记 + 演练留证；源仓配套 commit 3235758）/ T9 本 commit（验收核对 + 文档同步 + 回归）
+> **代码**：`src/api/routes_inst.rs`（redact_inst/redact_inst_map/restore_masked_password）+ `src/plugin/builtin/lua_north/{config,contract}.rs`（tls/ca_path/insecure_tls + build_transport/NoVerify）+ `src/event_bus.rs` + `src/db/alarms.rs` + `src/api/routes_alarm.rs` + `src/plugin/lua_core/api/mod.rs`（fire_event/clear_event + AlarmStats）+ `frontend/src/{types.ts,stores/monitor.ts,components/monitor/AlarmPanel.vue,views/Monitor.vue}` + `src/plugin/lua_core/io_engine/serial.rs`（open 走 spawn_blocking+timeout）；源仓 `E:/Rs_Codes/rsiot-lualib`（release.yml 硬化 + docs/PUBLISH.md）
+> **测试**：T9 三组合全量回归实测（数字见文末「执行核对」）——default 组合：lib **420 通过 / 9 ignored**[需外部资源] + 30 个测试目标全绿；minimal 组合（`--no-default-features --features lua`）：lib **337 通过 / 5 ignored** + 30 目标全绿（回归中发现并修复 T4 遗留 bug：`ratelimit` 模块 lua-http 门控致 minimal 编译失败 E0432，解除门控——纯 std 通用件本就该随 lua 编译）；clippy（default+显式 lua,lua-http 双查）零警告；fmt 零 diff；check_docs 通过；前端 vitest **101 通过**（7 文件）+ build 过
+> **遗留**：按需挂起清单原样保留（Sparkplug Q9/脚本包 Q14/模板安装器 Q18/M4+M5 与 send_command R3 收紧/alarm 角色独立壳/OneNET 现场验收——触发条件见演进设计遗留清单）；TLS 真 broker 真机 e2e 未建（无本机 TLS broker，留证形态为组装断言单测 9 项 + 明文反向锁）；upstream 正式发布属用户检查点（正式钥/Pages/首版 tag，按源仓 PUBLISH.md 执行）
 
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
@@ -135,25 +135,37 @@
 
 ### Task 9: D 阶段验收核对 + 文档同步 + 回归
 
-**Step 1: 验收核对（对照本计划逐项实测留证）:**
-- [ ] M3：实例回显不再泄漏字面 password（测试名）
-- [ ] TLS：tls 实例经真实 TLS broker（mosquitto 本机 TLS 或 EMQX）收发回归——若无本机 TLS broker 则 `#[ignore]` 真机项 + 组装断言单测留证
-- [ ] 告警全链：脚本 fire → lux 清单 + SSE 到前端面板（e2e + vitest）；频控/抖动护栏生效
-- [ ] 清偿批：north 四项/tag helper/flaky 加固全绿
-- [ ] 串口：真机 3 项（正常/不存在口/被占口）留证
-- [ ] upstream：本地全链演练通过
+**Step 1: 验收核对（对照本计划逐项实测留证，2026-08-21）：**
+- [x] M3：实例回显不再泄漏字面 password——单测 7 项全过（`redact_inst_masks_literal_password`（get 面）/ `redact_inst_keeps_secret_ref` / `redact_inst_noop_without_password` / `redact_inst_map_masks_each_entry`（list+roster 两端点共用的 map 面）/ `restore_masked_password_recovers_from_store` / `_removes_when_no_original` / `_passes_non_sentinel_through`（set 回写恢复三态）——`cargo test --lib -- routes_inst::tests::redact_inst routes_inst::tests::restore_masked` → **7 passed, 0.00s**）
+- [x] TLS：真 TLS broker 无本机条件（无 mosquitto-TLS/EMQX）——按计划以组装断言留证：解析 3 项（`parse_tls_defaults_off`/`parse_tls_overrides`/`parse_tls_rejects_bad_types`）+ 组装 5 项（`transport_default_tcp_zero_behavior_change`（**明文反向锁**：缺省仍 Tcp 且经 set_transport 读回）/ `transport_tls_with_ca_file_bytes` / `transport_tls_without_ca_uses_system_roots` / `transport_tls_insecure_shape` / `transport_ca_read_failure_errors`）+ `no_verify_accepts_everything`（跳过验证语义锁）→ **9 passed, 0.00s**。注记：T2 未另建 `#[ignore]` 真机 TLS 测试（组装锁已覆盖 transport 形态三变体 + 错误路径，真机项需先具备本机 TLS broker，挂按需——部署时按 release note TLS 配置示例现场验收）
+- [x] 告警全链：①e2e `tests/alarm_e2e.rs` 4 项（`alarms_without_jwt_401`/`alarms_list_empty_returns_empty_array`/`alarms_list_shape_and_ts_desc`/`alarm_delete_clears_list_and_publishes_sse_clear`）→ **4 passed, 2.02s**（REST/SSE/幂等）；②脚本面 `lua_core/api/tests.rs` 5 项（`alarm_api_injected_for_all_roles`（三角色注入矩阵）/`fire_event_validates_args`（校验拒绝）/`fire_event_rate_limited_returns_false`（频控 20/s）/`fire_event_dedupes_same_key_sse`（同 key 1s 抖动 count 不重发）/`clear_event_idempotent_always_publishes`（幂等恒发））→ **5 passed, 0.24s**；③前端 vitest `monitor.test.ts` 5 项（`start 订 alarm kind，fire 帧直入 alarms`/`onAlarm 语义：同键覆盖保 count 置顶/clear 移除/未知 key 无害`/`loadAlarms 全量替换`/`SSE 重连 onopen 补拉 alarms`/`clearAlarm DELETE 不本地移除`）→ **5 passed**（全量 28 项同文件）
+- [x] 清偿批：north P3 四项（PubResult 语义 doc/down 失败计数 will 重调契约/lux Fatal 归类）+ tag helper `strip_dev_prefix` 收拢 4 处随 `60fa416` 全绿；flaky 两项 5 连跑实测——`routes_secret::tests::list_masked_never_echoes_plaintext` → **5×1 passed**（0.02-0.03s）；`lua_client::tests::ctl_reload_message_triggers_vm_reload` → **5×1 passed**（1.28-1.29s）
+- [x] 串口：真机 3 项（com0com COM3/COM4，`RSIOT_SERIAL_E2E=COM3,COM4 ... io_engine::serial -- --ignored`）→ `serial_e2e_pair_roundtrip_and_handle_release`（正常收发+句柄释放）/ `serial_e2e_missing_port_errors_and_io_task_alive`（不存在口）/ `serial_e2e_occupied_port_no_wedge_and_no_handle_leak`（被占口）**3 passed, 0.40s**
+- [x] upstream：本地全链演练 + 篡改负向已留证（Task 8 执行回填块，commit `682486c`）——dev 钥 gen_index 1.3.0/15 文件 + sign 64B + verify 通过；主仓真 HTTP e2e `e2e_sync_official_dist_over_http` 1 passed（验签/落盘/清单 synced/require 同步版）；篡改 crc16.lua 1 字节 → sha256 不符拒装（fail-closed）
 **Step 2: 文档**——演进设计头部实施块 + v0.8 行 + 遗留清单勾销（M3/H1-TLS/Q12/串口/upstream 准备；按需清单保留触发条件）；docs/README 索引；release note `2026-08-21-lua-stage-d.md`（含 TLS 配置示例与告警 API 告示）。
 **Step 3:** 三组合全量回归（default + minimal + clippy/fmt + check_docs + 前端 build）→ commit `docs(lua): 阶段 D 收口——验收核对/发布说明/遗留勾销`
 
 ---
 
-## 验收清单（执行完回填）
+## 验收清单（2026-08-21 逐项实测勾销）
 
-- [ ] 安全最小集：M3 遮蔽 + TLS 选项（T1/T2）
-- [ ] 告警最小闭环：宿主面/脚本面/前端面（T3/T4/T5）
-- [ ] 清偿批：north P3 四项 + tag helper + flaky 加固（T6）
-- [ ] 串口 open 异步安全 + 真机 3 项（T7）
-- [ ] 源仓发布就绪 + 本地演练（T8；正式发布属用户检查点）
-- [ ] 三组合全绿（T9）
+- [x] 安全最小集：M3 遮蔽 + TLS 选项（T1/T2）——单测 7+9 项实测全过（见 Step 1）；真 TLS broker 留证形态注记如上
+- [x] 告警最小闭环：宿主面/脚本面/前端面（T3/T4/T5）——e2e 4 + 脚本面 5 + vitest 5 实测全过（见 Step 1）
+- [x] 清偿批：north P3 四项 + tag helper + flaky 加固（T6）——`60fa416` 全绿 + flaky 2 项 5 连跑实测（见 Step 1）
+- [x] 串口 open 异步安全 + 真机 3 项（T7）——`f03b144` + com0com 实测 3 passed 0.40s（见 Step 1）
+- [x] 源仓发布就绪 + 本地演练（T8；正式发布属用户检查点）——演练+篡改负向留证（Task 8 回填块）
+- [x] 三组合全绿（T9）——实测数字见文末「执行核对」
 
-> **按需挂起清单（2026-08-21 评估定案，触发条件见演进设计遗留清单）**：Sparkplug Q9 / 脚本包 Q14 / 模板安装器 Q18（绑定 upstream 正式发布时收尾）/ M4+M5 与 send_command R3 收紧（安全二期，部署形态决策）/ alarm 角色独立壳 / OneNET 真平台验收（等现场凭证）。
+> **按需挂起清单（2026-08-21 评估定案，D 收口复核：原样保留未动）**：Sparkplug Q9 / 脚本包 Q14 / 模板安装器 Q18（绑定 upstream 正式发布时收尾）/ M4+M5 与 send_command R3 收紧（安全二期，部署形态决策）/ alarm 角色独立壳 / OneNET 真平台验收（等现场凭证）。
+
+---
+
+## 执行核对（T9，2026-08-21）
+
+三组合全量回归真实输出（check_docs 在文档状态字全部翻面后执行）：
+
+- 组合一 `cargo test -p rs-iot --features lua,lua-http -j 4`：**全绿**——lib `420 passed; 0 failed; 9 ignored`（5 存量[需外部资源] + 3 串口真机 + 1 upstream e2e）+ main 0 + 28 个集成测试目标 + Doc-tests 全部 `test result: ok`（合计 31 行，0 failed）
+- 组合二 `cargo test -p rs-iot --no-default-features --features lua -j 4`：**全绿**——lib `337 passed; 0 failed; 5 ignored` + 30 个运行目标全部 `test result: ok`（0 failed）。**回归产出**：首跑编译失败 `E0432`（`api/alarm.rs` 引用 `ratelimit`，该模块被 `#[cfg(feature = "lua-http")]` 门控——T4 复用 http 频控件时漏查 feature 面）；修复=解除门控（`lua_core/mod.rs`，ratelimit 纯 std 无 http 依赖，注释同步改「双消费者」）后全绿
+- `cargo clippy --all-targets`（默认 feature）与 `cargo clippy --all-targets --features lua,lua-http`：**均零警告**；`cargo fmt --all --check`：**零 diff**
+- `python scripts/check_docs.py`：**通过**（0 违规；首轮报 alarm spec 缺 `**实施**` 行，补齐后过）
+- `cd frontend && npx vitest run`：**101 passed / 7 文件，0 failed**（2.42s）；`npm run build`：**通过**（vite built in 3.48s，仅存量 chunk>500kB 提示非错误）
