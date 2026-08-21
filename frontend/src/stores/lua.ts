@@ -15,6 +15,8 @@ import { api } from '../api/client'
  * - `GET /lua/script/versions?name=&kind=` → `{versions: [{ts, size}]}`（历史，降序）
  * - `POST /lua/script/rollback` `{name, ts, kind?}` → 复制 versions/<ts>.lua → 目标文件
  * - `POST /lua/reload?inst_id=<inst>` → 重载 lua 实例（stop+start；仅脚本关联实例，库走全局 watcher 自动 reload）
+ * - `GET /lua/stdlib` → `{version: <已装版本|null>, files: [{name, path, ver, source: "synced"|"seed"}]}`
+ * - `POST /lua/stdlib/sync` `{pin?}` → `{status:"ok", upstream, pin, report: {added, updated, removed, version}, reloaded}`（失败 502 纯文本）
  *
  * dirty 状态由 ScriptEditor 双向绑定 content 时维护（保存前提示）。
  */
@@ -35,6 +37,12 @@ export const useLuaStore = defineStore('lua', () => {
   const loading = ref(false)
   /** 最近一次错误信息（save/rollback 失败等）。 */
   const error = ref('')
+  /** 本地 stdlib 清单版本（GET /lua/stdlib；无 index → 后端 null，归一空串）。 */
+  const stdlibVersion = ref('')
+  /** 本地 stdlib 文件清单（`{name, path, ver, source}`，source 徽标 synced/seed）。 */
+  const stdlibFiles = ref<Record<string, unknown>[]>([])
+  /** 最近一次 stdlib 同步结果文案（含版本/文件数/重载数；失败走 error）。 */
+  const stdlibLastSync = ref('')
 
   /** 拉取资产列表（脚本 + 共享库并行；任一失败保留另一侧）。 */
   async function loadScripts() {
@@ -154,6 +162,55 @@ export const useLuaStore = defineStore('lua', () => {
     dirty.value = true
   }
 
+  /** 拉取本地 stdlib 清单（GET /lua/stdlib；version=null → 空串，files 原样存）。 */
+  async function loadStdlib() {
+    loading.value = true
+    error.value = ''
+    try {
+      const r = await api('/api/rsiot/api/v1/lua/stdlib')
+      if (!r.ok) {
+        error.value = `加载 stdlib 清单失败 (${r.status})`
+        return
+      }
+      const data = await r.json()
+      stdlibVersion.value = (data.version ?? '') as string
+      stdlibFiles.value = (data.files ?? []) as Record<string, unknown>[]
+    } catch (e) {
+      error.value = e instanceof Error ? e.message : '加载 stdlib 清单失败'
+    } finally {
+      loading.value = false
+    }
+  }
+
+  /** 同步官方 stdlib（POST /lua/stdlib/sync；pin 可省，"auto"=跟随 latest）。成功后
+   *  置 stdlibLastSync（report 的版本/增删改计数 + reloaded 实例数）并重拉清单。 */
+  async function syncStdlib(pin?: string): Promise<boolean> {
+    loading.value = true
+    error.value = ''
+    try {
+      const r = await api('/api/rsiot/api/v1/lua/stdlib/sync', {
+        method: 'POST',
+        body: JSON.stringify(pin ? { pin } : {}),
+      })
+      if (!r.ok) {
+        error.value = `stdlib 同步失败 (${r.status})`
+        return false
+      }
+      const data = await r.json()
+      const rep = (data.report ?? {}) as { version?: string; added?: unknown[]; updated?: unknown[]; removed?: unknown[] }
+      stdlibLastSync.value =
+        `同步成功：v${rep.version ?? '?'}（+${(rep.added ?? []).length}/~${(rep.updated ?? []).length}/` +
+        `-${(rep.removed ?? []).length}），重载 ${((data.reloaded ?? []) as unknown[]).length} 个实例`
+      await loadStdlib()
+      return true
+    } catch (e) {
+      error.value = e instanceof Error ? e.message : 'stdlib 同步失败'
+      return false
+    } finally {
+      loading.value = false
+    }
+  }
+
   /** 清空当前脚本状态（切换脚本 / 离开页面）。 */
   function reset() {
     current.value = null
@@ -171,11 +228,16 @@ export const useLuaStore = defineStore('lua', () => {
     dirty,
     loading,
     error,
+    stdlibVersion,
+    stdlibFiles,
+    stdlibLastSync,
     loadScripts,
     switchKind,
     loadScript,
     saveScript,
     rollback,
+    loadStdlib,
+    syncStdlib,
     markDirty,
     reset,
   }

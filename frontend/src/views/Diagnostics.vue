@@ -9,6 +9,7 @@ import { useMonitorStore } from '../stores/monitor'
 import LogStream from '../components/monitor/LogStream.vue'
 import PacketTrace from '../components/monitor/PacketTrace.vue'
 import SystemStatus from '../components/monitor/SystemStatus.vue'
+import SecretPanel from '../components/monitor/SecretPanel.vue'
 
 const monitor = useMonitorStore()
 
@@ -142,6 +143,11 @@ useWorkspacePage(() => ({
         <span>sysstatus 快照</span>
       </div>
       <SystemStatus />
+    </article>
+
+    <!-- 平台凭证（Q4 前端面）：面板自带标题区/清单/写删表单，setup 即拉清单。 -->
+    <article class="page-panel wide">
+      <SecretPanel />
     </article>
   </section>
 </template>

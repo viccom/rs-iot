@@ -401,6 +401,37 @@ export const useMonitorStore = defineStore('monitor', () => {
     return !!r && r.ok
   }
 
+  // ---- 写命令下发（command/send 前端面）----
+
+  /**
+   * 写命令下发（POST /api/v1/command/send，routes_command.rs §4.7）。data 为插件
+   * 自定义 JSON 文本——modbus 地址串 / opcua node_id 形态见 rest-api.md §4.7，
+   * lua 实例走脚本 on_write。前置校验 data 是合法 JSON（常见手误早拦，不发坏请求）。
+   * 后端仅确认投递到写总线（{"status":"ok"}），无执行回执；实例未运行 404。
+   */
+  async function sendCommand(
+    instance: string,
+    devid: string,
+    data: string,
+  ): Promise<{ ok: boolean; error?: string; status?: number }> {
+    try { JSON.parse(data) } catch { return { ok: false, error: 'data 不是合法 JSON' } }
+    try {
+      const r = await fetch('/api/rsiot/api/v1/command/send', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${useAuthStore().token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ instance, devid, cmd: 'write', data }),
+      })
+      if (r.status === 401) { handleUnauthorized(); return { ok: false, error: '登录已过期，请重新登录', status: 401 } }
+      if (!r.ok) return { ok: false, error: `HTTP ${r.status}`, status: r.status }
+      return { ok: true, status: r.status }
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : '下发失败' }
+    }
+  }
+
   // ---- 诊断 SSE 按需订阅（模块 M3）----
 
   /** 激活日志 SSE 订阅（诊断 Tab 手动）。订阅 log+state kind，并补拉最近日志。 */
@@ -633,6 +664,7 @@ export const useMonitorStore = defineStore('monitor', () => {
     purge,
     startInstance,
     stopInstance,
+    sendCommand,
     subscribeLog,
     unsubscribeLog,
     subscribePacket,

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { useWorkspacePage } from '../composables/useWorkspacePage'
 import { useMonitorStore } from '../stores/monitor'
+import CommandPanel from '../components/monitor/CommandPanel.vue'
 
 const monitor = useMonitorStore()
 
@@ -30,6 +31,11 @@ useWorkspacePage(() => ({
         <button class="command-button" @click="monitor.loadRtdata()">刷新实时数据</button>
         <button class="command-button" @click="monitor.loadSysstatus()">刷新系统指标</button>
       </div>
+    </article>
+
+    <!-- 写命令下发（command/send 前端面）：面板自带标题区/表单/结果行。 -->
+    <article class="page-panel wide">
+      <CommandPanel />
     </article>
 
     <article class="page-panel">

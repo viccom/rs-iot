@@ -35,8 +35,21 @@
 </div>
 
 <div class="row">
+  <button onclick="call('/api/v1/alarms')">alarms</button>
+  <button onclick="call('/api/v1/rtdatas')">rtdatas</button>
+  <button onclick="call('/api/v1/secret/list')">secret/list</button>
+  <button onclick="call('/api/v1/lua/scripts')">lua/scripts</button>
+  <button onclick="call('/api/v1/lua/stdlib')">lua/stdlib</button>
+</div>
+
+<div class="row">
   startinst id: <input id="sid" style="width:100px"><button onclick="startinst()">startinst</button>
   stopinst id: <input id="xid" style="width:100px"><button onclick="stopinst()">stopinst</button>
+</div>
+
+<div class="row">
+  secret ref: <input id="sref" style="width:100px"> value: <input id="sval" style="width:100px"><button onclick="secretSet()">secretSet</button><button onclick="secretDel()">secretDel</button>
+  alarm key: <input id="akey" style="width:100px"><button onclick="alarmClear()">alarmClear</button>
 </div>
 
 <pre id="out">(点击按钮调用接口)</pre>
@@ -66,6 +79,9 @@ async function login() {
 }
 async function startinst() { const id = document.getElementById('sid').value; call('/api/v1/startinst', { method: 'POST', body: JSON.stringify({ inst_id: id }) }); }
 async function stopinst() { const id = document.getElementById('xid').value; call('/api/v1/stopinst', { method: 'POST', body: JSON.stringify({ inst_id: id }) }); }
+async function secretSet() { const ref = document.getElementById('sref').value, val = document.getElementById('sval').value; call('/api/v1/secret/set', { method: 'POST', body: JSON.stringify({ ref: ref, value: val }) }); }
+async function secretDel() { const ref = document.getElementById('sref').value; call('/api/v1/secret?ref=' + encodeURIComponent(ref), { method: 'DELETE' }); }
+async function alarmClear() { const key = document.getElementById('akey').value; call('/api/v1/alarms?key=' + encodeURIComponent(key), { method: 'DELETE' }); }
 async function loadSys() { const r = await call('/api/v1/sysinfo'); try { const j = JSON.parse(r.body); document.getElementById('hwid').textContent = j.hwid; document.getElementById('ver').textContent = j.version; } catch (e) {} }
 
 loadSys();

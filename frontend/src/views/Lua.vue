@@ -12,6 +12,7 @@ import { useMonitorStore } from '../stores/monitor'
 import { api } from '../api/client'
 import { instDeviceView, relatedLuaInstances } from '../lib/instRelations'
 import ScriptEditor from '../components/lua/ScriptEditor.vue'
+import StdlibPanel from '../components/lua/StdlibPanel.vue'
 
 const lua = useLuaStore()
 const monitor = useMonitorStore()
@@ -311,6 +312,9 @@ useWorkspacePage(() => ({
         />
         <button class="btn-new" @click="createScript">新建</button>
       </div>
+
+      <!-- stdlib 官方库（阶段 A D1 前端面）：清单 + 同步（面板自带刷新/同步/折叠清单）。 -->
+      <StdlibPanel />
     </article>
 
     <!-- 右：编辑器 + 版本历史 -->
