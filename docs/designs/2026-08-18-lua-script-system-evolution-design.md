@@ -7,6 +7,7 @@
 > **代码**：`src/plugin/lua_core/`（公共层）+ `src/plugin/builtin/{lua_client,lua_north,lua_transform}/`（三薄插件）+ `src/db/secrets.rs` + `src/api/routes_secret.rs`；源仓 `E:/Rs_Codes/rsiot-lualib`（stdlib 至 1.3.0：种子 4 库 + hashings 子集 + cloud/emqx + cloud/onenet + oo/middleclass + proto/stream_buffer + codec/bcd——后三件为 1.3.0 现场调研 freeioe fork）
 > **测试**：`cargo test -p rs-iot --features lua,lua-http`（阶段 B 末：lib 366 通过 / 5 ignored[需外部资源] + 29 个测试目标全绿；B 契约闭环经进程内 rumqttd broker e2e 实测）；阶段 C 末数字见阶段 C 计划文末核对记录；C 自环/订阅/示例经真实链路 e2e（EventBus → subscribe 过滤 → on_rtdata → set_value → hub → pipeline → lux 落库）实测
 > **遗留**（阶段 A 审查项 + 阶段 B 新增登记）：
+> - **D 阶段范围评估定案（2026-08-21）**：必须做+值得做已入 D 计划（M3/TLS/告警 Q12/清偿批/串口 open/upstream 准备）；**按需挂起**（触发条件）——Sparkplug Q9（明确的 Sparkplug 客户/市场出现）、脚本包 Q14（第二台网关/脚本交付需求）、模板安装器 Q18（upstream 正式发布时绑定收尾）、M4+M5 与 send_command R3 收紧（公网/半可信部署形态确定时，安全二期）、alarm 角色独立壳（专职告警实例需求）、OneNET 真平台验收（现场凭证到位）
 > - **官方脚本模板安装器**（Q18/D1 半体，A 遗留）：模板已分发到 `_stdlib/scripts/`，安装器 + `@source` 徽标待 C/D
 > - **OneNET 真平台端到端待现场**（Q8）：token 向量与进程内契约闭环已验，真实平台（认证→上报→下行）需现场凭证手动验收（`RSIOT_NORTH_E2E_BROKER` 真机 e2e 就绪）
 > - **`IoBackend` request 兜底超时独占 IO task**（B 发现）：连接健康但响应丢失时 backend 层 30s 兜底会占住 IO task（上层 timeout 只释放 Lua 侧）；与 TcpIo 语义一致，属 trait 架构层面，评估 spawn_io_task 对 reply_to.closed() 竞速
@@ -313,7 +314,7 @@ src/plugin/builtin/lua_north/       ← 薄壳：mqtt-north（Sink——Sink tra
 | **collector** | 已有 | `on_init/collect/on_data/on_write` | C1-C6（现状不动） | 南向采集，链路必须 |
 | **transform** | 新增 | `on_init/on_timer(period)/on_rtdata(devid,tag,value)` | C0/C2/C4/C6（**无 C1/C3/C5**） | 数据加工/清洗/计算；`subscribe` 可选（空 = 纯定时） |
 | **mqtt-north** | 新增 | `on_init/auth(cfg)/up(batch)/down(topic,payload)/will()/on_connack/on_disconnect` | C0/C2/C4/C5/C6，R3 下行显式授权 | 北向平台适配 |
-| **alarm** | 规划 | `on_timer/on_rtdata` + `ctx:fire_event/clear_event` | C2/C4/C6 + EventBus Alarm 变体 | 告警规则（Q12，独立 spec） |
+| **alarm** | 规划（**2026-08-21 简化**：不建独立角色壳——`fire_event/clear_event` 作跨角色 C6 能力，判定用 collector/transform/north 实例承载；专职告警实例需求出现再独立，见 `2026-08-21-alarm-minimal-loop-design.md`） | `on_timer/on_rtdata`（复用既有角色）+ `ctx:fire_event/clear_event` | C2/C4/C6 + EventBus Alarm 变体 | 告警规则（Q12，spec 已落档） |
 
 **transform 关键决策（D1）**：不进 pipeline Processor 插槽，做成**订阅型实例**。pipeline 是同步逐点路径（`src/pipeline.rs:138-143` 明确警示慢处理器阻塞 worker），且 `Sample` 无质量戳是「不动」硬约束（`pipeline.rs:5`）；订阅型（luaClient 事件循环扩展 `Evt::Rtdata`，EventBus 的 Rtdata 变体已存在）完全复用现有 select! 循环、热加载、沙箱。Processor 插槽留给未来 Rust 原生处理器。
 
@@ -401,7 +402,7 @@ MqttPublisher 从 `lib.rs:231-234` 硬编码单例收敛为 luaNorth（mqtt-nort
 | **A 机制地基** | lua_client → lua_core 重构（Q19，纯搬移不改行为）；manifest（含 @source）+ API_VER + dry-run；require 命名空间路由（保留段/两段式强制拒绝）+ 本地 index + embed 种子；官方源仓 rsiot-lualib 建制 + 同步客户端（D1/D2）；`_lib/` 站点共享库（Q13/Q15）；能力卡制度（Q2）；护栏五项（Q3，含 clamp/防反压）；**spike-1：mlua 回调超时 drop 后 VM 状态语义**（§9 R1） | 重构后现有 lua 测试全绿（零行为变化）；modbus-like 示例改用 stdlib crc16 行为不变；命名违规引用被拒；离线冷启动种子兜底；镜像切换验证；spike-1 结论落 §4.5 |
 | **B 北向突破** | luaNorth 薄壳 + Sink 接线 + MqttPublisher 实例化迁移（旧账）；mqtt-north 契约（Q5）；secret 链路（Q4）；cloud/ 配方 EMQX→OneNET（Q8）；**spike-2：MQTT 透传 backend 独占模型适配**（§9 R2） | EMQX 环境契约闭环（auth/up/down/LWT/重连）；OneNET 端到端（认证→上报→下行命令）；凭证不出 lux；旧 mqtt 配置无损迁移 |
 | **C 数据加工** | luaTransform 薄壳；EventBus Rtdata 载荷带值（SSE 同步改）；subscribe 过滤 + **自环防护**（Q6 硬性验收）；on_timer；rhai 冻结标注（Q7） | 一个清洗/聚合脚本上线；自环测试通过（transform 输出不触发自身）；pipeline 零改动 |
-| **D 标准与高级** | Sparkplug（Q9，protobuf feature）；alarm 角色（Q12 独立 spec）；MQTT 透传 backend 正式版（Q10）；脚本包导入导出（Q14） | Sparkplug 兼容验证；告警经 SSE 推送；透传脚本在 MQTT 链路上行为与串口一致 |
+| **D 标准与高级** | Sparkplug（Q9，protobuf feature）；alarm 角色（Q12 独立 spec）；MQTT 透传 backend 正式版（Q10）；脚本包导入导出（Q14）——**2026-08-21 评估收窄**：透传已随 B 完成；D 实施范围 = 安全最小集（M3+TLS）+ 告警最小闭环（Q12，spec 简化不建独立角色壳）+ 顺带清偿 + 串口 open 异步安全 + 源仓发布准备（`2026-08-21-lua-stage-d-plan.md`）；Sparkplug/脚本包/模板安装器挂按需（触发条件见遗留清单） | Sparkplug 兼容验证；告警经 SSE 推送；透传脚本在 MQTT 链路上行为与串口一致（已随 B 达成） |
 
 ## 8. 关键设计决策记录（ADR）
 
