@@ -61,7 +61,8 @@ pub async fn plugins(State(_st): State<AppState>) -> Json<serde_json::Value> {
 /// `GET /api/v1/config`：返回脱敏后的配置快照。
 ///
 /// 供 AI agent（MCP `get_config` 工具）和运维读配置——**敏感字段遮蔽**
-/// （`jwt_secret` / `mqtt.password` / `mqtt.username`），结构保留便于 agent 理解配置形态。
+/// （`jwt_secret` / `mqtt.password` / `mqtt.username` / `lux.password`），
+/// 结构保留便于 agent 理解配置形态。
 /// 对标 v1 §六安全边界"遮 jwt_secret/password/mqtt.password"。
 pub async fn config(State(st): State<AppState>) -> Json<serde_json::Value> {
     Json(redact_config(&st.config))
@@ -69,13 +70,19 @@ pub async fn config(State(st): State<AppState>) -> Json<serde_json::Value> {
 
 /// 配置脱敏：深拷贝后遮蔽敏感字段（保留键、替换值为 `"***"`）。
 ///
-/// 纯函数便于单测。遮蔽点：`jwt_secret`（顶层）、`mqtt.password`、`mqtt.username`。
+/// 纯函数便于单测。遮蔽点：`jwt_secret`（顶层）、`mqtt.password`、`mqtt.username`、
+/// `lux.password`（D-LUX-1：RESP 密码同属凭据，绝不回显明文）。
 /// 其余字段原样（agent 需看 lux 端口/data_dir、bridge bind、log 级别等做诊断）。
 pub fn redact_config(cfg: &crate::config::AppConfig) -> serde_json::Value {
     let mut v = serde_json::to_value(cfg).expect("AppConfig serializable");
     if let Some(obj) = v.as_object_mut() {
         if obj.contains_key("jwt_secret") {
             obj.insert("jwt_secret".into(), serde_json::json!("***"));
+        }
+        if let Some(serde_json::Value::Object(lux)) = obj.get_mut("lux") {
+            if lux.contains_key("password") {
+                lux.insert("password".into(), serde_json::json!("***"));
+            }
         }
         if let Some(serde_json::Value::Object(mqtt)) = obj.get_mut("mqtt") {
             if mqtt.contains_key("username") {
@@ -146,6 +153,9 @@ mod tests {
         // 用 toml 构造带敏感值的配置（避免 field_reassign_with_default lint）。
         let toml_str = r#"
 jwt_secret = "real-secret-32-bytes-aaaaaaaaaaaaa"
+[lux]
+password = "resp-pass"
+port = 6390
 [mqtt]
 username = "broker-user"
 password = "broker-pass"
@@ -159,12 +169,17 @@ port = 1883
         assert_eq!(v["jwt_secret"], "***", "jwt_secret must be masked");
         assert_eq!(v["mqtt"]["username"], "***", "mqtt username must be masked");
         assert_eq!(v["mqtt"]["password"], "***", "mqtt password must be masked");
+        assert_eq!(
+            v["lux"]["password"], "***",
+            "lux RESP password must be masked"
+        );
         // 非敏感字段保留（agent 诊断需看端口/周期）。
         assert_eq!(v["mqtt"]["port"], 1883, "mqtt port preserved");
         assert_eq!(
             v["mqtt"]["host"], "broker.example.com",
             "mqtt host preserved"
         );
+        assert_eq!(v["lux"]["port"], 6390, "lux port preserved");
     }
 
     /// 无密码的 broker（匿名）也不应泄露 username 结构。

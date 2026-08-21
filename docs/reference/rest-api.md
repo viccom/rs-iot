@@ -75,7 +75,8 @@ curl -s -XPOST -H "Authorization: $TOKEN" -H 'Content-Type: application/json' \
 
 - `<state>` ∈ `starting`/`running`/`stopping`/`stopped`/`failed`。**`failed` 由 M3 supervisor 真实写入**：实例 task 异常退出（panic/配置错误早退/非正常 return）且未被主动 stop → 标 `failed` + `error!` 落盘；运维 `startinst` 可重拉（`failed → starting → running`）。主动 `stopinst` 走 `stopping → stopped`（token cancel）不误判
 - `startinst` 仅支持**南向 Source**（拒绝北向 `app_type=north`）
-- `config` 返回**脱敏回显**：顶层 `jwt_secret` 与 `mqtt.username`/`mqtt.password` 遮蔽为 `"***"`（保留键、替换值），其余字段原样——诊断需看 lux 端口/`data_dir`、bridge bind、log 级别等（供运维与 MCP `get_config` 工具读配置形态）
+- `config` 返回**脱敏回显**：顶层 `jwt_secret`、`mqtt.username`/`mqtt.password` 与 `lux.password` 遮蔽为 `"***"`（保留键、替换值），其余字段原样——诊断需看 lux 端口/`data_dir`、bridge bind、log 级别等（供运维与 MCP `get_config` 工具读配置形态）
+- `[lux] password`（D-LUX-1）：`bind_host` 非 loopback（非 `127.0.0.1`/`::1`/`localhost`）时**必须**设置，否则启动即拒（错误信息指路：设密码或改回 loopback 绑定）；设置后 RESP 端口强制 AUTH。loopback 部署缺省空串，维持无密码单机信任模型
 - 响应含 `hwid` 覆盖键：空串 = 启动时按硬件自动生成；非空 = 部署期指定的网关 ID（多网关接同一平台需唯一）
 
 ### 4.2 实例 CRUD（`routes_inst.rs`，lux Hash `instances`）

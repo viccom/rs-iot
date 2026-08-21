@@ -206,6 +206,11 @@ pub async fn run_app_with_shutdown(
     tracing::info!(%hwid, "rs-iot starting");
 
     std::fs::create_dir_all(&cfg.lux.data_dir)?;
+    // D-LUX-1：非 loopback 绑定强制认证的前置校验。走 Err 而非 panic——
+    // run_app 返回 Result 且 create_dir_all? 是既有启动失败惯例（main 经
+    // anyhow 打印后非 0 退出）；build_lux_config 内的 panic 仅为绕过本入口的兜底。
+    db::validate_lux_bind(&cfg.lux.bind_host, &cfg.lux.password)
+        .map_err(crate::error::RsIotError::Config)?;
     let lux_cfg = db::build_lux_config(&cfg);
     let handle = lux::run_with_config(lux_cfg).await?;
     if let Some(addr) = handle.local_addr() {

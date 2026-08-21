@@ -54,6 +54,10 @@ pub struct LuxConfig {
     pub port: u16,
     /// 绑定地址。默认 loopback。
     pub bind_host: String,
+    /// RESP 密码（D-LUX-1）。仅非 loopback 绑定时生效——启动校验
+    /// （`db::validate_lux_bind`）强制要求非空，否则拒绝启动；loopback
+    /// 部署保持无密码单机信任模型（缺省空串）。
+    pub password: String,
     /// 数据目录（lux.dat 快照 + Tiered WAL 落盘点）。
     pub data_dir: String,
     /// 后台快照间隔（秒）。Tiered 下用于截断 WAL，不可为 0。
@@ -105,6 +109,7 @@ impl Default for LuxConfig {
         Self {
             port: 6390,
             bind_host: "127.0.0.1".into(),
+            password: String::new(),
             data_dir: "./data/lux".into(),
             save_interval_secs: 300,
         }
@@ -327,5 +332,28 @@ ring_buffer_capacity = 500"#,
     fn hwid_toml_override() {
         let cfg: AppConfig = toml::from_str(r#"hwid = "custom-gw-001""#).unwrap();
         assert_eq!(cfg.hwid, "custom-gw-001");
+    }
+
+    /// [lux] password（D-LUX-1）：缺省空串——loopback 单机信任模型无需密码；
+    /// 非 loopback 绑定时启动校验（`db::validate_lux_bind`）强制要求非空。
+    #[test]
+    fn lux_password_default_empty() {
+        let cfg: AppConfig = toml::from_str("").unwrap();
+        assert_eq!(cfg.lux.password, "", "缺省空串=loopback 无密码单机信任模型");
+    }
+
+    /// [lux] password：显式配置覆盖；锁 partial-default 契约（只设 password 其余仍默认）。
+    #[test]
+    fn lux_password_toml_override() {
+        let cfg: AppConfig = toml::from_str(
+            r#"[lux]
+password = "s3cret""#,
+        )
+        .unwrap();
+        assert_eq!(cfg.lux.password, "s3cret");
+        assert_eq!(
+            cfg.lux.port, 6390,
+            "只设 password，其余 lux 字段仍走 Default"
+        );
     }
 }
