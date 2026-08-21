@@ -289,14 +289,14 @@ pub async fn run_app_with_shutdown(
         pipeline_token,
     ));
 
-    // lux autoStart 实例（南向 Source / 北向 Sink）；无则 demo
+    // lux autoStart 实例（南向 Source / 北向 Sink）
     let started = try_start_from_lux(&mgr, &client).await;
-    if started == 0 {
-        let _ = mgr.start_source(demo_datasim_config()).await;
-        tracing::info!("started demo source sim1 (no autoStart instances in lux)");
-    } else {
-        tracing::info!("started {started} source instance(s) from lux");
-    }
+    tracing::info!("started {started} source instance(s) from lux");
+
+    // selfMonitor：rs-iot 自身即设备（devid=rsiot，17 只读+3 可写标签），随进程
+    // 无条件自启（不落 lux instances——重启恒在；stopinst 可临时停）。
+    let _ = mgr.start_source(self_monitor_config()).await;
+    tracing::info!("started self-monitor instance (devid=rsiot)");
 
     // `_lib/` 站点共享库全局 watcher（T10/Q15）：`_lib/` 变更影响**所有** luaClient
     // 实例 → watcher 全局唯一，编排层单点启动一次（单例由唯一调用点保证，无需
@@ -439,32 +439,39 @@ async fn try_start_from_lux(
     count
 }
 
-fn demo_datasim_config() -> types::InstConfig {
+/// selfMonitor 实例配置（rs-iot 自监控设备，`selfMonitor` 计划 T3）。
+///
+/// `devices` 留空——tag 由插件代码生成（self_monitor 模块的 `collect` 一张表），
+/// 不由配置驱动；实例 runtime-only（不落 lux `instances`），随进程无条件自启。
+fn self_monitor_config() -> types::InstConfig {
     types::InstConfig {
-        inst_id: "sim1".into(),
-        inst_name: "data simulator".into(),
-        app_code: "dataSim".into(),
+        inst_id: "self".into(),
+        inst_name: "rs-iot 自监控".into(),
+        app_code: "selfMonitor".into(),
         app_type: types::AppType::South,
         auto_start: true,
         app_config: serde_json::json!({}),
-        devices: vec![types::DeviceSpec {
-            label: "demo".into(),
-            value: "devA".into(),
-            children: vec![
-                types::ChildSpec {
-                    label: "温度".into(),
-                    value: "temp".into(),
-                    r#type: "float".into(),
-                },
-                types::ChildSpec {
-                    label: "湿度".into(),
-                    value: "humidity".into(),
-                    r#type: "float".into(),
-                },
-            ],
-            slave_id: None,
-        }],
+        devices: vec![],
         host_kind: types::HostKind::Builtin,
+    }
+}
+
+#[cfg(test)]
+mod self_monitor_tests {
+    use crate::self_monitor_config;
+
+    /// self 实例编排配置形态：无条件自启的 rsiot 自监控设备。
+    #[test]
+    fn self_monitor_config_shape() {
+        let c = self_monitor_config();
+        assert_eq!(c.inst_id.as_str(), "self");
+        assert_eq!(c.inst_name, "rs-iot 自监控");
+        assert_eq!(c.app_code.as_str(), "selfMonitor");
+        assert_eq!(c.app_type, crate::types::AppType::South);
+        assert!(c.auto_start, "随进程无条件自启");
+        assert!(c.devices.is_empty(), "tag 由代码生成，不由配置驱动");
+        assert!(matches!(c.host_kind, crate::types::HostKind::Builtin));
+        assert!(c.app_config.as_object().is_some(), "app_config 为空对象");
     }
 }
 
