@@ -41,6 +41,11 @@ fn sync_dropped_samples(
         "alarm_rate_limited",
         serde_json::json!(alarm.rate_limited_count()),
     );
+    // 复审 P1-1：基数上限拒绝计数（新键达 1000 上限被拒）。
+    tracker.extra_insert(
+        "alarm_hash_capped",
+        serde_json::json!(alarm.hash_capped_count()),
+    );
 }
 
 /// 主循环事件（spec §5.4）：解耦 select! 与 `&lua` / `&mut lua` 借用，

@@ -571,6 +571,11 @@ fn sync_north_stats(
         "alarm_rate_limited",
         serde_json::json!(alarm.rate_limited_count()),
     );
+    // 复审 P1-1：基数上限拒绝计数（新键达 1000 上限被拒）。
+    tracker.extra_insert(
+        "alarm_hash_capped",
+        serde_json::json!(alarm.hash_capped_count()),
+    );
     // 订阅失败累计（复审 P2-5）：下行通道静默失效可见化（进程级计数，多实例共用）
     tracker.extra_insert(
         "subscribe_fail",

@@ -31,6 +31,8 @@ pub(crate) struct AlarmState {
     rl: RateLimiter,
     /// 频控拒绝计数（stat `alarm_rate_limited`）。
     rate_limited: AtomicU64,
+    /// 基数上限拒绝计数（stat `alarm_hash_capped`，复审 P1-1）。
+    hash_capped: AtomicU64,
     /// 同 key 最近一次 publish 时刻（1s 窗口内命中不重发；Mutex 瞬时返回不跨 await）。
     last_publish: Mutex<HashMap<String, std::time::Instant>>,
 }
@@ -41,6 +43,7 @@ impl AlarmState {
         Self {
             rl: RateLimiter::new(rate_per_sec),
             rate_limited: AtomicU64::new(0),
+            hash_capped: AtomicU64::new(0),
             last_publish: Mutex::new(HashMap::new()),
         }
     }
@@ -84,6 +87,17 @@ impl AlarmState {
     /// 频控拒绝计数快照（壳层 flush 落 stat `alarm_rate_limited`）。
     pub(crate) fn rate_limited_count(&self) -> u64 {
         self.rate_limited.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// 基数上限拒绝计数 +1（复审 P1-1，`alarm_hash_capped`）。
+    pub(crate) fn hash_capped(&self) {
+        self.hash_capped
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// 基数拒绝计数快照（壳层 flush 落 stat `alarm_hash_capped`）。
+    pub(crate) fn hash_capped_count(&self) -> u64 {
+        self.hash_capped.load(std::sync::atomic::Ordering::Relaxed)
     }
 }
 
@@ -192,6 +206,16 @@ pub(super) fn register(lua: &Lua, ctx: &mlua::Table, ac: &super::ApiCtx<'_>) -> 
                     }
                     let ts = crate::event_bus::now_iso8601();
                     match crate::db::alarms::fire(&lux, &key, &level, &inst, &message, &ts).await {
+                        Ok(crate::db::alarms::FireOutcome::Capped) => {
+                            // 复审 P1-1：全局基数上限（1000 键）拒新键——返 false
+                            // （与频控同形态）+ hash_capped 计数；既有键不受影响。
+                            stats.hash_capped();
+                            tracing::warn!(
+                                "[alarm] fire key={key} by={inst} 拒绝：活跃告警达基数上限 {}（运维清除后恢复）",
+                                crate::db::alarms::ALARM_MAX_KEYS
+                            );
+                            return Ok((Value::Boolean(false), Value::Nil));
+                        }
                         Ok(_count) => {
                             // 审计 key 级（spec §2：不落 message 全文防日志洪水）。
                             tracing::info!("[alarm] fire key={key} level={level} by={inst}");

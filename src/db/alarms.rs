@@ -3,8 +3,10 @@
 //!
 //! - field = key（脚本自定义告警键，如 "dev1.temp_high"）；
 //! - value = JSON `{level, source, message, ts, count}`（key 即 field，不重复存）；
-//! - fire 同 key：覆盖写 + `count += 1`（重复报警次数——风暴可见性；read-modify-write
-//!   由宿主单点执行，无并发竞争）；
+//! - fire 同 key：覆盖写 + `count += 1`（重复报警次数——风暴可见性）。RMW 的
+//!   HGET→HSET 非事务原子（EmbeddedClient Clone = 独立 session，跨实例并发同 key
+//!   fire 可能丢 count 更新——count 仅风暴可见性指标，非正确性数据，接受；复审
+//!   P3-1 修正原「无并发竞争」的不实注释）；
 //! - clear：HDEL（不存在也 `Ok`，幂等）；
 //! - 重启后活跃清单天然保留（lux 持久）——告警不因网关重启而消失，运维语义正确。
 //!
@@ -15,6 +17,21 @@ use lux::EmbeddedClient;
 
 /// lux hash 名（全局单表）。
 const HASH: &str = "alarms";
+
+/// 全局活跃告警键上限（复审 P1-1）：频控限速率不限基数——失控脚本若不设上限，
+/// 20/s × 86400s ≈ 172 万键/天（~250MB/天持久写入 + 面板全量 HGETALL/渲染/排序
+/// 同步占住 lux session）。达上限后新键拒（返回 [`FireOutcome::Capped`]），
+/// 既有键更新不受限（运维清除后自动恢复容量）。
+pub const ALARM_MAX_KEYS: usize = 1000;
+
+/// fire 结果（api 层据此返 true/false 并计数）。
+#[derive(Debug, PartialEq, Eq)]
+pub enum FireOutcome {
+    /// 已存储，携带更新后的 count。
+    Stored(u64),
+    /// 新键被基数上限拒绝（`alarm_hash_capped` 计数）。
+    Capped,
+}
 
 /// 单条活跃告警（REST list / 前端面板形状；key 来自 Hash field，spec §1.2/§4）。
 #[derive(Debug, Clone, serde::Serialize)]
@@ -44,7 +61,9 @@ struct AlarmRecord {
 }
 
 /// 触发/更新一条告警：HGET 现值 → `count+1`（无则 1）→ HSET 覆盖
-/// （level/source/message/ts 均取本次值）。返回新 count（脚本面抖动护栏感知用）。
+/// （level/source/message/ts 均取本次值）。新键且基数达 [`ALARM_MAX_KEYS`] →
+/// 拒存返回 [`FireOutcome::Capped`]（复审 P1-1；HLEN 与 HSET 间无事务，近似
+/// 上限对护栏语义足够）；既有键更新恒放行。
 pub async fn fire(
     c: &EmbeddedClient,
     key: &str,
@@ -52,10 +71,22 @@ pub async fn fire(
     source: &str,
     message: &str,
     ts: &str,
-) -> Result<u64, RsIotError> {
+) -> Result<FireOutcome, RsIotError> {
     let count = match get(c, key).await? {
         Some(item) => item.count + 1,
-        None => 1,
+        None => {
+            // 新键：基数护栏（复审 P1-1）。HLEN 回 RESP 整数 ":N"，去前缀解析；
+            // 解析失败按 0（fail-open——护栏失效好过告警全拒，量级看 alarm_hash_capped）。
+            let len: u64 = String::from_utf8_lossy(&c.execute("HLEN", &[HASH]).await?)
+                .trim()
+                .trim_start_matches(':')
+                .parse()
+                .unwrap_or(0);
+            if len as usize >= ALARM_MAX_KEYS {
+                return Ok(FireOutcome::Capped);
+            }
+            1
+        }
     };
     let rec = AlarmRecord {
         level: level.to_string(),
@@ -66,7 +97,7 @@ pub async fn fire(
     };
     c.execute("HSET", &[HASH, key, &serde_json::to_string(&rec)?])
         .await?;
-    Ok(count)
+    Ok(FireOutcome::Stored(count))
 }
 
 /// 读一条告警（REST clear 取清除前条目用：level/message 沿用条目值；无则 `None`）。
@@ -184,7 +215,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(n, 1, "首次 fire count 应为 1");
+        assert_eq!(n, FireOutcome::Stored(1), "首次 fire 应 Stored(1)");
 
         let item = get(&c, "dev1.temp_high").await.unwrap().expect("应存在");
         assert_eq!(item.count, 1);
@@ -204,7 +235,7 @@ mod tests {
         let n = fire(&c, "k", "error", "s1", "m2", "2026-08-21T02:00:00+00:00")
             .await
             .unwrap();
-        assert_eq!(n, 2, "二次 fire count 应为 2");
+        assert_eq!(n, FireOutcome::Stored(2), "二次 fire 应 Stored(2)");
 
         let item = get(&c, "k").await.unwrap().unwrap();
         assert_eq!(item.count, 2);
@@ -214,6 +245,29 @@ mod tests {
     }
 
     /// clear 幂等：不存在 → Ok；清除后清单空；再清仍 Ok（spec §1.2）。
+    /// 复审 P1-1：全局基数上限——新键达 [`ALARM_MAX_KEYS`] 拒存（Capped），
+    /// 既有键更新不受限；HDEL 释放容量后恢复。
+    #[tokio::test]
+    async fn fire_new_key_capped_at_limit() {
+        let c = test_client("alarms-cap").await;
+        for i in 0..ALARM_MAX_KEYS {
+            let r = fire(&c, &format!("k{i}"), "warn", "s", "m", "t")
+                .await
+                .unwrap();
+            assert_eq!(r, FireOutcome::Stored(1), "达上限前新键应 Stored：k{i}");
+        }
+        // 第 1001 个新键：Capped。
+        let r = fire(&c, "k_new", "warn", "s", "m", "t").await.unwrap();
+        assert_eq!(r, FireOutcome::Capped, "达上限后新键应 Capped");
+        // 既有键更新不受限（count 递增）。
+        let r = fire(&c, "k0", "warn", "s", "m2", "t2").await.unwrap();
+        assert_eq!(r, FireOutcome::Stored(2), "既有键更新恒放行");
+        // 清除一个键释放容量后新键恢复。
+        clear(&c, "k0").await.unwrap();
+        let r = fire(&c, "k_new", "warn", "s", "m", "t").await.unwrap();
+        assert_eq!(r, FireOutcome::Stored(1), "容量释放后新键恢复 Stored");
+    }
+
     #[tokio::test]
     async fn clear_is_idempotent() {
         let c = test_client("clear").await;
