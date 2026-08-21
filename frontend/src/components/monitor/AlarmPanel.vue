@@ -21,9 +21,17 @@ function fmtTs(ts: string): string {
   return Number.isNaN(d.getTime()) ? ts : d.toLocaleString()
 }
 
-/** 手动清除一条告警（失败静默——按钮无禁用态，SSE 帧收敛是唯一移除路径）。 */
-function clear(item: AlarmItem) {
-  void monitor.clearAlarm(item.key)
+/** 手动清除一条告警（复审 P3：确认对话框防误触——清除后需脚本重新判定才会
+ * 再现；失败 console.warn 可见——SSE 帧收敛是唯一移除路径，静默失败无感知）。 */
+async function clear(item: AlarmItem) {
+  if (!window.confirm(`清除告警「${item.key}」？（活跃清单移除，重新触发需脚本再判定）`)) return
+  const ok = await monitor.clearAlarm(item.key)
+  if (!ok) console.warn('AlarmPanel: 清除失败（REST 非 2xx/网络断）——面板经 SSE/30s 轮询收敛', item.key)
+}
+
+/** 风暴计数显示封顶（复审 P3：防大数撑破 ×count 列宽）。 */
+function fmtCount(n: number): string {
+  return n > 999 ? '999+' : String(n)
 }
 </script>
 
@@ -42,7 +50,7 @@ function clear(item: AlarmItem) {
           <span class="msg" :title="a.message">{{ a.message }}</span>
         </div>
         <span class="src" :title="`来源实例：${a.source}`">{{ a.source }}</span>
-        <span class="times" :class="{ storm: a.count > 1 }" :title="`累计触发 ${a.count} 次`">×{{ a.count }}</span>
+        <span class="times" :class="{ storm: a.count > 1 }" :title="`累计触发 ${a.count} 次`">×{{ fmtCount(a.count) }}</span>
         <span class="ts">{{ fmtTs(a.ts) }}</span>
         <button class="clear" @click="clear(a)">清除</button>
       </div>

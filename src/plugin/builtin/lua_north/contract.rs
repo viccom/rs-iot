@@ -465,6 +465,38 @@ pub(crate) async fn resolve_password_opt(
 /// - `tls=true` 无 `ca_path` → 系统根证书库。
 pub(crate) fn build_transport(cfg: &NorthCfg) -> Result<rumqttc::Transport, String> {
     if !cfg.tls {
+        return build_transport_uncached(cfg);
+    }
+    // 复审 P3：transport 进程级缓存（rumqttc Transport: Clone，ClientConfig 内部
+    // Arc 可安全跨连接复用）——重连循环每次 start_connect 都跑本函数，无缓存时
+    // 每次重连重读 PEM/重建根证书库（磁盘 IO + ms 级构建 × 秒级重连间隔）。键 =
+    // (tls, ca_path, insecure) 配置三元组，基数 = 配置空间（个位数）；Err 不缓存
+    // （ca 读失败逐次可感知）。
+    static CACHE: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, rumqttc::Transport>>,
+    > = std::sync::OnceLock::new();
+    let cache_key = format!(
+        "{}|{}|{}",
+        cfg.tls,
+        cfg.ca_path.as_deref().unwrap_or(""),
+        cfg.insecure_tls
+    );
+    let cache = CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+    if let Ok(m) = cache.lock() {
+        if let Some(t) = m.get(&cache_key) {
+            return Ok(t.clone());
+        }
+    }
+    let built = build_transport_uncached(cfg)?;
+    if let Ok(mut m) = cache.lock() {
+        m.insert(cache_key, built.clone());
+    }
+    Ok(built)
+}
+
+/// TLS transport 实际组装（无缓存；[`build_transport`] 的未缓存路径）。
+fn build_transport_uncached(cfg: &NorthCfg) -> Result<rumqttc::Transport, String> {
+    if !cfg.tls {
         return Ok(rumqttc::Transport::tcp());
     }
     // 树内 rustls 的 ring/aws-lc-rs feature 并存（reqwest/rumqttc 各拉一套），

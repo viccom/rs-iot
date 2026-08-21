@@ -205,17 +205,19 @@ pub(super) fn register(lua: &Lua, ctx: &mlua::Table, ac: &super::ApiCtx<'_>) -> 
                         return Ok((Value::Boolean(false), Value::Nil));
                     }
                     let ts = crate::event_bus::now_iso8601();
-                    match crate::db::alarms::fire(&lux, &key, &level, &inst, &message, &ts).await {
-                        Ok(crate::db::alarms::FireOutcome::Capped) => {
-                            // 复审 P1-1：全局基数上限（1000 键）拒新键——返 false
-                            // （与频控同形态）+ hash_capped 计数；既有键不受影响。
-                            stats.hash_capped();
-                            tracing::warn!(
-                                "[alarm] fire key={key} by={inst} 拒绝：活跃告警达基数上限 {}（运维清除后恢复）",
-                                crate::db::alarms::ALARM_MAX_KEYS
-                            );
-                            return Ok((Value::Boolean(false), Value::Nil));
-                        }
+                    let outcome =
+                        crate::db::alarms::fire(&lux, &key, &level, &inst, &message, &ts).await;
+                    if matches!(outcome, Ok(crate::db::alarms::FireOutcome::Capped)) {
+                        // 复审 P1-1：全局基数上限（1000 键）拒新键——返 false
+                        // （与频控同形态）+ hash_capped 计数；既有键不受影响。
+                        stats.hash_capped();
+                        tracing::warn!(
+                            "[alarm] fire key={key} by={inst} 拒绝：活跃告警达基数上限 {}（运维清除后恢复）",
+                            crate::db::alarms::ALARM_MAX_KEYS
+                        );
+                        return Ok((Value::Boolean(false), Value::Nil));
+                    }
+                    match outcome {
                         Ok(_count) => {
                             // 审计 key 级（spec §2：不落 message 全文防日志洪水）。
                             tracing::info!("[alarm] fire key={key} level={level} by={inst}");

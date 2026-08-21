@@ -64,6 +64,9 @@ struct AlarmRecord {
 /// （level/source/message/ts 均取本次值）。新键且基数达 [`ALARM_MAX_KEYS`] →
 /// 拒存返回 [`FireOutcome::Capped`]（复审 P1-1；HLEN 与 HSET 间无事务，近似
 /// 上限对护栏语义足够）；既有键更新恒放行。
+///
+/// 返回的 count 仅供调用方日志/排障（api 层当前不消费——抖动护栏走 AlarmState
+/// 的 last_publish 表，与 count 无关；复审 P3 文档对齐）。
 pub async fn fire(
     c: &EmbeddedClient,
     key: &str,
@@ -166,6 +169,8 @@ pub async fn clear_with_event(
     Ok(existed)
 }
 
+/// 清除一条告警（HDEL，不存在也 Ok——幂等）。纯存储原语；带 EventBus Clear 帧
+/// 的宿主编排走 [`clear_with_event`]。
 pub async fn clear(c: &EmbeddedClient, key: &str) -> Result<(), RsIotError> {
     c.execute("HDEL", &[HASH, key]).await?;
     Ok(())

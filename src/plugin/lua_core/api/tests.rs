@@ -1515,6 +1515,9 @@ async fn alarm_vm(
         .to_str()
         .unwrap()
         .to_string();
+    // 复审 P3-4：起跑先整删（pid 回收复用时残留数据带出旧告警/计数，精确断言
+    // 假红——routes_secret 加固同款；末尾 remove 受 Windows 句柄延迟影响，双保险）。
+    let _ = std::fs::remove_dir_all(&data_dir);
     let cfg = crate::config::AppConfig {
         lux: crate::config::LuxConfig {
             port: 0,
@@ -1743,14 +1746,16 @@ async fn clear_event_rate_limited_returns_false() {
 async fn fire_event_dedupes_same_key_sse() {
     let (lua, mut rx, ctx_host, _alarm, handle, data_dir) =
         alarm_vm("alarm-dedupe", Role::Collector, None).await;
-    for i in 0..2 {
-        let ok: bool = lua
-            .load("return ctx:fire_event('dev1.temp_high', 'warn', '温度过高')")
-            .eval_async()
-            .await
-            .unwrap_or_else(|e| panic!("第 {} 次 fire 应可调用：{e}", i + 1));
-        assert!(ok, "额度内两次 fire 都应 true");
-    }
+    // 复审 P3-4：两次 fire 合入同一 chunk——间隔缩到微秒级（此前两次 eval_async
+    // 间隔满载可超 1s 抖动窗，第二次正常发帧致 second.is_err() 假红）。
+    let oks: Vec<bool> = lua
+        .load(
+            "return { ctx:fire_event('dev1.temp_high', 'warn', '温度过高'), ctx:fire_event('dev1.temp_high', 'warn', '温度过高') }",
+        )
+        .eval_async()
+        .await
+        .expect("fire 应可调用");
+    assert_eq!(oks, vec![true, true], "额度内两次 fire 都应 true");
     // lux count 累计 2（抖动只吞 SSE 不吞计数）。
     let item = crate::db::alarms::get(&ctx_host.lux, "dev1.temp_high")
         .await

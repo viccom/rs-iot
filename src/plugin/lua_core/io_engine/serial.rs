@@ -272,7 +272,7 @@ mod tests {
         // 第 3 次：poisoned，门返回剩余秒数（≤30）。
         io.note_open_timeout();
         let secs = io.poison_gate().expect("第 3 次后应 poisoned");
-        assert!(secs <= 30 && secs >= 29, "退避剩余秒数应 ~30：{secs}");
+        assert!((29..=30).contains(&secs), "退避剩余秒数应 ~30：{secs}");
         // 门再次查询仍生效（未过期）。
         assert!(io.poison_gate().is_some(), "退避期内持续拦截");
         // 模拟退避过期：手工把截止拨到过去 → 自动解封。

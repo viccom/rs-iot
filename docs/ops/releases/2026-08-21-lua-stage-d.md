@@ -100,7 +100,12 @@
   挂按需。
 - 告警**无历史时序表**（活跃清单 only，历史走日志/外部系统）与**通知渠道**
   （邮件/短信/webhook——可用 C5 http 能力脚本自组）——Q12「最小」语义边界。
-- 串口 5s open 限时后的重试周期取决于脚本 request 节奏（无独立重连定时器）。
+- 串口 5s open 限时后的重试周期取决于脚本 request 节奏（无独立重连定时器）；
+  连续 3 次超时端口 poisoned 退避 30s（复审 P2-1，防 blocking 池被灌满）。
+- **M3 密码遮蔽的跨机限制（复审 P3 登记）**：实例配置经 REST/MCP 读回时字面
+  `password` 以 `***` 哨兵遮蔽；把 A 机读到的配置原样 set 到 B 机时，B 机库中
+  无原值可恢复——**password 键会被移除**（B 机已有该实例则静默保留 B 机旧值）。
+  密码不随配置复制跨机：用 `secret:` 引用（推荐）或目标机手动改写。
 
 ## 配置新增汇总
 
@@ -111,7 +116,8 @@
 | `ctx:clear_event(key)` | Lua API（全角色） | — | 告警清除（幂等恒发 SSE） |
 | `GET`/`DELETE /api/v1/alarms` | REST（JWT） | — | 活跃告警查询/清除 |
 | SSE `event: alarm` | 事件流 | — | `{action: fire\|clear, key, level, source, message, ts, count}` |
-| stat `alarm_rate_limited` / `down_skipped` | 实例 stat | — | 告警频控计数 / north 下行丢弃计数 |
+| stat `alarm_rate_limited` / `down_skipped` | 实例 stat | — | 告警频控计数（fire/clear 共桶）/ north 下行丢弃计数 |
+| stat `alarm_hash_capped` | 实例 stat | — | 告警基数上限拒绝计数（全局 1000 键，复审 P1-1） |
 
 > 工程侧：阶段 D 全程 worktree `feat/lua-stage-d` 隔离执行 + task 间审查，
 > 验收清单逐项实测记录于
