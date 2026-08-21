@@ -196,7 +196,13 @@ pub async fn run_app_with_shutdown(
     log_ringbuffer: std::sync::Arc<crate::log_ringbuffer::LogRingBuffer>,
     event_bus: crate::event_bus::EventBus,
 ) -> Result<(), RsIotError> {
-    let hwid = types::Hwid::from(hwid::hardware_id());
+    // hwid 覆盖（self-monitor 计划 T1）：cfg.hwid 非空=部署期指定唯一值
+    //（多网关接同一平台规避同型号 CPU 撞号）；空=按硬件自动生成。
+    let hwid = types::Hwid::from(if cfg.hwid.is_empty() {
+        hwid::hardware_id()
+    } else {
+        cfg.hwid.clone()
+    });
     tracing::info!(%hwid, "rs-iot starting");
 
     std::fs::create_dir_all(&cfg.lux.data_dir)?;
