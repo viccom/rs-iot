@@ -64,7 +64,7 @@
 | [2026-08-20-lua-script-system-stage-b-plan.md](designs/2026-08-20-lua-script-system-stage-b-plan.md) | 阶段 B 实施计划：12 task（luaNorth/Sink 接线/mqtt-north 契约/secret/cloud 配方/透传 spike-2） | **已实施** |
 | [2026-08-20-lua-script-system-stage-c-plan.md](designs/2026-08-20-lua-script-system-stage-c-plan.md) | 阶段 C 实施计划：9 task（luaTransform 订阅型/EventBus 带值/subscribe 过滤/自环防护/on_timer/rhai 冻结） | **已实施**（已合入 master） |
 | [2026-08-21-alarm-minimal-loop-design.md](designs/2026-08-21-alarm-minimal-loop-design.md) | 告警最小闭环设计（Q12 独立 spec：fire/clear 跨角色能力 + lux alarms + SSE/REST，不建独立角色壳） | **已实施**（随阶段 D，待合并） |
-| [2026-08-21-lua-stage-d-plan.md](designs/2026-08-21-lua-stage-d-plan.md) | 阶段 D 实施计划（评估收窄：安全最小集 M3+TLS/告警 Q12/清偿批/串口 open 异步安全/upstream 发布准备） | **已实施**（worktree feat/lua-stage-d 待合并） |
+| [2026-08-21-lua-stage-d-plan.md](designs/2026-08-21-lua-stage-d-plan.md) | 阶段 D 实施计划（评估收窄：安全最小集 M3+TLS/告警 Q12/清偿批/串口 open 异步安全/upstream 发布准备） | **已实施**（已合入 master） |
 
 ## ops/ — 部署与运维（怎么跑起来）
 
