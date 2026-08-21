@@ -101,6 +101,7 @@ export const PLUGIN_SCHEMAS: Record<string, PluginField[]> = {
     { key: 'period', label: 'on_timer 周期(秒)', type: 'number', default: 3, hint: '0=纯订阅（不调 on_timer）；修改后需重启实例生效' },
     { key: 'subscribe', label: '订阅模式', type: 'string[]', hint: '逗号分隔：dev1 / dev2.temp* / *；空=纯定时（不订 EventBus）。devid 不含点（模式以 . 分段）' },
     { key: 'callback_timeout_ms', label: '单回调预算(ms)', type: 'number', default: 10000, hint: 'on_init/on_timer/on_rtdata 每次调用时长预算' },
+    { key: 'fail_threshold', label: '连续失败降级阈值', type: 'number', default: 10, hint: 'on_rtdata 失败批连续达阈值 → degraded（照 luaClient 语义）' },
     { key: 'scripts_root', label: '脚本根目录', type: 'string', hint: '缺省 scripts（per-instance 覆盖，多用于测试隔离）' },
     { key: 'mem_limit_mb', label: '内存上限(MB)', type: 'number', default: 32 },
     { key: 'hook_instr_limit', label: '指令数上限', type: 'number', default: 1000000 },

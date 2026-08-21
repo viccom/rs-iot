@@ -177,6 +177,10 @@ impl Source for LuaTransform {
         let mut rtdata_points: u64 = 0;
         let mut rtdata_skipped: u64 = 0;
         let mut rtdata_lagged: u64 = 0;
+        // 连续失败批计数（复审 P2-2：批级 tick_fail + consecutive_fail →
+        // cfg.fail_threshold → degraded，照 lua_client 记账语义——此前 on_rtdata
+        // 纯订阅实例的数据面全灭只在 extra 计数可见，状态恒 running）。
+        let mut consecutive_fail: u32 = 0;
         let mut flush_ticker = tokio::time::interval(std::time::Duration::from_secs(
             crate::plugin::stat_tracker::FLUSH_INTERVAL_SECS,
         ));
@@ -288,6 +292,10 @@ impl Source for LuaTransform {
                     }
                     // samples 是 Arc<Vec<_>>（复审 P2-4）——fan-out 降为引用计数，
                     // 此处 iter 只读借用，零深克隆。
+                    // 批级记账计数（复审 P2-2）：一批一次 tick（点级会刷爆 tick_count），
+                    // 任一点失败记失败批（照 lua_client「任一 collect 失败记 fail 周期」）。
+                    let batch_started = std::time::Instant::now();
+                    let (mut batch_ok, mut batch_fail) = (0u64, 0u64);
                     'points: for s in samples.iter() {
                         // tag 双形态（"tag" / "devid.tag"，与 Sample.values 同源）：
                         // 剥本 dev 前缀（照 lua_north pull_rtdata_batch 语义）。
@@ -326,11 +334,15 @@ impl Source for LuaTransform {
                             )
                             .await
                             {
-                                Ok(Ok(())) => rtdata_points += 1,
+                                Ok(Ok(())) => {
+                                    rtdata_points += 1;
+                                    batch_ok += 1;
+                                }
                                 Ok(Err(e)) => {
                                     // 脚本即时错误（非挂起）：不产生停摆，逐点继续
                                     //（一点坏不弃整批）。
                                     rtdata_skipped += 1;
+                                    batch_fail += 1;
                                     tracing::warn!(
                                         "[luaTransform] inst {} on_rtdata 失败（dev={}, tag={}，跳过该点）：{e}",
                                         inst.inst_id,
@@ -345,6 +357,7 @@ impl Source for LuaTransform {
                                     // 整批停摆放大到 命中点数 × callback_timeout_ms，
                                     // stop/reload/cmd 全程不可见。
                                     rtdata_skipped += 1;
+                                    batch_fail += 1;
                                     tracing::warn!(
                                         "[luaTransform] inst {} on_rtdata 超预算（dev={}, tag={}）：{e}，整批剩余点跳过（弃批）",
                                         inst.inst_id,
@@ -354,6 +367,22 @@ impl Source for LuaTransform {
                                     break 'points;
                                 }
                             }
+                        }
+                    }
+                    // 批级记账（复审 P2-2，照 lua_client 记账语义）：有尝试点的批
+                    // 记一次 tick（全过滤/全自环抑制的批不记账）；失败批 →
+                    // consecutive_fail → cfg.fail_threshold → degraded；成功批
+                    // tick_ok 清账恢复 running——纯订阅实例的数据面健康从此可见。
+                    if batch_ok + batch_fail > 0 {
+                        if batch_fail > 0 {
+                            tracker.tick_fail("on_rtdata 批内存在失败点（超预算/出错）");
+                            consecutive_fail = consecutive_fail.saturating_add(1);
+                            if consecutive_fail >= cfg.fail_threshold {
+                                tracker.set_status("degraded");
+                            }
+                        } else {
+                            tracker.tick_ok(batch_started.elapsed().as_millis() as u64);
+                            consecutive_fail = 0;
                         }
                     }
                 }

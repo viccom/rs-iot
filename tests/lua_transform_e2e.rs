@@ -1020,3 +1020,88 @@ end
     let _ = std::fs::remove_dir_all(&scripts);
     let _ = std::fs::remove_dir_all(&data_dir);
 }
+
+/// 复审 P2-2 回归锁：on_rtdata 持续失败（脚本即时 error）→ 批级 tick_fail +
+/// consecutive_fail 达 `fail_threshold`（本测 2）→ `/inst/stats` health.status
+/// = degraded——纯订阅实例的数据面故障从此状态可见（修复前恒 running，仅
+/// rtdata_skipped extra 计数可查）。
+#[tokio::test]
+async fn transform_on_rtdata_failures_degrade_after_threshold() {
+    let event_bus = EventBus::new(64);
+    let (app, mgr, handle) = test_app("lua_transform_degrade", event_bus.clone()).await;
+    let token = login_token(app.clone()).await;
+
+    let scripts = std::env::temp_dir().join(format!("lua-transform-deg-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&scripts);
+    let script_dir = scripts.join("t10");
+    std::fs::create_dir_all(&script_dir).expect("mkdir");
+    std::fs::write(
+        script_dir.join("main.lua"),
+        "-- @role transform\nfunction on_rtdata(devid, tag, value) error(\"boom\") end\n",
+    )
+    .expect("write");
+
+    let inst = transform_inst(
+        "transform-10",
+        "luaTransform",
+        serde_json::json!({
+            "script": "t10", "period": 0, "subscribe": ["devD"],
+            "scripts_root": scripts.to_str().expect("utf8"),
+            "fail_threshold": 2
+        }),
+    );
+    inst_set(app.clone(), &token, &inst).await;
+    let resp = start_inst(app.clone(), &token, "transform-10").await;
+    assert_eq!(resp.status(), StatusCode::OK, "{}", body_text(resp).await);
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    assert_eq!(
+        mgr.status().get("transform-10"),
+        Some(&InstState::Running),
+        "实例应 Running: {:?}",
+        mgr.status()
+    );
+
+    // 重发失败事件 + 轮询 health.status → degraded（批级 tick_fail 每 2s flush，
+    // deadline 覆盖多个 flush 周期）。
+    let mut degraded = false;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(12);
+    while std::time::Instant::now() < deadline {
+        event_bus.publish(EventPayload::Rtdata {
+            dev_ids: vec!["devD".into()],
+            count: 1,
+            samples: std::sync::Arc::new(vec![rtdata_sample(
+                "devD",
+                &[("x", SampleValue::Int(1))],
+            )]),
+            ts: "2026-08-21T00:00:02Z".into(),
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/v1/inst/stats?inst_id=transform-10")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("call app");
+        assert_eq!(resp.status(), StatusCode::OK);
+        let stats = body_json(resp).await;
+        if stats["health"]["status"] == "degraded" {
+            degraded = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+    }
+    assert!(
+        degraded,
+        "连续失败批达 fail_threshold=2 后 health.status 应 degraded（修复前恒 running）"
+    );
+
+    stop_inst(app.clone(), &token, "transform-10").await;
+    mgr.stop_all().await;
+    common::stop_lux(handle).await;
+    let _ = std::fs::remove_dir_all(&scripts);
+}

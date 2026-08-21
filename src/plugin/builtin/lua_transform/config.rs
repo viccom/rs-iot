@@ -32,6 +32,9 @@ pub(crate) struct TransformCfg {
     /// 单回调时长预算毫秒（Q3/§4.5-1，照 lua_core config 缺省 10s；on_init/
     /// on_timer/on_rtdata 每次调用消费）。
     pub(crate) callback_timeout_ms: u64,
+    /// 连续失败降级阈值（Q3「连续超限走 fail_threshold → degraded」，照 collector
+    /// 可配缺省 10——复审 P2-2：on_rtdata 批级记账消费）。
+    pub(crate) fail_threshold: u32,
     /// VM 内存限额 MB（沙箱参数，照 collector/north 缺省 32）。
     pub(crate) mem_limit_mb: usize,
     /// 指令 hook 阈值（沙箱参数，照 collector/north 缺省 1M）。
@@ -63,6 +66,12 @@ pub(crate) fn parse_transform_cfg(app: &serde_json::Value) -> Result<TransformCf
         .and_then(|v| v.as_u64())
         .unwrap_or(10_000)
         .max(1);
+    // 复审 P2-2：连续失败降级阈值可配（照 collector lua_core config 缺省 10）。
+    let fail_threshold = app
+        .get("fail_threshold")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(10)
+        .max(1) as u32;
     let mem_limit_mb = app
         .get("mem_limit_mb")
         .and_then(|v| v.as_u64())
@@ -102,6 +111,7 @@ pub(crate) fn parse_transform_cfg(app: &serde_json::Value) -> Result<TransformCf
         subscribe,
         scripts_root,
         callback_timeout_ms,
+        fail_threshold,
         mem_limit_mb,
         hook_instr_limit,
     })
