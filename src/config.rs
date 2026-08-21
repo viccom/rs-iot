@@ -39,6 +39,11 @@ pub struct AppConfig {
     /// 时可调大此值（默认 256 对标 hub）。**内存口径**：ring 常驻 ≈ 容量 × 单事件
     /// 体积（带值 Rtdata 可达数十 KB，256 上限约数十 MB）——调大前先估内存。
     pub event_bus_capacity: usize,
+    /// 部署期指定的网关 ID（hwid 覆盖）。空 = 启动时按硬件自动生成
+    /// （`hwid::hardware_id()`，sha256(CPU brand+ARCH) 前缀 eiot——同型号 CPU 会撞号，
+    /// 多网关接同一平台需在部署时指定唯一值）。
+    #[serde(default)]
+    pub hwid: String,
 }
 
 /// lux ServerConfig 的子集映射（仅暴露我们关心的字段）。
@@ -90,6 +95,7 @@ impl Default for AppConfig {
             lua_stdlib_upstream: "https://rsiot.github.io/lualib/".into(),
             lua_stdlib_pin: None,
             event_bus_capacity: DEFAULT_EVENT_BUS_CAPACITY,
+            hwid: String::new(),
         }
     }
 }
@@ -307,5 +313,19 @@ ring_buffer_capacity = 500"#,
         assert_eq!(cfg.event_bus_capacity, 256, "默认容量 256（对标 hub）");
         let cfg: AppConfig = toml::from_str("event_bus_capacity = 1024").unwrap();
         assert_eq!(cfg.event_bus_capacity, 1024);
+    }
+
+    /// hwid 部署期覆盖键（self-monitor 计划 T1）：缺省空串 = 启动时按硬件自动生成。
+    #[test]
+    fn hwid_default_empty() {
+        let cfg: AppConfig = toml::from_str("").unwrap();
+        assert_eq!(cfg.hwid, "", "缺省空串=启动时按硬件自动生成");
+    }
+
+    /// hwid 部署期覆盖键：显式配置即部署期指定（多网关接同一平台时规避同型号 CPU 撞号）。
+    #[test]
+    fn hwid_toml_override() {
+        let cfg: AppConfig = toml::from_str(r#"hwid = "custom-gw-001""#).unwrap();
+        assert_eq!(cfg.hwid, "custom-gw-001");
     }
 }
