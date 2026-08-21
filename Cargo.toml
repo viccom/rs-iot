@@ -62,6 +62,12 @@ async-trait = "0.1"
 
 # M2: 插件系统 + MQTT 北向 + 数据转换
 rumqttc = { version = "0.25", features = ["url"] }
+# 阶段 D H1：luaNorth insecure_tls 需自建 dangerous verifier 注入 rumqttc
+# （0.25 无 set_insecure API；0.23.43 起 dangerous API 无条件导出，不再需要
+# dangerous_configuration feature）。版本与树内一致（0.23.43），不新增编译。
+rustls = { version = "0.23", default-features = false, features = ["std", "ring"] }
+# H1 无 ca_path 分支加载系统根证书（与 rumqttc 内部依赖同版本，lock 已有）。
+rustls-native-certs = "0.8"
 inventory = "0.3"
 dashmap = "6"
 rhai = { version = "1.25", optional = true }

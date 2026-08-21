@@ -45,6 +45,12 @@ pub(crate) struct NorthCfg {
     pub(crate) mem_limit_mb: usize,
     /// 指令 hook 阈值（沙箱参数，照 collector 缺省 1M）。
     pub(crate) hook_instr_limit: u32,
+    /// TLS 开关（H1 收口——凭证明文过网；缺省 false = 明文 TCP，零行为变化）。
+    pub(crate) tls: bool,
+    /// CA 证书 PEM 文件路径（tls=true 时可选；缺省信任系统根证书库）。
+    pub(crate) ca_path: Option<String>,
+    /// 跳过证书验证（缺省 false；**仅显式开启**允许——自签/内网场景，组装处 warn）。
+    pub(crate) insecure_tls: bool,
 }
 
 /// 解析 `app_config`（mqtt-north 键集）。`script`/`host` 必填；`port`/`period`/
@@ -127,6 +133,17 @@ pub(crate) fn parse_north_cfg(app: &serde_json::Value) -> Result<NorthCfg, Strin
         }
     };
 
+    // H1 TLS 布尔键：缺省/Null → false；类型不符 → Err（安全键不可静默缺省）。
+    let opt_bool = |key: &str| -> Result<bool, String> {
+        match app.get(key) {
+            None | Some(serde_json::Value::Null) => Ok(false),
+            Some(serde_json::Value::Bool(b)) => Ok(*b),
+            Some(other) => Err(format!(
+                "app_config.{key} 类型不符（期望 bool，实 {other}）"
+            )),
+        }
+    };
+
     Ok(NorthCfg {
         script,
         host,
@@ -151,6 +168,19 @@ pub(crate) fn parse_north_cfg(app: &serde_json::Value) -> Result<NorthCfg, Strin
         callback_timeout_ms,
         mem_limit_mb,
         hook_instr_limit,
+        // H1 TLS 三键（bool 键照 str_vec 的坏声明可见风格：类型不符 → Err——安全键
+        // 静默缺省会悄悄退回明文传输，不可静默）。
+        tls: opt_bool("tls")?,
+        ca_path: match app.get("ca_path") {
+            None | Some(serde_json::Value::Null) => None,
+            Some(serde_json::Value::String(s)) => Some(s.clone()),
+            Some(other) => {
+                return Err(format!(
+                    "app_config.ca_path 类型不符（期望 string，实 {other}）"
+                ))
+            }
+        },
+        insecure_tls: opt_bool("insecure_tls")?,
     })
 }
 
@@ -311,5 +341,45 @@ mod tests {
         }));
         assert!(r.is_err(), "非字符串元素应拒: {r:?}");
         assert!(r.unwrap_err().contains("非字符串元素"));
+    }
+
+    /// H1 TLS 三键缺省：全关（明文 TCP）——既有实例零行为变化的回归锁。
+    #[test]
+    fn parse_tls_defaults_off() {
+        let cfg = parse_north_cfg(&json!({"script":"s","host":"h"})).unwrap();
+        assert!(!cfg.tls, "tls 缺省 false");
+        assert!(cfg.ca_path.is_none(), "ca_path 缺省 None");
+        assert!(!cfg.insecure_tls, "insecure_tls 缺省 false");
+    }
+
+    /// H1 TLS 三键显式覆盖。
+    #[test]
+    fn parse_tls_overrides() {
+        let cfg = parse_north_cfg(&json!({
+            "script":"s","host":"h",
+            "tls":true,"ca_path":"/etc/mqtt/ca.pem","insecure_tls":true
+        }))
+        .unwrap();
+        assert!(cfg.tls);
+        assert_eq!(cfg.ca_path.as_deref(), Some("/etc/mqtt/ca.pem"));
+        assert!(cfg.insecure_tls);
+    }
+
+    /// TLS 键类型不符 → Err（坏声明可见，照 str_vec 收紧风格——静默缺省会让
+    /// `"tls":"true"` 字符串形态的配置悄悄退回明文，安全键不能静默）。
+    #[test]
+    fn parse_tls_rejects_bad_types() {
+        assert!(
+            parse_north_cfg(&json!({"script":"s","host":"h","tls":"yes"})).is_err(),
+            "tls 非布尔应 Err"
+        );
+        assert!(
+            parse_north_cfg(&json!({"script":"s","host":"h","ca_path":42})).is_err(),
+            "ca_path 非字符串应 Err"
+        );
+        assert!(
+            parse_north_cfg(&json!({"script":"s","host":"h","insecure_tls":1})).is_err(),
+            "insecure_tls 非布尔应 Err"
+        );
     }
 }

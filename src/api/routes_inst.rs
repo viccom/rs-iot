@@ -454,7 +454,11 @@ mod tests {
         });
         assert_eq!(redact_inst(south.clone()), south, "无 password 键零变化");
         let weird = serde_json::json!({"app_config": 42, "inst_id": "w"});
-        assert_eq!(redact_inst(weird.clone()), weird, "app_config 非对象防御零变化");
+        assert_eq!(
+            redact_inst(weird.clone()),
+            weird,
+            "app_config 非对象防御零变化"
+        );
     }
 
     /// list/roster 的 map 形态逐实例脱敏（两个路径都过这个函数）。

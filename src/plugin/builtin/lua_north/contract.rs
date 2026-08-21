@@ -256,7 +256,14 @@ pub(crate) async fn start_connect(
         ));
     }
     // 4. 组 MqttOptions → 交 mqtt task 重建 EventLoop（凭证刷新生效点）。
-    let opts = build_mqtt_options(cfg, &ov, resolved, will, hwid, inst_id);
+    let mut opts = build_mqtt_options(cfg, &ov, resolved, will, hwid, inst_id);
+    // TLS 组装（H1 收口——凭证明文过网）：ca 读取失败 = 配置级错误 → Fatal
+    // （照上方 password secret 解析的分类——重试也不会好，启动即 warn 退出可见）。
+    let transport = build_transport(cfg).map_err(|e| ConnectErr {
+        fatal: true,
+        msg: format!("TLS 配置失败：{e}"),
+    })?;
+    opts.set_transport(transport);
     cmd_tx
         .send(MqttCmd::Connect(Box::new(opts)))
         .await
@@ -433,6 +440,121 @@ pub(crate) async fn resolve_password_opt(
     crate::db::secrets::get(lux, &full)
         .await
         .map_err(|e| format!("password secret 读取失败：{e}"))
+}
+
+// ===== TLS transport 组装（阶段 D H1：凭证明文过网收口）=====
+
+/// 组 TLS [`rumqttc::Transport`]（纯函数）：
+/// - `tls=false`（缺省）→ `Transport::tcp()`——既有实例零行为变化；
+/// - `tls=true` + `insecure_tls` → 跳过证书验证的 rustls config（**仅显式开启**
+///   允许——自签/内网场景，调用方 warn）；
+/// - `tls=true` + `ca_path` → 读 PEM 文件字节进 `Simple{ca}`（读失败 Err——配置级
+///   错误，调用方按 Fatal 分类，照 password 解析处）；组装层只透传字节，PEM 解析
+///   在 rumqttc 连接时；
+/// - `tls=true` 无 `ca_path` → 系统根证书库。
+pub(crate) fn build_transport(cfg: &NorthCfg) -> Result<rumqttc::Transport, String> {
+    if !cfg.tls {
+        return Ok(rumqttc::Transport::tcp());
+    }
+    // 树内 rustls 的 ring/aws-lc-rs feature 并存（reqwest/rumqttc 各拉一套），
+    // `ClientConfig::builder()` 的自动探测会 panic——必须显式 provider。
+    let provider = rustls::crypto::CryptoProvider::get_default()
+        .cloned()
+        .unwrap_or_else(|| std::sync::Arc::new(rustls::crypto::ring::default_provider()));
+    // insecure 优先于 ca_path（跳过验证时 CA 无意义）——仅显式开启允许，warn 可见。
+    if cfg.insecure_tls {
+        tracing::warn!(
+            "[luaNorth] insecure_tls=true——跳过 TLS 证书验证（仅限内网/自签场景，明示开启）"
+        );
+        let schemes = provider
+            .signature_verification_algorithms
+            .supported_schemes();
+        let config = rustls::ClientConfig::builder_with_provider(provider)
+            .with_safe_default_protocol_versions()
+            .map_err(|e| format!("insecure TLS 协议版本选择失败：{e}"))?
+            .dangerous()
+            .with_custom_certificate_verifier(std::sync::Arc::new(NoVerify::new(schemes)))
+            .with_no_client_auth();
+        return Ok(rumqttc::Transport::tls_with_config(
+            rumqttc::TlsConfiguration::Rustls(std::sync::Arc::new(config)),
+        ));
+    }
+    match &cfg.ca_path {
+        Some(path) => {
+            let bytes =
+                std::fs::read(path).map_err(|e| format!("ca 证书读取失败（{path}）：{e}"))?;
+            Ok(rumqttc::Transport::tls(bytes, None, None))
+        }
+        // 无 ca_path → 系统根证书库（照 rumqttc tls_with_default_config 语义，
+        // 但显式组 config——前者内部 builder() 自动探测在多 provider 下 panic）。
+        None => {
+            let result = rustls_native_certs::load_native_certs();
+            for e in &result.errors {
+                tracing::warn!("[luaNorth] 系统根证书单项加载失败（跳过该证书）：{e}");
+            }
+            let mut roots = rustls::RootCertStore::empty();
+            for c in result.certs {
+                if let Err(e) = roots.add(c) {
+                    tracing::warn!("[luaNorth] 系统根证书加入信任库失败（跳过）：{e}");
+                }
+            }
+            let config = rustls::ClientConfig::builder_with_provider(provider)
+                .with_safe_default_protocol_versions()
+                .map_err(|e| format!("TLS 协议版本选择失败：{e}"))?
+                .with_root_certificates(roots)
+                .with_no_client_auth();
+            Ok(rumqttc::Transport::tls_with_config(
+                rumqttc::TlsConfiguration::Rustls(std::sync::Arc::new(config)),
+            ))
+        }
+    }
+}
+
+/// 跳过证书验证的 verifier（`insecure_tls=true` 专用——除显式配置外绝不启用）。
+#[derive(Debug)]
+pub(crate) struct NoVerify {
+    schemes: Vec<rustls::SignatureScheme>,
+}
+
+impl NoVerify {
+    pub(crate) fn new(schemes: Vec<rustls::SignatureScheme>) -> Self {
+        Self { schemes }
+    }
+}
+
+impl rustls::client::danger::ServerCertVerifier for NoVerify {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &rustls::pki_types::CertificateDer<'_>,
+        _intermediates: &[rustls::pki_types::CertificateDer<'_>],
+        _server_name: &rustls::pki_types::ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: rustls::pki_types::UnixTime,
+    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        Ok(rustls::client::danger::ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &rustls::pki_types::CertificateDer<'_>,
+        _dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        _message: &[u8],
+        _cert: &rustls::pki_types::CertificateDer<'_>,
+        _dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        self.schemes.clone()
+    }
 }
 
 // ===== flush（BatchTick：lux pull 收拢 + rx 缓冲合并 → up() → 逐条投递）=====
@@ -852,6 +974,124 @@ mod tests {
         assert_eq!(opts2.client_id(), "hw-9-n-9");
     }
 
+    // ===== build_transport（TLS 组装，阶段 D H1——凭证明文过网收口）=====
+
+    fn tls_cfg(mut extra: serde_json::Value) -> NorthCfg {
+        let mut app = serde_json::json!({"script": "s", "host": "h", "tls": true});
+        if let (Some(m), Some(e)) = (app.as_object_mut(), extra.as_object_mut()) {
+            for (k, v) in e.iter() {
+                m.insert(k.clone(), v.clone());
+            }
+        }
+        super::super::config::parse_north_cfg(&app).unwrap()
+    }
+
+    /// 缺省（tls=false）→ Tcp：既有 north 实例零行为变化（回归锁）；且经
+    /// `MqttOptions::set_transport` 后 `transport()` 读回仍是 Tcp（接线面）。
+    #[test]
+    fn transport_default_tcp_zero_behavior_change() {
+        let cfg = super::super::config::parse_north_cfg(&serde_json::json!({
+            "script": "s", "host": "h"
+        }))
+        .unwrap();
+        let t = build_transport(&cfg).expect("缺省组装不应 Err");
+        assert!(matches!(t, rumqttc::Transport::Tcp), "缺省明文 TCP");
+        let mut opts = rumqttc::MqttOptions::new("c", "h", 1883);
+        opts.set_transport(t);
+        assert!(
+            matches!(opts.transport(), rumqttc::Transport::Tcp),
+            "set_transport 后可读回（接线面验证）"
+        );
+    }
+
+    /// tls=true + ca_path → 文件字节原样进 `Simple{ca}`（组装层不解析 PEM——
+    /// rumqttc 连接时才解析）。
+    #[test]
+    fn transport_tls_with_ca_file_bytes() {
+        let dir = std::env::temp_dir().join(format!("lua-north-tls-ca-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let bytes = b"-----BEGIN CERTIFICATE-----\nfake-bytes\n-----END CERTIFICATE-----\n";
+        let ca = dir.join("ca.pem");
+        std::fs::write(&ca, bytes).unwrap();
+        let cfg = tls_cfg(serde_json::json!({"ca_path": ca.to_str().unwrap()}));
+        let t = build_transport(&cfg).expect("合法 CA 文件组装不应 Err");
+        assert!(
+            matches!(&t, rumqttc::Transport::Tls(rumqttc::TlsConfiguration::Simple { ca, .. })
+                if *ca == bytes.to_vec()),
+            "CA 文件字节原样透传进 Simple"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// tls=true 无 ca_path → 系统根证书库（Rustls 变体——tls_with_default_config 形态）。
+    #[test]
+    fn transport_tls_without_ca_uses_system_roots() {
+        let cfg = tls_cfg(serde_json::json!({}));
+        let t = build_transport(&cfg).unwrap();
+        assert!(
+            matches!(
+                t,
+                rumqttc::Transport::Tls(rumqttc::TlsConfiguration::Rustls(_))
+            ),
+            "无 ca → 系统根证书（Rustls 变体）"
+        );
+    }
+
+    /// tls=true + insecure_tls → 跳过验证（Rustls 变体；恒放行语义由
+    /// `no_verify_accepts_everything` 锁）。insecure 与 ca_path 并存时跳过优先。
+    #[test]
+    fn transport_tls_insecure_shape() {
+        let dir = std::env::temp_dir().join(format!("lua-north-tls-ins-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cfg = tls_cfg(serde_json::json!({
+            "insecure_tls": true,
+            "ca_path": dir.join("ca.pem").to_str().unwrap()
+        }));
+        let t = build_transport(&cfg).unwrap();
+        assert!(
+            matches!(
+                t,
+                rumqttc::Transport::Tls(rumqttc::TlsConfiguration::Rustls(_))
+            ),
+            "insecure 显式开启 → 跳过验证 config（ca_path 被忽略）"
+        );
+    }
+
+    /// NoVerify 恒放行：服务器证书验证直通——跳过验证语义的单元锁（生产路径仅
+    /// insecure_tls=true 显式启用，见 build_transport）。TLS12/13 签名方法同语义
+    /// （恒 assertion），但 `DigitallySignedStruct` 构造器 pub(crate) 无法在测试
+    /// 侧构造入参，由实现直读保证。
+    #[test]
+    fn no_verify_accepts_everything() {
+        use rustls::client::danger::ServerCertVerifier;
+        let v = NoVerify::new(Vec::new());
+        let cert = rustls::pki_types::CertificateDer::from(Vec::<u8>::new());
+        let name = rustls::pki_types::ServerName::try_from("any.host".to_string()).unwrap();
+        assert!(
+            v.verify_server_cert(&cert, &[], &name, b"", rustls::pki_types::UnixTime::now())
+                .is_ok(),
+            "任意证书/主机名恒放行（跳过验证语义）"
+        );
+    }
+
+    /// ca_path 文件读不到 → Err（配置级错误——调用方按 Fatal 分类，照 password
+    /// secret 解析处：重试也不会好，启动即退出可见）。
+    #[test]
+    fn transport_ca_read_failure_errors() {
+        let missing = std::env::temp_dir()
+            .join(format!("lua-north-tls-absent-{}", std::process::id()))
+            .join("nope.pem");
+        let cfg = tls_cfg(serde_json::json!({"ca_path": missing.to_str().unwrap()}));
+        let Err(e) = build_transport(&cfg) else {
+            panic!("ca 文件读不到应 Err（Fatal 分类的组装侧锁）");
+        };
+        assert!(
+            e.contains("ca") && e.contains("nope.pem"),
+            "Err 带可诊断信息（含路径）：{e}"
+        );
+    }
+
     // ===== parse_up_result =====
 
     /// 合法数组：qos 缺省 0、显式 1/2、payload 字节串原样。
@@ -1188,6 +1428,104 @@ mod tests {
         assert!(
             n >= 2,
             "断连后重连应重调 auth()（Q5）：实测 auth 调用 {n} 次（期望 ≥2）"
+        );
+        let _ = std::fs::remove_dir_all(&data_dir);
+    }
+
+    /// H1 TLS 接线回归锁：`tls=true` 的实例对**明文** broker 不产生 ConnAck（TLS
+    /// ClientHello 被明文 broker 拒收 → 断连重试循环）——若 start_connect 的
+    /// set_transport 未接线（仍明文 TCP），实例会连上并调 on_connack，本测试失败。
+    /// 真 TLS broker 的正向收发留 Task 9 真机验收项（#[ignore] + 组装断言单测留证）。
+    #[tokio::test]
+    async fn tls_instance_never_handshakes_cleartext_with_plain_broker() {
+        use crate::host::{BridgeRegistry, CtlRegistry, HostContext};
+        use crate::plugin::traits::Sink;
+        use crate::types::{AppType, DeviceSpec, HostKind, Hwid, InstConfig, PluginName};
+        use serde_json::json;
+
+        let port = spawn_inproc_broker("north-tls");
+        let tmp = std::env::temp_dir().join(format!("lua-north-tls-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join("tlsN")).unwrap();
+        std::fs::write(
+            tmp.join("tlsN/main.lua"),
+            "-- @role mqtt-north\n\
+             function auth(cfg) return {} end\n\
+             function up(batch) return {} end\n\
+             function on_connack() ctx:kv_set('connacks', 1) end",
+        )
+        .unwrap();
+
+        let data_dir = std::env::temp_dir()
+            .join(format!("lua-north-tls-lux-{}", std::process::id()))
+            .to_str()
+            .unwrap()
+            .to_string();
+        let cfg_lux = crate::config::AppConfig {
+            lux: crate::config::LuxConfig {
+                port: 0,
+                data_dir: data_dir.clone(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let handle = lux::run_with_config(crate::db::build_lux_config(&cfg_lux))
+            .await
+            .expect("lux");
+        let client = handle.client();
+
+        let (_tx, rx) = mpsc::channel::<Sample>(8);
+        let (_cmd_tx, cmd_rx) = mpsc::channel::<crate::types::CtlMessage>(4);
+        let ctx = HostContext {
+            lux: client.clone(),
+            hwid: Hwid::new("it"),
+            shutdown: CancellationToken::new(),
+            ctl_registry: CtlRegistry::new(std::sync::Arc::new(
+                crate::process_metrics::ProcessMetrics::new(),
+            )),
+            bridge_registry: BridgeRegistry::new(),
+            metrics: std::sync::Arc::new(crate::process_metrics::ProcessMetrics::new()),
+            trace_registry: crate::io_trace::TraceRegistry::new(),
+            event_tx: crate::event_bus::EventBus::dummy(),
+        };
+        let inst = InstConfig {
+            inst_id: "north-tls-it".into(),
+            inst_name: "it".into(),
+            app_code: PluginName::new("luaNorth"),
+            app_type: AppType::North,
+            devices: vec![DeviceSpec {
+                label: "d".into(),
+                value: "devT".into(),
+                children: vec![],
+                slave_id: None,
+            }],
+            app_config: json!({
+                "script": "tlsN", "host": "127.0.0.1", "port": port,
+                "period": 1, "batch_max_secs": 1, "tls": true,
+                "scripts_root": tmp.to_str().unwrap()
+            }),
+            auto_start: false,
+            host_kind: HostKind::Builtin,
+        };
+        let inst_id = inst.inst_id.to_string();
+        let token = CancellationToken::new();
+        let run_token = token.child_token();
+        tokio::spawn(async move {
+            crate::plugin::builtin::lua_north::LuaNorth
+                .run(ctx, inst, rx, cmd_rx, run_token)
+                .await;
+        });
+
+        // 等初始连接 + 至少一轮重连周期（period=1s）：TLS 握手失败应始终无 ConnAck。
+        tokio::time::sleep(std::time::Duration::from_millis(3_500)).await;
+        let connacks = crate::db::luakv::get(&client, &inst_id, "connacks")
+            .await
+            .unwrap();
+        token.cancel();
+        let _ = std::fs::remove_dir_all(&tmp);
+        assert!(
+            connacks.is_none(),
+            "tls=true 实例对明文 broker 不应 ConnAck（H1 接线锁）：实得 connacks={connacks:?}"
         );
         let _ = std::fs::remove_dir_all(&data_dir);
     }
