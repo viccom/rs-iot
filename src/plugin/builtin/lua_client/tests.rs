@@ -461,6 +461,7 @@ async fn reload_vm_rejects_bad_manifest() {
         runtime_devs: Default::default(),
         dropped: Default::default(),
         self_writes: None,
+        alarm: Default::default(),
         transport: cfg.transport.as_str(),
         scripts_root: &tmp,
     };
@@ -602,6 +603,7 @@ async fn reload_vm_on_init_budget_timeout_falls_back() {
         runtime_devs: Default::default(),
         dropped: Default::default(),
         self_writes: None,
+        alarm: Default::default(),
         transport: cfg.transport.as_str(),
         scripts_root: &tmp,
     };

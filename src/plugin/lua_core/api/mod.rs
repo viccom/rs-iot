@@ -5,10 +5,13 @@
 //! - `mod.rs`（本文件）：register 编排 + L1 request / L2 数据 / L3 send_command / L4 kv /
 //!   L6 log·now·time + register_log + parse_rtdata_value helper。
 //! - [`http`]：L5 http_get/post + headers_to_vec + http_request。
+//! - [`alarm`]：C6 fire_event/clear_event（Q12 告警，D 阶段 T4）+ AlarmState 护栏。
 //! - [`tests`]：API 单测（含 L2 数据闭环）。
 
 #[cfg(test)]
 mod tests;
+
+mod alarm;
 
 #[cfg(feature = "lua-http")]
 mod http;
@@ -45,6 +48,8 @@ pub(crate) type SelfWrites = std::sync::Arc<
 /// 对同 `(devid,tag)` 的并发写入会被一并静默——Q6 宿主保证的是"自身输出不触发
 /// 自身"（per-instance 表），跨源可见性不受保证。
 pub(crate) const SELF_LOOP_GUARD_WINDOW: std::time::Duration = std::time::Duration::from_secs(10);
+
+pub(crate) use alarm::AlarmStats;
 
 /// mlua::Value → SampleValue（对标 transform/rhai.rs 的类型映射）。
 ///
@@ -231,6 +236,11 @@ pub(crate) struct ApiCtx<'a> {
     pub(crate) scripts_root: &'a Path,
     /// 实例角色（能力包裁剪，§5.2）：缺省 Collector（luaClient 行为零变化）。
     pub(crate) role: Role,
+    /// 告警护栏状态（Q12 T4，spec §3）：fire 频控 20/s + 同 key 1s 抖动表 +
+    /// 频控计数。三壳各建一份（reload 复用 ac 计数不丢）；`ctx:fire_event`/
+    /// `clear_event` 消费（C6 跨角色全注入），壳层 flush 读计数落 stat
+    /// `alarm_rate_limited`（详见 [`alarm::AlarmState`]）。
+    pub(crate) alarm: AlarmStats,
 }
 
 /// 在 `lua` 上注册 ctx 全局对象 + host 函数（`run` 调用）。
@@ -256,6 +266,11 @@ pub(crate) struct ApiCtx<'a> {
 ///   [`crate::db::secrets`]）。恒注入 + 实例配置 `app_config.secrets` 字符串数组显式
 ///   授权（Q4/R3）：越权引用报错（可感知，非静默 nil）；在清单但未写 → nil；读取
 ///   不落日志（审计点在管理面写入/删除）。
+/// - C6 `ctx:fire_event(key, level, message) -> bool|nil,err` / `ctx:clear_event(key) -> bool`：
+///   async，告警触发/清除（Q12 T4，spec `2026-08-21-alarm` §2）——lux `alarms` Hash
+///   （count++ 覆盖写 / HDEL 幂等）+ EventBus `Alarm` 帧（同 key 1s 抖动；fire 20/s
+///   频控超限返 false；source=inst_id 宿主填脚本不可伪造）。三角色全注入（§5.2 C6
+///   行 ✓✓✓✓）；实现移 [`alarm`]。
 /// - L6 `log_info/warn/err/debug(msg)`：tracing，前缀 `[lua:<inst>]`。
 /// - L6 `now()`/`time()`：当前本地毫秒/秒时间戳（f64）。
 /// - 全局 `stdlib` 表（T9 §3.5）：`stdlib.list()/info(mod)` 只读清单——本地 index
@@ -613,6 +628,12 @@ pub(crate) fn register(lua: &Lua, ac: &ApiCtx<'_>) -> mlua::Result<()> {
         let transport_fn = lua.create_function(move |_lua, _self: Value| Ok(transport))?;
         ctx.set("transport", transport_fn)?;
     }
+
+    // --- C6 ctx:fire_event/clear_event（Q12 T4，api/alarm.rs）---
+    // 三角色全注入（§5.2 C6 行 ✓✓✓✓，无角色门）：判定场景可能在任一角色。
+    // fire：校验 → 20/s 频控 → lux count++ → 同 key 1s 抖动决定 publish；
+    // clear：幂等恒发 Clear 帧。护栏/审计详见 [`alarm`] 模块文档。
+    alarm::register(lua, &ctx, ac)?;
 
     // --- L5 ctx:http_get/http_post（feature lua-http）---
     // 实现移 http.rs（守 <500）；此处委托 http::register 注册到同一 ctx 表。

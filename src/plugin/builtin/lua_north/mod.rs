@@ -132,6 +132,8 @@ impl Sink for LuaNorth {
         //    hub 概念上不成立——接收端保活不消费 = send 成功即弃（零噪音；缓冲打满
         //    才 dropped 计数，语义同慢消费者，容量 1024 实际打不满）。
         let (stub_tx, _stub_rx) = mpsc::channel::<Sample>(1024);
+        // 告警护栏（Q12 T4）：fire 频控 + 抖动表 + 频控计数（flush 落 stat）。
+        let alarm: core_::api::AlarmStats = Default::default();
         let ac = core_::api::ApiCtx {
             ctx_host: ctx.clone(),
             inst: &inst,
@@ -143,6 +145,7 @@ impl Sink for LuaNorth {
             scripts_root: &scripts_root,
             role: core_::api::Role::North,
             self_writes: None, // North 无 EventBus 订阅面，无自环（T8）
+            alarm: alarm.clone(),
         };
 
         // 3. VM 组装：沙箱 → register + cfg 表（先于 load_main——脚本顶层可用
@@ -301,7 +304,7 @@ impl Sink for LuaNorth {
                     Evt::ReconnectNow
                 }
                 _ = flush_ticker.tick() => {
-                    sync_north_stats(&mut tracker, publish_ok, publish_fail, reconnect_count);
+                    sync_north_stats(&mut tracker, publish_ok, publish_fail, reconnect_count, &alarm);
                     tracker.flush().await;
                     continue;
                 }
@@ -502,7 +505,13 @@ impl Sink for LuaNorth {
                     }
                 }
                 if tracker.should_flush() {
-                    sync_north_stats(&mut tracker, publish_ok, publish_fail, reconnect_count);
+                    sync_north_stats(
+                        &mut tracker,
+                        publish_ok,
+                        publish_fail,
+                        reconnect_count,
+                        &alarm,
+                    );
                     tracker.flush().await;
                 }
             }
@@ -512,22 +521,34 @@ impl Sink for LuaNorth {
         mqtt_task.abort();
         // 退出标记 stopped（spec §13；实例生命周期经由 InstanceManager 全套）。
         tracker.set_status("stopped");
-        sync_north_stats(&mut tracker, publish_ok, publish_fail, reconnect_count);
+        sync_north_stats(
+            &mut tracker,
+            publish_ok,
+            publish_fail,
+            reconnect_count,
+            &alarm,
+        );
         tracker.flush().await;
     }
 }
 
 /// T7 stat 计数快照（Q5）：publish_ok/publish_fail/reconnect_count 落 tracker
-/// extra（每个 flush 点前调用，不留陈旧）。
+/// extra（每个 flush 点前调用，不留陈旧）。告警频控计数同出口（Q12 T4）。
 fn sync_north_stats(
     tracker: &mut crate::plugin::stat_tracker::StatTracker,
     publish_ok: u64,
     publish_fail: u64,
     reconnect_count: u64,
+    alarm: &core_::api::AlarmStats,
 ) {
     tracker.extra_insert("publish_ok", serde_json::json!(publish_ok));
     tracker.extra_insert("publish_fail", serde_json::json!(publish_fail));
     tracker.extra_insert("reconnect_count", serde_json::json!(reconnect_count));
+    // Q12 T4（spec alarm §3）：fire_event 被频控拒绝累计（风暴可见性）。
+    tracker.extra_insert(
+        "alarm_rate_limited",
+        serde_json::json!(alarm.rate_limited_count()),
+    );
     // 订阅失败累计（复审 P2-5）：下行通道静默失效可见化（进程级计数，多实例共用）
     tracker.extra_insert(
         "subscribe_fail",

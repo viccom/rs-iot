@@ -71,6 +71,7 @@ async fn register_exposes_ctx_api() {
             runtime_devs: RuntimeDevs::default(),
             dropped: zero_dropped(),
             self_writes: None,
+            alarm: AlarmStats::default(),
             transport: "tcp",
             scripts_root: Path::new("scripts"),
         },
@@ -141,6 +142,7 @@ async fn register_exposes_stdlib_table() {
             runtime_devs: RuntimeDevs::default(),
             dropped: zero_dropped(),
             self_writes: None,
+            alarm: AlarmStats::default(),
             transport: "tcp",
             scripts_root: &tmp,
         },
@@ -194,6 +196,7 @@ async fn kv_set_get_roundtrip() {
             runtime_devs: RuntimeDevs::default(),
             dropped: zero_dropped(),
             self_writes: None,
+            alarm: AlarmStats::default(),
             transport: "tcp",
             scripts_root: Path::new("scripts"),
         },
@@ -295,6 +298,7 @@ async fn send_command_routes_to_target() {
             runtime_devs: RuntimeDevs::default(),
             dropped: zero_dropped(),
             self_writes: None,
+            alarm: AlarmStats::default(),
             transport: "tcp",
             scripts_root: Path::new("scripts"),
         },
@@ -381,6 +385,7 @@ async fn http_get_returns_status_and_body() {
             runtime_devs: RuntimeDevs::default(),
             dropped: zero_dropped(),
             self_writes: None,
+            alarm: AlarmStats::default(),
             transport: "tcp",
             scripts_root: Path::new("scripts"),
         },
@@ -533,6 +538,7 @@ async fn capability_cards_match_registered_ctx() {
             runtime_devs: RuntimeDevs::default(),
             dropped: zero_dropped(),
             self_writes: None,
+            alarm: AlarmStats::default(),
             transport: "tcp",
             scripts_root: Path::new("scripts"),
         },
@@ -685,6 +691,7 @@ async fn set_value_pushes_sample_to_hub() {
             runtime_devs: RuntimeDevs::default(),
             dropped: zero_dropped(),
             self_writes: None,
+            alarm: AlarmStats::default(),
             transport: "tcp",
             scripts_root: Path::new("scripts"),
         },
@@ -746,6 +753,7 @@ async fn set_values_pushes_multi_tag_sample() {
             runtime_devs: RuntimeDevs::default(),
             dropped: zero_dropped(),
             self_writes: None,
+            alarm: AlarmStats::default(),
             transport: "tcp",
             scripts_root: Path::new("scripts"),
         },
@@ -819,6 +827,7 @@ async fn set_value_routes_by_devid() {
             runtime_devs: RuntimeDevs::default(),
             dropped: zero_dropped(),
             self_writes: None,
+            alarm: AlarmStats::default(),
             transport: "tcp",
             scripts_root: Path::new("scripts"),
         },
@@ -878,6 +887,7 @@ async fn get_value_reads_rtdata() {
             runtime_devs: RuntimeDevs::default(),
             dropped: zero_dropped(),
             self_writes: None,
+            alarm: AlarmStats::default(),
             transport: "tcp",
             scripts_root: Path::new("scripts"),
         },
@@ -941,6 +951,7 @@ async fn get_device_returns_rtdata_values() {
             runtime_devs: RuntimeDevs::default(),
             dropped: zero_dropped(),
             self_writes: None,
+            alarm: AlarmStats::default(),
             transport: "tcp",
             scripts_root: Path::new("scripts"),
         },
@@ -1007,6 +1018,7 @@ async fn list_devices_returns_inst_devices() {
             runtime_devs: RuntimeDevs::default(),
             dropped: zero_dropped(),
             self_writes: None,
+            alarm: AlarmStats::default(),
             transport: "tcp",
             scripts_root: Path::new("scripts"),
         },
@@ -1128,6 +1140,7 @@ async fn ctx_transport_returns_configured_kind() {
                 runtime_devs: RuntimeDevs::default(),
                 dropped: zero_dropped(),
                 self_writes: None,
+                alarm: AlarmStats::default(),
                 transport: kind,
                 scripts_root: Path::new("scripts"),
             },
@@ -1186,6 +1199,7 @@ async fn secret_get_allowlist_semantics() {
             runtime_devs: RuntimeDevs::default(),
             dropped: zero_dropped(),
             self_writes: None,
+            alarm: AlarmStats::default(),
             transport: "tcp",
             scripts_root: Path::new("scripts"),
         },
@@ -1277,6 +1291,7 @@ async fn north_role_skips_c1_request_transport() {
             runtime_devs: RuntimeDevs::default(),
             dropped: zero_dropped(),
             self_writes: None,
+            alarm: AlarmStats::default(),
             transport: "mqtt",
             scripts_root: Path::new("scripts"),
             role: Role::North,
@@ -1346,6 +1361,7 @@ async fn transform_role_trims_c1_c3_c5() {
             runtime_devs: RuntimeDevs::default(),
             dropped: zero_dropped(),
             self_writes: None,
+            alarm: AlarmStats::default(),
             transport: "none", // 占位（transform 不注册 transport，值不被消费）
             scripts_root: Path::new("scripts"),
             role: Role::Transform,
@@ -1427,6 +1443,7 @@ async fn secret_get_always_registered_with_default_empty_allowlist() {
                 runtime_devs: RuntimeDevs::default(),
                 dropped: zero_dropped(),
                 self_writes: None,
+                alarm: AlarmStats::default(),
                 transport: "tcp",
                 scripts_root: Path::new("scripts"),
             },
@@ -1455,4 +1472,389 @@ async fn secret_get_always_registered_with_default_empty_allowlist() {
         let _ = crate::db::shutdown_lux(handle).await;
         let _ = std::fs::remove_dir_all(&data_dir);
     }
+}
+
+// ============ T4 告警（Q12，spec 2026-08-21-alarm §2 ctx API / §3 护栏）============
+
+/// T4 告警测试共用：lux + **真实 EventBus**（16 容量，subscribe 断言告警帧）+
+/// 按角色 register（io/transport/app_code 照既有角色测试）。返回
+/// (lua, 订阅端, ctx_host, alarm, handle, data_dir)——alarm 由调用方传入
+///（频控测注入小容量；None → 缺省 20/s）。
+async fn alarm_vm(
+    tag: &str,
+    role: Role,
+    alarm: Option<AlarmStats>,
+) -> (
+    Lua,
+    tokio::sync::broadcast::Receiver<crate::event_bus::EventPayload>,
+    HostContext,
+    AlarmStats,
+    lux::ServerHandle,
+    String,
+) {
+    let data_dir = std::env::temp_dir()
+        .join(format!("lua-{tag}-{}", std::process::id()))
+        .to_str()
+        .unwrap()
+        .to_string();
+    let cfg = crate::config::AppConfig {
+        lux: crate::config::LuxConfig {
+            port: 0,
+            data_dir: data_dir.clone(),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let handle = lux::run_with_config(crate::db::build_lux_config(&cfg))
+        .await
+        .expect("lux");
+    let ctx_host = HostContext {
+        lux: handle.client(),
+        hwid: crate::types::Hwid::new("it"),
+        shutdown: CancellationToken::new(),
+        ctl_registry: CtlRegistry::new(std::sync::Arc::new(
+            crate::process_metrics::ProcessMetrics::new(),
+        )),
+        bridge_registry: BridgeRegistry::new(),
+        metrics: std::sync::Arc::new(crate::process_metrics::ProcessMetrics::new()),
+        trace_registry: crate::io_trace::TraceRegistry::new(),
+        event_tx: crate::event_bus::EventBus::new(16),
+    };
+    // 订阅先于任何 fire/clear（broadcast 收不到订阅前事件）。
+    let rx = ctx_host.event_tx.subscribe();
+    let (app_code, app_type, app_config) = match role {
+        Role::Collector => (
+            "luaClient",
+            AppType::South,
+            serde_json::json!({"script":"a","endpoint":"x"}),
+        ),
+        Role::North => (
+            "luaNorth",
+            AppType::North,
+            serde_json::json!({"script":"a","host":"127.0.0.1"}),
+        ),
+        Role::Transform => (
+            "luaTransform",
+            AppType::South, // Source 订阅型实例（Q19/D1），不走 Processor
+            serde_json::json!({"script":"a"}),
+        ),
+    };
+    let inst = InstConfig {
+        inst_id: "it".into(),
+        inst_name: "it".into(),
+        app_code: PluginName::new(app_code),
+        app_type,
+        auto_start: false,
+        app_config,
+        devices: vec![DeviceSpec {
+            label: "d".into(),
+            value: "d".into(),
+            children: vec![],
+            slave_id: None,
+        }],
+        host_kind: HostKind::Builtin,
+    };
+    let alarm = alarm.unwrap_or_default();
+    let (io, transport) = match role {
+        Role::Collector => (Some(spawn_mock_io()), "tcp"),
+        Role::North => (None, "mqtt"),
+        Role::Transform => (None, "none"),
+    };
+    let lua = Lua::new();
+    register(
+        &lua,
+        &ApiCtx {
+            ctx_host: ctx_host.clone(),
+            inst: &inst,
+            io,
+            tx: mock_hub_tx(),
+            runtime_devs: RuntimeDevs::default(),
+            dropped: zero_dropped(),
+            self_writes: None,
+            transport,
+            scripts_root: Path::new("scripts"),
+            role,
+            alarm: alarm.clone(),
+        },
+    )
+    .expect("register");
+    (lua, rx, ctx_host, alarm, handle, data_dir)
+}
+
+/// T4 注入矩阵（spec §2/§5.2 C6 行 ✓✓✓✓）：三角色（Collector/North/Transform）
+/// 全部注册 fire_event/clear_event——无角色门（判定场景可能在任一角色：采集判
+/// 原始点 / transform 判派生点 / north 判平台回执）。
+#[tokio::test]
+async fn alarm_api_injected_for_all_roles() {
+    for role in [Role::Collector, Role::North, Role::Transform] {
+        let (lua, _rx, _host, _alarm, handle, data_dir) = alarm_vm("alarm-roles", role, None).await;
+        for api in ["fire_event", "clear_event"] {
+            let is_fn: bool = lua
+                .load(format!("return type(ctx.{api}) == 'function'"))
+                .eval()
+                .expect(api);
+            assert!(is_fn, "{role:?} 角色应有 ctx.{api}（C6 跨角色全注入）");
+        }
+        let _ = crate::db::shutdown_lux(handle).await;
+        let _ = std::fs::remove_dir_all(&data_dir);
+    }
+}
+
+/// spec §2 入口校验：key 非空 ≤128 字符 / level ∈ {info,warn,error} / message
+/// ≤512 字符——违例返 `nil, err`（可感知，与 R2 频控同错误形态），且不落库。
+#[tokio::test]
+async fn fire_event_validates_args() {
+    let (lua, _rx, ctx_host, _alarm, handle, data_dir) =
+        alarm_vm("alarm-valid", Role::Collector, None).await;
+    // 每条违例：首个返回值 nil（非 false——可感知错误而非限流）+ 错误消息非空。
+    let cases: Vec<String> = vec![
+        "ctx:fire_event('', 'warn', 'm')".to_string(), // key 空
+        format!("ctx:fire_event('{}', 'warn', 'm')", "k".repeat(129)), // key 129 字符
+        "ctx:fire_event('dev1.x', 'critical', 'm')".to_string(), // level 非三档
+        format!("ctx:fire_event('dev1.x', 'warn', '{}')", "m".repeat(513)), // message 513
+        "ctx:clear_event('')".to_string(),             // clear 同 key 规则
+    ];
+    for src in &cases {
+        let perceptible: bool = lua
+            .load(format!(
+                "local ok, err = {src}; return ok == nil and err ~= nil and err ~= ''"
+            ))
+            .eval_async()
+            .await
+            .unwrap_or_else(|e| panic!("{src} 应可调用：{e}"));
+        assert!(perceptible, "违例应返 nil, err（可感知）：{src}");
+    }
+    // 校验失败不落库（清单空）。
+    let items = crate::db::alarms::list(&ctx_host.lux).await.unwrap();
+    assert!(items.is_empty(), "校验拒绝的调用不应落库");
+
+    let _ = crate::db::shutdown_lux(handle).await;
+    let _ = std::fs::remove_dir_all(&data_dir);
+}
+
+/// spec §3 每实例频控：token bucket 超限返 false（非错误——风暴不是脚本 bug，
+/// 静默退避语义）+ `alarm_rate_limited` 计数；超限调用不落库（清单不被刷爆）。
+/// 注入小容量（2/s）测第 3 次（生产 20/s 同逻辑，限值查能力卡）。
+#[tokio::test]
+async fn fire_event_rate_limited_returns_false() {
+    let (lua, _rx, ctx_host, alarm, handle, data_dir) = alarm_vm(
+        "alarm-rate",
+        Role::Collector,
+        Some(std::sync::Arc::new(super::alarm::AlarmState::new(2))),
+    )
+    .await;
+    for k in ["k0", "k1"] {
+        let ok: bool = lua
+            .load(format!("return ctx:fire_event('{k}', 'warn', 'm')"))
+            .eval_async()
+            .await
+            .unwrap_or_else(|e| panic!("{k} 应可调用：{e}"));
+        assert!(ok, "{k} 窗口额度内应 true");
+    }
+    // 第 3 次（超 2/s 额度）：false 且非错误形态（ok == false，err == nil）。
+    let limited: bool = lua
+        .load(
+            "local ok, err = ctx:fire_event('k2', 'warn', 'm'); return ok == false and err == nil",
+        )
+        .eval_async()
+        .await
+        .expect("第 3 次调用");
+    assert!(limited, "频控超限应返 false（非 nil,err）");
+    assert_eq!(
+        alarm.rate_limited_count(),
+        1,
+        "alarm_rate_limited 计数应 +1"
+    );
+    let items = crate::db::alarms::list(&ctx_host.lux).await.unwrap();
+    assert_eq!(items.len(), 2, "超限调用不落库（清单不被刷爆）");
+    assert!(
+        items.iter().all(|i| i.key != "k2"),
+        "被限流的 k2 不应出现在清单"
+    );
+
+    let _ = crate::db::shutdown_lux(handle).await;
+    let _ = std::fs::remove_dir_all(&data_dir);
+}
+
+/// spec §3 同 key 抖动：1s 窗口内重复 fire 仍计数（lux count=2——风暴可见性）
+/// 但只发一次 Alarm Fire 帧（前端不被同键闪屏）；帧 source 是 inst_id（宿主填，
+/// 脚本不可伪造——API 无 source 参数）。
+#[tokio::test]
+async fn fire_event_dedupes_same_key_sse() {
+    let (lua, mut rx, ctx_host, _alarm, handle, data_dir) =
+        alarm_vm("alarm-dedupe", Role::Collector, None).await;
+    for i in 0..2 {
+        let ok: bool = lua
+            .load("return ctx:fire_event('dev1.temp_high', 'warn', '温度过高')")
+            .eval_async()
+            .await
+            .unwrap_or_else(|e| panic!("第 {} 次 fire 应可调用：{e}", i + 1));
+        assert!(ok, "额度内两次 fire 都应 true");
+    }
+    // lux count 累计 2（抖动只吞 SSE 不吞计数）。
+    let item = crate::db::alarms::get(&ctx_host.lux, "dev1.temp_high")
+        .await
+        .unwrap()
+        .expect("条目应存在");
+    assert_eq!(item.count, 2, "同 key 重复 fire count 应累计");
+    // SSE 只 1 帧 Fire（第二次被 1s 抖动窗口吞）。
+    let f1 = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+        .await
+        .expect("超时")
+        .expect("应收到首帧");
+    match f1 {
+        crate::event_bus::EventPayload::Alarm {
+            action,
+            key,
+            level,
+            source,
+            message,
+            ..
+        } => {
+            assert!(
+                matches!(action, crate::event_bus::AlarmAction::Fire),
+                "应为 Fire 帧"
+            );
+            assert_eq!(key, "dev1.temp_high");
+            assert_eq!(level, "warn");
+            assert_eq!(message, "温度过高");
+            assert_eq!(source, "it", "source 由宿主填 inst_id（脚本不可伪造）");
+        }
+        other => panic!("应收到 Alarm 帧，实得 {other:?}"),
+    }
+    let second = tokio::time::timeout(std::time::Duration::from_millis(150), rx.recv()).await;
+    assert!(second.is_err(), "1s 抖动窗口内第二次 fire 不应再发 SSE");
+
+    let _ = crate::db::shutdown_lux(handle).await;
+    let _ = std::fs::remove_dir_all(&data_dir);
+}
+
+/// spec §2 clear 幂等恒发：无条目也发 Clear 帧（level/message 空串）；有条目
+/// 沿用条目 level/message；clear 顺带清抖动表——同 key 立即重新 fire 是新事件
+///（再发 Fire 帧，非抖动吞掉）。
+#[tokio::test]
+async fn clear_event_idempotent_always_publishes() {
+    let (lua, mut rx, ctx_host, _alarm, handle, data_dir) =
+        alarm_vm("alarm-clear", Role::Collector, None).await;
+
+    // 1) 无条目 clear → true + Clear 帧（level/message 空串——多客户端视图收敛）。
+    let ok: bool = lua
+        .load("return ctx:clear_event('ghost')")
+        .eval_async()
+        .await
+        .expect("clear ghost");
+    assert!(ok, "clear 幂等：无条目也返回 true");
+    let f = recv_alarm(&mut rx).await;
+    assert!(
+        matches!(f.action, crate::event_bus::AlarmAction::Clear),
+        "clear 应恒发 Clear 帧"
+    );
+    assert_eq!(f.key, "ghost");
+    assert_eq!(f.level, "", "无条目时 level 空串");
+    assert_eq!(f.message, "", "无条目时 message 空串");
+    assert_eq!(f.source, "it");
+
+    // 2) 有条目 clear → level/message 沿用条目值 + lux 删除。
+    fire_and_recv(&lua, &mut rx).await;
+    let ok: bool = lua
+        .load("return ctx:clear_event('dev1.x')")
+        .eval_async()
+        .await
+        .expect("clear dev1.x");
+    assert!(ok);
+    let f = recv_alarm(&mut rx).await;
+    assert!(matches!(f.action, crate::event_bus::AlarmAction::Clear));
+    assert_eq!(f.key, "dev1.x");
+    assert_eq!(f.level, "error", "clear 沿用清除时条目的 level");
+    assert_eq!(f.message, "急停按下", "clear 沿用条目的 message");
+    assert!(
+        crate::db::alarms::get(&ctx_host.lux, "dev1.x")
+            .await
+            .unwrap()
+            .is_none(),
+        "clear 后条目应删除"
+    );
+
+    // 3) clear 后立即再 fire 同 key = 新事件（抖动表已清，正常发 Fire）。
+    let ok: bool = lua
+        .load("return ctx:fire_event('dev1.x', 'warn', '再次触发')")
+        .eval_async()
+        .await
+        .expect("再次 fire");
+    assert!(ok);
+    let f = recv_alarm(&mut rx).await;
+    assert!(
+        matches!(f.action, crate::event_bus::AlarmAction::Fire),
+        "clear 清抖动表后重新 fire 应发新 Fire 帧"
+    );
+
+    // 4) 幂等：再 clear 已清除的 key 仍 true + 仍发 Clear 帧。
+    let ok: bool = lua
+        .load("return ctx:clear_event('dev1.x')")
+        .eval_async()
+        .await
+        .expect("重复 clear");
+    assert!(ok, "clear 幂等：重复清除仍 true");
+    let f = recv_alarm(&mut rx).await;
+    assert!(matches!(f.action, crate::event_bus::AlarmAction::Clear));
+
+    let _ = crate::db::shutdown_lux(handle).await;
+    let _ = std::fs::remove_dir_all(&data_dir);
+}
+
+/// 告警帧分离形态（recv_alarm 返回，测试断言用）。
+struct AlarmFrame {
+    action: crate::event_bus::AlarmAction,
+    key: String,
+    level: String,
+    source: String,
+    message: String,
+    #[allow(dead_code)]
+    ts: String,
+}
+
+/// 告警测试辅助：收一帧 Alarm（非 Alarm 帧或超时即 panic，分离字段供断言）。
+async fn recv_alarm(
+    rx: &mut tokio::sync::broadcast::Receiver<crate::event_bus::EventPayload>,
+) -> AlarmFrame {
+    let f = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+        .await
+        .expect("超时（应收告警帧）")
+        .expect("通道不应关闭");
+    match f {
+        crate::event_bus::EventPayload::Alarm {
+            action,
+            key,
+            level,
+            source,
+            message,
+            ts,
+        } => AlarmFrame {
+            action,
+            key,
+            level,
+            source,
+            message,
+            ts,
+        },
+        other => panic!("应收到 Alarm 帧，实得 {other:?}"),
+    }
+}
+
+/// fire 一条（dev1.x/error）并收掉对应 Fire 帧（clear 场景的前置）。
+async fn fire_and_recv(
+    lua: &Lua,
+    rx: &mut tokio::sync::broadcast::Receiver<crate::event_bus::EventPayload>,
+) {
+    let ok: bool = lua
+        .load("return ctx:fire_event('dev1.x', 'error', '急停按下')")
+        .eval_async()
+        .await
+        .expect("fire dev1.x");
+    assert!(ok);
+    let f = recv_alarm(rx).await;
+    assert!(
+        matches!(f.action, crate::event_bus::AlarmAction::Fire),
+        "前置 fire 应发 Fire 帧"
+    );
 }

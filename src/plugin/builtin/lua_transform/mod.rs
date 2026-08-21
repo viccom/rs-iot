@@ -97,6 +97,8 @@ impl Source for LuaTransform {
         let runtime_devs: core_::api::RuntimeDevs = Default::default();
         let dropped: std::sync::Arc<std::sync::atomic::AtomicU64> = Default::default();
         let self_writes: core_::api::SelfWrites = Default::default();
+        // 告警护栏（Q12 T4）：fire 频控 + 抖动表 + 频控计数（flush 落 stat）。
+        let alarm: core_::api::AlarmStats = Default::default();
         let ac = core_::api::ApiCtx {
             ctx_host: ctx.clone(),
             inst: &inst,
@@ -108,6 +110,7 @@ impl Source for LuaTransform {
             transport: "none",
             scripts_root: &scripts_root,
             role: core_::api::Role::Transform,
+            alarm: alarm.clone(),
         };
 
         // 3. VM 组装（north 序：register 先于 load_main——顶层能力探针可用）+
@@ -235,7 +238,7 @@ impl Source for LuaTransform {
                 },
                 _ = flush_ticker.tick() => {
                     core_::budget::sync_runtime_devs(&mut tracker, &runtime_devs);
-                    sync_transform_stats(&mut tracker, &dropped, rtdata_points, rtdata_skipped, rtdata_lagged);
+                    sync_transform_stats(&mut tracker, &dropped, rtdata_points, rtdata_skipped, rtdata_lagged, &alarm);
                     tracker.flush().await;
                     continue;
                 }
@@ -286,6 +289,7 @@ impl Source for LuaTransform {
                             rtdata_points,
                             rtdata_skipped,
                             rtdata_lagged,
+                            &alarm,
                         );
                         tracker.flush().await;
                     }
@@ -432,6 +436,7 @@ impl Source for LuaTransform {
                             rtdata_points,
                             rtdata_skipped,
                             rtdata_lagged,
+                            &alarm,
                         );
                         tracker.flush().await;
                         tracing::info!("[luaTransform] inst {} 热加载成功", inst.inst_id);
@@ -453,6 +458,7 @@ impl Source for LuaTransform {
             rtdata_points,
             rtdata_skipped,
             rtdata_lagged,
+            &alarm,
         );
         tracker.flush().await;
     }
@@ -534,12 +540,14 @@ fn sample_to_lua(lua: &mlua::Lua, v: &SampleValue) -> mlua::Result<mlua::Value> 
 }
 
 /// transform 投递面计数快照 → tracker extra（每个 flush 点前调用，不留陈旧）。
+/// 告警频控计数同出口（Q12 T4，spec alarm §3：fire_event 被拒累计）。
 fn sync_transform_stats(
     tracker: &mut crate::plugin::stat_tracker::StatTracker,
     dropped: &std::sync::atomic::AtomicU64,
     rtdata_points: u64,
     rtdata_skipped: u64,
     rtdata_lagged: u64,
+    alarm: &core_::api::AlarmStats,
 ) {
     tracker.extra_insert(
         "dropped_samples",
@@ -548,6 +556,10 @@ fn sync_transform_stats(
     tracker.extra_insert("rtdata_points", serde_json::json!(rtdata_points));
     tracker.extra_insert("rtdata_skipped", serde_json::json!(rtdata_skipped));
     tracker.extra_insert("rtdata_lagged", serde_json::json!(rtdata_lagged));
+    tracker.extra_insert(
+        "alarm_rate_limited",
+        serde_json::json!(alarm.rate_limited_count()),
+    );
 }
 
 // 静态注册到 inventory（编译期，编进单一二进制）——transform 角色 SourceEntry

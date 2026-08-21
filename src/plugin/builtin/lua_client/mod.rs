@@ -20,11 +20,12 @@ use core_::loader::SCRIPTS_ROOT;
 use core_::script::{load_main, LoadCtx};
 
 /// 把丢样计数快照写进 tracker extra（每个 flush 点前调用，与 [`sync_runtime_devs`]
-/// 并排；Q3 护栏可观测：背压丢了几样一眼可见）。
+/// 并排；Q3 护栏可观测：背压丢了几样一眼可见）。告警频控计数同出口（Q12 T4）。
 fn sync_dropped_samples(
     tracker: &mut crate::plugin::stat_tracker::StatTracker,
     dropped: &std::sync::atomic::AtomicU64,
     dropped_frames: &std::sync::atomic::AtomicU64,
+    alarm: &core_::api::AlarmStats,
 ) {
     tracker.extra_insert(
         "dropped_samples",
@@ -34,6 +35,11 @@ fn sync_dropped_samples(
     tracker.extra_insert(
         "dropped_frames",
         serde_json::json!(dropped_frames.load(std::sync::atomic::Ordering::Relaxed)),
+    );
+    // Q12 T4（spec alarm §3）：fire_event 被频控拒绝累计（风暴可见性）。
+    tracker.extra_insert(
+        "alarm_rate_limited",
+        serde_json::json!(alarm.rate_limited_count()),
     );
 }
 
@@ -162,6 +168,8 @@ impl Source for LuaClient {
         //    dropped：丢样计数，set_value(s) 与 collect 双出口共享，flush 落 stat）。
         let runtime_devs: RuntimeDevs = Default::default();
         let dropped: std::sync::Arc<std::sync::atomic::AtomicU64> = Default::default();
+        // 告警护栏（Q12 T4）：fire 频控 + 抖动表 + 频控计数（flush 落 stat）。
+        let alarm: core_::api::AlarmStats = Default::default();
         // ApiCtx（9 参收敛 struct，B 阶段 T3）：启动注册与 Evt::Reload 两处共用一份；
         // 字段为廉价句柄克隆 + 借用 inst/scripts_root。role 缺省 Collector（本插件
         // 全量能力，行为零变化；B 阶段 T6 起 north 按 §5.2 矩阵裁剪 C1）。
@@ -176,6 +184,7 @@ impl Source for LuaClient {
             scripts_root: &scripts_root,
             role: core_::api::Role::default(),
             self_writes: None, // Collector 无 EventBus 订阅面，无自环（T8）
+            alarm: alarm.clone(),
         };
         if let Err(e) = core_::api::register(&lua, &ac) {
             tracing::warn!("[luaClient] inst {} ctx API 注册失败：{e}", inst.inst_id);
@@ -257,7 +266,7 @@ impl Source for LuaClient {
                 },
                 Some(frame) = data_rx.recv() => Evt::Data(frame),
                 Some(()) = reload_rx.recv() => Evt::Reload, // None（watcher 退出/失败）忽略，不忙循环
-                _ = flush_ticker.tick() => { core_::budget::sync_runtime_devs(&mut tracker, &runtime_devs); sync_dropped_samples(&mut tracker, &dropped, &dropped_frames); tracker.flush().await; continue; }
+                _ = flush_ticker.tick() => { core_::budget::sync_runtime_devs(&mut tracker, &runtime_devs); sync_dropped_samples(&mut tracker, &dropped, &dropped_frames, &alarm); tracker.flush().await; continue; }
                 _ = ticker.tick() => Evt::Tick,
             };
             match evt {
@@ -388,7 +397,7 @@ impl Source for LuaClient {
                     }
                     if tracker.should_flush() {
                         core_::budget::sync_runtime_devs(&mut tracker, &runtime_devs);
-                        sync_dropped_samples(&mut tracker, &dropped, &dropped_frames);
+                        sync_dropped_samples(&mut tracker, &dropped, &dropped_frames, &alarm);
                         tracker.flush().await;
                     }
                 }
@@ -411,7 +420,7 @@ impl Source for LuaClient {
                             consecutive_fail = 0;
                             tracker.set_status("running");
                             core_::budget::sync_runtime_devs(&mut tracker, &runtime_devs);
-                            sync_dropped_samples(&mut tracker, &dropped, &dropped_frames);
+                            sync_dropped_samples(&mut tracker, &dropped, &dropped_frames, &alarm);
                             tracker.flush().await;
                             tracing::info!("[luaClient] inst {} 热加载成功", inst.inst_id);
                         }
@@ -431,7 +440,7 @@ impl Source for LuaClient {
         io_join.abort();
         tracker.set_status("stopped");
         core_::budget::sync_runtime_devs(&mut tracker, &runtime_devs);
-        sync_dropped_samples(&mut tracker, &dropped, &dropped_frames);
+        sync_dropped_samples(&mut tracker, &dropped, &dropped_frames, &alarm);
         tracker.flush().await;
     }
 }

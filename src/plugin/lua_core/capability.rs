@@ -1,10 +1,11 @@
 //! 能力卡（设计 §4.2/Q2）：宿主赋予脚本能力的元数据登记——单一事实源，
 //! 驱动一致性测试、护栏参数与文档生成。
 //!
-//! 现登记 20 张卡：19 个 ctx 方法（与 [`crate::plugin::lua_core::api::register`] +
-//! `api/http.rs` 的 ctx.set 清单逐一对齐；设计 §4.1 表写的"17 项"实测 +T5
-//! `secret_get` 为 19——`set_values`/`log_*` 按方法名单计数）+ builtin `json` 模块
-//! （T8 实现，`api::tests::json_roundtrip_and_limit` 锁行为）。
+//! 现登记 22 张卡：21 个 ctx 方法（与 [`crate::plugin::lua_core::api::register`] +
+//! `api/http.rs` + `api/alarm.rs` 的 ctx.set 清单逐一对齐；设计 §4.1 表写的"17 项"
+//! 实测 +T5 `secret_get` +D 阶段 T4 告警双函数为 21——`set_values`/`log_*` 按方法名
+//! 单计数）+ builtin `json` 模块（T8 实现，`api::tests::json_roundtrip_and_limit`
+//! 锁行为）。
 //! 一致性锁：本文件 tests（卡名格式/去重/数量）+ `api::tests::capability_cards_match_registered_ctx`
 //! （每张 "ctx:" 卡必须真注册在 mock VM 的 ctx 表上）。
 
@@ -270,6 +271,27 @@ pub(crate) static CAPABILITIES: &[CapabilityCard] = &[
         rate_per_sec: 0,
         api_ver: 1,
         desc: "底层链路类型（tcp/serial/udp）",
+    },
+    // --- C6 告警（Q12 T4，api/alarm.rs；跨角色全注入 + fire 频控/抖动护栏）---
+    CapabilityCard {
+        name: "ctx:fire_event",
+        layer: Layer::C6,
+        risk: Risk::R1,
+        feature: None,
+        timeout_cap_ms: 0,
+        rate_per_sec: 20, // spec alarm §3：每实例 20/s，超限返 false + alarm_rate_limited 计数
+        api_ver: 1,
+        desc: "触发告警（20/s 频控 + 同 key 1s 抖动）",
+    },
+    CapabilityCard {
+        name: "ctx:clear_event",
+        layer: Layer::C6,
+        risk: Risk::R1,
+        feature: None,
+        timeout_cap_ms: 0,
+        rate_per_sec: 0,
+        api_ver: 1,
+        desc: "清除告警（幂等，恒发 Clear 事件）",
     },
     // --- L5 网络出站（api/http.rs，feature lua-http；Q3 频控 20/s）---
     CapabilityCard {
