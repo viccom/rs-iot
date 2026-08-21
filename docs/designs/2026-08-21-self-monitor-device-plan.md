@@ -1,7 +1,12 @@
 # rs-iot 自监控设备（selfMonitor）实施计划
 
 > 日期：2026-08-21
-> **状态**：planned
+> **状态**：implemented（2026-08-21 于 worktree `feat/self-monitor` 执行完毕，4 task 全落地 + 冒烟全过，待合并 master）
+> **实施**：2026-08-21，T1 `42af12a`（hwid 覆盖键）→ T2 `bd02365`（collect 纯函数，**17 只读**——计划原写 15 系笔误，实现补 `healthy` Bool 凑齐四型）→ T3 `8bc8e2e`（Source 落地+注册+删 demo；含冒烟期发现的口径修复：`instance_health` 配置白名单——残留 stat 键如旧版 sim1 被杀进程未落 stopped 不计入健康统计）
+> **代码**：`src/config.rs`（`hwid` 覆盖键）+ `src/lib.rs`（删 demo_datasim_config，无条件自启 self_monitor_config）+ `src/plugin/builtin/self_monitor/`（SelfObservation/collect/Source/apply_write——17 只读+3 可写标签一张表）
+> **测试**：`cargo test -p rs-iot --features lua,lua-http --lib -j 4` **442/0**（self_monitor 17 用例：标签集精确断言/四型/口径白名单/apply_write 全分支）；clippy `-D warnings` 0；现场冒烟：17 标签四型出数（id==hwid）、watchdog/note 一命令双写回环（中文原样）、report_period 5→2 动态生效（日志+采样确认）、dataSim 实例上线计数联动（1/1/1/running/healthy）、stopinst self 可停（停后标签冻结）
+> **遗留**：无（可写标签集后续按需扩展——`apply_write` match 加一臂即可；mem_percent/北向连接状态等候选未做，走扩展点）
+
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
 **Goal:** 把 rs-iot 自身做成一个常驻设备（devid=`rsiot`）——自身识别/资源/统计变量作为标签周期上报数据面，并提供三个可写标签（watchdog/note/report_period）；同时删除 sim1 demo 设备（lib.rs 空配置分支），hwid 预留配置覆盖入口。
@@ -26,6 +31,7 @@
 | `uptime_s` | Int | `ctx.metrics.started` elapsed |
 | `cpu_percent` | Float | `process_metrics::sample_process_resource().0` |
 | `mem_bytes` | Int | 同上 `.1`（进程内存字节） |
+| `healthy` | Bool | 自身健康：无降级且无失败业务实例（inst_degraded==0 && inst_failed==0） |
 | `collector_count` | Int | lux `HGETALL instances` 条目数 |
 | `device_count` | Int | 遍历 instances 各 `devices` 总数 |
 | `tag_count` | Int | 遍历 instances 各 `children` 总数 |
@@ -108,7 +114,7 @@ pub(crate) fn collect(obs: &SelfObservation) -> BTreeMap<String, SampleValue>
 
 2. 失败测试（≥5 用例）：四型齐备（platform/id 是 Str、cpu Float、计数 Int）；watchdog/note None 时不插键；全部键存在性（用固定期望键集 diff——**这张表就是标签清单的执行态**，加标签先改这里）；数值直传不丢精度；空实例统计（collector_count=0 时各计数 0）
 3. 实现纯函数（一行一标签，BTreeMap 插入）
-4. 测试绿 → commit `feat(self-monitor): 标签汇总纯函数 collect——15 只读标签四型覆盖 + 口径单测`
+4. 测试绿 → commit `feat(self-monitor): 标签汇总纯函数 collect——17 只读标签四型覆盖 + 口径单测`
 
 ### Task 3: SelfMonitor Source + 注册 + 替换 demo
 
@@ -124,13 +130,13 @@ pub(crate) fn collect(obs: &SelfObservation) -> BTreeMap<String, SampleValue>
 2. `inventory::submit!` 注册 `"selfMonitor"`；模块树声明
 3. lib.rs：删 `demo_datasim_config()` 与空配置分支 → **无条件** `mgr.start_source(self_monitor_config()).await`（构造 InstConfig：inst_id "self"、app_code "selfMonitor"、devices 留空——tag 由代码生成不由配置驱动；日志 `"started self-monitor instance (devid=rsiot)"`）；dataSim 插件本身**保留**（用户仍可手建 dataSim 实例）
 4. 单测：self_monitor_config 形态；cmd 解析各臂（watchdog/note/period 钳制/坏 JSON/未知 tag）——解析逻辑提纯函数测
-5. `cargo test -p rs-iot --features lua,lua-http --lib -j 4` 全绿 + `cargo clippy -j 4 --all-features -- -D warnings`（注意仓内 clippy 惯例）0 警告 → commit `feat(self-monitor): selfMonitor 内置插件——rsiot 设备 15 只读+3 可写标签；删 sim1 demo 改无条件自启`
+5. `cargo test -p rs-iot --features lua,lua-http --lib -j 4` 全绿 + `cargo clippy -j 4 --all-features -- -D warnings`（注意仓内 clippy 惯例）0 警告 → commit `feat(self-monitor): selfMonitor 内置插件——rsiot 设备 17 只读+3 可写标签；删 sim1 demo 改无条件自启`
 
 ### Task 4: 收口回归 + 现场冒烟（主会话亲自执行）
 
 1. `cargo test -p rs-iot --features lua,lua-http -j 4` 全量 + `cargo fmt --check`
 2. 冒烟（复用 F:\rsiot-field\work\e2e-lua-d，config 无自启实例=原 demo 场景）：
-   - 新构建 rs-iot.exe 起进程 → `python resp.py HGETALL rtdata:rsiot`：15 只读标签齐、`id`==启动日志 hwid、四型正确（cpu 浮点/note 字符串）
+   - 新构建 rs-iot.exe 起进程 → `python resp.py HGETALL rtdata:rsiot`：17 只读标签齐、`id`==启动日志 hwid、四型正确（cpu 浮点/note 字符串）
    - `command/send` watchdog=7 → 下一周期 `rsiot.watchdog=7`；note 写中文 → 回读；report_period 5→2 → 时间戳间隔变短
    - 建一个 modbus 实例 → `collector_count`/`device_count`/`tag_count` 变化；`stopinst {"inst_id":"self"}` → inststatus stopped、rtdata:rsiot 停更
    - 清理：实例删、进程杀、端口释放
@@ -147,7 +153,7 @@ pub(crate) fn collect(obs: &SelfObservation) -> BTreeMap<String, SampleValue>
 ## 验收清单
 
 - [ ] hwid config 覆盖键生效（空=自动；非空=指定），测试覆盖
-- [ ] rtdata:rsiot 15 只读标签四型齐备、口径排除 self
+- [ ] rtdata:rsiot 17 只读标签四型齐备、口径排除 self
 - [ ] 三可写标签命令回环（watchdog/note/report_period）
 - [ ] sim1/devA 永不再出现；selfMonitor 无条件自启、可 stopinst
 - [ ] cargo test 全绿 + clippy 0 + fmt 过；现场冒烟记录在案

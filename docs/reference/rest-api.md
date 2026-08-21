@@ -199,6 +199,7 @@ curl -s -XPOST -H "Authorization: $TOKEN" -H 'Content-Type: application/json' \
   - opcua：`{"node_id":"ns=2;s=v1","value":123,"opc_type":"Int32"}`
   - modbus：`{"address":"holding:0:f32:ABCD","value":12.5}`
   - s7：`{"address":"DB1.DBD0","value":42.5,"kind":"f32"}`
+  - **selfMonitor（rs-iot 自监控设备，instance 恒 `"self"`）**：`{"watchdog":7}`（任意整数，下周期回读——写通路自检）/ `{"note":"机房A-1号网关"}`（现场备注，≤256 字符）/ `{"report_period":2}`（自身上报周期秒，钳 [1,3600]，下周期生效）；多键可一命令同写；写后随下一上报周期出现在 `rtdata:rsiot`（标签全表见 `docs/designs/2026-08-21-self-monitor-device-plan.md`）
 - 与 MQTT `<hwid>/command` 共用同一条 `CtlRegistry` 写总线；**仅确认投递到 `cmd_rx`，无执行回执**（见完备性评估）
 
 ### 4.8 实时数据（`routes_rtdata.rs`，lux Hash `rtdata:<devId>`）
