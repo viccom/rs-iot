@@ -12,7 +12,7 @@
 | 框架 | axum 0.8（`src/api/mod.rs::build_router`） |
 | 监听 | `0.0.0.0:{api_port}` |
 | 业务前缀 | `/api/v1/...` |
-| 持久层 | lux 嵌入式 KV（Hash: `users`/`passwords`/`instances`/`devices`/`groups`；string: `accesskey`；Hash: `rtdata:<devId>`；string: `stat:<inst>`；Hash: `ext_tokens`） |
+| 持久层 | lux 嵌入式 KV（Hash: `users`/`passwords`/`instances`/`devices`/`groups`/`secrets`/`alarms`；string: `accesskey`；Hash: `rtdata:<devId>`；string: `stat:<inst>`；Hash: `ext_tokens`） |
 | 鉴权中间件 | 全局 `auth::auth_middleware`（`from_fn_with_state`）+ `tower_http::TraceLayer` |
 
 **错误响应格式（当前不统一，调用方需兼容两种）**：
@@ -71,22 +71,28 @@ curl -s -XPOST -H "Authorization: $TOKEN" -H 'Content-Type: application/json' \
 | GET | `/api/v1/inststatus` | — | `{<inst>:<state>}` |
 | POST | `/api/v1/startinst` | `{"inst_id":"..."}` | `{"status":"ok"}`；不存在 404；配置非法 400；非南向 400 |
 | POST | `/api/v1/stopinst` | `{"inst_id":"..."}` | `{"status":"ok"}` |
+| GET | `/api/v1/config` | — | 脱敏后的运行配置 JSON（`AppConfig` 全量结构） |
 
 - `<state>` ∈ `starting`/`running`/`stopping`/`stopped`/`failed`。**`failed` 由 M3 supervisor 真实写入**：实例 task 异常退出（panic/配置错误早退/非正常 return）且未被主动 stop → 标 `failed` + `error!` 落盘；运维 `startinst` 可重拉（`failed → starting → running`）。主动 `stopinst` 走 `stopping → stopped`（token cancel）不误判
 - `startinst` 仅支持**南向 Source**（拒绝北向 `app_type=north`）
+- `config` 返回**脱敏回显**：顶层 `jwt_secret` 与 `mqtt.username`/`mqtt.password` 遮蔽为 `"***"`（保留键、替换值），其余字段原样——诊断需看 lux 端口/`data_dir`、bridge bind、log 级别等（供运维与 MCP `get_config` 工具读配置形态）
 
 ### 4.2 实例 CRUD（`routes_inst.rs`，lux Hash `instances`）
 
 | Method | Path | Body/Query | 成功响应 |
 |---|---|---|---|
 | GET | `/api/v1/insts` | — | `{<inst_id>:<InstConfig>}` |
+| GET | `/api/v1/inst/roster` | — | `[{<InstConfig>, "state":"<running\|stopped\|...>"}, ...]`（配置全集 ∪ 运行态合并） |
 | GET | `/api/v1/inst/get` | `?inst_id=` | `{<inst_id>:<InstConfig>}`，无则 `{}` |
 | POST | `/api/v1/inst/set` | `{"inst_id":"...","object":<InstConfig>}` | `{"status":"ok"}`；外部插件额外 `{"status":"ok","plugin_token":"<hex>"}`；非法配置 `{"status":"error","msg":...}` |
 | POST | `/api/v1/inst/delete` | `{"inst_id":"..."}` | `{"status":"deleted"}` |
+| POST | `/api/v1/purge` | `{"scope":"all"\|"rtdata"}` | all：`{"status":"purged","instances":<N>,"rtdata_keys":<M>}`；rtdata：`{"status":"purged","rtdata_keys":<N>}` |
 
 - `inst/set` 会**强校验** `object` 反序列化为 `InstConfig`（避免存入非法配置延迟到 startinst 才报错）
 - **外部插件**（`host_kind:"external"`）：每次 `set` 调 `ext_token::issue` **覆盖旧 token**（旧 token 即失效），明文 `plugin_token` 仅此次返回（管理员交付外部进程）。重复 set 同实例 = 轮换 token
 - `inst/delete` 连带清除外插件 token + 该实例全部 Lua kv（`luakv`）
+- **`inst/roster` 是实例名册的单一权威数据源**：`/inststatus`（`mgr.status()`）只含已 start 过的实例，`auto_start=false` 从未启动的配置实例会缺席。roster 合并 lux `instances` 配置全集与运行态——未在运行态的实例标 `state:"stopped"`；运行态中配置没有的实例（config.toml/代码启动）追加仅含 `inst_id`+`state` 的条目。回显经 M3 脱敏（`app_config.password` 字面值遮 `"***"`，`secret:` 引用原样），MCP `rsiot_list_instances` 同源
+- **`purge` 是危险操作**（前端已接二次确认）：`scope=all` 遍历全部实例逐个级联删除（停 task + 清 rtdata/stat/trace/配置/token/luakv），再兜底 `KEYS` 清 `rtdata:*`/`stat:*`/`luakv:*` 孤儿残留；**绝不碰** `users`/`passwords`/`groups`/`accesskey`/`ext_tokens` 系统数据。`scope=rtdata` 只清实时数据缓存（保留实例配置）；未知 scope 返回 `{"status":"error","msg":"unknown scope: '...', expected 'all' or 'rtdata'"}`
 
 **建普通采集实例示例**（modbus，RS485 多 slave 单实例）：
 ```bash
@@ -234,6 +240,8 @@ curl -s -XPOST -H "Authorization: $TOKEN" -H 'Content-Type: application/json' \
 
 > **报文 trace 按设计不落盘**：trace 报文（trace level）只进内存 ring buffer（2000 条/实例，按需激活、用完关闭），不写入日志文件——避免 hex 数据撑爆磁盘；常规运行日志（info/warn/error）才 daily 落盘。
 
+> 实时性补充：活跃告警清单（§4.12 `GET /api/v1/alarms`）与 SSE 事件流（§4.13 `GET /api/v1/events`）同属可观测面——前者 REST 拉取当前活跃告警，后者增量推送日志/报文/状态/实时数据/告警五类事件。
+
 ### 4.11 平台凭证 secret（`routes_secret.rs`，阶段 B T4）
 
 平台级凭证（MQTT broker 密码、OneNET access_key 等）的 lux 全局 `secrets` 表管理面。
@@ -263,6 +271,39 @@ curl -H "Authorization: <token>" localhost:8790/api/v1/secret/list
 curl -X DELETE -H "Authorization: <token>" "localhost:8790/api/v1/secret?ref=secret:onenet_key"
 ```
 
+### 4.12 活跃告警（`routes_alarm.rs`，Q12 告警最小闭环）
+
+脚本判定的活跃告警清单（lux Hash `alarms`：field = key，value = `{level,source,message,ts,count}`）的查询/手动清除面。只存**当前活跃**（历史时序表明确不做）；lux 持久——重启后活跃清单与 count 保留。
+
+| Method | Path | 鉴权 | Body/Query | 响应 |
+|---|---|---|---|---|
+| GET | `/api/v1/alarms` | JWT | — | `[{key,level,source,message,ts,count}, ...]`（按 ts 倒序，空表 `[]`）；lux 故障 500 |
+| DELETE | `/api/v1/alarms` | JWT | `?key=<k>` | `{"status":"ok","key":...}`（幂等：不存在仍 200）；lux 故障 500 |
+
+- **触发（fire）无 REST 端点**——判定归脚本 `ctx:fire_event(key, level, message)`（阈值/迟滞逻辑在 Lua 内）；`source` 由宿主注入实例 ID（API 无 source 参数，脚本不可伪造）
+- `level` ∈ `info`/`warn`/`error`；`count` 为同 key 累计触发次数（重复报警风暴可见性）；同 key **1s 抖动窗口**内重复 fire 不重发 SSE 帧（前端不被同键闪屏）但 count 仍累计；fire 频控 20/s/实例、key 非空且 ≤128 字符、全局活跃键上限 1000（新键拒存，运维清除后恢复容量）
+- DELETE 手动清除（运维兜底）：条目存在才发 Clear SSE 事件（alarm 帧 `action:"clear"`，见 §4.13——前端面板视图收敛）；HDEL→publish 统一序，清除失败整轮报错不发帧
+- **审计 key 级不落 message 全文**（防日志洪水；message 看 REST/SSE）
+
+```bash
+# 活跃清单（ts 倒序）
+curl -H "Authorization: <token>" localhost:8790/api/v1/alarms
+# 手动清除（幂等，前端已接二次确认）
+curl -X DELETE -H "Authorization: <token>" "localhost:8790/api/v1/alarms?key=dev1.temp_high"
+```
+
+### 4.13 SSE 实时事件流（`routes_events.rs`）
+
+| Method | Path | 鉴权 | Body/Query | 响应 |
+|---|---|---|---|---|
+| GET | `/api/v1/events` | JWT | `?types=<逗号分隔 kind>`（缺省/空 = 全推） | `text/event-stream`：每事件一帧 `event: <kind>\ndata: <json>\n\n` |
+
+- **kind 五种**：`rtdata`（实时数据批量帧，Q6 带值：`{dev_ids,count,samples,ts}`——50ms 攒批窗口**一批一事件**而非每点一次，`samples` 按 dev 聚合携带最新值；lagged 丢帧/dev 超限截断时数据不全，前端靠既有 2s 轮询 `GET /rtdatas` 兜底）/ `alarm`（告警 fire/clear）/ `log`（与 `/api/v1/logs/recent` 同构的 LogEntry）/ `packet`（报文 trace hex dump：`{inst_id,dir:"tx"\|"rx",hex,ts}`）/ `state`（实例状态变更：`{inst_id,state,app_code,host_kind,ts}`）
+- **alarm 帧** data 形状：`{"kind":"alarm","action":"fire"|"clear","key","level","source","message","ts"}`（`source` 为宿主注入的实例 ID，不可伪造；一次 `addEventListener("alarm")` 覆盖双向）
+- **鉴权走 cookie**：EventSource 无法带自定义 header，`/login` 已 `Set-Cookie token=...; HttpOnly` 同源自动带（Authorization 头通道同全局中间件，§2，curl 调试可用）
+- broadcast 语义：每连接独立 Receiver；慢客户端缓冲满收 `Lagged` → 丢帧继续不终结流，丢失条数累入 Prometheus `rs_iot_sse_lagged_total`（持续增长提示调大 `event_bus_capacity`，默认 256）
+- 无事件时 KeepAlive 周期发注释帧防代理超时；无生产者时连接静默等待
+
 ## 5. 数据模型（`src/types.rs`）
 
 ```
@@ -286,4 +327,4 @@ CtlMessage { instance:InstId, devid, cmd, data:<JSON 文本> }
 
 ## 6. 已知限制与完备性
 
-当前 API 定位为**单管理员调试/运维**（对标 Lite_IOT）。要支撑「管理员 + 多用户前端系统」尚有缺口（无授权层、无用户自服务、无批量/分页/历史、命令无回执、无 `/healthz`、错误格式不统一等），详见 API 完备性评估（`api-completeness-assessment.md`，已归档，git 历史 66945dd 可溯）。**可观测性已具备**：`/metrics`（Prometheus）+ `/api/v1/inst/stats`（per-instance JSON）+ `/api/v1/inst/trace`（报文 trace）+ `/api/v1/logs/recent`（日志快照）四端点覆盖指标/诊断/日志三个维度。
+当前 API 定位为**单管理员调试/运维**（对标 Lite_IOT）。要支撑「管理员 + 多用户前端系统」尚有缺口（无授权层、无用户自服务、无批量/分页/历史、命令无回执、无 `/healthz`、错误格式不统一等），详见 API 完备性评估（`api-completeness-assessment.md`，已归档，git 历史 66945dd 可溯）。**可观测性已具备**：`/metrics`（Prometheus）+ `/api/v1/inst/stats`（per-instance JSON）+ `/api/v1/inst/trace`（报文 trace）+ `/api/v1/logs/recent`（日志快照）+ `/api/v1/alarms`（告警清单，§4.12）+ `/api/v1/events`（SSE 实时事件流，§4.13）六端点覆盖指标/诊断/日志/告警/实时推送。
