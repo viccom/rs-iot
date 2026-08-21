@@ -79,6 +79,9 @@ async fn test_app(
     event_bus: EventBus,
 ) -> (axum::Router, Arc<InstanceManager>, lux::ServerHandle) {
     let data_dir = common::test_data_dir(tag);
+    // 复审 P2-5：先清历史残留（同机重跑时 kv 残留会致精确断言假绿/假红——
+    // real_chain 先例；tag 按测试隔离，并行安全）。
+    let _ = std::fs::remove_dir_all(&data_dir);
     let (handle, client) = common::start_lux(data_dir.to_str().expect("utf8")).await;
     rs_iot::db::identity::bootstrap(&client)
         .await
