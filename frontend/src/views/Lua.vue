@@ -522,7 +522,13 @@ useWorkspacePage(() => ({
   flex: 1; display: grid; grid-template-columns: 1fr 240px; gap: 14px;
   min-height: 420px; position: relative; z-index: 1;
 }
-.editor-wrap { min-height: 420px; overflow: hidden; }
+/* 确定高度（与 LogStream/RtdataPanel 同款断链修复：editor-wrap 只有 min-height 时
+   .cm-host 的 height:100% 失效，编辑器随脚本行数撑开——切脚本高度跳动、下方元素
+   跟随位移。clamp 固定后 CodeMirror .cm-scroller 内滚出条）。 */
+.editor-wrap {
+  height: clamp(420px, calc(100vh - 300px), 860px);
+  overflow: hidden;
+}
 
 .versions { display: flex; flex-direction: column; gap: 8px; max-height: 480px; overflow-y: auto; }
 .versions-label { margin: 0; font-size: 11px; color: var(--color-ink-muted); letter-spacing: 0.08em; text-transform: uppercase; }
