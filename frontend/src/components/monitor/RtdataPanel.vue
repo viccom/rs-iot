@@ -42,9 +42,10 @@ const typeMap = computed(() => {
   return m
 })
 
-/** devId → 归属映射（配置声明 ∪ 运行时上报，多实例同 dev 为数组——修正"首个胜出"歧义）。
- *  与 typeMap 同源遍历（instanceConfigs + roster），方向 2b 行过滤 + owner 列共用。 */
-const ownership = computed(() => buildDeviceOwnership(monitor.instanceConfigs, monitor.roster))
+/** devId → 归属映射（配置声明 ∪ 运行时上报 ∪ 后端归属表 owner_inst，多实例同 dev
+ *  为数组——修正"首个胜出"歧义）。与 typeMap 同源遍历（instanceConfigs + roster），
+ *  方向 2b 行过滤 + owner 列共用。 */
+const ownership = computed(() => buildDeviceOwnership(monitor.instanceConfigs, monitor.roster, monitor.deviceOwners))
 
 /** 已知类型集合（类型下拉选项，从 typeMap 收集）。 */
 const knownTypes = computed(() => {

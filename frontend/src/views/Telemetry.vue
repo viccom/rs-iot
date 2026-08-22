@@ -8,17 +8,24 @@ import { buildDeviceOwnership, unclaimedDevices } from '../lib/instRelations'
 
 const monitor = useMonitorStore()
 
-/** 设备归属映射（配置声明 ∪ 运行时上报，lib 纯函数派生）。 */
-const ownership = computed(() => buildDeviceOwnership(monitor.instanceConfigs, monitor.roster))
+/** 设备归属映射（配置声明 ∪ 运行时上报 ∪ 后端归属表 owner_inst，lib 纯函数派生）。 */
+const ownership = computed(() => buildDeviceOwnership(monitor.instanceConfigs, monitor.roster, monitor.deviceOwners))
 
-/** 实例设备集：配置 devices ∪ 运行时上报 runtime_devices（实例过滤的收窄口径）。 */
+/** 实例设备集：配置 devices ∪ 运行时上报 runtime_devices ∪ 归属表 owner_inst
+ *  （实例过滤的收窄口径——归属表多宿主逗号串拆分）。 */
 function instanceDeviceSet(instId: string): Set<string> {
   const cfg = monitor.instanceConfigs[instId]
   const s = new Set<string>(cfg?.devices.map(d => d.value).filter(Boolean) ?? [])
   const rt = monitor.roster.find(i => i.inst_id === instId)?.health?.runtime_devices ?? []
   for (const d of rt) if (d) s.add(d)
+  for (const [devId, owners] of Object.entries(monitor.deviceOwners)) {
+    if ((owners ?? '').split(',').map(x => x.trim()).includes(instId)) s.add(devId)
+  }
   return s
 }
+
+// setup 拉一次后端归属表（dev2inst 全插件口径；缺席时退化为配置+runtime_devices）。
+monitor.loadDeviceOwners()
 
 /** 孤儿设备（有数据、无任何归属——多为已删实例残留）。仅"全部实例"视图单独分组展示。 */
 const orphans = computed(() => unclaimedDevices(monitor.rtdata, ownership.value))

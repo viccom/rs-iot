@@ -75,6 +75,9 @@ export const useMonitorStore = defineStore('monitor', () => {
   const packets = ref<PacketEntry[]>([])
   /** rtdata 快照：`{devId: {tag: [ts, localTime, value]}}`。 */
   const rtdata = ref<Record<string, Record<string, RtdataCell>>>({})
+  /** 后端归属表（GET /devices 运行时条目的 owner_inst——dev2inst 全插件口径；
+   *  配置设备不在此（配置源已覆盖），仅运行时产生设备有键。 */
+  const deviceOwners = ref<Record<string, string>>({})
   /** sysstatus 快照（dbsize / metrics / process 等）。 */
   const sysstatus = ref<Record<string, unknown>>({})
   /** 活跃告警清单（最新在前；来源 GET /alarms 拉取 + SSE alarm 帧收敛，Q12 T5）。 */
@@ -226,6 +229,25 @@ export const useMonitorStore = defineStore('monitor', () => {
       if (r.status === 401) { handleUnauthorized(); return }
       if (r.ok) instances.value = (await r.json()) as InstanceStat[]
     } catch { /* 轮询失败静默，下周期重试 */ }
+  }
+
+  /** 拉取后端设备归属表（GET /devices；提取运行时条目 owner_inst——dev2inst
+   *  全插件口径。归属变化频率低，页面 setup 拉一次即可）。 */
+  async function loadDeviceOwners() {
+    if (isPreviewAuthToken(useAuthStore().token)) return
+    try {
+      const r = await fetch('/api/rsiot/api/v1/devices', {
+        headers: { Authorization: `Bearer ${useAuthStore().token}` },
+      })
+      if (r.status === 401) { handleUnauthorized(); return }
+      if (!r.ok) return
+      const data = (await r.json()) as Record<string, { runtime?: boolean; owner_inst?: string }>
+      const out: Record<string, string> = {}
+      for (const [devId, entry] of Object.entries(data)) {
+        if (entry?.runtime && entry.owner_inst) out[devId] = entry.owner_inst
+      }
+      deviceOwners.value = out
+    } catch { /* 静默：归属表缺席时前端退化为配置+runtime_devices 口径 */ }
   }
 
   /** 拉取实例完整配置表（GET /insts，含 app_config/devices；实例管理 + 类型映射用）。 */
@@ -640,6 +662,7 @@ export const useMonitorStore = defineStore('monitor', () => {
     logs,
     packets,
     rtdata,
+    deviceOwners,
     sysstatus,
     alarms,
     selectedInstance,
@@ -653,6 +676,7 @@ export const useMonitorStore = defineStore('monitor', () => {
     onRtdataNotify,
     onAlarm,
     loadInstances,
+    loadDeviceOwners,
     loadInstanceConfigs,
     loadRtdata,
     loadSysstatus,

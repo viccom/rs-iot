@@ -1,8 +1,9 @@
 // frontend/src/lib/instRelations.ts
 // 实例↔设备/脚本关联派生纯函数（方向 2：树形追溯数据源）。
 //
-// 数据源全部为前端既有 store 状态（instanceConfigs / roster / rtdata），零后端新增请求。
-// 归属口径：**配置声明 ∪ 运行时上报**（后端 luaClient stat extra 的 runtime_devices）。
+// 数据源为前端 store 状态（instanceConfigs / roster / rtdata / deviceOwners）。
+// 归属口径：**配置声明 ∪ 运行时上报（lua stat runtime_devices）∪ 后端归属表
+// （GET /devices 运行时条目 owner_inst = dev2inst，全插件口径）**。
 
 import type { InstConfig, InstanceConfigs, InstanceStat, RtdataCell } from '../types'
 
@@ -55,10 +56,11 @@ export function relatedLuaInstances(
   return out
 }
 
-/** devId → 归属映射（配置声明 ∪ 运行时上报，同实例去重，跳过空 devId）。 */
+/** devId → 归属映射（配置声明 ∪ 运行时上报 ∪ 后端归属表，同实例去重，跳过空 devId）。 */
 export function buildDeviceOwnership(
   instanceConfigs: InstanceConfigs,
   instances: InstanceStat[],
+  deviceOwners?: Record<string, string>,
 ): Record<string, DeviceOwnership> {
   const m: Record<string, DeviceOwnership> = {}
   /** 去重追加一个归属（实例 + 插件名同序）。 */
@@ -77,9 +79,18 @@ export function buildDeviceOwnership(
   }
   // 运行时上报归属（lua stat 的 runtime_devices；旧后端无此字段 → 空，优雅降级）。
   // 插件名取 roster 的 app_code（与配置侧同源）。
+  const appCodeById = new Map(instances.map(i => [i.inst_id, i.app_code]))
   for (const inst of instances) {
     for (const devId of inst.health?.runtime_devices ?? []) {
       add(devId, inst.inst_id, inst.app_code)
+    }
+  }
+  // 后端归属表（GET /devices 运行时条目的 owner_inst——dev2inst 全插件口径：
+  // selfMonitor/sidecar/transform 派生设备不具各 runtime_devices 字段，经此源覆盖；
+  // 多宿主逗号串拆分。与配置源重复时 add 去重）。
+  for (const [devId, ownersRaw] of Object.entries(deviceOwners ?? {})) {
+    for (const instId of (ownersRaw ?? '').split(',').map(s => s.trim()).filter(Boolean)) {
+      add(devId, instId, appCodeById.get(instId) ?? 'unknown')
     }
   }
   return m

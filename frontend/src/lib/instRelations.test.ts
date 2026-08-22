@@ -133,6 +133,29 @@ describe('buildDeviceOwnership', () => {
     const own = buildDeviceOwnership(cfgs, [legacy])
     expect(own['d1'].owners).toEqual(['lua1'])
   })
+
+  it('归属表 owner_int（单宿主）——selfMonitor 等无 runtime_devices 插件的运行时设备', () => {
+    const cfgs = {} // selfMonitor devices 为空（tag 由代码生成）
+    const instances = [stat('self', 'running')] // roster 有 self（app_code 供展示）
+    const deviceOwners = { rsiot: 'self' }
+    const own = buildDeviceOwnership(cfgs, instances, deviceOwners)
+    expect(own['rsiot'].owners).toEqual(['self'])
+  })
+
+  it('归属表 owner_inst 多宿主逗号串拆分，与配置源并集去重', () => {
+    const cfgs = { a: luaCfg('a', 's', ['shared']) }
+    const instances = [stat('a', 'running'), stat('b', 'running')]
+    const deviceOwners = { shared: 'a, b', rtdev3: 'b' }
+    const own = buildDeviceOwnership(cfgs, instances, deviceOwners)
+    expect(own['shared'].owners.sort()).toEqual(['a', 'b']) // a 配置+归属表双源不重复
+    expect(own['rtdev3'].owners).toEqual(['b'])
+  })
+
+  it('归属表缺席/空串条目跳过（向后兼容两参调用）', () => {
+    const cfgs = { lua1: luaCfg('lua1', 's', ['d1']) }
+    expect(buildDeviceOwnership(cfgs, [], {})).toEqual({ d1: { owners: ['lua1'], appCodes: ['luaClient'] } })
+    expect(buildDeviceOwnership(cfgs, [], { d2: '' })).toEqual({ d1: { owners: ['lua1'], appCodes: ['luaClient'] } })
+  })
 })
 
 // ---- unclaimedDevices：孤儿设备（有数据、无任何归属） ----
