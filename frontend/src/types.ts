@@ -39,6 +39,8 @@ export interface LogEntry {
   target: string
   message: string
   fields?: Record<string, string>
+  /** 前端注入的稳定 key（store 入队/补拉时分配；后端不回传）。 */
+  seq?: number
 }
 
 /** SSE `packet` 事件 payload。ts 为 ISO8601 字符串。 */
@@ -47,6 +49,8 @@ export interface PacketEntry {
   dir: 'tx' | 'rx'
   hex: string
   ts: string
+  /** 前端注入的稳定 key（同 LogEntry.seq）。 */
+  seq?: number
 }
 
 /** SSE `state` 事件 payload。ts 为 ISO8601 字符串。 */

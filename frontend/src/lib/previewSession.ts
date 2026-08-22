@@ -59,20 +59,32 @@ export function createPreviewSnapshot(): PreviewSnapshot {
       {
         ts: '2026-08-13T11:20:48.000Z',
         level: 'warn',
-        target: 'opc-boiler',
-        message: 'Boiler-2 温度反馈波动偏大，建议检查采样稳定性',
+        target: 'rs_iot::plugin::builtin::modbus_client',
+        message: '[modbusClient] inst mb-power connect failed: Connection refused (os error 10061)',
+      },
+      {
+        ts: '2026-08-13T11:20:44.000Z',
+        level: 'info',
+        target: 'rs_iot::plugin::builtin::self_monitor',
+        message: '[selfMonitor] inst self starting (devid=rsiot, every 5s)',
       },
       {
         ts: '2026-08-13T11:20:16.000Z',
         level: 'info',
-        target: 'mb-power',
-        message: 'Power meter devA 已刷新 12 个关键点位',
+        target: 'rs_iot::plugin::builtin::lua_client',
+        message: '[luaClient] inst opc-boiler 已刷新 12 个关键点位',
       },
       {
         ts: '2026-08-13T11:19:53.000Z',
         level: 'error',
-        target: 'bacnet-floor2',
-        message: 'Floor2 采集器离线，等待人工恢复',
+        target: 'rs_iot::api::routes_inst',
+        message: 'startinst mb-power: io error (instance not running)',
+      },
+      {
+        ts: '2026-08-13T11:19:40.000Z',
+        level: 'info',
+        target: 'rs_iot::pipeline',
+        message: 'write_batch 24 fields flushed (dbsize=118)',
       },
     ],
     packets: [

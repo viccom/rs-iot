@@ -21,6 +21,9 @@ import { createPreviewSnapshot, isPreviewAuthToken } from '../lib/previewSession
 const MAX_LOGS = 500
 /** 报文环形缓冲容量（最新在前）。 */
 const MAX_PACKETS = 200
+/** 日志/报文 SSE 攒批窗口（ms）：每帧即时 unshift 会触发全列表响应式更新，
+ *  高频日志（debug 级/多实例）下每秒几十次；攒批 flush 把渲染压到 ~2-3 次/秒。 */
+const SSE_FLUSH_MS = 400
 /** rtdata 通知触发轮询的去抖窗口（ms）——连续通知风暴只拉一次最新值。 */
 const RTDATA_NOTIFY_DEBOUNCE_MS = 200
 
@@ -124,15 +127,45 @@ export const useMonitorStore = defineStore('monitor', () => {
     if (typeof window !== 'undefined') window.location.href = '/login'
   }
 
-  /** 收到一条日志：prepend 并截断到 MAX_LOGS。 */
+  /** 前端递增序号：SSE/补拉/预览注入时统一分配，作 v-for 稳定 key——
+   *  同一 tick 同内容条目也不撞（此前用索引 key，prepend 下全列表错位重 patch）。 */
+  let entrySeq = 0
+  /** 攒批队列（到达序 = 旧→新）。 */
+  const pendingLogs: LogEntry[] = []
+  let logFlushTimer: ReturnType<typeof setTimeout> | null = null
+  const pendingPackets: PacketEntry[] = []
+  let packetFlushTimer: ReturnType<typeof setTimeout> | null = null
+
+  /** 收到一条日志：入攒批队列，SSE_FLUSH_MS 后合并 prepend（截断到 MAX_LOGS）。 */
   function onLog(e: LogEntry) {
-    logs.value.unshift(e)
+    e.seq = ++entrySeq
+    pendingLogs.push(e)
+    if (!logFlushTimer) logFlushTimer = setTimeout(flushLogs, SSE_FLUSH_MS)
+  }
+
+  /** 冲刷日志攒批队列（定时器到期/退订时调用）。 */
+  function flushLogs() {
+    if (logFlushTimer) { clearTimeout(logFlushTimer); logFlushTimer = null }
+    if (!pendingLogs.length) return
+    // 队列内旧→新，unshift 需新→旧序（保持 logs 最新在前语义）。
+    const batch = pendingLogs.splice(0).reverse()
+    logs.value.unshift(...batch)
     if (logs.value.length > MAX_LOGS) logs.value.length = MAX_LOGS
   }
 
-  /** 收到一帧报文：prepend 并截断到 MAX_PACKETS。 */
+  /** 收到一帧报文：入攒批队列（同 onLog 模式）。 */
   function onPacket(e: PacketEntry) {
-    packets.value.unshift(e)
+    e.seq = ++entrySeq
+    pendingPackets.push(e)
+    if (!packetFlushTimer) packetFlushTimer = setTimeout(flushPackets, SSE_FLUSH_MS)
+  }
+
+  /** 冲刷报文攒批队列。 */
+  function flushPackets() {
+    if (packetFlushTimer) { clearTimeout(packetFlushTimer); packetFlushTimer = null }
+    if (!pendingPackets.length) return
+    const batch = pendingPackets.splice(0).reverse()
+    packets.value.unshift(...batch)
     if (packets.value.length > MAX_PACKETS) packets.value.length = MAX_PACKETS
   }
 
@@ -349,7 +382,7 @@ export const useMonitorStore = defineStore('monitor', () => {
         const seen = new Set(logs.value.map(l => `${l.ts}|${l.message}`))
         for (const e of [...entries].reverse()) {
           const k = `${e.ts}|${e.message}`
-          if (!seen.has(k)) { logs.value.unshift(e); seen.add(k) }
+          if (!seen.has(k)) { e.seq = ++entrySeq; logs.value.unshift(e); seen.add(k) }
         }
         if (logs.value.length > MAX_LOGS) logs.value.length = MAX_LOGS
       }
@@ -471,10 +504,11 @@ export const useMonitorStore = defineStore('monitor', () => {
     void loadLogsRecent()  // 首次补拉历史
   }
 
-  /** 关闭日志 SSE 订阅（离开诊断 Tab）。 */
+  /** 关闭日志 SSE 订阅（离开诊断 Tab）。冲刷攒批尾巴防丢帧。 */
   function unsubscribeLog() {
     logSse?.close()
     logSse = null
+    flushLogs()
     logSubscribed.value = false
   }
 
@@ -494,10 +528,11 @@ export const useMonitorStore = defineStore('monitor', () => {
     packetSubscribed.value = true
   }
 
-  /** 关闭报文 SSE 订阅。同时停当前实例的 trace 推送（后端 per-instance 注册表）。 */
+  /** 关闭报文 SSE 订阅。冲刷攒批尾巴；同时停当前实例的 trace 推送（后端 per-instance 注册表）。 */
   function unsubscribePacket() {
     packetSse?.close()
     packetSse = null
+    flushPackets()
     packetSubscribed.value = false
     if (selectedInstance.value) void stopPacketTrace(selectedInstance.value)
   }
@@ -619,8 +654,8 @@ export const useMonitorStore = defineStore('monitor', () => {
   function applyPreviewSnapshot() {
     const previewSnapshot = createPreviewSnapshot()
     instances.value = previewSnapshot.instances
-    logs.value = previewSnapshot.logs
-    packets.value = previewSnapshot.packets
+    logs.value = previewSnapshot.logs.map(l => ({ ...l, seq: ++entrySeq }))
+    packets.value = previewSnapshot.packets.map(p => ({ ...p, seq: ++entrySeq }))
     rtdata.value = previewSnapshot.rtdata
     sysstatus.value = previewSnapshot.sysstatus
     if (!selectedInstance.value) {

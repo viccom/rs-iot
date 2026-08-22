@@ -2,6 +2,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useMonitorStore } from '../../stores/monitor'
+import { useVirtualRows } from '../../composables/useVirtualRows'
 const monitor = useMonitorStore()
 
 /** 抓样窗口剩余秒数（>0 表示 trace 激活中；后端 60s deadline 到期自动失效，前端只作提示）。 */
@@ -9,11 +10,23 @@ const remaining = ref(0)
 /** 倒计时句柄。 */
 let countdown: ReturnType<typeof setInterval> | null = null
 
+/** 固定行高（hex 单行 ellipsis 后行高恒定——虚拟滚动的硬约束）。 */
+const ROW_H = 36
+
 // PacketEntry.inst_id 真的是 inst_id（非 devId），按 selectedInstance 过滤正确。
 const filtered = computed(() => {
   if (!monitor.selectedInstance) return monitor.packets
   return monitor.packets.filter(p => p.inst_id === monitor.selectedInstance)
 })
+
+const { containerRef, onScroll, start, end, padTop, padBottom, toTop, compensatePrepend } =
+  useVirtualRows(computed(() => filtered.value.length), ROW_H)
+const windowRows = computed(() => filtered.value.slice(start.value, end.value))
+
+// 切换抓样目标实例 → 回顶（内容全换）。先于 length watch 注册（同 LogStream 理由）。
+watch(() => monitor.selectedInstance, () => toTop())
+// 高频前插补偿：回看历史（非顶部）时新帧到来不让视口内容跳动。
+watch(() => filtered.value.length, (n, o) => { if (n > o) compensatePrepend(n - o) })
 
 /** 选中实例的运行态（抓样要求实例 Running——后端对未运行实例返回 404）。 */
 const selectedRunning = computed(() =>
@@ -77,13 +90,18 @@ onUnmounted(() => {
       </button>
     </div>
     <p v-if="armError" class="arm-error">{{ armError }}</p>
-    <div class="list">
-      <div v-for="(p, i) in filtered" :key="i" class="pkt" :class="p.dir">
+    <div class="head">
+      <span>方向</span><span>实例</span><span>报文</span><span>时间</span>
+    </div>
+    <div ref="containerRef" class="list" @scroll.passive="onScroll">
+      <div :style="{ height: padTop + 'px' }"></div>
+      <div v-for="p in windowRows" :key="p.seq" class="pkt" :class="p.dir">
         <span class="dir">{{ p.dir.toUpperCase() }}</span>
-        <span class="inst">{{ p.inst_id }}</span>
-        <span class="hex">{{ p.hex }}</span>
+        <span class="inst" :title="p.inst_id">{{ p.inst_id }}</span>
+        <span class="hex" :title="p.hex">{{ p.hex }}</span>
         <span class="ts">{{ new Date(p.ts).toLocaleTimeString() }}</span>
       </div>
+      <div :style="{ height: padBottom + 'px' }"></div>
       <p v-if="!filtered.length" class="empty">
         {{ !selectedRunning && monitor.selectedInstance
           ? '实例未运行，无报文可抓（先到采集器页启动实例）'
@@ -145,19 +163,39 @@ onUnmounted(() => {
   border: 1px solid color-mix(in srgb, var(--color-danger) 25%, transparent);
   border-radius: 10px;
 }
+
+/* 表头与数据行同列模板（方向/实例/时间固定宽，报文弹性）。 */
+.head,
 .pkt {
   display: grid;
-  grid-template-columns: 48px 130px 1fr 84px;
+  grid-template-columns: 48px 130px minmax(0, 1fr) 84px;
   gap: 10px;
-  padding: 12px 10px;
+  padding: 0 10px;
   font-size: 12px;
   font-family: Consolas, monospace;
+}
+.head {
+  height: 30px;
+  align-items: center;
+  color: var(--color-ink-muted);
+  border-bottom: 1px solid var(--color-divider);
+  font-size: 11px;
+  letter-spacing: 0.06em;
+}
+.pkt {
+  height: 36px; /* 与 ROW_H 常量一致（虚拟滚动固定行高） */
+  align-items: center;
   border-bottom: 1px solid var(--card-border);
-  border-radius: 14px;
 }
 .pkt:hover { background: var(--table-row-hover); }
 .pkt.tx .dir { color: var(--color-primary); } .pkt.rx .dir { color: var(--color-success); }
 .inst, .ts { color: var(--color-ink-muted); }
-.hex { word-break: break-all; }
+/* 单行截断（hex 长帧此前 word-break 折行——行高不定无法虚拟滚动；全文悬停 title 可看）。 */
+.dir, .inst, .hex, .ts {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .empty { color: var(--color-ink-muted); padding: 20px; text-align: center; }
 </style>

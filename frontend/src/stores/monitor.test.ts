@@ -63,23 +63,39 @@ describe('monitor store', () => {
     ;(globalThis as { EventSource?: unknown }).EventSource = FakeEventSource
   })
 
-  it('onLog prepends log and caps at 500', () => {
-    const s = useMonitorStore()
-    for (let i = 0; i < 510; i++) {
-      const e: LogEntry = { ts: String(i), level: 'info', target: 't', message: `m${i}` }
-      s.onLog(e)
+  it('onLog 攒批 flush：prepend 最新在前 + 截断 500 + 分配稳定 seq', () => {
+    // 攒批语义（SSE_FLUSH_MS=400）：入队不即写 logs，定时器到期一次 flush。
+    vi.useFakeTimers()
+    try {
+      const s = useMonitorStore()
+      for (let i = 0; i < 510; i++) {
+        const e: LogEntry = { ts: String(i), level: 'info', target: 't', message: `m${i}` }
+        s.onLog(e)
+      }
+      expect(s.logs.length).toBe(0) // 未到期不入列
+      vi.advanceTimersByTime(400)
+      expect(s.logs.length).toBe(500)
+      expect(s.logs[0].message).toBe('m509') // 最新在前
+      expect(s.logs[0].seq).toBeGreaterThan(0) // v-for 稳定 key
+    } finally {
+      vi.useRealTimers()
     }
-    expect(s.logs.length).toBe(500)
-    expect(s.logs[0].message).toBe('m509') // 最新在前
   })
 
-  it('onPacket prepends packet and caps at 200', () => {
-    const s = useMonitorStore()
-    for (let i = 0; i < 210; i++) {
-      const e: PacketEntry = { ts: String(i), dir: 'tx', hex: 'aa', inst_id: 'i' }
-      s.onPacket(e)
+  it('onPacket 攒批 flush：截断 200', () => {
+    vi.useFakeTimers()
+    try {
+      const s = useMonitorStore()
+      for (let i = 0; i < 210; i++) {
+        const e: PacketEntry = { ts: String(i), dir: 'tx', hex: 'aa', inst_id: 'i' }
+        s.onPacket(e)
+      }
+      expect(s.packets.length).toBe(0)
+      vi.advanceTimersByTime(400)
+      expect(s.packets.length).toBe(200)
+    } finally {
+      vi.useRealTimers()
     }
-    expect(s.packets.length).toBe(200)
   })
 
   it('onState updates existing instance state', () => {
@@ -247,10 +263,10 @@ describe('monitor store', () => {
     // logs/recent 被调（subscribeLog 内初始拉历史）。
     expect(s.logs.length).toBe(2)
     expect(s.logs[0].message).toBe('m2')
-    // 实时 log 帧分发到 ring buffer。
+    // 实时 log 帧入攒批队列；退订时冲刷（防丢尾）——live 应已入列。
     logSse!.emit('log', { ts: 't', level: 'info', target: 't', message: 'live' })
-    expect(s.logs[0].message).toBe('live')
     s.unsubscribeLog()
+    expect(s.logs[0].message).toBe('live')
     expect(s.logSubscribed).toBe(false)
     s.stop()
     fetchSpy.mockRestore()
