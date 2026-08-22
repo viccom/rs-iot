@@ -312,3 +312,51 @@ async fn purge_clears_dev2inst_both_scopes() {
 
     common::stop_lux(handle).await;
 }
+
+/// runtime-only 实例 stop 后 startinst 可恢复（routes_sys::startinst 配置双源：
+/// lux miss → mgr 快照回退）。selfMonitor 不落 lux instances——stop 后经此重启，
+/// 此前 404 "instance not found"（前端实例页"可停不可启"缺口）。
+#[tokio::test]
+async fn startinst_restores_runtime_only_instance_after_stop() {
+    let (app, handle, mgr, _lux) = test_app("own_selfrestart").await;
+    let token = login_token(&app).await;
+
+    // selfMonitor 同款 runtime-only 实例（devices 空——tag 由代码生成，不落 lux）。
+    let self_inst = InstConfig {
+        inst_id: "self".into(),
+        inst_name: "rs-iot 自监控".into(),
+        app_code: PluginName::new("selfMonitor"),
+        app_type: AppType::South,
+        auto_start: true,
+        app_config: serde_json::json!({}),
+        devices: vec![],
+        host_kind: HostKind::Builtin,
+    };
+    mgr.start_source(self_inst).await.expect("start self");
+
+    // stop → starting 态落 Stopped（快照保留）；startinst 修复前在此 404。
+    let (status, _) = post_json(&app, &token, "/api/v1/stopinst", r#"{"inst_id":"self"}"#).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, body) =
+        post_json(&app, &token, "/api/v1/startinst", r#"{"inst_id":"self"}"#).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "快照回退应恢复 runtime-only 实例: {body}"
+    );
+
+    // mgr 运行态回到 running（startinst 是异步拉起——轮询等待短暂窗口）。
+    for _ in 0..20 {
+        if mgr.status().get("self").copied() == Some(rs_iot::plugin::instance::InstState::Running) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert_eq!(
+        mgr.status().get("self").copied(),
+        Some(rs_iot::plugin::instance::InstState::Running),
+        "self 应恢复 running"
+    );
+
+    common::stop_lux(handle).await;
+}

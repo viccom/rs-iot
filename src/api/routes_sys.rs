@@ -106,17 +106,24 @@ pub struct IdReq {
 }
 
 pub async fn startinst(State(st): State<AppState>, Json(req): Json<IdReq>) -> Response {
-    let raw = match st
+    // 配置双源：lux instances（REST 建的实例）；miss 回退 mgr 运行态快照——
+    // runtime-only 实例（selfMonitor、config.toml/代码启动）stop 后经此重启
+    // （照 cascade_delete 回退先例；stop 保留快照，remove_state/删除才清）。
+    let inst: InstConfig = match st
         .lux
         .execute_value("HGET", &["instances", req.inst_id.as_ref()])
         .await
     {
-        Ok(v) if !matches!(v, EmbeddedValue::Nil) => str_from_value(&v),
-        _ => return err(StatusCode::NOT_FOUND, "instance not found"),
-    };
-    let inst: InstConfig = match serde_json::from_str(&raw) {
-        Ok(c) => c,
-        Err(e) => return err(StatusCode::BAD_REQUEST, &format!("invalid config: {e}")),
+        Ok(v) if !matches!(v, EmbeddedValue::Nil) => {
+            match serde_json::from_str(&str_from_value(&v)) {
+                Ok(c) => c,
+                Err(e) => return err(StatusCode::BAD_REQUEST, &format!("invalid config: {e}")),
+            }
+        }
+        _ => match st.mgr.config_snapshot(req.inst_id.as_ref()) {
+            Some(c) => c,
+            None => return err(StatusCode::NOT_FOUND, "instance not found"),
+        },
     };
     // 按方向分发（R4）：South→Source、North→Sink（此前 North 被 400 拒绝）。
     let result = match inst.app_type {
