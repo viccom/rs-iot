@@ -6,7 +6,7 @@ import CommandPanel from '../components/monitor/CommandPanel.vue'
 const monitor = useMonitorStore()
 
 useWorkspacePage(() => ({
-  pageSummary: '正在准备巡检动作、人工刷新与 AI 协作建议',
+  pageSummary: '正在下发写命令并核对控制上下文',
   facts: [
     `当前实例 ${monitor.selectedInstance || '未选中'}`,
     `当前设备 ${monitor.selectedDevice || '未选中'}`,
@@ -18,39 +18,9 @@ useWorkspacePage(() => ({
 
 <template>
   <section class="control-page">
-    <article class="page-panel command-panel">
-      <div class="panel-head">
-        <div>
-          <p class="panel-label">人工操作</p>
-          <h3>快速刷新</h3>
-        </div>
-        <span>适合巡检前手动对齐最新状态</span>
-      </div>
-      <div class="command-list">
-        <button class="command-button" @click="monitor.loadInstances()">刷新实例状态</button>
-        <button class="command-button" @click="monitor.loadRtdata()">刷新实时数据</button>
-        <button class="command-button" @click="monitor.loadSysstatus()">刷新系统指标</button>
-      </div>
-    </article>
-
     <!-- 写命令下发（command/send 前端面）：面板自带标题区/表单/结果行。 -->
     <article class="page-panel wide">
       <CommandPanel />
-    </article>
-
-    <article class="page-panel">
-      <div class="panel-head">
-        <div>
-          <p class="panel-label">AI 协作提示</p>
-          <h3>建议提问</h3>
-        </div>
-        <span>打开右上角 AI 即可直接提问</span>
-      </div>
-      <div class="prompt-list">
-        <article class="prompt-card">帮我总结当前页面最值得关注的异常线索。</article>
-        <article class="prompt-card">结合当前实例和设备，判断是否存在断连或降级风险。</article>
-        <article class="prompt-card">根据最近日志和报文，给出下一步排查建议。</article>
-      </div>
     </article>
 
     <article class="page-panel wide">
@@ -83,7 +53,7 @@ useWorkspacePage(() => ({
 .control-page {
   display: grid;
   gap: 18px;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: minmax(0, 1fr);
 }
 
 .page-panel {
@@ -132,8 +102,6 @@ useWorkspacePage(() => ({
   color: var(--color-ink-dim);
 }
 
-.command-list,
-.prompt-list,
 .scope-grid {
   display: grid;
   gap: 12px;
@@ -141,8 +109,6 @@ useWorkspacePage(() => ({
   z-index: 1;
 }
 
-.command-button,
-.prompt-card,
 .scope-card {
   padding: 16px;
   border-radius: var(--radius-card);
@@ -150,11 +116,6 @@ useWorkspacePage(() => ({
   background: var(--card-bg);
   color: var(--color-ink);
   box-shadow: inset 0 1px 0 var(--panel-inner-border);
-}
-
-.command-button {
-  text-align: left;
-  font-weight: 600;
 }
 
 .scope-grid {
@@ -171,13 +132,8 @@ useWorkspacePage(() => ({
 }
 
 @media (max-width: 960px) {
-  .control-page,
   .scope-grid {
     grid-template-columns: 1fr;
-  }
-
-  .page-panel.wide {
-    grid-column: auto;
   }
 }
 </style>
