@@ -3,6 +3,7 @@
 //! `Processor`，用 Rust async + `CancellationToken` 表达生命周期。
 
 use crate::host::HostContext;
+use crate::plugin::sample_sender::SampleSender;
 use crate::types::{CtlMessage, InstConfig, Sample};
 use async_trait::async_trait;
 use tokio::sync::mpsc;
@@ -18,11 +19,14 @@ pub trait Source: Send + Sync {
     fn name(&self) -> &'static str;
 
     /// 运行采集循环：产出经 `tx` 推入 hub，命令从 `cmd_rx` 消费，`token` 取消时退出。
+    ///
+    /// `tx` 是 [`SampleSender`]（D-OWN-1：`send`/`try_send` 遮蔽转发前把 devid
+    /// 归属登记到 lux dev2inst）；`Deref` 回 `mpsc::Sender` 兼容其余用法。
     async fn run(
         &self,
         ctx: HostContext,
         inst: InstConfig,
-        tx: mpsc::Sender<Sample>,
+        tx: SampleSender,
         cmd_rx: mpsc::Receiver<CtlMessage>,
         token: CancellationToken,
     );

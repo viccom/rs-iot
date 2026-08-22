@@ -1,16 +1,20 @@
-//! device CRUD——设备元数据**单一权威源 = 实例配置**（`InstConfig.devices`）。
+//! device CRUD——设备**权威源 = 实例配置（`InstConfig.devices`）∪ `dev2inst`
+//! 运行时补集**（D-OWN-3）。
 //!
 //! 历史设计：lux `devices` Hash 为独立设备注册表，但唯一写入方是 `device/set`
 //! 手动 API，无 bootstrap 预置、建实例不同步写——是**孤立死表**（写方=手动 API，
 //! 读方=同一 API，前端/pipeline/采集全不用）。REST 客户端读到空表而实例实际在
 //! 采集（现场 bug）。已废弃该 Hash，统一到实例配置：
 //!
-//! - `GET /api/v1/devices`：从实例配置**聚合**派生（单一数据源，与前端采集器页/
-//!   rtdata 类型映射同源）
+//! - `GET /api/v1/devices`：实例配置**聚合** ∪ dev2inst 补集——lua `set_value`
+//!   等运行时产生的设备（无配置点表）也可见，带 `runtime: true` + `owner_inst`
+//!   徽标（前端设备树/roster 据此区分运行时设备并显示宿主）；同 devid 配置与
+//!   在册并存时**配置优先**（不重复、不覆盖 children）
 //! - `GET /api/v1/device/get`：聚合后过滤单设备
 //! - `POST /api/v1/device/set`：**单点实例配置操作**（body 含 `inst_id` 定位——
 //!   设备挂在实例下，无实例不成设备），读-改-写整包实例配置，免去整包覆盖
-//! - `POST /api/v1/device/delete`：同上，从实例点表移除该设备
+//! - `POST /api/v1/device/delete`：同上，从实例点表移除该设备（管理 API 语义
+//!   不变：仍写实例配置，运行时设备的清理走 dev2inst 级联闭环）
 
 use crate::api::{hget, AppState};
 use crate::types::{DeviceSpec, InstConfig};
@@ -24,25 +28,36 @@ pub struct IdQuery {
     pub dev_id: String,
 }
 
-/// `GET /api/v1/devices`：聚合所有实例配置的设备表 `{dev_id: DeviceSpec}`。
+/// `GET /api/v1/devices`：聚合所有实例配置的设备表，并入 dev2inst 运行时补集
+/// `{dev_id: DeviceSpec}`。
 ///
 /// 实例配置全集 = lux `instances` + **运行态补缺**（config.toml/代码启动的实例
 /// 不落 lux，如 demo sim1——不合并则设备实际在采集而 API 返回空表，AI/前端
 /// 误报"无设备"。与 routes_inst::merge_roster / cascade_delete 的 mgr 快照
-/// 回退同款语义）。
+/// 回退同款语义）。运行时补集（D-OWN-3）：lua `set_value` 等产生的无配置
+/// 设备经 dev2inst 并入，带 `runtime: true` + `owner_inst`。
 pub async fn list(State(st): State<AppState>) -> Json<serde_json::Value> {
-    let insts = inst_configs(&st).await;
-    Json(serde_json::Value::Object(aggregate_from_insts(&insts)))
+    Json(serde_json::Value::Object(aggregate(&st).await))
 }
 
 /// `GET /api/v1/device/get?dev_id=`：聚合后过滤单设备；不存在返空对象。
 pub async fn get(State(st): State<AppState>, Query(q): Query<IdQuery>) -> Json<serde_json::Value> {
-    let insts = inst_configs(&st).await;
-    let agg = aggregate_from_insts(&insts);
+    let agg = aggregate(&st).await;
     match agg.get(&q.dev_id) {
         Some(v) => Json(serde_json::json!({ q.dev_id: v })),
         None => Json(serde_json::json!({})),
     }
+}
+
+/// 聚合入口（list/get 共用）：实例配置派生 ∪ dev2inst 运行时补集。
+///
+/// dev2inst 读失败 → warn 并退化纯配置派生（不 500）。
+async fn aggregate(st: &AppState) -> serde_json::Map<String, serde_json::Value> {
+    let insts = inst_configs(st).await;
+    let mut agg = aggregate_from_insts(&insts);
+    let reg = registry_or_empty(crate::db::dev_registry::all(&st.lux).await);
+    merge_runtime_entries(&mut agg, reg);
+    agg
 }
 
 /// lux instances + 运行态补缺的实例配置全集（list/get 取数入口）。
@@ -256,6 +271,47 @@ fn merge_children(existing: &mut serde_json::Value, new: &serde_json::Value) {
     }
 }
 
+/// dev2inst 读结果 → 补集条目集：读失败降级为空补集（warn，不 500）——
+/// 聚合退化为纯配置派生，与 routes_inst::cascade 的 dev2inst 失败退化同口径。
+fn registry_or_empty(
+    r: Result<Vec<(String, Vec<String>)>, crate::error::RsIotError>,
+) -> Vec<(String, Vec<String>)> {
+    match r {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!("[routes_device] dev2inst 读失败（聚合退化为纯配置派生）: {e}");
+            Vec::new()
+        }
+    }
+}
+
+/// 把 dev2inst 运行时补集并入聚合（纯函数，便于单测）。
+///
+/// 配置派生优先：聚合已含的 devid 跳过（不重复、不覆盖 children）；仅补配置
+/// 没出现的运行时设备，形态 `{"label": devid, "value": devid, "children": [],
+/// "runtime": true, "owner_inst": "<宿主列表：单宿主即首项，多宿主逗号串>"}`。
+/// 空 owners 条目跳过（owner_inst 空串无意义）。
+fn merge_runtime_entries(
+    agg: &mut serde_json::Map<String, serde_json::Value>,
+    registry: Vec<(String, Vec<String>)>,
+) {
+    for (devid, owners) in registry {
+        if owners.is_empty() || agg.contains_key(&devid) {
+            continue; // 空 owners 无意义；配置在册以配置为准
+        }
+        agg.insert(
+            devid.clone(),
+            serde_json::json!({
+                "label": devid,
+                "value": devid,
+                "children": [],
+                "runtime": true,
+                "owner_inst": owners.join(","),
+            }),
+        );
+    }
+}
+
 // ---- 局部类型/工具 ----
 type StatusCode = axum::http::StatusCode;
 type Response = axum::response::Response;
@@ -421,5 +477,85 @@ mod tests {
             agg["devLux"]["children"].as_array().unwrap().is_empty(),
             "mb-1 同名 lux 优先，运行态空 devices 不覆盖"
         );
+    }
+
+    // ===== D-OWN-3：dev2inst 运行时补集并入聚合 =====
+
+    /// 配置设备 + dev2inst 运行时设备（无配置）→ 输出含两者；运行时设备带
+    /// `runtime: true` 与 `owner_inst`（单宿主即首项，多宿主逗号串）。
+    #[test]
+    fn merge_runtime_entries_adds_runtime_badge() {
+        let mut agg = aggregate_from_insts(&insts_fixture()); // devA + devB
+        merge_runtime_entries(
+            &mut agg,
+            vec![
+                ("rtdev1".into(), vec!["lua-1".into()]),
+                ("rtdev2".into(), vec!["inst-a".into(), "inst-b".into()]),
+            ],
+        );
+        assert_eq!(agg.len(), 4, "配置 2 台 + 运行时 2 台 = 4");
+        let rt = &agg["rtdev1"];
+        assert_eq!(rt["label"], "rtdev1", "运行时设备 label 回退为 devid");
+        assert_eq!(rt["value"], "rtdev1");
+        assert_eq!(
+            rt["children"].as_array().unwrap().len(),
+            0,
+            "运行时设备无配置点表，children 空数组"
+        );
+        assert_eq!(rt["runtime"], true, "运行时徽标");
+        assert_eq!(rt["owner_inst"], "lua-1", "单宿主 owner_inst 即首项");
+        assert_eq!(agg["rtdev2"]["owner_inst"], "inst-a,inst-b", "多宿主逗号串");
+        // 配置设备不带新键（向后兼容：前端 monitor/roster 输出零变化）。
+        assert!(agg["devA"].get("runtime").is_none());
+        assert!(agg["devA"].get("owner_inst").is_none());
+    }
+
+    /// 同 devid 配置与在册并存 → 以配置为准：不重复、不覆盖 children、
+    /// 不注入 runtime/owner_inst（配置是持久化权威，dev2inst 只是观测补集）。
+    #[test]
+    fn merge_runtime_entries_config_wins() {
+        let mut agg = aggregate_from_insts(&insts_fixture());
+        let before = agg["devA"].clone();
+        merge_runtime_entries(&mut agg, vec![("devA".into(), vec!["inst-x".into()])]);
+        assert_eq!(agg.len(), 2, "同 devid 不产生重复条目");
+        assert_eq!(
+            agg["devA"], before,
+            "配置设备整体不被覆盖（含 children/inst_id）"
+        );
+        assert!(
+            agg["devA"].get("runtime").is_none(),
+            "在册不改变配置设备形态"
+        );
+    }
+
+    /// 空 owners 条目跳过（owner_inst 空串无意义，防御畸形态）。
+    #[test]
+    fn merge_runtime_entries_skips_empty_owners() {
+        let mut agg = aggregate_from_insts(&insts_fixture());
+        merge_runtime_entries(&mut agg, vec![("ghost".into(), vec![])]);
+        assert_eq!(agg.len(), 2, "空 owners 条目不入聚合");
+    }
+
+    /// dev2inst 读失败（`registry_or_empty` 映射 Err → 空补集）→ 聚合退化纯配置
+    /// 派生：空补集 merge 后聚合与纯配置输出一致（list/get 返回 Json 不 500）。
+    #[test]
+    fn registry_read_failure_degrades_to_config_only() {
+        let err = crate::error::RsIotError::Io(std::io::Error::other("dev2inst unreadable"));
+        let degraded = registry_or_empty(Err(err));
+        assert!(degraded.is_empty(), "读失败映射为空补集");
+        let mut agg = aggregate_from_insts(&insts_fixture());
+        merge_runtime_entries(&mut agg, degraded);
+        assert_eq!(
+            agg,
+            aggregate_from_insts(&insts_fixture()),
+            "退化 = 纯配置派生"
+        );
+    }
+
+    /// 读成功时 `registry_or_empty` 原样透传（不吞正常数据）。
+    #[test]
+    fn registry_or_empty_passes_ok_through() {
+        let reg = vec![("rtdev1".into(), vec!["lua-1".into()])];
+        assert_eq!(registry_or_empty(Ok(reg.clone())), reg);
     }
 }

@@ -5,6 +5,7 @@
 
 use crate::host::HostContext;
 use crate::plugin::lua_core as core_;
+use crate::plugin::sample_sender::SampleSender;
 use crate::plugin::traits::Source;
 use crate::types::{CtlMessage, InstConfig, Sample, SampleValue};
 use async_trait::async_trait;
@@ -76,7 +77,7 @@ impl Source for LuaClient {
         &self,
         ctx: HostContext,
         inst: InstConfig,
-        tx: mpsc::Sender<Sample>,
+        tx: SampleSender,
         mut cmd_rx: mpsc::Receiver<CtlMessage>,
         token: CancellationToken,
     ) {

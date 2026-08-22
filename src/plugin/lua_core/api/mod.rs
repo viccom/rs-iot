@@ -20,10 +20,10 @@ mod json;
 
 use crate::host::HostContext;
 use crate::plugin::lua_core::io_engine::IoEngine;
+use crate::plugin::sample_sender::SampleSender;
 use crate::types::{CtlMessage, InstConfig, InstId, Sample, SampleValue};
 use mlua::{Lua, LuaSerdeExt, LuaString, Value};
 use std::path::Path;
-use tokio::sync::mpsc;
 
 /// 运行时上报设备集（collect 与 L2 `set_value(s)` 双出口共用；flush 时同步 stat）。
 ///
@@ -80,9 +80,12 @@ pub(crate) enum SendOutcome {
 /// 数据面反压冻结）。满 channel 无消费者时 2s 后丢样返回 [`SendOutcome::Dropped`]，
 /// 而非裸 `tx.send` 的无限期挂起；hub 关闭返回 [`SendOutcome::Closed`]。
 ///
+/// `tx` 是 [`SampleSender`]（D-OWN-1）：经遮蔽 send 转发前登记 dev2inst——登记
+/// 仅 seen miss 首次发生（微秒级），正常被 2s 预算覆盖。
+///
 /// collect 分支（`builtin/lua_client/mod.rs`）与 `push_sample`（set_value(s)）共用；
 /// 丢样计数 `dropped` 由调用方持有并 fetch_add（flush 时落 stat `dropped_samples`）。
-pub(crate) async fn send_with_deadline(tx: &mpsc::Sender<Sample>, sample: Sample) -> SendOutcome {
+pub(crate) async fn send_with_deadline(tx: &SampleSender, sample: Sample) -> SendOutcome {
     match tokio::time::timeout(std::time::Duration::from_secs(2), tx.send(sample)).await {
         Ok(Ok(())) => SendOutcome::Sent,
         Ok(Err(_)) => SendOutcome::Closed,
@@ -92,8 +95,9 @@ pub(crate) async fn send_with_deadline(tx: &mpsc::Sender<Sample>, sample: Sample
 
 /// [`send_with_deadline`] 的非等待版（阶段 A 审查修复）：同一 tick 内首次 send 已
 /// 超预算（hub 持续满）后，剩余样本不再逐条各等 2s——立即入队或丢弃，控制面
-/// 不被数据面冻结（语义映射与 [`send_with_deadline`] 一致）。
-pub(crate) fn try_send_outcome(tx: &mpsc::Sender<Sample>, sample: Sample) -> SendOutcome {
+/// 不被数据面冻结（语义映射与 [`send_with_deadline`] 一致）。try_send 内的归属
+/// 登记走 detached task（不占本路径等待，见 [`SampleSender::try_send`]）。
+pub(crate) fn try_send_outcome(tx: &SampleSender, sample: Sample) -> SendOutcome {
     match tx.try_send(sample) {
         Ok(()) => SendOutcome::Sent,
         Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => SendOutcome::Dropped,
@@ -109,7 +113,7 @@ pub(crate) fn try_send_outcome(tx: &mpsc::Sender<Sample>, sample: Sample) -> Sen
 /// （运行时设备集，collect 与 L2 上报共用出口）。发送成功且 `self_writes` 为 Some
 /// 时记自写点（Q6 自环防护——丢样/关闭不产生回流，不记）。
 async fn push_sample(
-    tx: &mpsc::Sender<Sample>,
+    tx: &SampleSender,
     hwid: &crate::types::Hwid,
     runtime_devs: &RuntimeDevs,
     dropped: &std::sync::atomic::AtomicU64,
@@ -232,8 +236,9 @@ pub(crate) struct ApiCtx<'a> {
     /// IO 引擎（L1 `ctx:request` 内部 `io.request` → IO task 独占处理，spec §8 模式 Z）。
     /// North 角色传 None：无传输层不 spawn IO task，C1 随 [`Role`] 裁剪不注册。
     pub(crate) io: Option<IoEngine>,
-    /// hub 发送端（L2 `set_value` 推 [`Sample`]）。
-    pub(crate) tx: mpsc::Sender<Sample>,
+    /// hub 发送端（L2 `set_value` 推 [`Sample`]）：[`SampleSender`]——set_value(s)
+    /// 产出的运行时设备同样经遮蔽 send 登记 dev2inst（D-OWN-1，lua 全角色覆盖）。
+    pub(crate) tx: SampleSender,
     /// 运行时上报设备集（collect 与 L2 `set_value(s)` 双出口共用，flush 时同步
     /// stat；详见 [`RuntimeDevs`]）。
     pub(crate) runtime_devs: RuntimeDevs,

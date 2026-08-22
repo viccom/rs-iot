@@ -128,18 +128,25 @@ pub struct DelReq {
     pub inst_id: String,
 }
 
-/// 级联删除实例的全部痕迹：停运行 task → 清 rtdata（逐设备）→ 清 stat →
+/// 级联删除实例的全部痕迹：停运行 task → 清 rtdata（按归属表决策）→ 清 stat →
 /// 清 trace → 删配置 → 清 token/luakv。
 ///
 /// **顺序关键**：先 `HGET` 读配置拿 devid 列表，再 `HDEL` 删配置——否则配置删了
 /// 就读不到关联设备，rtdata 会残留成孤儿（北向发布器仍发布）。各步骤容错（warn 不
 /// 中断），尽力清完避免半残留，与原 `delete` 的语义一致。`pub(crate)` 供
 /// `purge` 批量复用。
+///
+/// **rtdata 清理按归属表决策（D-OWN-2 闭环）**：处理对象 = `dev2inst` 反查该宿主
+/// 的全部 devid（配置设备经启动预登记在册、运行时设备经 SampleSender 出口登记在
+/// 册，两类统一经归属表）∪ 配置声明 devids（安全网：预登记失败/旧数据目录无
+/// dev2inst 时兜底）。在册设备的 rtdata 仅当本实例是**最后宿主**才清——
+/// `remove_owner` 返"列表空"信号；多宿主共写设备删一宿主不清数据（归属列表留
+/// 其余宿主）。不在册的配置设备按原语义直删（安全网）。
 pub(crate) async fn cascade_delete(st: &AppState, inst_id: &str) {
-    // 1. 先读配置，收集该实例的所有 devid（rtdata key 依据）。
+    // 1. 先读配置，收集该实例的配置声明 devid（rtdata key 依据 + 归属安全网）。
     //    优先 lux instances；配置不在 lux（config.toml/代码启动实例，如 sim1）时
     //    回退 mgr 运行态配置快照——否则 devids=[] → rtdata 不清 → 孤儿残留（前端"设备残留"bug）。
-    let devids: Vec<String> = match hget(&st.lux, "instances", inst_id).await {
+    let cfg_devids: Vec<String> = match hget(&st.lux, "instances", inst_id).await {
         Some(raw) => serde_json::from_str::<crate::types::InstConfig>(&raw)
             .map(|cfg| cfg.devices.into_iter().map(|d| d.value).collect())
             .unwrap_or_default(),
@@ -149,6 +156,21 @@ pub(crate) async fn cascade_delete(st: &AppState, inst_id: &str) {
             .map(|cfg| cfg.devices.into_iter().map(|d| d.value).collect())
             .unwrap_or_default(),
     };
+    // 1b. 归属反查（闭环主路径）：dev2inst 中该宿主的全部 devid——含配置设备
+    //     （启动预登记）与运行时设备（lua set_value/transform 派生，经
+    //     SampleSender 登记）。与配置声明取并集（安全网路径不丢）。
+    let owned: HashSet<String> = match crate::db::dev_registry::devices_of(&st.lux, inst_id).await {
+        Ok(devs) => devs.into_iter().collect(),
+        Err(e) => {
+            tracing::warn!("[routes_inst] dev2inst 反查 {inst_id} 失败（退化为配置路径）: {e}");
+            HashSet::new()
+        }
+    };
+    let devids: Vec<String> = {
+        let mut all = owned.clone();
+        all.extend(cfg_devids);
+        all.into_iter().collect()
+    };
     // 2. 停运行中的实例 task（若在跑，否则 no-op）。
     if let Err(e) = st.mgr.stop(inst_id).await {
         tracing::warn!("[routes_inst] stop {inst_id} on delete failed: {e}");
@@ -157,7 +179,21 @@ pub(crate) async fn cascade_delete(st: &AppState, inst_id: &str) {
     //     否则 /inst/stats 持续返回已删除实例（残留 bug）。
     st.mgr.remove_state(inst_id);
     // 3. 清该实例所有设备的实时数据（防默认北向实例发孤儿）。
+    //    归属在册：remove_owner 移除本宿主，列表空（最后宿主）才清 rtdata——
+    //    多宿主共写设备删一宿主不清数据（D-OWN-2）；
+    //    不在册（配置路径安全网）：按原语义直删。
     for dev_id in &devids {
+        if owned.contains(dev_id) {
+            match crate::db::dev_registry::remove_owner(&st.lux, dev_id, inst_id).await {
+                Ok(true) => {}         // 最后宿主 → 继续清 rtdata
+                Ok(false) => continue, // 仍有其它宿主共写 → 保留 rtdata 与归属列表
+                Err(e) => {
+                    // 归属移除失败 → 保守不删（防误清可能共写的数据）。
+                    tracing::warn!("[routes_inst] remove owner {dev_id} <- {inst_id} failed: {e}");
+                    continue;
+                }
+            }
+        }
         if let Err(e) = crate::db::rtdata::delete_device(&st.lux, dev_id).await {
             tracing::warn!("[routes_inst] delete rtdata:{dev_id} failed: {e}");
         }
@@ -197,9 +233,11 @@ pub struct PurgeReq {
 /// `POST /api/v1/purge`：清空业务数据（重置）。
 ///
 /// - `scope=all`：遍历所有实例逐个 `cascade_delete`（停 task + 清 rtdata/stat/trace/
-///   配置/token/luakv），再兜底 `KEYS` 清残留孤儿。**绝不碰** `users`/`passwords`/
-///   `groups`/`accesskey`/`ext_tokens` Hash 整体——只删已删实例的精确 field。
-/// - `scope=rtdata`：只 `KEYS rtdata:*` + DEL（清实时数据缓存，保留实例配置）。
+///   配置/token/luakv），再兜底 `KEYS` 清残留孤儿，最后清归属表 `dev2inst`。
+///   **绝不碰** `users`/`passwords`/`groups`/`accesskey`/`ext_tokens` Hash 整体——
+///   只删已删实例的精确 field。
+/// - `scope=rtdata`：只 `KEYS rtdata:*` + DEL（清实时数据缓存，保留实例配置），
+///   并同步清归属表 `dev2inst`——rtdata 已清，保留归属无意义（D-OWN-2）。
 ///
 /// 无 FLUSHDB（lux 未验证支持），全用 `KEYS` + `DEL`（对标 `routes_rtdata.rs:88` 遍历）。
 pub async fn purge(
@@ -219,6 +257,11 @@ pub async fn purge(
             let n_rtdata = del_by_pattern(&st.lux, "rtdata:*").await;
             let _ = del_by_pattern(&st.lux, "stat:*").await;
             let _ = del_by_pattern(&st.lux, "luakv:*").await;
+            // 归属表同步清空（D-OWN-2）：rtdata 已清，保留归属无意义——且覆盖
+            // cascade 触不到的孤儿归属（宿主实例早已不在 instances 表的残条目）。
+            if let Err(e) = crate::db::dev_registry::clear(&st.lux).await {
+                tracing::warn!("[routes_inst] purge clear dev2inst failed: {e}");
+            }
             Json(serde_json::json!({
                 "status": "purged",
                 "instances": n_inst,
@@ -227,6 +270,10 @@ pub async fn purge(
         }
         "rtdata" => {
             let n = del_by_pattern(&st.lux, "rtdata:*").await;
+            // 归属表同步清空（D-OWN-2）：rtdata 已清，保留归属无意义。
+            if let Err(e) = crate::db::dev_registry::clear(&st.lux).await {
+                tracing::warn!("[routes_inst] purge clear dev2inst failed: {e}");
+            }
             Json(serde_json::json!({"status": "purged", "rtdata_keys": n}))
         }
         other => Json(serde_json::json!({

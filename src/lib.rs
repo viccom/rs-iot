@@ -205,7 +205,16 @@ pub async fn run_app_with_shutdown(
     });
     tracing::info!(%hwid, "rs-iot starting");
 
+    // D-SEC-1：secrets AEAD 密钥进程级初始化（jwt_secret 恒定）——先于任何
+    // secrets 读写（REST/脚本/北向路径共享同一派生键）。
+    db::secrets::init_key(&cfg.jwt_secret);
+
     std::fs::create_dir_all(&cfg.lux.data_dir)?;
+    // D-LUX-1：非 loopback 绑定强制认证的前置校验。走 Err 而非 panic——
+    // run_app 返回 Result 且 create_dir_all? 是既有启动失败惯例（main 经
+    // anyhow 打印后非 0 退出）；build_lux_config 内的 panic 仅为绕过本入口的兜底。
+    db::validate_lux_bind(&cfg.lux.bind_host, &cfg.lux.password)
+        .map_err(crate::error::RsIotError::Config)?;
     let lux_cfg = db::build_lux_config(&cfg);
     let handle = lux::run_with_config(lux_cfg).await?;
     if let Some(addr) = handle.local_addr() {
@@ -292,6 +301,16 @@ pub async fn run_app_with_shutdown(
     // lux autoStart 实例（南向 Source / 北向 Sink）
     let started = try_start_from_lux(&mgr, &client).await;
     tracing::info!("started {started} source instance(s) from lux");
+
+    // D-CLN-1：lux `devices` Hash 是历史遗留死表（权威源=实例配置 ∪ dev2inst，见
+    // routes_device）——存量非空仅提示，不自动删数据（保守）。
+    if let Ok(lux::EmbeddedValue::Int(n)) = client.execute_value("HLEN", &["devices"]).await {
+        if n > 0 {
+            tracing::warn!(
+                "[startup] lux `devices` Hash 存在 {n} 条历史遗留数据（已废弃，设备权威源=实例配置；可 DEL devices 清理）"
+            );
+        }
+    }
 
     // selfMonitor：rs-iot 自身即设备（devid=rsiot，17 只读+3 可写标签），随进程
     // 无条件自启（不落 lux instances——重启恒在；stopinst 可临时停）。

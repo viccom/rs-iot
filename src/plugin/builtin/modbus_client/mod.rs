@@ -81,6 +81,7 @@ mod merge;
 mod transport;
 
 use crate::host::HostContext;
+use crate::plugin::sample_sender::SampleSender;
 use crate::plugin::traits::Source;
 use crate::types::{CtlMessage, DeviceSpec, InstConfig, Sample, SampleValue};
 use address::{addr_fc, addr_func_name, parse_point, Func, PointSpec, Type};
@@ -287,7 +288,7 @@ impl Source for ModbusClient {
         &self,
         ctx: HostContext,
         inst: InstConfig,
-        tx: mpsc::Sender<Sample>,
+        tx: SampleSender,
         mut cmd_rx: mpsc::Receiver<CtlMessage>,
         token: CancellationToken,
     ) {

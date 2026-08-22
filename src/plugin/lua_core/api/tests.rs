@@ -6,6 +6,7 @@
 use super::*;
 use crate::host::{BridgeRegistry, CtlRegistry, HostContext};
 use crate::plugin::lua_core::io_engine::{spawn_io_task, IoEngine, MockIoTask};
+use crate::plugin::sample_sender::SampleSender;
 use crate::types::{AppType, DeviceSpec, HostKind, InstConfig, PluginName};
 use tokio_util::sync::CancellationToken;
 
@@ -28,9 +29,10 @@ fn spawn_mock_io() -> IoEngine {
 /// 测试用 mock hub tx（满足 ApiCtx.tx 字段；接收端立即丢弃，不验接收）。
 ///
 /// 现有 L1/L3/L4/L6 测试不触 set_value，故 tx 仅占位；L2 `set_value` 测自建真实 channel。
-fn mock_hub_tx() -> tokio::sync::mpsc::Sender<crate::types::Sample> {
+/// untracked：纯转发不登记（归属登记单测见 plugin::sample_sender）。
+fn mock_hub_tx() -> crate::plugin::sample_sender::SampleSender {
     let (tx, _rx) = tokio::sync::mpsc::channel::<crate::types::Sample>(8);
-    tx
+    crate::plugin::sample_sender::SampleSender::untracked(tx)
 }
 
 /// 测试用零值丢样计数（满足 ApiCtx.dropped 字段；背压行为测试见
@@ -613,8 +615,10 @@ async fn send_with_deadline_drops_on_full_channel() {
     }
 
     // 满 channel：容量 1 塞 1 条不消费 → 后续 send 无限期等容量。
+    // untracked 包装：本测只验背压语义，登记路径单测见 plugin::sample_sender。
     let (tx, _rx) = tokio::sync::mpsc::channel::<crate::types::Sample>(1);
     tx.send(sample("a")).await.expect("塞满容量");
+    let tx = crate::plugin::sample_sender::SampleSender::untracked(tx);
     let started = tokio::time::Instant::now();
     let out = send_with_deadline(&tx, sample("b")).await;
     assert!(
@@ -630,12 +634,20 @@ async fn send_with_deadline_drops_on_full_channel() {
     // hub 关闭（接收端 drop）→ Closed（非超时路径）。
     let (tx2, rx2) = tokio::sync::mpsc::channel::<crate::types::Sample>(1);
     drop(rx2);
-    let out2 = send_with_deadline(&tx2, sample("c")).await;
+    let out2 = send_with_deadline(
+        &crate::plugin::sample_sender::SampleSender::untracked(tx2),
+        sample("c"),
+    )
+    .await;
     assert!(matches!(out2, SendOutcome::Closed), "hub 关应 Closed");
 
     // 正常路径（有空位）→ Sent 且消费者可收。
     let (tx3, mut rx3) = tokio::sync::mpsc::channel::<crate::types::Sample>(1);
-    let out3 = send_with_deadline(&tx3, sample("d")).await;
+    let out3 = send_with_deadline(
+        &crate::plugin::sample_sender::SampleSender::untracked(tx3),
+        sample("d"),
+    )
+    .await;
     assert!(matches!(out3, SendOutcome::Sent), "有空位应 Sent");
     assert!(rx3.recv().await.is_some(), "Sent 后消费者应能收到");
 }
@@ -705,7 +717,7 @@ async fn set_value_pushes_sample_to_hub() {
             inst: &inst,
             io: Some(io),
             role: Role::default(),
-            tx,
+            tx: SampleSender::untracked(tx),
             runtime_devs: RuntimeDevs::default(),
             dropped: zero_dropped(),
             self_writes: None,
@@ -767,7 +779,7 @@ async fn set_values_pushes_multi_tag_sample() {
             inst: &inst,
             io: Some(io),
             role: Role::default(),
-            tx,
+            tx: SampleSender::untracked(tx),
             runtime_devs: RuntimeDevs::default(),
             dropped: zero_dropped(),
             self_writes: None,
@@ -841,7 +853,7 @@ async fn set_value_routes_by_devid() {
             inst: &inst,
             io: Some(io),
             role: Role::default(),
-            tx,
+            tx: SampleSender::untracked(tx),
             runtime_devs: RuntimeDevs::default(),
             dropped: zero_dropped(),
             self_writes: None,

@@ -7,6 +7,7 @@ use async_trait::async_trait;
 use rs_iot::host::{BridgeRegistry, CtlRegistry, HostContext};
 use rs_iot::plugin::instance::{InstState, InstanceManager};
 use rs_iot::plugin::registry::SourceEntry;
+use rs_iot::plugin::sample_sender::SampleSender;
 use rs_iot::plugin::traits::Source;
 use rs_iot::types::{AppType, DeviceSpec, HostKind, Hwid, InstConfig, PluginName, Sample};
 use std::time::Duration;
@@ -24,7 +25,7 @@ impl Source for ImmediateExitSource {
         &self,
         _ctx: HostContext,
         _inst: InstConfig,
-        _tx: mpsc::Sender<Sample>,
+        _tx: SampleSender,
         _cmd_rx: mpsc::Receiver<rs_iot::types::CtlMessage>,
         _token: CancellationToken,
     ) {
@@ -47,7 +48,7 @@ impl Source for PanicSource {
         &self,
         _ctx: HostContext,
         _inst: InstConfig,
-        _tx: mpsc::Sender<Sample>,
+        _tx: SampleSender,
         _cmd_rx: mpsc::Receiver<rs_iot::types::CtlMessage>,
         _token: CancellationToken,
     ) {
@@ -70,7 +71,7 @@ impl Source for ObedientSource {
         &self,
         _ctx: HostContext,
         _inst: InstConfig,
-        _tx: mpsc::Sender<Sample>,
+        _tx: SampleSender,
         _cmd_rx: mpsc::Receiver<rs_iot::types::CtlMessage>,
         token: CancellationToken,
     ) {

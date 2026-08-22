@@ -3,6 +3,7 @@
 use super::LuaClient;
 use crate::host::{BridgeRegistry, CtlRegistry, HostContext};
 use crate::plugin::registry::find_source;
+use crate::plugin::sample_sender::SampleSender;
 use crate::plugin::traits::Source;
 use crate::types::{AppType, CtlMessage, DeviceSpec, HostKind, Hwid, InstConfig, PluginName};
 use serde_json::json;
@@ -130,7 +131,9 @@ async fn collect_pushes_sample_to_hub() {
     let token = CancellationToken::new();
     let run_token = token.child_token();
     tokio::spawn(async move {
-        LuaClient.run(ctx, inst, tx, cmd_rx, run_token).await;
+        LuaClient
+            .run(ctx, inst, SampleSender::untracked(tx), cmd_rx, run_token)
+            .await;
     });
     let _ = cmd_tx; // 保留 sender，防 cmd_rx.recv() 立即 None 致忙循环
 
@@ -366,7 +369,13 @@ async fn bad_manifest_rejects_instance_load() {
     let inst = lua_inst_config(&tmp, "devM");
     tokio::spawn(async move {
         LuaClient
-            .run(lua_host_ctx().await, inst, tx, cmd_rx, run_token)
+            .run(
+                lua_host_ctx().await,
+                inst,
+                SampleSender::untracked(tx),
+                cmd_rx,
+                run_token,
+            )
             .await;
     });
     let _ = cmd_tx; // 保留 sender，防 cmd_rx.recv() 立即 None
@@ -402,7 +411,13 @@ async fn good_manifest_with_role_collects() {
     let inst = lua_inst_config(&tmp, "devM");
     tokio::spawn(async move {
         LuaClient
-            .run(lua_host_ctx().await, inst, tx, cmd_rx, run_token)
+            .run(
+                lua_host_ctx().await,
+                inst,
+                SampleSender::untracked(tx),
+                cmd_rx,
+                run_token,
+            )
             .await;
     });
     let _ = cmd_tx;
@@ -457,7 +472,7 @@ async fn reload_vm_rejects_bad_manifest() {
         inst: &inst,
         io: Some(io),
         role: crate::plugin::lua_core::api::Role::default(),
-        tx,
+        tx: SampleSender::untracked(tx),
         runtime_devs: Default::default(),
         dropped: Default::default(),
         self_writes: None,
@@ -524,7 +539,9 @@ async fn on_init_budget_timeout_startup_continues() {
     let token = CancellationToken::new();
     let run_token = token.child_token();
     tokio::spawn(async move {
-        LuaClient.run(ctx, inst, tx, cmd_rx, run_token).await;
+        LuaClient
+            .run(ctx, inst, SampleSender::untracked(tx), cmd_rx, run_token)
+            .await;
     });
     let _ = cmd_tx;
 
@@ -599,7 +616,7 @@ async fn reload_vm_on_init_budget_timeout_falls_back() {
         inst: &inst,
         io: Some(io),
         role: crate::plugin::lua_core::api::Role::default(),
-        tx,
+        tx: SampleSender::untracked(tx),
         runtime_devs: Default::default(),
         dropped: Default::default(),
         self_writes: None,
@@ -658,7 +675,9 @@ async fn ctl_reload_message_triggers_vm_reload() {
     let token = CancellationToken::new();
     let run_token = token.child_token();
     tokio::spawn(async move {
-        LuaClient.run(ctx, inst, tx, cmd_rx, run_token).await;
+        LuaClient
+            .run(ctx, inst, SampleSender::untracked(tx), cmd_rx, run_token)
+            .await;
     });
 
     // 首轮样本：boots=1（首启 on_init）。满载 flaky 加固（终审计杂项登记）：超时

@@ -1,9 +1,10 @@
 # 设备归属模型 + lux/RESP 收口 + secrets 加密 实施计划
 
 > 日期：2026-08-21
-> **状态**：planned
-> **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
-> 设计定案见同日 `2026-08-21-device-ownership-design.md`（D-OWN-1..4 / D-LUX-1 / D-SEC-1 / D-CLN-1，本计划不重复论证）。
+> **状态**：implemented（8 task 全落地于 worktree `feat/device-ownership`，待合并 master；T8 冒烟记录见尾部）
+> **实施**：T1 `64635eb` → T7 本提交（各 task 首末 commit 见 spec 实施块）
+> **代码**：见同日 spec 实施块（dev_registry/SampleSender/级联/devices 视图/lux 校验/secrets AEAD 的文件级清单——计划与 spec 同仓同特性，不重复罗列）
+> **测试**：566+/0 + clippy 0 + check_docs OK；T8 冒烟记录见尾部
 
 **Goal:** 运行时设备归属闭环（登记/级联清理/设备视图）、非 loopback RESP 强制认证、secrets AEAD 加密、devices 死表提示。
 

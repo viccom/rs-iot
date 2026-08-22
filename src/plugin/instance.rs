@@ -9,6 +9,7 @@
 use crate::error::RsIotError;
 use crate::host::HostContext;
 use crate::plugin::registry;
+use crate::plugin::sample_sender::SampleSender;
 use crate::types::{CtlMessage, InstConfig, Sample};
 use dashmap::DashMap;
 use std::collections::HashMap;
@@ -95,7 +96,25 @@ impl InstanceManager {
         self.emit_state(&id_key, InstState::Starting);
 
         let ctx = self.ctx.clone();
-        let tx = self.hub_tx.clone();
+        // D-OWN-2 启动预登记：配置 devices[].value 在首条数据前就入册 dev2inst——
+        // 防"启动后未出数即删"漏归属（SampleSender 只登记实际出过数的 devid，
+        // 预登记补齐零出数窗口）。失败仅 warn：登记是管理面记账，最终一致；
+        // cascade 的配置回退路径仍是安全网（见 routes_inst::cascade_delete）。
+        for dev in &inst.devices {
+            if dev.value.is_empty() {
+                continue;
+            }
+            if let Err(e) = crate::db::dev_registry::note(&self.ctx.lux, &dev.value, &id_key).await
+            {
+                tracing::warn!(
+                    "[instance] dev2inst 预登记 {} <- {id_key} 失败（不阻断启动）: {e}",
+                    dev.value
+                );
+            }
+        }
+        // D-OWN-1 唯一包装点：Source 出口经 SampleSender 遮蔽 send/try_send 登记
+        // dev2inst（归属 = 本实例）；seen 去重防每 tick 旁路写，详见 sample_sender。
+        let tx = SampleSender::new(self.hub_tx.clone(), self.ctx.lux.clone(), id_key.clone());
         let token_run = token.clone();
         let id_for_log = id_key.clone();
         let source_join = tokio::spawn(async move {
