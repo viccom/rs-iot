@@ -32,7 +32,7 @@ pub struct DevQuery {
 }
 
 /// 取 field 末段（`<devid>.<tag>` → `<tag>`；devid 不含 `.`，故 split 末段即 tag）。
-fn tag_of(field: &str) -> &str {
+pub(crate) fn tag_of(field: &str) -> &str {
     field.split('.').next_back().unwrap_or(field)
 }
 
