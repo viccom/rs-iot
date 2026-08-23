@@ -14,7 +14,8 @@ use rs_iot::event_bus::EventBus;
 use rs_iot::host::{CtlRegistry, HostContext};
 use rs_iot::log_ringbuffer::LogRingBuffer;
 use rs_iot::plugin::instance::InstanceManager;
-use rs_iot::types::Hwid;
+use rs_iot::types::{Hwid, Sample, SampleValue};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use tower::ServiceExt;
@@ -109,6 +110,23 @@ async fn collect_window(stream: &mut BodyDataStream, dur: std::time::Duration) -
     buf
 }
 
+/// 种子数据：write_batch 一条 Sample（field 形如 <devid>.<tag>，cell[2] 为值串）。
+async fn seed(lux: &lux::EmbeddedClient, devid: &str, pts: &[(&str, &str)], ts: i64) {
+    let mut values = BTreeMap::new();
+    for (t, v) in pts {
+        values.insert((*t).to_string(), SampleValue::Str((*v).to_string()));
+    }
+    let s = Sample {
+        hwid: Hwid::new("it-hwid"),
+        devid: devid.into(),
+        values,
+        timestamp: ts,
+    };
+    rs_iot::db::rtdata::write_batch(lux, std::slice::from_ref(&s))
+        .await
+        .unwrap();
+}
+
 #[tokio::test]
 async fn subscribe_without_jwt_401() {
     let (app, handle, _lux) = test_app("sub401").await;
@@ -135,5 +153,38 @@ async fn subscribe_with_jwt_200_event_stream() {
     // 骨架（空流）下流立即结束——窗口收集返回空或 keep-alive，不卡死即可。
     let buf = collect_window(&mut stream, std::time::Duration::from_millis(300)).await;
     assert!(buf.len() < 1 << 20);
+    common::stop_lux(handle).await;
+}
+
+#[tokio::test]
+async fn snapshot_pushes_all_points_on_connect() {
+    let (app, handle, lux) = test_app("subsnap").await;
+    seed(&lux, "devA", &[("t1", "1.5"), ("t2", "2")], 1_700_000_000).await;
+    seed(&lux, "devB", &[("t1", "3")], 1_700_000_000).await;
+    let tok = jwt(&app).await;
+    let mut stream = connect(&app, "?interval=200", &tok).await;
+    let buf = collect_window(&mut stream, std::time::Duration::from_millis(800)).await;
+    // 两设备各一帧 snapshot；cell 形如 [ts,"localTime","value"]（值串，与 /rtdatas 同构）。
+    assert!(buf.contains("event: snapshot"), "应含 snapshot 帧: {buf}");
+    assert!(
+        buf.contains("\"dev\":\"devA\"") && buf.contains("\"dev\":\"devB\""),
+        "逐设备分帧: {buf}"
+    );
+    assert!(buf.contains("devA.t1") && buf.contains("1.5"), "{buf}");
+    assert!(buf.contains("devA.t2") && buf.contains("devB.t1"), "{buf}");
+    common::stop_lux(handle).await;
+}
+
+#[tokio::test]
+async fn snapshot_respects_dev_and_tag_filter() {
+    let (app, handle, lux) = test_app("subfilter").await;
+    seed(&lux, "devA", &[("temp", "1"), ("hum", "2")], 1).await;
+    seed(&lux, "devB", &[("temp", "3")], 1).await;
+    let tok = jwt(&app).await;
+    let mut stream = connect(&app, "?dev_id=devA&tag=temp&interval=200", &tok).await;
+    let buf = collect_window(&mut stream, std::time::Duration::from_millis(800)).await;
+    assert!(buf.contains("devA.temp"), "{buf}");
+    assert!(!buf.contains("devA.hum"), "tag 过滤应排除: {buf}");
+    assert!(!buf.contains("devB"), "dev 过滤应排除 devB: {buf}");
     common::stop_lux(handle).await;
 }

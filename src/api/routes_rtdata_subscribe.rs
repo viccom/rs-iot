@@ -12,12 +12,15 @@
 //! interval）；断线重连即重新 snapshot 全量重同步。pipeline / event_bus 零改动
 //! ——现有 `/api/v1/events` 与 lua_transform 订阅面不受影响。
 
-use crate::api::routes_rtdata::tag_of;
+use crate::api::{hgetall, routes_rtdata::tag_of, AppState};
+use axum::extract::{Query, State};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::IntoResponse;
 use serde::Deserialize;
+use serde_json::json;
 use std::collections::{HashMap, HashSet};
 use std::convert::Infallible;
+use std::time::Duration;
 use tokio_stream::wrappers::ReceiverStream;
 
 /// 订阅周期下限 ms（防高频滥用——每连接每 tick 全量 HGETALL 的成本护栏）。
@@ -37,6 +40,8 @@ pub struct SubQuery {
     /// 订阅周期 ms（clamp [100, 60000]，缺省 1000）。
     pub interval: Option<u64>,
 }
+
+// ---------- 纯函数（Task 2，单测覆盖） ----------
 
 /// interval clamp：缺省 DEFAULT，夹到 [MIN, MAX]。纯函数便于单测。
 pub fn clamp_interval(raw: Option<u64>) -> u64 {
@@ -107,14 +112,102 @@ pub fn filter_by_tag(
     }
 }
 
+// ---------- producer（Task 4/5 组装纯函数） ----------
+
+/// 读订阅范围内全部设备 → (dev, field→cell) 列表。
+///
+/// dev_filter=None → 每 tick `KEYS rtdata:*` 重查（新设备自动纳入订阅）；
+/// Some → 固定设备列表（设备已删时 HGETALL 返回空 map → 其点位进 removed）。
+async fn read_scope(
+    lux: &lux::EmbeddedClient,
+    dev_filter: &Option<HashSet<String>>,
+) -> Vec<(String, serde_json::Map<String, serde_json::Value>)> {
+    let devs: Vec<String> = match dev_filter {
+        Some(set) => set.iter().cloned().collect(),
+        None => match lux.execute_value("KEYS", &["rtdata:*"]).await {
+            Ok(lux::EmbeddedValue::Array(keys)) => keys
+                .iter()
+                .filter_map(|k| match k {
+                    lux::EmbeddedValue::Bulk(b) => Some(String::from_utf8_lossy(b).to_string()),
+                    lux::EmbeddedValue::Simple(s) => Some(s.clone()),
+                    _ => None,
+                })
+                .map(|k| k.strip_prefix("rtdata:").unwrap_or(&k).to_string())
+                .collect(),
+            _ => Vec::new(),
+        },
+    };
+    let mut out = Vec::with_capacity(devs.len());
+    for dev in devs {
+        let obj = hgetall(lux, &format!("rtdata:{dev}")).await;
+        if let serde_json::Value::Object(m) = obj {
+            out.push((dev, m));
+        }
+    }
+    out
+}
+
 /// `GET /api/v1/rtdatas/subscribe`：OPC UA 式实时数据订阅（SSE）。
 ///
-/// T3 骨架：空流（headers + 立即结束）；T4 起挂 producer（snapshot + 周期 diff）。
-/// 客户端断开 → mpsc send 失败 → producer task 退出（资源回收）。
-pub async fn subscribe() -> impl IntoResponse {
+/// 连接建立：snapshot 逐设备全量推送 + 建基线；之后每 interval 读侧 diff，
+/// 变化才推 datachange。客户端断开 → send 失败 → producer task 退出（资源回收）。
+pub async fn subscribe(
+    State(st): State<AppState>,
+    Query(q): Query<SubQuery>,
+) -> impl IntoResponse {
+    let dev_filter = parse_dev_ids(q.dev_id.as_deref());
+    let tag_filter = q.tag.clone();
+    let interval = Duration::from_millis(clamp_interval(q.interval));
+    tracing::debug!(
+        "[rtdata-subscribe] client connected: dev={:?} tag={:?} interval={:?}",
+        dev_filter,
+        tag_filter,
+        interval
+    );
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(8);
-    drop(tx);
+    let lux = st.lux.clone();
+    tokio::spawn(async move {
+        run(&lux, dev_filter, tag_filter, interval, tx).await;
+        tracing::debug!("[rtdata-subscribe] client disconnected");
+    });
     Sse::new(ReceiverStream::new(rx)).keep_alive(KeepAlive::default())
+}
+
+/// producer 主体：snapshot（Phase 1）+ 周期 diff（Phase 2，Task 5）。tx 断（客户端
+/// 断开）即返回。
+async fn run(
+    lux: &lux::EmbeddedClient,
+    dev_filter: Option<HashSet<String>>,
+    tag_filter: Option<String>,
+    interval: Duration,
+    tx: tokio::sync::mpsc::Sender<Result<Event, Infallible>>,
+) {
+    let tag = tag_filter.as_deref();
+    let mut last_sent: HashMap<String, String> = HashMap::new();
+
+    // ---- Phase 1: snapshot（逐设备一帧，建基线）----
+    for (dev, points) in read_scope(lux, &dev_filter).await {
+        let filtered = filter_by_tag(points, tag);
+        if filtered.is_empty() {
+            continue; // tag 过滤后无点（或空 hash）不推空帧
+        }
+        for (field, cell) in &filtered {
+            last_sent.insert(field.clone(), value_str(cell));
+        }
+        if let Ok(ev) = Event::default()
+            .event("snapshot")
+            .json_data(json!({ "dev": dev, "points": filtered }))
+        {
+            if tx.send(Ok(ev)).await.is_err() {
+                return;
+            }
+        }
+    }
+
+    // ---- Phase 2: 周期 diff（Task 5 实现；本 Task 占位空转）----
+    loop {
+        tokio::time::sleep(interval).await;
+    }
 }
 
 #[cfg(test)]
