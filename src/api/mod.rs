@@ -24,6 +24,7 @@ pub mod routes_logs;
 pub mod routes_lua;
 pub mod routes_metrics;
 pub mod routes_rtdata;
+pub mod routes_rtdata_subscribe;
 pub mod routes_secret;
 pub mod routes_stat;
 pub mod routes_sys;
