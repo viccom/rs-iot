@@ -48,6 +48,11 @@ pub enum RsIotError {
     /// 身份/引导错误。
     #[error("identity error: {0}")]
     Identity(String),
+
+    /// 实例唯一启动守卫：同 inst_id 已处于活跃态（starting/running/stopping），
+    /// 拒绝二次启动（REST 映射 409；Stopped/Failed 放行——stop 后可重启）。
+    #[error("instance {0} already active (starting/running/stopping)")]
+    InstanceAlreadyRunning(String),
 }
 
 /// 库统一 Result 别名。

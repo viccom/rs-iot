@@ -58,6 +58,29 @@ pub struct InstanceManager {
     hub_tx: mpsc::Sender<Sample>,
 }
 
+/// 唯一启动守卫的原子认领（start_source/start_sink 共用）：states 无条目或终态
+/// （Stopped/Failed）→ 置 Starting 放行；活跃态（Starting/Running/Stopping）→
+/// [`RsIotError::InstanceAlreadyRunning`]。`entry` 的检查-写入在 shard 锁内一次
+/// 完成，并发二次启动只有一个能认领成功（且本函数不含 await，锁不跨挂起点）。
+fn claim_starting(states: &DashMap<String, InstState>, id: &str) -> Result<(), RsIotError> {
+    use dashmap::mapref::entry::Entry;
+    match states.entry(id.to_string()) {
+        Entry::Occupied(mut e) => match e.get() {
+            InstState::Starting | InstState::Running | InstState::Stopping => {
+                Err(RsIotError::InstanceAlreadyRunning(id.to_string()))
+            }
+            InstState::Stopped | InstState::Failed => {
+                e.insert(InstState::Starting);
+                Ok(())
+            }
+        },
+        Entry::Vacant(e) => {
+            e.insert(InstState::Starting);
+            Ok(())
+        }
+    }
+}
+
 impl InstanceManager {
     /// 构造管理器，绑定到共享 hub 发送端。
     pub fn new(ctx: HostContext, hub_tx: mpsc::Sender<Sample>) -> Self {
@@ -90,7 +113,11 @@ impl InstanceManager {
         let (cmd_tx, cmd_rx) = mpsc::channel::<CtlMessage>(64);
         let token = self.ctx.shutdown.child_token();
 
-        self.states.insert(id_key.clone(), InstState::Starting);
+        // 唯一启动守卫（原子认领）：同 inst_id 活跃态（Starting/Running/Stopping）
+        // → 拒绝。此前裸 insert 顶替注册表条目，旧任务无人 cancel 成"幽灵任务"
+        // （双份采样/CPU 且 instance_info 单行不可见）。Stopped/Failed 放行——
+        // stop 后可重启（ed76dc2 语义）。entry 持锁作用域不跨 await。
+        claim_starting(&self.states, &id_key)?;
         self.configs.insert(id_key.clone(), inst.clone());
         self.ctx.ctl_registry.register(&id_key, cmd_tx);
         self.emit_state(&id_key, InstState::Starting);
@@ -153,7 +180,8 @@ impl InstanceManager {
         let (_sample_tx, sample_rx) = mpsc::channel::<Sample>(64);
         let token = self.ctx.shutdown.child_token();
 
-        self.states.insert(id_key.clone(), InstState::Starting);
+        // 唯一启动守卫（同 start_source，见其注释）。
+        claim_starting(&self.states, &id_key)?;
         self.configs.insert(id_key.clone(), inst.clone());
         self.ctx.ctl_registry.register(&id_key, cmd_tx);
         self.emit_state(&id_key, InstState::Starting);

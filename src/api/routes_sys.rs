@@ -130,10 +130,12 @@ pub async fn startinst(State(st): State<AppState>, Json(req): Json<IdReq>) -> Re
         AppType::South => st.mgr.start_source(inst).await,
         AppType::North => st.mgr.start_sink(inst).await,
     };
-    if let Err(e) = result {
-        return err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string());
+    match result {
+        // 唯一启动守卫：已运行实例二次 startinst → 409（幂等与否交调用方决定）
+        Err(e @ crate::error::RsIotError::InstanceAlreadyRunning(_)) => err(StatusCode::CONFLICT, &e.to_string()),
+        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+        Ok(()) => Json(serde_json::json!({"status": "ok"})).into_response(),
     }
-    Json(serde_json::json!({"status": "ok"})).into_response()
 }
 
 pub async fn stopinst(State(st): State<AppState>, Json(req): Json<IdReq>) -> Response {
