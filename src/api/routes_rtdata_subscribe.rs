@@ -13,7 +13,12 @@
 //! ——现有 `/api/v1/events` 与 lua_transform 订阅面不受影响。
 
 use crate::api::routes_rtdata::tag_of;
+use axum::response::sse::{Event, KeepAlive, Sse};
+use axum::response::IntoResponse;
+use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
+use std::convert::Infallible;
+use tokio_stream::wrappers::ReceiverStream;
 
 /// 订阅周期下限 ms（防高频滥用——每连接每 tick 全量 HGETALL 的成本护栏）。
 const MIN_INTERVAL_MS: u64 = 100;
@@ -21,6 +26,17 @@ const MIN_INTERVAL_MS: u64 = 100;
 const MAX_INTERVAL_MS: u64 = 60_000;
 /// 默认订阅周期 ms。
 const DEFAULT_INTERVAL_MS: u64 = 1_000;
+
+/// query 参数（均可选）。
+#[derive(Deserialize)]
+pub struct SubQuery {
+    /// 设备 ID 逗号列表（精确匹配；缺省 = 全部设备，每 tick 重查 KEYS，新设备自动纳入）。
+    pub dev_id: Option<String>,
+    /// tag 模糊过滤（field 末段 contains；语义同 `GET /api/v1/rtdatas?tag=`）。
+    pub tag: Option<String>,
+    /// 订阅周期 ms（clamp [100, 60000]，缺省 1000）。
+    pub interval: Option<u64>,
+}
 
 /// interval clamp：缺省 DEFAULT，夹到 [MIN, MAX]。纯函数便于单测。
 pub fn clamp_interval(raw: Option<u64>) -> u64 {
@@ -89,6 +105,16 @@ pub fn filter_by_tag(
             .filter(|(k, _)| tag_of(k).contains(t))
             .collect(),
     }
+}
+
+/// `GET /api/v1/rtdatas/subscribe`：OPC UA 式实时数据订阅（SSE）。
+///
+/// T3 骨架：空流（headers + 立即结束）；T4 起挂 producer（snapshot + 周期 diff）。
+/// 客户端断开 → mpsc send 失败 → producer task 退出（资源回收）。
+pub async fn subscribe() -> impl IntoResponse {
+    let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(8);
+    drop(tx);
+    Sse::new(ReceiverStream::new(rx)).keep_alive(KeepAlive::default())
 }
 
 #[cfg(test)]

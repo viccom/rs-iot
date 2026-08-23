@@ -175,6 +175,12 @@ pub fn build_router(state: AppState) -> axum::Router {
         )
         // 实时数据查询
         .route("/api/v1/rtdatas", get(routes_rtdata::rtdatas))
+        // 实时数据订阅（OPC UA 式：snapshot 全量 + 周期 datachange；
+        // 设计 docs/designs/2026-08-23-rtdata-subscribe-plan.md）
+        .route(
+            "/api/v1/rtdatas/subscribe",
+            get(routes_rtdata_subscribe::subscribe),
+        )
         // 日志 ring buffer 快照(最近 N 条结构化日志;默认 JWT 保护)
         .route("/api/v1/logs/recent", get(routes_logs::recent))
         // SSE 实时推送(日志/报文/实例状态;默认 JWT 保护,走 cookie)
