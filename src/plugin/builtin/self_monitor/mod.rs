@@ -133,18 +133,20 @@ impl Source for SelfMonitor {
         ));
         let mut next_tick = tokio::time::Instant::now() + phase;
 
-        // StatTracker（健康状态落 lux stat:self）+ flush ticker。
+        // StatTracker（健康状态落 lux stat:self）+ flush ticker（错峰 + 条件落盘）。
         let mut tracker = crate::plugin::stat_tracker::StatTracker::new(
             inst.inst_id.to_string(),
             ctx.lux.clone(),
         );
-        let mut flush_ticker = tokio::time::interval(Duration::from_secs(
-            crate::plugin::stat_tracker::FLUSH_INTERVAL_SECS,
-        ));
+        let mut flush_ticker = crate::plugin::stat_tracker::flush_ticker(inst.inst_id.as_str());
+        // 启动即落一次初始 stat（ticker 首拍带相位延迟，见 stat_tracker::flush_ticker）。
+        tracker.flush().await;
 
         // 可写标签状态：cmd 分支与 tick 分支同 task，select 循环内局部 mut 即可（无需锁）。
         let mut watchdog: Option<i64> = None;
         let mut note: Option<String> = None;
+        // 重查询聚合缓存（AGGREGATE_TTL_SECS 内复用，见 fetch_aggregates）。
+        let mut agg_cache: Option<(std::time::Instant, Aggregates)> = None;
 
         tracing::info!(
             "[selfMonitor] inst {} starting (devid={DEVID}, every {report_period}s)",
@@ -206,7 +208,7 @@ impl Source for SelfMonitor {
                     }
                 }
                 _ = flush_ticker.tick() => {
-                    tracker.flush().await;
+                    tracker.flush_if_due().await;
                 }
                 // 动态周期：sleep_until 每次 tick 后按**当前** report_period 重算下一拍
                 // ——写命令改 report_period 后，已排定的下一拍照旧，再下一拍起新周期
@@ -214,7 +216,18 @@ impl Source for SelfMonitor {
                 _ = tokio::time::sleep_until(next_tick) => {
                     next_tick = tokio::time::Instant::now() + Duration::from_secs(report_period);
                     let started = std::time::Instant::now();
-                    let obs = observe(&ctx, watchdog, note.clone()).await;
+                    // 聚合命中缓存则零 lux 往返；过期/首拍现采并续期。
+                    let agg = match &agg_cache {
+                        Some((t, a)) if t.elapsed() < Duration::from_secs(AGGREGATE_TTL_SECS) => {
+                            a.clone()
+                        }
+                        _ => {
+                            let a = fetch_aggregates(&ctx).await;
+                            agg_cache = Some((std::time::Instant::now(), a.clone()));
+                            a
+                        }
+                    };
+                    let obs = observe_light(&ctx, &agg, watchdog, note.clone());
                     let sample = Sample {
                         hwid: ctx.hwid.clone(),
                         devid: DEVID.to_string(),
@@ -356,12 +369,27 @@ fn platform() -> &'static str {
     })
 }
 
-/// 从 lux + 进程指标组装一次观测。
-async fn observe(
-    ctx: &HostContext,
-    watchdog: Option<i64>,
-    note: Option<String>,
-) -> SelfObservation {
+/// 重查询聚合缓存 TTL（秒）：`instance_stats`/`instance_health`/`alarms`/`DBSIZE`
+/// 合计 ~10 次跨线程 lux 往返（含 KEYS 全键扫），每 5s tick 全查是周期 CPU 脉冲的
+/// 组成部分；TTL 内复用上次结果。CPU/内存/uptime/pipeline 计数（进程内 atomics）
+/// 仍每 tick 现采——资源类标签保持 5s 新鲜，计数类标签接受 ≤60s 陈旧。
+const AGGREGATE_TTL_SECS: u64 = 60;
+
+/// 一次重查询聚合（[`fetch_aggregates`] 产物；TTL 缓存载体）。
+#[derive(Debug, Default, Clone)]
+pub(crate) struct Aggregates {
+    pub collector_count: usize,
+    pub device_count: usize,
+    pub tag_count: usize,
+    pub inst_running: usize,
+    pub inst_degraded: usize,
+    pub inst_failed: usize,
+    pub alarm_active: u64,
+    pub dbsize: i64,
+}
+
+/// 现采重查询聚合（lux 慢路径）。来源与口径同旧 `observe` 直查实现，无语义变化。
+async fn fetch_aggregates(ctx: &HostContext) -> Aggregates {
     // 统计与配置白名单同源（同一次 HGETALL）——健康口径只认配置内实例。
     let (collector_count, device_count, tag_count, configured) = instance_stats(&ctx.lux).await;
     let (inst_running, inst_degraded, inst_failed) = instance_health(&ctx.lux, &configured).await;
@@ -374,14 +402,7 @@ async fn observe(
         Ok(lux::EmbeddedValue::Int(n)) => n,
         _ => 0,
     };
-    let (cpu, mem_bytes) = crate::process_metrics::sample_process_resource();
-    SelfObservation {
-        hwid: ctx.hwid.to_string(),
-        version: env!("CARGO_PKG_VERSION").to_string(),
-        platform: platform().to_string(),
-        uptime_s: ctx.metrics.started.elapsed().as_secs(),
-        cpu,
-        mem_bytes,
+    Aggregates {
         collector_count,
         device_count,
         tag_count,
@@ -390,6 +411,35 @@ async fn observe(
         inst_failed,
         alarm_active,
         dbsize,
+    }
+}
+
+/// 组装一次轻量观测（进程内现采）+ 缓存的聚合值。
+///
+/// 轻量项：hwid/version/platform（静态）/uptime/cpu/mem（进程内）/pipeline 计数
+/// （atomics）/可写标签回显。聚合项由调用方传缓存（见 run 的 `agg_cache`）。
+fn observe_light(
+    ctx: &HostContext,
+    agg: &Aggregates,
+    watchdog: Option<i64>,
+    note: Option<String>,
+) -> SelfObservation {
+    let (cpu, mem_bytes) = crate::process_metrics::sample_process_resource();
+    SelfObservation {
+        hwid: ctx.hwid.to_string(),
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        platform: platform().to_string(),
+        uptime_s: ctx.metrics.started.elapsed().as_secs(),
+        cpu,
+        mem_bytes,
+        collector_count: agg.collector_count,
+        device_count: agg.device_count,
+        tag_count: agg.tag_count,
+        inst_running: agg.inst_running,
+        inst_degraded: agg.inst_degraded,
+        inst_failed: agg.inst_failed,
+        alarm_active: agg.alarm_active,
+        dbsize: agg.dbsize,
         pipeline_processed: ctx
             .metrics
             .pipeline_processed_count

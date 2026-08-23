@@ -325,9 +325,9 @@ impl Source for ModbusClient {
         );
         // exception（modbus 协议层错误码）独立计数——与 transport 失败区分（后者拆 session）。
         let mut exceptions: u64 = 0;
-        let mut flush_ticker = tokio::time::interval(std::time::Duration::from_secs(
-            crate::plugin::stat_tracker::FLUSH_INTERVAL_SECS,
-        ));
+        let mut flush_ticker = crate::plugin::stat_tracker::flush_ticker(inst_id.as_str());
+        // 启动即落一次初始 stat（ticker 首拍带相位延迟，见 stat_tracker::flush_ticker）。
+        tracker.flush().await;
 
         let mut session: Option<Context> = None;
 
@@ -336,7 +336,7 @@ impl Source for ModbusClient {
                 _ = token.cancelled() => break,
                 msg = cmd_rx.recv() => Evt::Cmd(msg),
                 _ = flush_ticker.tick() => {
-                    tracker.flush().await;
+                    tracker.flush_if_due().await;
                     continue;
                 }
                 _ = ticker.tick() => Evt::Tick,

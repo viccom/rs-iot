@@ -190,9 +190,9 @@ impl Source for LuaTransform {
         // 失败时每点一条 warn 会洪水，且回灌同一条 EventBus 挤占 Rtdata；1s 去重后
         // 首条必达，量级看 rtdata_skipped 计数）。
         let mut last_fail_warn: Option<std::time::Instant> = None;
-        let mut flush_ticker = tokio::time::interval(std::time::Duration::from_secs(
-            crate::plugin::stat_tracker::FLUSH_INTERVAL_SECS,
-        ));
+        let mut flush_ticker = crate::plugin::stat_tracker::flush_ticker(inst.inst_id.as_str());
+        // 启动即落一次初始 stat（ticker 首拍带相位延迟，见 stat_tracker::flush_ticker）。
+        tracker.flush().await;
         tracing::info!(
             "[luaTransform] inst {} started (script={}, period={}s, subscribe={} 条)",
             inst.inst_id,
@@ -240,7 +240,7 @@ impl Source for LuaTransform {
                 _ = flush_ticker.tick() => {
                     core_::budget::sync_runtime_devs(&mut tracker, &runtime_devs);
                     sync_transform_stats(&mut tracker, &dropped, rtdata_points, rtdata_skipped, rtdata_lagged, &alarm);
-                    tracker.flush().await;
+                    tracker.flush_if_due().await;
                     continue;
                 }
                 _ = ticker.tick() => Evt::Tick,

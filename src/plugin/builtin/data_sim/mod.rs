@@ -58,9 +58,9 @@ impl Source for DataSim {
             inst.inst_id.to_string(),
             ctx.lux.clone(),
         );
-        let mut flush_ticker = tokio::time::interval(std::time::Duration::from_secs(
-            crate::plugin::stat_tracker::FLUSH_INTERVAL_SECS,
-        ));
+        let mut flush_ticker = crate::plugin::stat_tracker::flush_ticker(inst.inst_id.as_str());
+        // 启动即落一次初始 stat（ticker 首拍带相位延迟，见 stat_tracker::flush_ticker）。
+        tracker.flush().await;
 
         tracing::info!(
             "[dataSim] inst {} starting ({} devices, every {}s)",
@@ -81,7 +81,7 @@ impl Source for DataSim {
                     }
                 }
                 _ = flush_ticker.tick() => {
-                    tracker.flush().await;
+                    tracker.flush_if_due().await;
                 }
                 _ = ticker.tick() => {
                     let started = std::time::Instant::now();

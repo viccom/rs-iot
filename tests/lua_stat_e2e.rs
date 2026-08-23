@@ -82,9 +82,11 @@ async fn stat_written_after_collect() {
     };
     mgr.start_source(inst).await.expect("start lua");
 
-    // 等 collect 周期 + stat 周期 flush（StatTracker 每 FLUSH_INTERVAL_SECS=5s 落一次 lux，
-    // 非每 tick 落；period 1s → ~6s 至少一轮 collect + 一次 flush）。
-    tokio::time::sleep(Duration::from_millis(6000)).await;
+    // 等 collect 周期 + stat 条件落盘（StatTracker ticker 5s 错峰检查 + 距上次落盘
+    // ≥ FLUSH_MAX_INTERVAL_SECS=30s 才写。到期写入的墙钟时刻 = 启动相位(0..5s)+30s
+    // → 最坏 ~35s，留 2s 裕量取 37s；period 1s → 覆盖多轮 collect + 一次到期落盘。
+    // 启动瞬间的初始 stat（tick=0）由进 loop 前的显式 flush 落）。
+    tokio::time::sleep(Duration::from_millis(37000)).await;
     let stat = stat::read(&client, "lua-st")
         .await
         .expect("read stat")
@@ -193,8 +195,9 @@ async fn runtime_devices_recorded_in_stat() {
     };
     mgr.start_source(inst).await.expect("start lua");
 
-    // collect period 1s + stat flush 5s → 6s 覆盖至少一轮 collect + 一次 flush。
-    tokio::time::sleep(Duration::from_millis(6000)).await;
+    // collect period 1s + stat 条件落盘（到期时刻最坏 相位+30s≈35s，见上测注释）
+    // → 37s 覆盖至少一轮 collect + 一次到期落盘。
+    tokio::time::sleep(Duration::from_millis(37000)).await;
     let stat = stat::read(&client, "lua-rt")
         .await
         .expect("read stat")

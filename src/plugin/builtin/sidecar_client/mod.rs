@@ -294,10 +294,10 @@ impl Source for SidecarClient {
             // 心跳超时检测 ticker(非采集,不接 jitter——jitter 会改变超时判定语义)。
             let mut ticker = tokio::time::interval(hb_check);
             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-            // observed stat 周期 flush ticker（与采集 ticker 解耦，5s 落一次 lux stat:<inst>）。
-            let mut flush_ticker = tokio::time::interval(std::time::Duration::from_secs(
-                crate::plugin::stat_tracker::FLUSH_INTERVAL_SECS,
-            ));
+            // observed stat 周期 flush ticker（与采集 ticker 解耦；错峰 + 条件落盘，
+            // 见 stat_tracker::flush_ticker / flush_if_due）。
+            let mut flush_ticker = crate::plugin::stat_tracker::flush_ticker(&inst_id);
+            tracker.flush().await;
 
             loop {
                 tokio::select! {
@@ -388,7 +388,7 @@ impl Source for SidecarClient {
                         }
                     }
                     _ = flush_ticker.tick() => {
-                        tracker.flush().await;
+                        tracker.flush_if_due().await;
                     }
                     _ = ticker.tick() => {
                         if last_hb.elapsed() > hb_timeout {

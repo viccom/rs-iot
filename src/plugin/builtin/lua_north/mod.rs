@@ -206,7 +206,14 @@ impl Sink for LuaNorth {
         let script_dir = scripts_root.join(cfg.script.as_str());
         core_::hotload::spawn_watcher(script_dir, reload_tx, token.clone());
         let batch_period = std::time::Duration::from_secs(cfg.batch_max_secs.max(1));
-        let mut batch_ticker = tokio::time::interval(batch_period);
+        // batch ticker 错峰（同 stat ticker 理由：多实例/与 stat 同 5s 周期时散开首拍
+        // 与整点栅格；period 本身不变，只平移相位）。
+        let batch_phase = std::time::Duration::from_millis(crate::plugin::ticker::phase_ms(
+            inst.inst_id.as_str(),
+            batch_period,
+        ));
+        let mut batch_ticker =
+            tokio::time::interval_at(tokio::time::Instant::now() + batch_phase, batch_period);
         batch_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         // 5. mqtt task + 通道（spike-2 模型：网络 IO 独占，回调全在主循环侧）。
@@ -226,9 +233,9 @@ impl Sink for LuaNorth {
             serde_json::json!(core_::script::script_version(&scripts_root, &cfg.script)),
         );
         let mut vm_restarts: u64 = 0;
-        let mut flush_ticker = tokio::time::interval(std::time::Duration::from_secs(
-            crate::plugin::stat_tracker::FLUSH_INTERVAL_SECS,
-        ));
+        let mut flush_ticker = crate::plugin::stat_tracker::flush_ticker(inst.inst_id.as_str());
+        // 启动即落一次初始 stat（ticker 首拍带相位延迟，见 stat_tracker::flush_ticker）。
+        tracker.flush().await;
         // T7 stat 计数（Q5）：发布成败与重连次数（flush 点落 extra）。
         let mut publish_ok: u64 = 0;
         let mut publish_fail: u64 = 0;
@@ -318,7 +325,7 @@ impl Sink for LuaNorth {
                         down_skipped,
                         &alarm,
                     );
-                    tracker.flush().await;
+                    tracker.flush_if_due().await;
                     continue;
                 }
                 _ = batch_ticker.tick() => Evt::BatchTick,

@@ -148,13 +148,26 @@ impl ProcessMetrics {
     }
 }
 
-/// 现采进程 CPU%(sysinfo 单核百分比,多核机器可 >100)与常驻内存字节(sysinfo 0.32)。
+/// 现采进程 CPU%（sysinfo 单核百分比，多核机器可 >100）与常驻内存字节（sysinfo 0.32）。
 ///
-/// `/sysstatus` 与 `/metrics` 复用(DRY)。`System::new_all()` 构造并刷新;
-/// `get_current_pid` 返回 `Result`,失败兜底 `Pid::from(0_usize)`。
+/// `/sysstatus` 与 `/metrics` 复用(DRY)。**定向刷新**（2026-08 CPU 优化）：静态复用
+/// `System` 实例 + 只刷本进程——旧实现每次 `System::new_all()` 全系统枚举（本机 383
+/// 进程实测 ~41ms 墙钟，含 WMI 等待，CPU 落在 WmiPrvSE），selfMonitor 每 5s tick +
+/// 每次 /metrics、/sysstatus 抓取各付一次并阻塞 tokio worker；定向刷新实测 ~10ms
+/// 且无 WMI 副作用。互斥串行化并发抓取（调用方均为异步上下文，~10ms 级临界区可忍）。
+///
+/// 语义注：`cpu_usage()` 为距**上次刷新**的窗口平均（旧实现的"进程启动以来平均"本就
+/// 依赖首刷基线，窗口化后更贴近即时值）；两次调用间隔 < sysinfo
+/// `MINIMUM_CPU_UPDATE_INTERVAL`（200ms）时保持上次值。
 pub fn sample_process_resource() -> (f32, u64) {
-    let sys = sysinfo::System::new_all();
+    use std::sync::{Mutex, OnceLock};
+    static SYS: OnceLock<Mutex<sysinfo::System>> = OnceLock::new();
     let pid = sysinfo::get_current_pid().unwrap_or_else(|_| sysinfo::Pid::from(0_usize));
+    let mut sys = SYS
+        .get_or_init(|| Mutex::new(sysinfo::System::new()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    sys.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[pid]), true);
     sys.process(pid)
         .map(|p| (p.cpu_usage(), p.memory()))
         .unwrap_or((0.0, 0))

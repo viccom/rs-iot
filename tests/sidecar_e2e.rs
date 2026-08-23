@@ -227,10 +227,11 @@ async fn sidecar_dataup_and_command_roundtrip() {
         .await
         .expect("send ack");
 
-    // observed stat：DataUp 后 bridge 周期 flush（FLUSH_INTERVAL_SECS=5s），等下一周期
-    // 后 stat:sc1 应反映 observed tick（tick_count>=1）+ 连接元数据（reconnect_count/connected）。
-    // 严格 observed stat e2e 受 flush 周期限制，故在此显式等待。
-    tokio::time::sleep(Duration::from_secs(6)).await;
+    // observed stat：DataUp 后 bridge 周期 flush（ticker 5s 错峰检查 + 距上次落盘
+    // ≥ FLUSH_MAX_INTERVAL_SECS=30s 才写，到期时刻最坏 相位+30s≈35s——见 stat_tracker）。
+    // 连接瞬间的初始 stat（connected/reconnect_count 已含，tick=0）由连接建立后的
+    // 显式 flush 落；observed tick（tick_count>=1）须等到期落盘，故显式等 37s。
+    tokio::time::sleep(Duration::from_secs(37)).await;
     let stat_v = env
         .client
         .execute_value("GET", &["stat:sc1"])

@@ -318,9 +318,9 @@ impl Source for EipClientPlugin {
             ctx.lux.clone(),
         );
         let mut reconnects: u64 = 0;
-        let mut flush_ticker = tokio::time::interval(Duration::from_secs(
-            crate::plugin::stat_tracker::FLUSH_INTERVAL_SECS,
-        ));
+        let mut flush_ticker = crate::plugin::stat_tracker::flush_ticker(inst_id.as_str());
+        // 启动即落一次初始 stat（ticker 首拍带相位延迟，见 stat_tracker::flush_ticker）。
+        tracker.flush().await;
 
         // 断线即 None（对标 opcuaClient session=None）；下个 tick 重连（节流）。
         let mut client: Option<EipClient> = None;
@@ -345,7 +345,7 @@ impl Source for EipClientPlugin {
                     }
                 }
                 _ = flush_ticker.tick() => {
-                    tracker.flush().await;
+                    tracker.flush_if_due().await;
                 }
                 _ = ticker.tick() => {
                     if client.is_none() {

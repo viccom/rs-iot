@@ -256,9 +256,9 @@ impl Source for LuaClient {
         let mut vm_restarts: u64 = 0;
         // 连续失败计数（内存，不落 lux；驱动 cfg.fail_threshold 的 degraded 判定）。
         let mut consecutive_fail: u32 = 0;
-        let mut flush_ticker = tokio::time::interval(std::time::Duration::from_secs(
-            crate::plugin::stat_tracker::FLUSH_INTERVAL_SECS,
-        ));
+        let mut flush_ticker = crate::plugin::stat_tracker::flush_ticker(inst.inst_id.as_str());
+        // 启动即落一次初始 stat（ticker 首拍带相位延迟，见 stat_tracker::flush_ticker）。
+        tracker.flush().await;
 
         let mut lua = lua; // 可变（Evt::Reload 替换为新 VM）
         loop {
@@ -272,7 +272,7 @@ impl Source for LuaClient {
                 },
                 Some(frame) = data_rx.recv() => Evt::Data(frame),
                 Some(()) = reload_rx.recv() => Evt::Reload, // None（watcher 退出/失败）忽略，不忙循环
-                _ = flush_ticker.tick() => { core_::budget::sync_runtime_devs(&mut tracker, &runtime_devs); sync_dropped_samples(&mut tracker, &dropped, &dropped_frames, &alarm); tracker.flush().await; continue; }
+                _ = flush_ticker.tick() => { core_::budget::sync_runtime_devs(&mut tracker, &runtime_devs); sync_dropped_samples(&mut tracker, &dropped, &dropped_frames, &alarm); tracker.flush_if_due().await; continue; }
                 _ = ticker.tick() => Evt::Tick,
             };
             match evt {
