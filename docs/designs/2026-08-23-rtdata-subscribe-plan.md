@@ -1,11 +1,11 @@
 # 实时数据订阅接口（OPC UA 式）实施计划
 
-> **状态**：accepted（评估结论与设计方向经用户确认 2026-08-23；OPC UA 南向原生订阅不在本计划——用户明示下一轮另立）
+> **状态**：implemented（2026-08-23 于 worktree feat/rtdata-subscribe 执行完毕，T1-T6 全落地，子代理驱动 + task 间审查；OPC UA 南向原生订阅不在本计划——用户明示下一轮另立）
 > **日期**：2026-08-23
-> **实施**：未开始
+> **实施**：T1 tag_of 提升（13e16d7）→ T2 纯函数 TDD 10 单测（2f02869）→ T3 端点骨架+路由+401/200 e2e（b200986）→ T4 snapshot 全量+过滤（188ceb6）→ T5 datachange+removed（d9bdc89）→ T6 文档收口+全量验证
 > **代码**：`src/api/routes_rtdata_subscribe.rs`（新增）、`src/api/mod.rs`（模块声明 + 路由注册）、`src/api/routes_rtdata.rs`（`tag_of` 提升 `pub(crate)`）
-> **测试**：`tests/rtdata_subscribe_e2e.rs`（新增，5 e2e）+ `src/api/routes_rtdata_subscribe.rs` 内单测（10）
-> **遗留**：全部（T1~T6 待执行；实施后可选增强：订阅者数/帧量 Prometheus 指标、点级精确订阅白名单、超大单设备 snapshot 分帧、多订阅者共享 diff 服务）
+> **测试**：`tests/rtdata_subscribe_e2e.rs`（6 e2e：401/200/snapshot 全量/dev+tag 过滤/值变才推/removed）+ `src/api/routes_rtdata_subscribe.rs` 内单测（10）
+> **遗留**：可选增强未做：订阅者数/帧量 Prometheus 指标、点级精确订阅白名单、超大单设备 snapshot 分帧、多订阅者共享 diff 服务、deadband 死区过滤（SampleValue 无类型元数据）
 
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
@@ -905,7 +905,7 @@ curl -N -H "Authorization: Bearer $JWT" \
 **Step 2: README 索引登记**（designs 表尾加行；本 Task 实施完成后状态直接写"已实施"）
 
 ```markdown
-| [2026-08-23-rtdata-subscribe-plan.md](designs/2026-08-23-rtdata-subscribe-plan.md) | 实时数据订阅接口实施计划（OPC UA 式 snapshot/datachange，SSE） | 已实施 |
+| `2026-08-23-rtdata-subscribe-plan.md`（README 行实际落地为 [链接](2026-08-23-rtdata-subscribe-plan.md)，相对路径 `designs/` 前缀以 README 位置为准） | 实时数据订阅接口实施计划（OPC UA 式 snapshot/datachange，SSE） | 已实施 |
 ```
 
 **Step 3: 计划头部回写 implemented**（`> **状态**` 起的状态块整体替换：实施=各 Task commit 列表、代码/测试字段复核、遗留=可选增强清单或"无"）

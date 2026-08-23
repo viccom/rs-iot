@@ -70,7 +70,7 @@
 | [2026-08-21-device-ownership-design.md](designs/2026-08-21-device-ownership-design.md) | 设备归属模型设计（dev2inst 软关联/SampleSender 拦截/级联闭环 + lux 非 loopback 强制认证 + secrets AEAD + devices 死表废弃） | **部分实施**（T1-T4 归属闭环已实施） |
 | [2026-08-21-device-ownership-plan.md](designs/2026-08-21-device-ownership-plan.md) | 设备归属 + lux/RESP 收口 + secrets 加密实施计划（8 task） | **已实施**（待合并） |
 | [2026-08-23-startinst-double-start-plan.md](designs/2026-08-23-startinst-double-start-plan.md) | startinst 唯一启动守卫实施计划（活跃态二次启动 409，修幽灵双任务） | 已实施 |
-| [2026-08-23-rtdata-subscribe-plan.md](designs/2026-08-23-rtdata-subscribe-plan.md) | 实时数据订阅接口实施计划（OPC UA 式：snapshot 全量 + 周期 datachange，SSE，外部客户端） | **待实施** |
+| [2026-08-23-rtdata-subscribe-plan.md](designs/2026-08-23-rtdata-subscribe-plan.md) | 实时数据订阅接口实施计划（OPC UA 式：snapshot 全量 + 周期 datachange，SSE，外部客户端） | 已实施 |
 
 ## ops/ — 部署与运维（怎么跑起来）
 

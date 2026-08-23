@@ -210,6 +210,7 @@ curl -s -XPOST -H "Authorization: $TOKEN" -H 'Content-Type: application/json' \
 | Method | Path | Query | 响应 |
 |---|---|---|---|
 | GET | `/api/v1/rtdatas` | `?dev_id=`（可选） | 单设备 `{<field>:[ts,localTime,value]}`；不传 `{<devId>:{<field>:...}}` 全量 |
+| GET | `/api/v1/rtdatas/subscribe` | `?dev_id=`（逗号分隔，可选）`&tag=`（可选）`&interval=`（ms，可选，默认 1000，clamp [100,60000]） | SSE：`snapshot`（连接即推，逐设备全量）+ `datachange`（周期，仅值变化/删除）；cell 与 `/rtdatas` 同构（§4.14） |
 
 - 每个 field 值尝试 JSON 解析（失败保留原始字符串）
 - **只读最新快照**，无历史/时间范围/分页/聚合（见完备性评估）
@@ -310,6 +311,33 @@ curl -X DELETE -H "Authorization: <token>" "localhost:8790/api/v1/alarms?key=dev
 - **鉴权走 cookie**：EventSource 无法带自定义 header，`/login` 已 `Set-Cookie token=...; HttpOnly` 同源自动带（Authorization 头通道同全局中间件，§2，curl 调试可用）
 - broadcast 语义：每连接独立 Receiver；慢客户端缓冲满收 `Lagged` → 丢帧继续不终结流，丢失条数累入 Prometheus `rs_iot_sse_lagged_total`（持续增长提示调大 `event_bus_capacity`，默认 256）
 - 无事件时 KeepAlive 周期发注释帧防代理超时；无生产者时连接静默等待
+
+### 4.14 实时数据订阅（OPC UA 式，`routes_rtdata_subscribe.rs`）
+
+外部客户端订阅实时数据（对标 OPC UA CreateSubscription 语义：初次全量 + 周期只推变化；SSE，鉴权同全局中间件——Authorization / cookie / X-Access-Key）。
+
+| Method | Path | 鉴权 | Body/Query | 响应 |
+|---|---|---|---|---|
+| GET | `/api/v1/rtdatas/subscribe` | JWT | `?dev_id=<逗号分隔设备ID>`（缺省=全部设备）`&tag=<contains>`（可选）`&interval=<ms>`（默认 1000，clamp [100,60000]） | `text/event-stream`：`snapshot` + `datachange` 帧 |
+
+```bash
+curl -N -H "Authorization: Bearer $JWT" \
+  "http://localhost:8790/api/v1/rtdatas/subscribe?dev_id=devA,devB&tag=temp&interval=1000"
+```
+
+帧类型（`event:` 头，EventSource `addEventListener` 分发）：
+
+- `event: snapshot`（连接建立即推，一设备一帧）：`{"dev":"devA","points":{"devA.temp":[ts,"localTime","value"],...}}`
+- `event: datachange`（每 interval 一查，仅当有变化/删除才推一帧）：`{"changes":{<field>:[ts,"localTime","value"],...},"removed":[<field>,...],"ts":"RFC3339"}`
+- 注释帧（`: `，15s KeepAlive）——代理防超时
+
+语义保证：
+
+- **值变化只比 cell[2] 值串**——采集插件周期写回同值不产生通知（对标 OPC UA DataChangeFilter 值触发）
+- **断线重连即重新 snapshot 全量重同步**（EventSource 自动重连即可恢复，无需 resync 协议）
+- 设备/点位删除 → `datachange.removed` 列出
+- 与 `GET /api/v1/rtdatas` 的 cell 输出同构（`[ts, localTime, value]` 值串），客户端复用同一解析
+- 机制为**每连接读侧 poll-diff**（非 EventBus 转发，不受其 dev 截断/丢帧特性影响；设计依据：[2026-08-23-rtdata-subscribe-plan.md](../designs/2026-08-23-rtdata-subscribe-plan.md)）
 
 ## 5. 数据模型（`src/types.rs`）
 
