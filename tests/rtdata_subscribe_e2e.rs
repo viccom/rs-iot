@@ -188,3 +188,40 @@ async fn snapshot_respects_dev_and_tag_filter() {
     assert!(!buf.contains("devB"), "dev 过滤应排除 devB: {buf}");
     common::stop_lux(handle).await;
 }
+
+#[tokio::test]
+async fn datachange_only_pushes_changed_values() {
+    let (app, handle, lux) = test_app("subdiff").await;
+    seed(&lux, "devA", &[("t1", "1"), ("t2", "2")], 1_700_000_000).await;
+    let tok = jwt(&app).await;
+    let mut stream = connect(&app, "?dev_id=devA&interval=100", &tok).await;
+    // 窗口1：snapshot 收全。
+    let buf1 = collect_window(&mut stream, std::time::Duration::from_millis(600)).await;
+    assert!(buf1.contains("event: snapshot") && buf1.contains("devA.t1"), "{buf1}");
+    // 变更：t1 新值；t2 同值不同 ts（采集周期写回同值场景）。
+    seed(&lux, "devA", &[("t1", "9"), ("t2", "2")], 1_700_000_100).await;
+    let buf2 = collect_window(&mut stream, std::time::Duration::from_millis(1500)).await;
+    assert!(buf2.contains("event: datachange"), "应含 datachange: {buf2}");
+    assert!(buf2.contains("devA.t1") && buf2.contains("9"), "{buf2}");
+    assert!(!buf2.contains("devA.t2"), "值未变不应重推: {buf2}");
+    common::stop_lux(handle).await;
+}
+
+#[tokio::test]
+async fn removed_on_device_delete() {
+    let (app, handle, lux) = test_app("subdel").await;
+    seed(&lux, "devA", &[("t1", "1")], 1).await;
+    seed(&lux, "devB", &[("t1", "2")], 1).await;
+    let tok = jwt(&app).await;
+    let mut stream = connect(&app, "?interval=100", &tok).await;
+    let buf1 = collect_window(&mut stream, std::time::Duration::from_millis(600)).await;
+    assert!(buf1.contains("devA.t1") && buf1.contains("devB.t1"), "{buf1}");
+    rs_iot::db::rtdata::delete_device(&lux, "devA").await.unwrap();
+    let buf2 = collect_window(&mut stream, std::time::Duration::from_millis(1500)).await;
+    assert!(
+        buf2.contains("event: datachange") && buf2.contains("removed"),
+        "{buf2}"
+    );
+    assert!(buf2.contains("devA.t1"), "removed 应列 devA.t1: {buf2}");
+    common::stop_lux(handle).await;
+}

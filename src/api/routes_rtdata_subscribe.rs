@@ -173,8 +173,7 @@ pub async fn subscribe(
     Sse::new(ReceiverStream::new(rx)).keep_alive(KeepAlive::default())
 }
 
-/// producer 主体：snapshot（Phase 1）+ 周期 diff（Phase 2，Task 5）。tx 断（客户端
-/// 断开）即返回。
+/// producer 主体：snapshot（Phase 1）+ 周期 diff（Phase 2）。tx 断（客户端断开）即返回。
 async fn run(
     lux: &lux::EmbeddedClient,
     dev_filter: Option<HashSet<String>>,
@@ -204,9 +203,39 @@ async fn run(
         }
     }
 
-    // ---- Phase 2: 周期 diff（Task 5 实现；本 Task 占位空转）----
+    // ---- Phase 2: 周期 diff（值变/删除才推）----
+    let mut ticker = tokio::time::interval(interval);
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    ticker.tick().await; // interval 首拍立即完成——快照刚读，消费掉跳过
     loop {
-        tokio::time::sleep(interval).await;
+        ticker.tick().await;
+        let mut current: HashMap<String, (String, serde_json::Value)> = HashMap::new();
+        for (_dev, points) in read_scope(lux, &dev_filter).await {
+            for (field, cell) in filter_by_tag(points, tag) {
+                let v = value_str(&cell);
+                current.insert(field, (v, cell));
+            }
+        }
+        let (changes, removed) = diff_scope(current, &last_sent);
+        // 基线更新（变更覆盖 + 删除移除），与推帧解耦——推帧失败即退出无需回滚。
+        for (field, cell) in &changes {
+            last_sent.insert(field.clone(), value_str(cell));
+        }
+        for field in &removed {
+            last_sent.remove(field);
+        }
+        if changes.is_empty() && removed.is_empty() {
+            continue;
+        }
+        if let Ok(ev) = Event::default().event("datachange").json_data(json!({
+            "changes": changes,
+            "removed": removed,
+            "ts": crate::event_bus::now_iso8601(),
+        })) {
+            if tx.send(Ok(ev)).await.is_err() {
+                return;
+            }
+        }
     }
 }
 
