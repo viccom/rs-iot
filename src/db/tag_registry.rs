@@ -19,7 +19,7 @@ use crate::error::RsIotError;
 use crate::types::{tag_key, Sample, TagProps};
 use lux::EmbeddedClient;
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex, OnceLock, RwLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 /// lux hash 名（全局单表）。
 const HASH: &str = "tags";
@@ -27,68 +27,23 @@ const HASH: &str = "tags";
 /// 进程级"已确认写入 lux"集合——稳态命中零 lux 交互。
 static SEEN: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
 
-/// 声明式初值快照（`ChildSpec.props` 预载；Arc 换手，flush 路径零 clone 成本）。
-static DECLARED: OnceLock<RwLock<Arc<HashMap<String, TagProps>>>> = OnceLock::new();
-
 fn seen() -> &'static Mutex<HashSet<String>> {
     SEEN.get_or_init(|| Mutex::new(HashSet::new()))
 }
 
-fn declared_cell() -> &'static RwLock<Arc<HashMap<String, TagProps>>> {
-    DECLARED.get_or_init(|| RwLock::new(Arc::new(HashMap::new())))
-}
-
 /// 当前声明式初值快照（Arc clone，廉价）。
-pub fn declared() -> Arc<HashMap<String, TagProps>> {
-    declared_cell().read().unwrap().clone()
-}
-
-/// 从 lux `instances` 全量重建声明式初值（启动一次 + startinst 后增量刷新）。
-/// 解析失败的实例条目跳过（容错：props 是增强不是关键路径）。
-pub async fn refresh_declared(c: &EmbeddedClient) -> Result<usize, RsIotError> {
-    let v = c.execute_value("HGETALL", &["instances"]).await?;
-    let mut raw: Vec<String> = Vec::new();
-    if let lux::EmbeddedValue::Array(arr) = v {
-        let mut i = 0;
-        while i + 1 < arr.len() {
-            if let Some(json) = embedded_to_string(arr[i + 1].clone()) {
-                raw.push(json);
-            }
-            i += 2;
-        }
-    }
-    let map = parse_declared(&raw);
-    let n = map.len();
-    *declared_cell().write().unwrap() = Arc::new(map);
-    Ok(n)
-}
-
-/// 纯函数：instances JSON 串列表 → 声明式初值表。
 ///
-/// key 规则：`tag_key(dev.value, tag名)`，tag 名 **label 与 value 双候选都登记**
-/// （不同插件取 key 的惯例不同——dataSim 用 value、modbus 用 label 优先——双登记
-/// 防漏，多余条目只在 lux miss 建卡时被用到，无害）。同 key 冲突 last-wins。
-pub fn parse_declared(instance_jsons: &[String]) -> HashMap<String, TagProps> {
-    let mut out = HashMap::new();
-    for json in instance_jsons {
-        let Ok(cfg) = serde_json::from_str::<crate::types::InstConfig>(json) else {
-            continue;
-        };
-        for dev in &cfg.devices {
-            if dev.value.is_empty() {
-                continue;
-            }
-            for child in &dev.children {
-                let Some(props) = &child.props else { continue };
-                for name in [&child.label, &child.value] {
-                    if !name.is_empty() {
-                        out.insert(tag_key(&dev.value, name), props.clone());
-                    }
-                }
-            }
-        }
-    }
-    out
+/// M-2 起数据源 = **effective 物化缓存**（模型模板默认 ∪ devreg 覆盖，
+/// `model::cache`）——内联 `ChildSpec.props` 已随实例绑定化消失，模板默认成为
+/// 声明式初值的唯一权威（比旧双候选登记更准：三态合并后的最终意图）。
+pub fn declared() -> Arc<HashMap<String, TagProps>> {
+    crate::model::cache::effective()
+}
+
+/// 刷新声明式初值（= effective 缓存全量重建；启动 + startinst 后刷新）。
+pub async fn refresh_declared(c: &EmbeddedClient) -> Result<usize, RsIotError> {
+    let m = crate::model::cache::reload(c).await?;
+    Ok(m.len())
 }
 
 // ---------- 纯函数 ----------
@@ -379,27 +334,5 @@ mod tests {
                 ..Default::default()
             }
         );
-    }
-
-    #[test]
-    fn parse_declared_double_candidate_and_bad_json_tolerated() {
-        let inst = serde_json::json!({
-            "inst_id":"sim1","app_code":"dataSim","app_type":"south",
-            "devices":[{"label":"d","value":"dev1","children":[
-                {"label":"炉温","value":"temp","type":"f32","props":{"history":true,"deadband":0.5}}
-            ]}]
-        });
-        let bad = "{not json".to_string();
-        let map = parse_declared(&[inst.to_string(), bad]);
-        // label 与 value 双候选（同键形 "dev1.炉温" / "dev1.temp"）。
-        assert_eq!(map.len(), 2);
-        assert_eq!(map["dev1.temp"].deadband, Some(0.5));
-        assert!(map["dev1.炉温"].history);
-        // 无 props 的 children 不产出条目。
-        let inst2 = serde_json::json!({
-            "inst_id":"x","app_code":"opcuaClient","app_type":"south",
-            "devices":[{"label":"d","value":"dev2","children":[{"label":"t","value":"ns=2;s=1"}]}]
-        });
-        assert!(parse_declared(&[inst2.to_string()]).is_empty());
     }
 }

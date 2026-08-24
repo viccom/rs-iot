@@ -148,12 +148,12 @@ pub(crate) async fn cascade_delete(st: &AppState, inst_id: &str) {
     //    回退 mgr 运行态配置快照——否则 devids=[] → rtdata 不清 → 孤儿残留（前端"设备残留"bug）。
     let cfg_devids: Vec<String> = match hget(&st.lux, "instances", inst_id).await {
         Some(raw) => serde_json::from_str::<crate::types::InstConfig>(&raw)
-            .map(|cfg| cfg.devices.into_iter().map(|d| d.value).collect())
+            .map(|cfg| cfg.devices.into_iter().map(|d| d.devid).collect())
             .unwrap_or_default(),
         None => st
             .mgr
             .config_snapshot(inst_id)
-            .map(|cfg| cfg.devices.into_iter().map(|d| d.value).collect())
+            .map(|cfg| cfg.devices.into_iter().map(|d| d.devid).collect())
             .unwrap_or_default(),
     };
     // 1b. 归属反查（闭环主路径）：dev2inst 中该宿主的全部 devid——含配置设备

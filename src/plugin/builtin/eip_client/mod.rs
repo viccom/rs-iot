@@ -250,10 +250,10 @@ struct Targets {
     strings: Vec<(String, Vec<(String, String)>)>,
 }
 
-fn parse_targets(inst: &InstConfig) -> Targets {
+fn parse_targets(devices: &[crate::types::DeviceSpec]) -> Targets {
     let mut batch = Vec::new();
     let mut strings = Vec::new();
-    for dev in &inst.devices {
+    for dev in devices {
         let mut b = Vec::new();
         let mut s = Vec::new();
         for c in &dev.children {
@@ -303,7 +303,15 @@ impl Source for EipClientPlugin {
                 return;
             }
         };
-        let targets = parse_targets(&inst);
+        // M-2 模型驱动装配：绑定展开（模板 addr × devreg params → 绝对 tag 路径）。
+        let expanded = match crate::model::expand::expand_to_specs(&ctx.lux, &inst.devices).await {
+            Ok(d) => d,
+            Err(e) => {
+                tracing::error!("[eipClient] inst {inst_id} 绑定展开失败（设备未注册？）: {e}");
+                return;
+            }
+        };
+        let targets = parse_targets(&expanded);
 
         let period = Duration::from_secs(cfg.period);
         // jitter 相位：FNV-1a(inst_id) % period，多实例首次 tick 散布，削整点脉冲。

@@ -54,8 +54,82 @@ pub(crate) struct SelfObservation {
     pub note: Option<String>,
 }
 
+/// selfMonitor 隐式模型 id（内置注册进 devmodels——"运行时设备也走模型"的
+/// 完整性验证，决策 §一.5）。
+pub(crate) const SYS_MODEL_ID: &str = "_sys_rsiot";
+
+/// 隐式模型定义（tags 与 [`collect`] 表同源——代码是运行时权威，模型是元数据
+/// 登记面；加标签时两处同步，`sys_model_matches_collect` 单测锁定漂移）。
+pub(crate) fn sys_model() -> crate::model::types::DeviceModel {
+    use crate::model::types::{DeviceModel, TagTemplate};
+    let tag = |name: &str, data_type: &str, desc: &str| TagTemplate {
+        name: name.into(),
+        data_type: data_type.into(),
+        desc: Some(desc.into()),
+        unit: None,
+        addr: None, // 纯软设备（采集由代码驱动，无协议地址）
+        rw: crate::model::types::TagRw::R,
+        props: crate::types::TagProps::default(),
+    };
+    DeviceModel {
+        model_id: SYS_MODEL_ID.into(),
+        vendor: Some("rs-iot".into()),
+        model_no: Some("builtin".into()),
+        category: Some("自监控".into()),
+        desc: Some("系统自监控设备内置隐式模型（启动幂等注册）".into()),
+        params: vec![],
+        tags: vec![
+            tag("id", "string", "硬件 ID"),
+            tag("version", "string", "构建版本"),
+            tag("platform", "string", "平台（os/arch）"),
+            tag("uptime_s", "int", "运行时长秒"),
+            tag("cpu_percent", "float", "进程 CPU %"),
+            tag("mem_bytes", "int", "进程内存字节"),
+            tag("healthy", "bool", "自身健康"),
+            tag("collector_count", "int", "实例总数"),
+            tag("device_count", "int", "设备总数（devreg）"),
+            tag("tag_count", "int", "标签总数（effective）"),
+            tag("inst_running", "int", "运行实例数"),
+            tag("inst_degraded", "int", "降级实例数"),
+            tag("inst_failed", "int", "失败实例数"),
+            tag("alarm_active", "int", "活跃告警数"),
+            tag("dbsize", "int", "lux 键总数"),
+            tag("pipeline_processed_count", "int", "pipeline 累计处理样本"),
+            tag("hub_depth_last", "int", "hub 深度最近值"),
+            tag("watchdog", "int", "看门狗计数（可选）"),
+            tag("note", "string", "人工备注（可选）"),
+        ],
+    }
+}
+
+/// 启动幂等注册：`_sys_rsiot` 模型 + devreg 设备 `rsiot`（存在则跳过——
+/// 人工改过模板不覆盖）。失败仅 warn（自监控是增强，不阻断主链路）。
+pub(crate) async fn ensure_sys_model_registered(lux: &lux::EmbeddedClient) {
+    use crate::model::store;
+    if store::get_model(lux, SYS_MODEL_ID)
+        .await
+        .ok()
+        .flatten()
+        .is_none()
+    {
+        if let Err(e) = store::set_model(lux, &sys_model()).await {
+            tracing::warn!("[selfMonitor] _sys_rsiot 模型注册失败（不阻断）: {e}");
+        }
+    }
+    if store::get_device(lux, DEVID).await.ok().flatten().is_none() {
+        let dev = crate::model::types::DeviceEntry {
+            devid: DEVID.into(),
+            model: SYS_MODEL_ID.into(),
+            ..Default::default()
+        };
+        if let Err(e) = store::set_device(lux, &dev).await {
+            tracing::warn!("[selfMonitor] rsiot 设备注册失败（不阻断）: {e}");
+        }
+    }
+}
+
 /// 汇总为 rsiot 设备的标签表（BTreeMap——键有序，rtdata hash 与文档呈现稳定）。
-/// 加标签=此处加一行 + 计划文档表格登记一行（扩展点）。
+/// 加标签=此处加一行 + [`sys_model`] tags 加一行（扩展点）。
 pub(crate) fn collect(obs: &SelfObservation) -> BTreeMap<String, SampleValue> {
     use SampleValue::{Bool, Float, Int, Str};
     let mut m = BTreeMap::new();
@@ -462,14 +536,13 @@ fn observe_light(
 async fn instance_stats(
     lux: &lux::EmbeddedClient,
 ) -> (usize, usize, usize, std::collections::HashSet<String>) {
-    let mut configured = std::collections::HashSet::new();
+    let configured = std::collections::HashSet::new();
     let arr = match lux.execute_value("HGETALL", &["instances"]).await {
         Ok(lux::EmbeddedValue::Array(a)) => a,
         _ => return (0, 0, 0, configured),
     };
     let mut collectors = 0;
-    let mut devices = 0;
-    let mut tags = 0;
+    let mut configured = std::collections::HashSet::new();
     let mut i = 0;
     while i + 1 < arr.len() {
         let raw = match &arr[i + 1] {
@@ -483,8 +556,6 @@ async fn instance_stats(
         match serde_json::from_str::<crate::types::InstConfig>(&raw) {
             Ok(inst) => {
                 collectors += 1;
-                devices += inst.devices.len();
-                tags += inst.devices.iter().map(|d| d.children.len()).sum::<usize>();
                 configured.insert(inst.inst_id.to_string());
             }
             Err(e) => tracing::warn!(
@@ -494,6 +565,13 @@ async fn instance_stats(
         }
         i += 2;
     }
+    // M-2：设备/标签口径切模型注册表（devreg 全局设备数 + effective 缓存标签数，
+    // 实例配置只剩绑定无点表）。读失败降级 0（概览指标，不阻断采集）。
+    let devices = crate::model::store::list_devices(lux)
+        .await
+        .map(|v| v.len())
+        .unwrap_or(0);
+    let tags = crate::model::cache::effective().len();
     (collectors, devices, tags, configured)
 }
 

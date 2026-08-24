@@ -125,6 +125,23 @@ pub async fn startinst(State(st): State<AppState>, Json(req): Json<IdReq>) -> Re
             None => return err(StatusCode::NOT_FOUND, "instance not found"),
         },
     };
+    // M-2 绑定事实校验（南向 Source）：每条绑定的设备须在 devreg 且模型可展开
+    // （params 齐/地址可解析）——fail-fast 拒启动带指引，不带病运行（插件侧
+    // 装配期也会再展开一次，此处给 REST 调用方即时反馈）。
+    if inst.app_type == AppType::South {
+        for b in &inst.devices {
+            if let Err(e) = crate::model::expand::expand_binding(&st.lux, b).await {
+                return err(
+                    StatusCode::NOT_FOUND,
+                    &format!(
+                        "绑定设备 {} 展开失败: {e}（先 POST /api/v1/devreg/set 建设备\
+                         或 POST /api/v1/migrate/inline-devices 迁移旧配置）",
+                        b.devid
+                    ),
+                );
+            }
+        }
+    }
     // 按方向分发（R4）：South→Source、North→Sink（此前 North 被 400 拒绝）。
     let result = match inst.app_type {
         AppType::South => st.mgr.start_source(inst).await,

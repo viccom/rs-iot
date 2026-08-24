@@ -5,7 +5,7 @@ use crate::host::{BridgeRegistry, CtlRegistry, HostContext};
 use crate::plugin::registry::find_source;
 use crate::plugin::sample_sender::SampleSender;
 use crate::plugin::traits::Source;
-use crate::types::{AppType, CtlMessage, DeviceSpec, HostKind, Hwid, InstConfig, PluginName};
+use crate::types::{AppType, CtlMessage, DeviceBinding, HostKind, Hwid, InstConfig, PluginName};
 use serde_json::json;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -119,11 +119,9 @@ async fn collect_pushes_sample_to_hub() {
             "script":"devA","endpoint":"127.0.0.1:1","period":1,
             "scripts_root": tmp.to_str().unwrap()
         }),
-        devices: vec![DeviceSpec {
-            label: "d".into(),
-            value: "devA".into(),
-            children: vec![],
-            slave_id: None,
+        devices: vec![DeviceBinding {
+            devid: "devA".into(),
+            bind: Default::default(),
         }],
         host_kind: HostKind::Builtin,
     };
@@ -324,11 +322,9 @@ fn lua_inst_config(tmp: &std::path::Path, script: &str) -> InstConfig {
             "script": script, "endpoint": "127.0.0.1:1", "period": 1,
             "scripts_root": tmp.to_str().unwrap()
         }),
-        devices: vec![DeviceSpec {
-            label: "d".into(),
-            value: "devM".into(),
-            children: vec![],
-            slave_id: None,
+        devices: vec![DeviceBinding {
+            devid: "devM".into(),
+            bind: Default::default(),
         }],
         host_kind: HostKind::Builtin,
     }
@@ -526,11 +522,9 @@ async fn on_init_budget_timeout_startup_continues() {
         app_type: AppType::South,
         auto_start: false,
         app_config: cfg_app,
-        devices: vec![DeviceSpec {
-            label: "d".into(),
-            value: "devI".into(),
-            children: vec![],
-            slave_id: None,
+        devices: vec![DeviceBinding {
+            devid: "devI".into(),
+            bind: Default::default(),
         }],
         host_kind: HostKind::Builtin,
     };
@@ -662,11 +656,9 @@ async fn ctl_reload_message_triggers_vm_reload() {
         app_type: AppType::South,
         auto_start: false,
         app_config: cfg_app,
-        devices: vec![DeviceSpec {
-            label: "d".into(),
-            value: "devR".into(),
-            children: vec![],
-            slave_id: None,
+        devices: vec![DeviceBinding {
+            devid: "devR".into(),
+            bind: Default::default(),
         }],
         host_kind: HostKind::Builtin,
     };

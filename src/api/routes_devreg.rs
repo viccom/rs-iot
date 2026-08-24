@@ -101,75 +101,21 @@ pub async fn delete(State(st): State<AppState>, Json(req): Json<DeleteReq>) -> R
     }
 }
 
-/// `POST /api/v1/migrate/inline-devices`：一次性迁移（幂等，可重复执行）。
+/// `POST /api/v1/migrate/inline-devices`：一次性迁移（幂等，可重复执行；M-2 起
+/// **升级必经路径**——旧内联形态实例在新类型下无法反序列化）。
 ///
-/// 扫描 lux `instances` 内联点表 → `migrate::convert` → 隐式模型 + devreg 条目
-/// 入册（已存在跳过）；单条目失败记入 `failures` 继续（不中断整体）。实例配置
-/// 改写为 DeviceBinding 属 M-2 T1（`InstConfig.devices` 类型升级时）。
+/// 隐式模型 + devreg 设备入册（已存在跳过）+ 实例配置 devices 改写为
+/// DeviceBinding；单条失败记入 `failures` 继续（不中断整体）。
 pub async fn migrate_inline(State(st): State<AppState>) -> Response {
-    let v = match st.lux.execute_value("HGETALL", &["instances"]).await {
-        Ok(v) => v,
-        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
-    };
-    let mut converted_models = 0u64;
-    let mut converted_devices = 0u64;
-    let mut converted_instances = 0u64;
-    let mut failures: Vec<String> = Vec::new();
-    if let lux::EmbeddedValue::Array(arr) = v {
-        let mut i = 0;
-        while i + 1 < arr.len() {
-            let raw = crate::api::str_from_value(&arr[i + 1]);
-            i += 2;
-            let Ok(inst) = serde_json::from_str::<crate::types::InstConfig>(&raw) else {
-                continue; // 坏值条目容错跳过（同 refresh_declared 口径）
-            };
-            let outcome = crate::model::migrate::convert(&inst);
-            let mut any = false;
-            for m in &outcome.models {
-                match store::get_model(&st.lux, &m.model_id).await {
-                    Ok(Some(_)) => continue, // 幂等：已迁移跳过
-                    Ok(None) => {}
-                    Err(e) => {
-                        failures.push(format!("model {}: {e}", m.model_id));
-                        continue;
-                    }
-                }
-                match store::set_model(&st.lux, m).await {
-                    Ok(()) => {
-                        converted_models += 1;
-                        any = true;
-                    }
-                    Err(e) => failures.push(format!("model {}: {e}", m.model_id)),
-                }
-            }
-            for d in &outcome.devices {
-                match store::get_device(&st.lux, &d.devid).await {
-                    Ok(Some(_)) => continue,
-                    Ok(None) => {}
-                    Err(e) => {
-                        failures.push(format!("device {}: {e}", d.devid));
-                        continue;
-                    }
-                }
-                match store::set_device(&st.lux, d).await {
-                    Ok(()) => {
-                        converted_devices += 1;
-                        any = true;
-                    }
-                    Err(e) => failures.push(format!("device {}: {e}", d.devid)),
-                }
-            }
-            if any {
-                converted_instances += 1;
-            }
-        }
+    match crate::model::migrate::run(&st.lux).await {
+        Ok(sum) => Json(json!({
+            "status": "ok",
+            "converted_models": sum.converted_models,
+            "converted_devices": sum.converted_devices,
+            "converted_instances": sum.converted_instances,
+            "failures": sum.failures,
+        }))
+        .into_response(),
+        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
     }
-    Json(json!({
-        "status": "ok",
-        "converted_models": converted_models,
-        "converted_devices": converted_devices,
-        "converted_instances": converted_instances,
-        "failures": failures,
-    }))
-    .into_response()
 }
