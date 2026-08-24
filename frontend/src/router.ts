@@ -15,6 +15,7 @@ export const router = createRouter({
         { path: 'overview', name: 'overview', component: () => import('./views/Overview.vue'), meta: { auth: true } },
         { path: 'telemetry', name: 'telemetry', component: () => import('./views/Telemetry.vue'), meta: { auth: true } },
         { path: 'collectors', name: 'collectors', component: () => import('./views/Collectors.vue'), meta: { auth: true } },
+        { path: 'models', name: 'models', component: () => import('./views/DeviceModels.vue'), meta: { auth: true } },
         { path: 'diagnostics', name: 'diagnostics', component: () => import('./views/Diagnostics.vue'), meta: { auth: true } },
         { path: 'control', name: 'control', component: () => import('./views/Control.vue'), meta: { auth: true } },
         { path: 'lua', name: 'lua', component: () => import('./views/Lua.vue'), meta: { auth: true } },

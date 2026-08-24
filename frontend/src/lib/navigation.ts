@@ -2,6 +2,7 @@ export type WorkspaceRouteKey =
   | 'overview'
   | 'telemetry'
   | 'collectors'
+  | 'models'
   | 'diagnostics'
   | 'control'
   | 'lua'
@@ -35,6 +36,13 @@ export const PRIMARY_ROUTES: PrimaryRouteDefinition[] = [
     title: '采集器',
     shortTitle: '采集器',
     summary: '查看采集实例状态、宿主类型与运行分布',
+  },
+  {
+    key: 'models',
+    path: '/models',
+    title: '设备模型',
+    shortTitle: '模型',
+    summary: '物模型模板与全局设备注册表——设备/标签元数据唯一出生地',
   },
   {
     key: 'diagnostics',
