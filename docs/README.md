@@ -17,6 +17,7 @@
 | 外部插件 bridge | [扩展策略](decisions/2026-08-07-plugin-extension-strategy.md)（已实施） | —（[协议规约](reference/external-plugin-protocol.md)即设计） | `src/plugin/builtin/sidecar_client/` | `tests/sidecar_e2e.rs` | [开发指南](guides/external-plugin-dev-guide.md)、`examples/ext-plugin-*` |
 | 可观测性（M4+P1） | — | [packet-trace](designs/2026-08-10-packet-trace-design.md)（部分实施）· [log-ringbuffer](designs/2026-08-10-log-ringbuffer-design.md)（已实施） | `src/io_trace.rs`、`src/log_ringbuffer.rs`、`src/api/routes_{metrics,trace,logs}.rs` | `tests/{trace,log,metrics}_e2e.rs` | [埋点规范](conventions/instrumentation-conventions.md)、[rest-api](reference/rest-api.md) §4.10+ |
 | AI 网关集成 | [技术选型](decisions/2026-08-12-gateway-tech-selection.md)（已实施） | [v3 设计](designs/2026-08-11-ai-agent-integration-v3-design.md)（已实施）→ [分层演进](designs/2026-08-18-multi-system-gateway-design.md)（**待实施**） | `crates/rsiot-gateway/`、`crates/rsiot-mcp/` | gateway/mcp crate 内单测 | [部署指南](ops/deploy-gateway-and-mcp.md) |
+| 设备模型注册表（物模型） | [元数据唯一来源决策](decisions/2026-08-25-device-model-registry.md)（待实施） | [四期实施计划](designs/2026-08-25-device-model-registry-plan.md)（待实施·M-1~M-4 TDD） | M-1 待启动（`src/model/` 域） | `tests/model_registry_e2e.rs`（随 M-1 建） | 决策文档 §3 业界对标 |
 | 历史时序存储（tsink） | [tsink 选型决策](decisions/2026-08-24-history-storage-tsink-selection.md)（待实施·含实测对比） | [总设计与路线图](designs/2026-08-24-history-storage-master-plan.md)（待实施·ADR 权威版）→ [Tag Registry](designs/2026-08-24-tag-registry-plan.md)（**已实施**·Phase 1a 地基） | Phase 1b 待启动（`src/db/tag_registry.rs` 已并入） | `tests/tag_registry_e2e.rs` | 决策文档附录（实测基线/工件位置） |
 | 现场部署与测试 | — | — | `field-kit/` | `field-kit` e2e 脚本 | [field-e2e-windows](ops/field-e2e-windows.md) |
 
@@ -50,6 +51,7 @@
 | [2026-08-07-feature-gating-protocols.md](decisions/2026-08-07-feature-gating-protocols.md) | 内置协议 Cargo feature 裁剪（方案 B）评估与实施 | 已实施 |
 | [2026-08-12-gateway-tech-selection.md](decisions/2026-08-12-gateway-tech-selection.md) | API Gateway 技术选型调研：axum 0.8 + reqwest 手写反代（全部 file:line 引证） | 已实施 |
 | [2026-08-24-history-storage-tsink-selection.md](decisions/2026-08-24-history-storage-tsink-selection.md) | 历史时序存储选型：tsink 内嵌（fork 自管）+ 独立 server 形态实测对比 + 单机 10 万点位级定位 | 待实施 |
+| [2026-08-25-device-model-registry.md](decisions/2026-08-25-device-model-registry.md) | 设备模型注册表（物模型）：元数据唯一来源原则（宪法级）+ 全局设备实体 + tags 表吸收 + 严格校验 | 待实施 |
 
 ## designs/ — 设计定稿（怎么做，日期命名）
 
@@ -74,6 +76,7 @@
 | [2026-08-23-startinst-double-start-plan.md](designs/2026-08-23-startinst-double-start-plan.md) | startinst 唯一启动守卫实施计划（活跃态二次启动 409，修幽灵双任务） | 已实施 |
 | [2026-08-23-rtdata-subscribe-plan.md](designs/2026-08-23-rtdata-subscribe-plan.md) | 实时数据订阅接口实施计划（OPC UA 式：snapshot 全量 + 周期 datachange，SSE，外部客户端） | 已实施 |
 | [2026-08-24-history-storage-master-plan.md](designs/2026-08-24-history-storage-master-plan.md) | 历史时序存储总设计：三层开关/ADR 全表 D1-D10/Phase 1b-5 路线/tsink 语义陷阱/fork backlog/实测基线附录 | 待实施 |
+| [2026-08-25-device-model-registry-plan.md](designs/2026-08-25-device-model-registry-plan.md) | 设备模型注册表实施计划（devmodels/devreg/discoveries + 四期 M-1~M-4 TDD + 现状处置清单 + 新会话执行指引） | 待实施 |
 | [2026-08-24-tag-registry-plan.md](designs/2026-08-24-tag-registry-plan.md) | 标签/设备元数据统一存储实施计划（Tag Registry：lux tags 表 + 三路径登记 + REST，历史存储前置地基） | 已实施 |
 
 ## ops/ — 部署与运维（怎么跑起来）
