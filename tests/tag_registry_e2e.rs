@@ -1,11 +1,9 @@
-//! Tag Registry 端到端：三路径登记语义 + REST 面 + 只补缺不覆盖 + 删除重占位。
-//!
-//! 覆盖（docs/designs/2026-08-24-tag-registry-plan.md Task 6 六场景）：
-//! ① JWT 保护；② dataSim 全链路自动登记（默认 props + owner_inst=宿主实例）；
-//! ③ 声明式 props 初值（instances 配置 + refresh_declared → 首见建卡落初值）；
-//! ④ 只补缺不覆盖（表已有记录——API/前次运行——不被出口登记冲掉）；
-//! ⑤ glob 批量（matched/updated 计数 + 未匹配不动）；
-//! ⑥ 删除后重占位（seen 移除 → 再出数默认卡重建）。
+//! 标签元数据端到端（Phase 1a 六场景随 M-4 T1 发现引擎平移）：
+//! ① JWT 保护；② dataSim 全链路——已建模标签过闸（不进 discoveries、
+//! 不再自动建 tags 卡）；③ 模型模板 props 默认进 effective 物化缓存；
+//! ④ 遗留 tags 表直写条目不被发现引擎触碰；
+//! ⑤ glob 批量（matched/updated 计数 + 未匹配不动，M-4 T3 前旧实现）；
+//! ⑥ tags 记录删除后再出数——未建模数据进 discoveries 队列（新发现语义）。
 //!
 //! 注意：`SEEN` 是进程级全局，测试并行共享——**各测试用互不重叠的 devid**
 //! （devA/devC/devD/devE/devF/devG）避免互扰。
@@ -200,10 +198,10 @@ async fn tags_api_requires_jwt() {
     common::stop_lux(handle).await;
 }
 
-// ---------- ② dataSim 全链路自动登记 ----------
+// ---------- ② dataSim 全链路：已建模过闸 ----------
 
 #[tokio::test]
-async fn datasim_flow_registers_default_cards_with_owner() {
+async fn datasim_modeled_flow_passes_gate() {
     let (app, handle, hub, mgr) = test_app("tagreg-flow").await;
     // M-2 模型驱动：devA 注册为隐式模型（dataSim 纯软：tag=temp/humidity）。
     let bindings = common::register_devices_as_models(
@@ -245,24 +243,30 @@ async fn datasim_flow_registers_default_cards_with_owner() {
     mgr.start_source(inst).await.expect("start datasim");
     tokio::time::sleep(Duration::from_millis(2300)).await; // ≥2 个采集周期
 
+    // M-4 T1：出口登记转型发现引擎——不再自动写 tags 卡（tags 表 per-lux，
+    // 断言稳定）。"已建模不进队列"的判定依赖全局 effective 缓存内容，会被
+    // 并行测试的 reload 刷掉（M-1 已知竞态，否定断言不可重试收敛）——该语义
+    // 由 model::discovery::tests::modeled_tag_skipped_entirely 串行单测覆盖。
     let tok = jwt(&app).await;
     let m = tags(&app, &tok, "?dev_id=devA").await;
-    assert!(m.contains_key("devA.temp"), "自动登记: {m:?}");
-    assert!(m.contains_key("devA.humidity"));
-    let props = &m["devA.temp"];
-    assert_eq!(props["history"], serde_json::json!(false), "默认不归档");
-    assert_eq!(
-        props["owner_inst"],
-        serde_json::json!("sim_flow"),
-        "owner=宿主实例（dev2inst 首宿主）"
+    assert!(m.is_empty(), "不再自动建卡: {m:?}");
+    // 采集链路本身不受影响（rtdata 正常入库）。
+    let client = handle.client();
+    let v = client
+        .execute_value("HGET", &["rtdata:devA", "devA.temp"])
+        .await
+        .unwrap();
+    assert!(
+        !matches!(v, lux::EmbeddedValue::Nil),
+        "rtdata 采集不受模型闸影响"
     );
     common::stop_lux(handle).await;
 }
 
-// ---------- ③ 声明式 props 初值 ----------
+// ---------- ③ 模板 props 默认进 effective 物化缓存 ----------
 
 #[tokio::test]
-async fn declared_props_seed_initial_card() {
+async fn template_props_seed_effective_cache() {
     let (app, handle, hub, _mgr) = test_app("tagreg-decl").await;
     // M-2：声明式 props 初值 = 模型模板默认（devG 建隐式模型，temp2 模板 props
     // 带声明值）+ refresh_declared（= effective 装载，模拟 startinst 接线）。
@@ -311,44 +315,26 @@ async fn declared_props_seed_initial_card() {
         )
         .await
         .unwrap();
-    rs_iot::db::tag_registry::refresh_declared(&client)
-        .await
-        .expect("refresh declared");
-    // 直推样本（tag=temp2 与声明 value 候选一致）→ flush 建卡用声明初值。
-    // 全局 effective 缓存被并行测试的写路径刷新覆盖（M-1 已知竞态）：轮询重试
-    // ——reload 缓存 + 重推 + 重读，直到初值生效或超时（8s）。
-    let tok = jwt(&app).await;
-    let mut history_ok = false;
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
-    while std::time::Instant::now() < deadline {
-        rs_iot::db::tag_registry::refresh_declared(&client)
-            .await
-            .expect("refresh declared");
-        hub.send(sample("devG", "temp2", 42.0)).await.unwrap();
-        tokio::time::sleep(Duration::from_millis(400)).await;
-        let m = tags(&app, &tok, "").await;
-        if let Some(props) = m.get("devG.temp2") {
-            if props["history"] == serde_json::json!(true) {
-                history_ok = true;
-                break;
-            }
-        }
-    }
-    assert!(
-        history_ok,
-        "声明 history 生效（经 effective 初值→出口登记），8s 内未达成"
-    );
-    let m = tags(&app, &tok, "").await;
-    let props = &m["devG.temp2"];
-    assert_eq!(props["deadband"], serde_json::json!(0.5));
-    assert_eq!(props["unit"], serde_json::json!("°C"));
+    // M-4 T1：模板 props 默认随模型入册进 effective 物化缓存（reload 返回值
+    // 确定性断言——全局快照被并行测试刷新覆盖是 M-1 已知竞态）。
+    let m = rs_iot::model::cache::reload(&client).await.expect("reload");
+    let props = m.get("devG.temp2").expect("effective 缓存含模板 tag");
+    assert_eq!(props.history, true, "模板声明 history 默认");
+    assert_eq!(props.deadband, Some(0.5));
+    assert_eq!(props.unit.as_deref(), Some("°C"));
+    // 直推同样本：已建模过闸（不进队列），effective 不因数据流变化。
+    hub.send(sample("devG", "temp2", 42.0)).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    let disc = rs_iot::model::discovery::list(&client).await.unwrap();
+    assert!(!disc.contains_key("devG.temp2"), "已建模不进队列");
+    drop(hub);
     common::stop_lux(handle).await;
 }
 
 // ---------- ④ 只补缺不覆盖 ----------
 
 #[tokio::test]
-async fn existing_card_not_overwritten_by_exit_registration() {
+async fn legacy_card_untouched_by_discovery_engine() {
     let (app, handle, hub, _mgr) = test_app("tagreg-keep").await;
     let client = handle.client();
     // 模拟"表已有记录"（前次运行/API 设置）：devC.x 直写 lux（不经 set()，不入
@@ -383,12 +369,20 @@ async fn existing_card_not_overwritten_by_exit_registration() {
 #[tokio::test]
 async fn batch_glob_updates_matched_only() {
     let (app, handle, hub, _mgr) = test_app("tagreg-batch").await;
-    hub.send(sample("devD", "a", 1.0)).await.unwrap();
-    hub.send(sample("devD", "b", 2.0)).await.unwrap();
-    hub.send(sample("devE", "a", 3.0)).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(400)).await;
-
+    // M-4 T1：出口登记不再建卡——显式 API 建两张卡（devE.a 不建=未匹配对照）。
     let tok = jwt(&app).await;
+    for (dev, tag) in [("devD", "a"), ("devD", "b")] {
+        let (code, v) = post(
+            &app,
+            &tok,
+            "/api/v1/tag/set",
+            &format!(r#"{{"dev_id":"{dev}","tag":"{tag}","history":false}}"#),
+        )
+        .await;
+        assert_eq!(code, StatusCode::OK, "{v:?}");
+    }
+    hub.send(sample("devD", "a", 1.0)).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(400)).await;
     let (code, v) = post(
         &app,
         &tok,
@@ -407,39 +401,22 @@ async fn batch_glob_updates_matched_only() {
     common::stop_lux(handle).await;
 }
 
-// ---------- ⑥ 删除后重占位 ----------
+// ---------- ⑥ 未建模数据进发现队列（新发现语义） ----------
 
 #[tokio::test]
-async fn delete_then_reflow_recreates_default_card() {
+async fn unmodeled_reflow_enters_discovery_queue() {
     let (app, handle, hub, _mgr) = test_app("tagreg-del").await;
-    hub.send(sample("devF", "x", 1.0)).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(400)).await;
-    let tok = jwt(&app).await;
-
-    // 人工置 history=true → 删除（seen 同步移除）→ 再出数 → 重建默认卡。
-    let (code, v) = post(
-        &app,
-        &tok,
-        "/api/v1/tag/set",
-        r#"{"dev_id":"devF","tag":"x","history":true}"#,
-    )
-    .await;
-    assert_eq!(code, StatusCode::OK, "{v:?}");
-    let (code, v) = post(
-        &app,
-        &tok,
-        "/api/v1/tag/delete",
-        r#"{"dev_id":"devF","tag":"x"}"#,
-    )
-    .await;
-    assert_eq!(code, StatusCode::OK, "{v:?}");
-    let m = tags(&app, &tok, "?dev_id=devF").await;
-    assert!(m.is_empty(), "删除后无记录: {m:?}");
-
+    let client = handle.client();
+    // devF 未建模：出口数据进 discoveries（首见立即落盘 + 样本值）。
     hub.send(sample("devF", "x", 2.0)).await.unwrap();
     tokio::time::sleep(Duration::from_millis(400)).await;
+    let disc = rs_iot::model::discovery::list(&client).await.unwrap();
+    let d = disc.get("devF.x").expect("未建模进队列");
+    assert_eq!(d.count, 1);
+    assert_eq!(d.sample_value, "2.0");
+    // tags 表不再自动建卡（出口登记已转型）。
+    let tok = jwt(&app).await;
     let m = tags(&app, &tok, "?dev_id=devF").await;
-    let props = &m["devF.x"];
-    assert_eq!(props["history"], serde_json::json!(false), "重占位=默认卡");
+    assert!(m.is_empty(), "tags 表无自动占位: {m:?}");
     common::stop_lux(handle).await;
 }

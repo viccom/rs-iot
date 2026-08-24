@@ -1,49 +1,24 @@
 //! 标签属性注册表（lux Hash `tags`；设计见 docs/designs/2026-08-24-tag-registry-plan.md）。
 //!
-//! - field = `tag_key(devid, tag)`（与 rtdata field 同构的 `<devid>.<tag>`），
-//!   value = [`TagProps`] JSON——标签身份单一规范化源（`types::tag_key`）；
-//! - **叠加层**：采集地址语义仍在各插件 `ChildSpec`，本表只存跨插件共享属性
-//!   （history/deadband/desc/unit/owner_inst）；
-//! - **三路径登记、只补缺不覆盖**：配置声明式（`declared` 初值）→ 出口自动
-//!   （`note_once`，pipeline flush 咽喉）→ API 人工（`set`/`batch_set`）。
-//!   自动路径对已有记录 no-op——人工修改在实例重启后不丢；
-//! - **进程级 once-set 去重**（`SEEN`）：首见 tag 才探测 lux，稳态零读零写。
-//!   `delete` 同步移除 seen——删除后再出数重新占位登记；
-//! - RMW 的 HGET→HSET 非事务原子（同 `dev_registry` 口径）——管理面属性数据，
-//!   最终一致可接受（出口登记 next tick 兜底重试，seen 语义见 `note_once` 注释）。
-//!
-//! `owner_inst` 取 `dev2inst` 宿主列表首个（多宿主共写是遗留形态，本表只记账
-//! 不治理——同 dev2inst 哲学）。
+//! **M-4 退役中**：出口登记已转型发现引擎（`model::discovery`，决策 D-M3——
+//! tags 表不再是运行时登记目标，未建模数据进 discoveries 队列）；本模块仅余
+//! tags 表 CRUD 供过渡读取（M-4 T3 随 routes_tag 改造——effective 视图 +
+//! devreg.overrides 写入——一并退役）。`glob_match` 复用（批量建模/清理）。
 
 use crate::error::RsIotError;
-use crate::types::{tag_key, Sample, TagProps};
+use crate::types::{tag_key, TagProps};
 use lux::EmbeddedClient;
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Mutex, OnceLock};
 
 /// lux hash 名（全局单表）。
 const HASH: &str = "tags";
 
-/// 进程级"已确认写入 lux"集合——稳态命中零 lux 交互。
+/// 进程级"已确认"集合（API set/delete 共享；发现引擎不再用）。
 static SEEN: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
 
 fn seen() -> &'static Mutex<HashSet<String>> {
     SEEN.get_or_init(|| Mutex::new(HashSet::new()))
-}
-
-/// 当前声明式初值快照（Arc clone，廉价）。
-///
-/// M-2 起数据源 = **effective 物化缓存**（模型模板默认 ∪ devreg 覆盖，
-/// `model::cache`）——内联 `ChildSpec.props` 已随实例绑定化消失，模板默认成为
-/// 声明式初值的唯一权威（比旧双候选登记更准：三态合并后的最终意图）。
-pub fn declared() -> Arc<HashMap<String, TagProps>> {
-    crate::model::cache::effective()
-}
-
-/// 刷新声明式初值（= effective 缓存全量重建；启动 + startinst 后刷新）。
-pub async fn refresh_declared(c: &EmbeddedClient) -> Result<usize, RsIotError> {
-    let m = crate::model::cache::reload(c).await?;
-    Ok(m.len())
 }
 
 // ---------- 纯函数 ----------
@@ -78,12 +53,16 @@ pub fn glob_match(pattern: &str, key: &str) -> bool {
 /// 全量覆盖语义：`None` = 清除该属性。
 #[derive(Debug, Clone, Default, serde::Deserialize)]
 pub struct TagSetReq {
+    /// 历史归档白名单。
     #[serde(default)]
     pub history: Option<bool>,
+    /// 绝对死区。
     #[serde(default)]
     pub deadband: Option<f64>,
+    /// 描述。
     #[serde(default)]
     pub desc: Option<String>,
+    /// 工程单位。
     #[serde(default)]
     pub unit: Option<String>,
 }
@@ -117,82 +96,6 @@ pub async fn batch_set(
         updated += 1;
     }
     Ok((matched, updated))
-}
-
-/// 出口登记（pipeline flush 咽喉调用）：batch 内首见 `(devid, tag)` 探测 lux，
-/// 缺 → 占位写入（declared 初值或默认 + owner_inst 取 dev2inst 首宿主）。
-///
-/// - once-set **先加后查**：本批内去重 + 失败下批重试（探测/写入失败时从
-///   seen 移除，next flush 兜底——最终一致）；
-/// - 表中已有 → 不写（"只补缺不覆盖"：API 人工修改不被实例重启冲掉）；
-/// - 本函数 fail-soft 由调用方决定（pipeline 侧 warn+计数，不影响写路径）。
-pub async fn note_once(
-    c: &EmbeddedClient,
-    samples: &[Sample],
-    declared: &HashMap<String, TagProps>,
-) -> Result<(), RsIotError> {
-    // 本批候选：去重后的 (key, devid)（devid 供 owner 反查）。
-    // **热路径零分配**：key 复用同一 scratch String 组装 + `contains(&str)` 借用查找
-    //（50万点/秒管线门槛——逐点 String 分配实测 -13% 端到端吞吐，见 plan 文档）；
-    // 仅真正的新 tag（罕见）才 clone 入候选。
-    let mut candidates: Vec<(String, String)> = Vec::new();
-    {
-        let seen = seen().lock().unwrap();
-        let mut key = String::new();
-        for s in samples {
-            for tag in s.values.keys() {
-                key.clear();
-                if tag.contains(s.devid.as_str()) {
-                    key.push_str(tag);
-                } else {
-                    key.push_str(&s.devid);
-                    key.push('.');
-                    key.push_str(tag);
-                }
-                if !seen.contains(key.as_str()) {
-                    candidates.push((key.clone(), s.devid.clone()));
-                }
-            }
-        }
-    }
-    if candidates.is_empty() {
-        return Ok(());
-    }
-    let mut failed: Vec<String> = Vec::new();
-    for (key, devid) in &candidates {
-        seen().lock().unwrap().insert(key.clone());
-        let existing = c.execute_value("HGET", &[HASH, key]).await;
-        match existing {
-            Ok(v) if embedded_to_string(v.clone()).is_some() => {} // 已有记录：只补缺，不覆盖
-            _ => {
-                // miss（或 HGET 失败重试路径）：占位写。declared 初值或默认。
-                let mut props = declared.get(key).cloned().unwrap_or_default();
-                if props.owner_inst.is_empty() {
-                    if let Ok(first_owner) = first_owner(c, devid).await {
-                        props.owner_inst = first_owner;
-                    }
-                }
-                let raw = serde_json::to_string(&props)?;
-                if c.execute("HSET", &[HASH, key, &raw]).await.is_err() {
-                    failed.push(key.clone());
-                }
-            }
-        }
-    }
-    // 失败的从 seen 移除——next flush 重试（最终一致）。
-    if !failed.is_empty() {
-        let mut seen = seen().lock().unwrap();
-        for k in failed {
-            seen.remove(&k);
-        }
-    }
-    Ok(())
-}
-
-/// dev2inst 宿主列表首个（owner_inst 展示语义；查不到返回空串）。
-async fn first_owner(c: &EmbeddedClient, devid: &str) -> Result<String, RsIotError> {
-    let v = c.execute_value("HGET", &["dev2inst", devid]).await?;
-    Ok(embedded_to_string(v).unwrap_or_default())
 }
 
 /// 读单条（缺 → None）。

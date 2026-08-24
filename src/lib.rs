@@ -295,16 +295,16 @@ pub async fn run_app_with_shutdown(
     // 幂等入册——运行时设备也走模型的完整性验证。须在 effective 装载**之前**
     // （缓存含 rsiot 标签）。
     crate::plugin::builtin::self_monitor::ensure_sys_model_registered(&client).await;
-    // Tag Registry 声明式初值预载（M-2 起数据源 = effective 物化缓存）。
-    match db::tag_registry::refresh_declared(&client).await {
-        Ok(n) => tracing::debug!("[tag-registry] declared props 预载 {n} 条"),
-        Err(e) => tracing::warn!("[tag-registry] declared props 预载失败(占位默认): {e}"),
-    }
     // 设备模型注册表 effective 物化缓存装载（M-1 T8；模型∪覆盖 → tag_key →
-    // TagProps，Phase 1b 历史/死区与 M-4 发现引擎的 O(1) 读侧；fail-soft 同上）。
+    // TagProps，Phase 1b 历史/死区与发现引擎的 O(1) 读侧；fail-soft）。
     match model::cache::reload(&client).await {
         Ok(m) => tracing::debug!("[model] effective 物化缓存装载 {} 条", m.len()),
         Err(e) => tracing::warn!("[model] effective 物化缓存装载失败(空快照): {e}"),
+    }
+    // 发现队列启动装载（M-4 T1）：lux discoveries → 内存计数缓冲（count 接续）。
+    match model::discovery::load(&client).await {
+        Ok(n) => tracing::debug!("[discovery] 发现队列装载 {n} 条"),
+        Err(e) => tracing::warn!("[discovery] 发现队列装载失败(计数重新累计): {e}"),
     }
     let pipeline_token = shutdown.child_token();
     let pipeline_handle = tokio::spawn(pipeline::run(

@@ -146,6 +146,42 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await
         .expect("bootstrap");
 
+    // M-4 起发现引擎以 effective 缓存判定建模——bench 场景须反映生产稳态
+    //（全部点已建模，出口走 seen 纯内存路径）：预注册 1 模型 × N_DEVID 台设备
+    // 后装载 effective 缓存。未建模脏点场景由 model::discovery 单测覆盖
+    //（LRU/节流），不经本吞吐 bench。
+    {
+        use rs_iot::model::store;
+        use rs_iot::model::types::{DeviceEntry, DeviceModel, TagTemplate};
+        let model = DeviceModel {
+            model_id: "_bench".into(),
+            tags: (0..N_POINTS)
+                .map(|p| TagTemplate {
+                    name: format!("tag{p}"),
+                    data_type: "f32".into(),
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        };
+        store::set_model(&client, &model)
+            .await
+            .expect("bench model");
+        for d in 0..N_DEVID {
+            let dev = DeviceEntry {
+                devid: format!("dev{d}"),
+                model: "_bench".into(),
+                ..Default::default()
+            };
+            store::set_device(&client, &dev)
+                .await
+                .expect("bench device");
+        }
+        rs_iot::model::cache::reload(&client)
+            .await
+            .expect("effective reload");
+    }
+
     // 组装 HostContext（照 throughput_e2e.rs：CtlRegistry/BridgeRegistry/metrics/trace/EventBus::dummy）。
     let shutdown = CancellationToken::new();
     let metrics = Arc::new(ProcessMetrics::new());
