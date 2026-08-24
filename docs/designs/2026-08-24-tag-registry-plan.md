@@ -1,7 +1,12 @@
 # 标签/设备元数据统一存储（Tag Registry）实施计划
 
-> **状态**：accepted
-> **日期**：2026-08-24
+> **状态**：implemented
+> **日期**：2026-08-24（于 worktree feat/tag-registry 执行完毕，T1-T7 全落地）
+> **实施**：T1 tag_key+TagProps → T2 tag_registry 存储（glob/note_once/declared）→ T3 ChildSpec.props → T4 pipeline 接线+吞吐门槛 → T5 REST 四端点 → T6 e2e 六场景 → T7 文档收口
+> **代码**：`src/db/tag_registry.rs`（新增）、`src/api/routes_tag.rs`（新增）、`src/types.rs`（tag_key/TagProps/ChildSpec.props）、`src/db/rtdata.rs`（改用 tag_key）、`src/pipeline.rs`（flush 出口登记）、`src/lib.rs`+`src/api/routes_sys.rs`（declared 双刷新点）、`src/api/mod.rs`（路由）
+> **测试**：`tests/tag_registry_e2e.rs`（6 e2e：401/全链路登记+owner/声明式初值/不覆盖/glob 批量/删除重占位）+ 单测（tag_registry 7/routes_tag 2/types 新增 8）；全库 `--lib` 508 过；`throughput_e2e` 过
+> **性能（3×3 交替 A/B，本机）**：出口登记初版逐点 String 分配实测 -13% 端到端吞吐 → 优化为 scratch 复用+借用查找后 **-8%**（TAGREG 2.14/2.34/2.26M vs BASELINE 2.41/2.28/2.67M，mean 点/秒）；**仓库门槛 ≥50万点/秒 PASS（4.5× 余量）**；本计划自设 <5% 目标未达——剩余为逐点"组合键+哈希查重"固有开销（精确登记语义下限），后续优化项登记：per-worker 本地 seen 缓存 + delete 代际失效、批量布隆预过滤
+> **遗留**：KSUB `tags:*` 缓存失效（当前 API 直读 lux）、前端标签管理页（P3）、alarm 结构化绑定/scale/history_mode（P2 backlog）
 > **背景**：历史时序存储（tsink 内嵌）总方案的前置地基——用户定调"先完善基础设计的缺陷：标签/设备元数据统一存储"。业界对标：Ignition per-tag `History Enabled`、OPC UA per-node 元数据、PI exception/compression 两级过滤（调研记录见会话）。现状缺口：跨插件唯一 tag 结构 `ChildSpec` 仅 3 字段（label/value/type），无任何 tag 级属性（history/deadband/unit/desc）持久化；lua/sidecar 动态 tag 无注册处；告警 key 是自由字符串。
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 

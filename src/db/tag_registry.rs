@@ -19,7 +19,7 @@ use crate::error::RsIotError;
 use crate::types::{tag_key, Sample, TagProps};
 use lux::EmbeddedClient;
 use std::collections::{HashMap, HashSet};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
 /// lux hash 名（全局单表）。
 const HASH: &str = "tags";
@@ -27,8 +27,68 @@ const HASH: &str = "tags";
 /// 进程级"已确认写入 lux"集合——稳态命中零 lux 交互。
 static SEEN: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
 
+/// 声明式初值快照（`ChildSpec.props` 预载；Arc 换手，flush 路径零 clone 成本）。
+static DECLARED: OnceLock<RwLock<Arc<HashMap<String, TagProps>>>> = OnceLock::new();
+
 fn seen() -> &'static Mutex<HashSet<String>> {
     SEEN.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+fn declared_cell() -> &'static RwLock<Arc<HashMap<String, TagProps>>> {
+    DECLARED.get_or_init(|| RwLock::new(Arc::new(HashMap::new())))
+}
+
+/// 当前声明式初值快照（Arc clone，廉价）。
+pub fn declared() -> Arc<HashMap<String, TagProps>> {
+    declared_cell().read().unwrap().clone()
+}
+
+/// 从 lux `instances` 全量重建声明式初值（启动一次 + startinst 后增量刷新）。
+/// 解析失败的实例条目跳过（容错：props 是增强不是关键路径）。
+pub async fn refresh_declared(c: &EmbeddedClient) -> Result<usize, RsIotError> {
+    let v = c.execute_value("HGETALL", &["instances"]).await?;
+    let mut raw: Vec<String> = Vec::new();
+    if let lux::EmbeddedValue::Array(arr) = v {
+        let mut i = 0;
+        while i + 1 < arr.len() {
+            if let Some(json) = embedded_to_string(arr[i + 1].clone()) {
+                raw.push(json);
+            }
+            i += 2;
+        }
+    }
+    let map = parse_declared(&raw);
+    let n = map.len();
+    *declared_cell().write().unwrap() = Arc::new(map);
+    Ok(n)
+}
+
+/// 纯函数：instances JSON 串列表 → 声明式初值表。
+///
+/// key 规则：`tag_key(dev.value, tag名)`，tag 名 **label 与 value 双候选都登记**
+/// （不同插件取 key 的惯例不同——dataSim 用 value、modbus 用 label 优先——双登记
+/// 防漏，多余条目只在 lux miss 建卡时被用到，无害）。同 key 冲突 last-wins。
+pub fn parse_declared(instance_jsons: &[String]) -> HashMap<String, TagProps> {
+    let mut out = HashMap::new();
+    for json in instance_jsons {
+        let Ok(cfg) = serde_json::from_str::<crate::types::InstConfig>(json) else {
+            continue;
+        };
+        for dev in &cfg.devices {
+            if dev.value.is_empty() {
+                continue;
+            }
+            for child in &dev.children {
+                let Some(props) = &child.props else { continue };
+                for name in [&child.label, &child.value] {
+                    if !name.is_empty() {
+                        out.insert(tag_key(&dev.value, name), props.clone());
+                    }
+                }
+            }
+        }
+    }
+    out
 }
 
 // ---------- 纯函数 ----------
@@ -117,14 +177,25 @@ pub async fn note_once(
     declared: &HashMap<String, TagProps>,
 ) -> Result<(), RsIotError> {
     // 本批候选：去重后的 (key, devid)（devid 供 owner 反查）。
+    // **热路径零分配**：key 复用同一 scratch String 组装 + `contains(&str)` 借用查找
+    //（50万点/秒管线门槛——逐点 String 分配实测 -13% 端到端吞吐，见 plan 文档）；
+    // 仅真正的新 tag（罕见）才 clone 入候选。
     let mut candidates: Vec<(String, String)> = Vec::new();
     {
         let seen = seen().lock().unwrap();
+        let mut key = String::new();
         for s in samples {
             for tag in s.values.keys() {
-                let key = tag_key(&s.devid, tag);
-                if !seen.contains(&key) {
-                    candidates.push((key, s.devid.clone()));
+                key.clear();
+                if tag.contains(s.devid.as_str()) {
+                    key.push_str(tag);
+                } else {
+                    key.push_str(&s.devid);
+                    key.push('.');
+                    key.push_str(tag);
+                }
+                if !seen.contains(key.as_str()) {
+                    candidates.push((key.clone(), s.devid.clone()));
                 }
             }
         }
@@ -253,7 +324,10 @@ mod tests {
     #[test]
     fn glob_middle_segment_ordered_no_overlap() {
         assert!(glob_match("*zone*.temp*", "furnace_02.zone1.temp"));
-        assert!(!glob_match("*temp*.zone*", "furnace_02.zone1.temp"), "中间段须依序");
+        assert!(
+            !glob_match("*temp*.zone*", "furnace_02.zone1.temp"),
+            "中间段须依序"
+        );
         // 不重叠：消费过的子串不复用。
         assert!(!glob_match("a*a*a", "aa"));
         assert!(glob_match("a*a*a", "aaa"));
@@ -298,9 +372,34 @@ mod tests {
             ..Default::default()
         };
         apply_set(&mut props, &TagSetReq::default());
-        assert_eq!(props, TagProps {
-            owner_inst: "x".into(),
-            ..Default::default()
+        assert_eq!(
+            props,
+            TagProps {
+                owner_inst: "x".into(),
+                ..Default::default()
+            }
+        );
+    }
+
+    #[test]
+    fn parse_declared_double_candidate_and_bad_json_tolerated() {
+        let inst = serde_json::json!({
+            "inst_id":"sim1","app_code":"dataSim","app_type":"south",
+            "devices":[{"label":"d","value":"dev1","children":[
+                {"label":"炉温","value":"temp","type":"f32","props":{"history":true,"deadband":0.5}}
+            ]}]
         });
+        let bad = "{not json".to_string();
+        let map = parse_declared(&[inst.to_string(), bad]);
+        // label 与 value 双候选（同键形 "dev1.炉温" / "dev1.temp"）。
+        assert_eq!(map.len(), 2);
+        assert_eq!(map["dev1.temp"].deadband, Some(0.5));
+        assert!(map["dev1.炉温"].history);
+        // 无 props 的 children 不产出条目。
+        let inst2 = serde_json::json!({
+            "inst_id":"x","app_code":"opcuaClient","app_type":"south",
+            "devices":[{"label":"d","value":"dev2","children":[{"label":"t","value":"ns=2;s=1"}]}]
+        });
+        assert!(parse_declared(&[inst2.to_string()]).is_empty());
     }
 }

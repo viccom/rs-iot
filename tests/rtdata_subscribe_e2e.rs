@@ -24,7 +24,9 @@ use tower::ServiceExt;
 async fn test_app(name: &str) -> (axum::Router, lux::ServerHandle, lux::EmbeddedClient) {
     let data_dir = common::test_data_dir(name);
     let (handle, client) = common::start_lux(data_dir.to_str().expect("utf8")).await;
-    rs_iot::db::identity::bootstrap(&client).await.expect("bootstrap");
+    rs_iot::db::identity::bootstrap(&client)
+        .await
+        .expect("bootstrap");
 
     let shutdown = CancellationToken::new();
     let metrics = Arc::new(rs_iot::process_metrics::ProcessMetrics::new());
@@ -71,7 +73,9 @@ async fn jwt(app: &axum::Router) -> String {
         )
         .await
         .unwrap();
-    let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20).await.unwrap();
+    let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20)
+        .await
+        .unwrap();
     let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     v["token"].as_str().unwrap().to_string()
 }
@@ -197,11 +201,17 @@ async fn datachange_only_pushes_changed_values() {
     let mut stream = connect(&app, "?dev_id=devA&interval=100", &tok).await;
     // 窗口1：snapshot 收全。
     let buf1 = collect_window(&mut stream, std::time::Duration::from_millis(600)).await;
-    assert!(buf1.contains("event: snapshot") && buf1.contains("devA.t1"), "{buf1}");
+    assert!(
+        buf1.contains("event: snapshot") && buf1.contains("devA.t1"),
+        "{buf1}"
+    );
     // 变更：t1 新值；t2 同值不同 ts（采集周期写回同值场景）。
     seed(&lux, "devA", &[("t1", "9"), ("t2", "2")], 1_700_000_100).await;
     let buf2 = collect_window(&mut stream, std::time::Duration::from_millis(1500)).await;
-    assert!(buf2.contains("event: datachange"), "应含 datachange: {buf2}");
+    assert!(
+        buf2.contains("event: datachange"),
+        "应含 datachange: {buf2}"
+    );
     assert!(buf2.contains("devA.t1") && buf2.contains("9"), "{buf2}");
     assert!(!buf2.contains("devA.t2"), "值未变不应重推: {buf2}");
     common::stop_lux(handle).await;
@@ -215,8 +225,13 @@ async fn removed_on_device_delete() {
     let tok = jwt(&app).await;
     let mut stream = connect(&app, "?interval=100", &tok).await;
     let buf1 = collect_window(&mut stream, std::time::Duration::from_millis(600)).await;
-    assert!(buf1.contains("devA.t1") && buf1.contains("devB.t1"), "{buf1}");
-    rs_iot::db::rtdata::delete_device(&lux, "devA").await.unwrap();
+    assert!(
+        buf1.contains("devA.t1") && buf1.contains("devB.t1"),
+        "{buf1}"
+    );
+    rs_iot::db::rtdata::delete_device(&lux, "devA")
+        .await
+        .unwrap();
     let buf2 = collect_window(&mut stream, std::time::Duration::from_millis(1500)).await;
     assert!(
         buf2.contains("event: datachange") && buf2.contains("removed"),

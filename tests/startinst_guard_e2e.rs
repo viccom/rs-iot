@@ -17,7 +17,9 @@ use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
 /// harness：lux + HostContext + InstanceManager（hub_rx 留给采样计数）。
-async fn harness(tag: &str) -> (
+async fn harness(
+    tag: &str,
+) -> (
     Arc<InstanceManager>,
     tokio::sync::mpsc::Receiver<Sample>,
     CancellationToken,
@@ -40,7 +42,12 @@ async fn harness(tag: &str) -> (
         event_tx: rs_iot::event_bus::EventBus::dummy(),
     };
     let (hub_tx, hub_rx) = tokio::sync::mpsc::channel::<Sample>(256);
-    (Arc::new(InstanceManager::new(ctx, hub_tx)), hub_rx, shutdown, handle)
+    (
+        Arc::new(InstanceManager::new(ctx, hub_tx)),
+        hub_rx,
+        shutdown,
+        handle,
+    )
 }
 
 /// dataSim 实例（period 1s、单设备单标签——采样速率可控可断言）。
@@ -162,8 +169,7 @@ async fn rest_startinst_double_returns_409() {
     let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20)
         .await
         .expect("body");
-    let token = serde_json::from_slice::<serde_json::Value>(&bytes)
-        .expect("json")["token"]
+    let token = serde_json::from_slice::<serde_json::Value>(&bytes).expect("json")["token"]
         .as_str()
         .expect("token")
         .to_string();

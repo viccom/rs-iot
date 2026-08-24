@@ -311,7 +311,10 @@ mod tests {
     #[test]
     fn tag_key_joins_devid_and_tag() {
         assert_eq!(tag_key("dev1", "temp"), "dev1.temp");
-        assert_eq!(tag_key("furnace_02", "zone1.pressure"), "furnace_02.zone1.pressure");
+        assert_eq!(
+            tag_key("furnace_02", "zone1.pressure"),
+            "furnace_02.zone1.pressure"
+        );
     }
 
     #[test]

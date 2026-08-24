@@ -32,10 +32,19 @@ use tower::ServiceExt;
 /// 建测试 app：lux + pipeline（1 worker）+ InstanceManager + REST 路由。
 /// 骨架同 rtdata_subscribe_e2e，加真实 pipeline（dataflow.rs 模式）使
 /// flush → note_once 全链路生效。返回 (router, lux handle, hub_tx, mgr)。
-async fn test_app(name: &str) -> (axum::Router, lux::ServerHandle, tokio::sync::mpsc::Sender<Sample>, Arc<InstanceManager>) {
+async fn test_app(
+    name: &str,
+) -> (
+    axum::Router,
+    lux::ServerHandle,
+    tokio::sync::mpsc::Sender<Sample>,
+    Arc<InstanceManager>,
+) {
     let data_dir = common::test_data_dir(name);
     let (handle, client) = common::start_lux(data_dir.to_str().expect("utf8")).await;
-    rs_iot::db::identity::bootstrap(&client).await.expect("bootstrap");
+    rs_iot::db::identity::bootstrap(&client)
+        .await
+        .expect("bootstrap");
 
     let shutdown = CancellationToken::new();
     let shutdown_for_pipeline = shutdown.clone();
@@ -93,7 +102,9 @@ async fn jwt(app: &axum::Router) -> String {
         )
         .await
         .unwrap();
-    let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20).await.unwrap();
+    let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20)
+        .await
+        .unwrap();
     let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     v["token"].as_str().unwrap().to_string()
 }
@@ -111,7 +122,11 @@ fn sample(devid: &str, tag: &str, val: f64) -> Sample {
 }
 
 /// GET /api/v1/tags（带过滤参数）→ 解析后的 map。
-async fn tags(app: &axum::Router, tok: &str, query: &str) -> serde_json::Map<String, serde_json::Value> {
+async fn tags(
+    app: &axum::Router,
+    tok: &str,
+    query: &str,
+) -> serde_json::Map<String, serde_json::Value> {
     let resp = app
         .clone()
         .oneshot(
@@ -124,14 +139,21 @@ async fn tags(app: &axum::Router, tok: &str, query: &str) -> serde_json::Map<Str
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    let bytes = axum::body::to_bytes(resp.into_body(), 1 << 22).await.unwrap();
+    let bytes = axum::body::to_bytes(resp.into_body(), 1 << 22)
+        .await
+        .unwrap();
     match serde_json::from_slice::<serde_json::Value>(&bytes).unwrap() {
         serde_json::Value::Object(m) => m,
         other => panic!("expected object, got {other:?}"),
     }
 }
 
-async fn post(app: &axum::Router, tok: &str, uri: &str, body: &str) -> (StatusCode, serde_json::Value) {
+async fn post(
+    app: &axum::Router,
+    tok: &str,
+    uri: &str,
+    body: &str,
+) -> (StatusCode, serde_json::Value) {
     let resp = app
         .clone()
         .oneshot(
@@ -146,8 +168,13 @@ async fn post(app: &axum::Router, tok: &str, uri: &str, body: &str) -> (StatusCo
         .await
         .unwrap();
     let code = resp.status();
-    let bytes = axum::body::to_bytes(resp.into_body(), 1 << 22).await.unwrap();
-    (code, serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null))
+    let bytes = axum::body::to_bytes(resp.into_body(), 1 << 22)
+        .await
+        .unwrap();
+    (
+        code,
+        serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null),
+    )
 }
 
 // ---------- ① JWT 保护 ----------
@@ -187,8 +214,18 @@ async fn datasim_flow_registers_default_cards_with_owner() {
             label: "d".into(),
             value: "devA".into(),
             children: vec![
-                ChildSpec { label: "t".into(), value: "temp".into(), r#type: "float".into(), props: None },
-                ChildSpec { label: "h".into(), value: "humidity".into(), r#type: "float".into(), props: None },
+                ChildSpec {
+                    label: "t".into(),
+                    value: "temp".into(),
+                    r#type: "float".into(),
+                    props: None,
+                },
+                ChildSpec {
+                    label: "h".into(),
+                    value: "humidity".into(),
+                    r#type: "float".into(),
+                    props: None,
+                },
             ],
             slave_id: None,
         }],
@@ -204,7 +241,11 @@ async fn datasim_flow_registers_default_cards_with_owner() {
     assert!(m.contains_key("devA.humidity"));
     let props = &m["devA.temp"];
     assert_eq!(props["history"], serde_json::json!(false), "默认不归档");
-    assert_eq!(props["owner_inst"], serde_json::json!("sim_flow"), "owner=宿主实例（dev2inst 首宿主）");
+    assert_eq!(
+        props["owner_inst"],
+        serde_json::json!("sim_flow"),
+        "owner=宿主实例（dev2inst 首宿主）"
+    );
     common::stop_lux(handle).await;
 }
 
@@ -244,7 +285,11 @@ async fn declared_props_seed_initial_card() {
     client
         .execute(
             "HSET",
-            &["instances", "sim_decl", &serde_json::to_string(&inst).unwrap()],
+            &[
+                "instances",
+                "sim_decl",
+                &serde_json::to_string(&inst).unwrap(),
+            ],
         )
         .await
         .unwrap();
@@ -258,7 +303,11 @@ async fn declared_props_seed_initial_card() {
     let tok = jwt(&app).await;
     let m = tags(&app, &tok, "").await;
     let props = &m["devG.temp2"];
-    assert_eq!(props["history"], serde_json::json!(true), "声明 history 生效");
+    assert_eq!(
+        props["history"],
+        serde_json::json!(true),
+        "声明 history 生效"
+    );
     assert_eq!(props["deadband"], serde_json::json!(0.5));
     assert_eq!(props["unit"], serde_json::json!("°C"));
     common::stop_lux(handle).await;
@@ -336,9 +385,21 @@ async fn delete_then_reflow_recreates_default_card() {
     let tok = jwt(&app).await;
 
     // 人工置 history=true → 删除（seen 同步移除）→ 再出数 → 重建默认卡。
-    let (code, v) = post(&app, &tok, "/api/v1/tag/set", r#"{"dev_id":"devF","tag":"x","history":true}"#).await;
+    let (code, v) = post(
+        &app,
+        &tok,
+        "/api/v1/tag/set",
+        r#"{"dev_id":"devF","tag":"x","history":true}"#,
+    )
+    .await;
     assert_eq!(code, StatusCode::OK, "{v:?}");
-    let (code, v) = post(&app, &tok, "/api/v1/tag/delete", r#"{"dev_id":"devF","tag":"x"}"#).await;
+    let (code, v) = post(
+        &app,
+        &tok,
+        "/api/v1/tag/delete",
+        r#"{"dev_id":"devF","tag":"x"}"#,
+    )
+    .await;
     assert_eq!(code, StatusCode::OK, "{v:?}");
     let m = tags(&app, &tok, "?dev_id=devF").await;
     assert!(m.is_empty(), "删除后无记录: {m:?}");
