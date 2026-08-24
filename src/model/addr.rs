@@ -92,6 +92,29 @@ pub fn resolve(template: &str, params: &BTreeMap<String, String>) -> Result<Stri
     Ok(out)
 }
 
+/// 提取模板全部占位符名（保持出现顺序，不去重；括号合法性校验与 [`resolve`]
+/// 同口径）。`validate` 用其检查 addr 占位符 ⊆ 模型 params。
+pub(crate) fn placeholders(template: &str) -> Result<Vec<String>, AddrError> {
+    let mut names = Vec::new();
+    let mut rest = template;
+    while let Some(open) = rest.find('{') {
+        let after = &rest[open + 1..];
+        let close = after
+            .find('}')
+            .ok_or_else(|| AddrError::Malformed("占位符未闭合（缺少 '}'）".into()))?;
+        let name = &after[..close];
+        if name.is_empty() {
+            return Err(AddrError::Malformed("占位符名为空".into()));
+        }
+        if name.contains('{') {
+            return Err(AddrError::Malformed("占位符嵌套 '{'".into()));
+        }
+        names.push(name.to_string());
+        rest = &after[close + 1..];
+    }
+    Ok(names)
+}
+
 /// `tail` 是否以 `+<digits>` 开头：是则返回数字段（不含 `+`），否则 `None`
 /// （`+` 后无数字 = 字面量加号，不构成偏移语法）。
 fn offset_suffix(tail: &str) -> Option<&str> {
@@ -239,5 +262,24 @@ mod tests {
     fn empty_template_resolves_empty() {
         let p = params(&[]);
         assert_eq!(resolve("", &p).unwrap(), "");
+    }
+
+    #[test]
+    fn placeholders_extracts_names_in_order_with_offsets() {
+        assert_eq!(
+            placeholders("DB{db}.DBD{base}+4 and {db} again").unwrap(),
+            vec!["db".to_string(), "base".to_string(), "db".to_string()],
+            "偏移语法不进占位符名，重复保留出现顺序"
+        );
+        assert_eq!(
+            placeholders("no placeholder").unwrap(),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn placeholders_malformed_is_err() {
+        assert!(placeholders("holding:{base").is_err());
+        assert!(placeholders("{}").is_err());
     }
 }

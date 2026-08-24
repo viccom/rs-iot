@@ -133,3 +133,115 @@ pub struct DeviceBinding {
     #[serde(default)]
     pub bind: BTreeMap<String, String>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tag_override_deadband_wire_tri_state() {
+        // 缺省 = 继承（字段整体省略）。
+        let absent: TagOverride = serde_json::from_str(r#"{"history":true}"#).unwrap();
+        assert_eq!(absent.deadband, None);
+        assert!(serde_json::to_value(&absent)
+            .unwrap()
+            .get("deadband")
+            .is_none());
+        // 显式 null = Some(None)（显式关死区）。
+        let off: TagOverride = serde_json::from_str(r#"{"deadband":null}"#).unwrap();
+        assert_eq!(off.deadband, Some(None));
+        assert_eq!(
+            serde_json::to_value(&off).unwrap()["deadband"],
+            serde_json::Value::Null,
+            "Some(None) 序列化为 null（roundtrip）"
+        );
+        // 数值 = Some(Some(v))。
+        let v: TagOverride = serde_json::from_str(r#"{"deadband":0.5}"#).unwrap();
+        assert_eq!(v.deadband, Some(Some(0.5)));
+        let back: TagOverride = serde_json::from_value(serde_json::to_value(&v).unwrap()).unwrap();
+        assert_eq!(back, v, "roundtrip");
+    }
+
+    #[test]
+    fn device_model_minimal_json_and_full_roundtrip() {
+        // 最小 JSON（旧/手工配置容错：全部增强字段缺省）。
+        let m: DeviceModel = serde_json::from_str(r#"{"model_id":"m1"}"#).unwrap();
+        assert_eq!(m.model_id, "m1");
+        assert!(m.tags.is_empty() && m.params.is_empty());
+        // 全字段往返。
+        let full = DeviceModel {
+            model_id: "vx_dtz341".into(),
+            vendor: Some("威胜".into()),
+            model_no: Some("DTZ34Z".into()),
+            category: Some("电表".into()),
+            desc: Some("三相电能表".into()),
+            params: vec!["base".into()],
+            tags: vec![TagTemplate {
+                name: "ua".into(),
+                data_type: "f32".into(),
+                desc: Some("A相电压".into()),
+                unit: Some("V".into()),
+                addr: Some("holding:{base}:f32".into()),
+                rw: TagRw::R,
+                props: TagProps {
+                    history: true,
+                    deadband: Some(0.5),
+                    ..Default::default()
+                },
+            }],
+        };
+        let back: DeviceModel =
+            serde_json::from_value(serde_json::to_value(&full).unwrap()).unwrap();
+        assert_eq!(back, full);
+    }
+
+    #[test]
+    fn device_entry_defaults_and_roundtrip() {
+        let e: DeviceEntry = serde_json::from_str(r#"{"devid":"d1","model":"m1"}"#).unwrap();
+        assert!(e.params.is_empty() && e.overrides.is_empty() && e.desc.is_none());
+        let full = DeviceEntry {
+            devid: "d1".into(),
+            model: "m1".into(),
+            params: [("base".to_string(), "100".to_string())].into(),
+            overrides: [(
+                "ua".to_string(),
+                TagOverride {
+                    deadband: Some(None),
+                    ..Default::default()
+                },
+            )]
+            .into(),
+            desc: Some("1号电表".into()),
+        };
+        let back: DeviceEntry =
+            serde_json::from_value(serde_json::to_value(&full).unwrap()).unwrap();
+        assert_eq!(back, full);
+    }
+
+    #[test]
+    fn device_binding_wire() {
+        let b: DeviceBinding = serde_json::from_str(r#"{"devid":"d1"}"#).unwrap();
+        assert!(b.bind.is_empty());
+        let full = DeviceBinding {
+            devid: "d1".into(),
+            bind: [("slave_id".to_string(), "2".to_string())].into(),
+        };
+        let back: DeviceBinding =
+            serde_json::from_value(serde_json::to_value(&full).unwrap()).unwrap();
+        assert_eq!(back, full);
+    }
+
+    #[test]
+    fn tag_rw_wire_lowercase() {
+        assert_eq!(
+            serde_json::to_value(TagRw::R).unwrap(),
+            serde_json::json!("r")
+        );
+        assert_eq!(
+            serde_json::to_value(TagRw::Rw).unwrap(),
+            serde_json::json!("rw")
+        );
+        let r: TagRw = serde_json::from_str("\"r\"").unwrap();
+        assert_eq!(r, TagRw::R);
+    }
+}
