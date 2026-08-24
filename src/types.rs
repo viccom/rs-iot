@@ -240,6 +240,10 @@ pub struct ChildSpec {
     /// 值类型（"float"/"int"/"bool" 等）。
     #[serde(default)]
     pub r#type: String,
+    /// 声明式标签属性初值（Tag Registry）：出口登记首见建卡时落表——
+    /// tags 表已有记录则忽略（只补缺不覆盖；人工 API 修改优先）。缺省 None 向后兼容。
+    #[serde(default)]
+    pub props: Option<TagProps>,
 }
 
 /// 插件实例配置（对标 `sysutil.InstConfig`）。
@@ -277,6 +281,31 @@ mod tests {
         let json = serde_json::json!({"value":"m1","slave_id":2});
         let d: DeviceSpec = serde_json::from_value(json).unwrap();
         assert_eq!(d.slave_id, Some(2));
+    }
+
+    #[test]
+    fn child_spec_props_absent_is_none_for_backward_compat() {
+        // 旧配置无 props → None（全部既有实例配置零迁移）。
+        let json = serde_json::json!({"label":"t","value":"holding:0:f32","type":"float"});
+        let c: ChildSpec = serde_json::from_value(json).unwrap();
+        assert_eq!(c.props, None);
+    }
+
+    #[test]
+    fn child_spec_props_deserializes_and_roundtrips() {
+        let json = serde_json::json!({
+            "label":"炉温","value":"DB1.DBD0","type":"f32",
+            "props":{"history":true,"deadband":0.5,"unit":"°C"}
+        });
+        let c: ChildSpec = serde_json::from_value(json).unwrap();
+        let props = c.props.clone().unwrap();
+        assert!(props.history);
+        assert_eq!(props.deadband, Some(0.5));
+        assert_eq!(props.unit.as_deref(), Some("°C"));
+        assert_eq!(props.owner_inst, "", "声明式初值不填 owner（出口登记填）");
+        let back = serde_json::to_value(&c).unwrap();
+        let c2: ChildSpec = serde_json::from_value(back).unwrap();
+        assert_eq!(c2.props, c.props, "roundtrip");
     }
 
     #[test]
