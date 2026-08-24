@@ -24,6 +24,43 @@ pub enum DeleteOutcome {
     Referenced(Vec<String>),
 }
 
+/// 模型更新结果（[`update_model`]）：引用完整性预检不通过时拒绝落盘。
+#[derive(Debug, Clone, PartialEq)]
+pub enum UpdateOutcome {
+    /// 已更新（同型号设备 effective 随模板生效）。
+    Updated,
+    /// 模型不存在（REST 映射 404）。
+    NotFound,
+    /// 新模板与既有引用设备冲突（REST 409 载荷）；`(devid, 原因)` 列表。
+    Conflict(Vec<(String, validate::ModelError)>),
+}
+
+/// 更新模型：结构校验 + **引用设备预检**（每台引用设备在新模板下重验
+/// params 齐套/覆盖 tag ∈ tags），全部通过才落盘——预检先行则无需回滚。
+pub async fn update_model(
+    c: &EmbeddedClient,
+    m: &DeviceModel,
+) -> Result<UpdateOutcome, RsIotError> {
+    if get_model(c, &m.model_id).await?.is_none() {
+        return Ok(UpdateOutcome::NotFound);
+    }
+    validate::validate_model(m)?;
+    let refs = referencing_devices(c, &m.model_id).await?;
+    let mut conflicts = Vec::new();
+    for devid in &refs {
+        if let Some(dev) = get_device(c, devid).await? {
+            if let Err(e) = validate::validate_device_entry(&dev, m) {
+                conflicts.push((devid.clone(), e));
+            }
+        }
+    }
+    if !conflicts.is_empty() {
+        return Ok(UpdateOutcome::Conflict(conflicts));
+    }
+    set_model(c, m).await?;
+    Ok(UpdateOutcome::Updated)
+}
+
 /// 写入模型：先 [`validate::validate_model`] 结构校验，再 HSET JSON。
 ///
 /// upsert 语义（同 id 整体替换）——REST 层建模型走 create-only（重名 409），

@@ -1,0 +1,192 @@
+// frontend/src/stores/devreg.ts
+// 设备模型注册表 store（M-1）：devmodels/devreg 双表 + 一次性迁移。
+// API 走 gateway 前缀 /api/rsiot（同 monitor.ts）；postJson 模式同 monitor
+// （不 import api/client.ts——router 依赖会破坏 vitest）。
+import { defineStore } from 'pinia'
+import { ref } from 'vue'
+import { useAuthStore } from './auth'
+import type { DeviceEntry, DeviceModel } from '../lib/devmeta'
+
+/** 迁移结果（POST /migrate/inline-devices）。 */
+export interface MigrateResult {
+  converted_models: number
+  converted_devices: number
+  converted_instances: number
+  failures: string[]
+}
+
+/** 后端 409 载荷：模型删除被引用 / 更新引用完整性冲突。 */
+export interface ConflictInfo {
+  status: string
+  referenced_by?: string[]
+  conflicts?: { devid: string; reason: string }[]
+}
+
+export const useDevregStore = defineStore('devreg', () => {
+  /** devmodels 全表（model_id → DeviceModel）。 */
+  const models = ref<Record<string, DeviceModel>>({})
+  /** devreg 全表（devid → DeviceEntry，含 effective 摘要）。 */
+  const devices = ref<Record<string, DeviceEntry>>({})
+  const loading = ref(false)
+  const error = ref('')
+
+  async function fetchJson(path: string): Promise<unknown | null> {
+    try {
+      const r = await fetch(path, {
+        headers: { Authorization: `Bearer ${useAuthStore().token}` },
+      })
+      if (r.status === 401) {
+        useAuthStore().clear()
+        return null
+      }
+      if (!r.ok) return null
+      return await r.json()
+    } catch {
+      return null
+    }
+  }
+
+  async function postJson(path: string, body: unknown): Promise<Response | null> {
+    try {
+      const r = await fetch(path, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${useAuthStore().token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(body),
+      })
+      if (r.status === 401) {
+        useAuthStore().clear()
+        return null
+      }
+      return r
+    } catch {
+      return null
+    }
+  }
+
+  /** 拉双表（进入页面/每次写操作后）。 */
+  async function loadAll(): Promise<void> {
+    loading.value = true
+    error.value = ''
+    const [m, d] = await Promise.all([
+      fetchJson('/api/rsiot/api/v1/devmodels'),
+      fetchJson('/api/rsiot/api/v1/devreg'),
+    ])
+    if (m) models.value = m as Record<string, DeviceModel>
+    if (d) devices.value = d as Record<string, DeviceEntry>
+    loading.value = false
+  }
+
+  /** 建模型（create-only：重名 409 → false）。 */
+  async function createModel(m: DeviceModel): Promise<boolean> {
+    const r = await postJson('/api/rsiot/api/v1/devmodel/set', m)
+    if (!r) return false
+    if (!r.ok) {
+      error.value = r.status === 409 ? `模型 ${m.model_id} 已存在` : await r.text()
+      return false
+    }
+    await loadAll()
+    return true
+  }
+
+  /** 更新模型（引用完整性冲突 409 → false，error 带明细）。 */
+  async function updateModel(m: DeviceModel): Promise<boolean> {
+    const r = await postJson('/api/rsiot/api/v1/devmodel/update', m)
+    if (!r) return false
+    if (!r.ok) {
+      if (r.status === 409) {
+        try {
+          const info = (await r.json()) as ConflictInfo
+          const lines = (info.conflicts ?? []).map(c => `${c.devid}: ${c.reason}`)
+          error.value = `更新被引用设备拒绝——${lines.join('；')}`
+        } catch {
+          error.value = '更新与引用设备冲突'
+        }
+      } else {
+        error.value = await r.text()
+      }
+      return false
+    }
+    await loadAll()
+    return true
+  }
+
+  /** 删模型（被引用 409 → false，error 带引用列表）。 */
+  async function deleteModel(modelId: string): Promise<boolean> {
+    const r = await postJson('/api/rsiot/api/v1/devmodel/delete', { model_id: modelId })
+    if (!r) return false
+    if (!r.ok) {
+      if (r.status === 409) {
+        try {
+          const info = (await r.json()) as ConflictInfo
+          error.value = `模型被设备引用（${(info.referenced_by ?? []).join(', ')}），先删设备`
+        } catch {
+          error.value = '模型被设备引用'
+        }
+      } else {
+        error.value = await r.text()
+      }
+      return false
+    }
+    await loadAll()
+    return true
+  }
+
+  /** 建设备（upsert；400 校验错 → false，error 带后端 reason）。 */
+  async function saveDevice(d: DeviceEntry): Promise<boolean> {
+    const r = await postJson('/api/rsiot/api/v1/devreg/set', d)
+    if (!r) return false
+    if (!r.ok) {
+      error.value = r.status === 400 ? await r.text() : `保存失败 (${r.status})`
+      return false
+    }
+    await loadAll()
+    return true
+  }
+
+  /** 删设备（级联 dev2inst/rtdata）。 */
+  async function deleteDevice(devid: string): Promise<boolean> {
+    const r = await postJson('/api/rsiot/api/v1/devreg/delete', { devid })
+    if (!r || !r.ok) {
+      error.value = r ? `删除失败 (${r.status})` : '网络错误'
+      return false
+    }
+    await loadAll()
+    return true
+  }
+
+  /** 一次性迁移旧内联点表（幂等）。返回结果摘要或 null（失败）。 */
+  async function migrateInline(): Promise<MigrateResult | null> {
+    const r = await postJson('/api/rsiot/api/v1/migrate/inline-devices', {})
+    if (!r || !r.ok) {
+      error.value = r ? `迁移失败 (${r.status})` : '网络错误'
+      return null
+    }
+    try {
+      return (await r.json()) as MigrateResult
+    } catch {
+      return null
+    }
+  }
+
+  function clearError() {
+    error.value = ''
+  }
+
+  return {
+    models,
+    devices,
+    loading,
+    error,
+    loadAll,
+    createModel,
+    updateModel,
+    deleteModel,
+    saveDevice,
+    deleteDevice,
+    migrateInline,
+    clearError,
+  }
+})

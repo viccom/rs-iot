@@ -137,6 +137,7 @@ pub fn build_router(state: AppState) -> axum::Router {
         // 设备模型注册表（M-1；devreg 为过渡路径，M-2 接管 /api/v1/devices 系）
         .route("/api/v1/devmodels", get(routes_model::list))
         .route("/api/v1/devmodel/set", post(routes_model::set))
+        .route("/api/v1/devmodel/update", post(routes_model::update))
         .route("/api/v1/devmodel/delete", post(routes_model::delete))
         .route("/api/v1/devreg", get(routes_devreg::list))
         .route("/api/v1/devreg/set", post(routes_devreg::set))
