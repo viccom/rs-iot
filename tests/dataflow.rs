@@ -34,11 +34,13 @@ fn datasim_inst() -> InstConfig {
                     label: "温度".into(),
                     value: "temp".into(),
                     r#type: "float".into(),
+                    props: None,
                 },
                 ChildSpec {
                     label: "湿度".into(),
                     value: "humidity".into(),
                     r#type: "float".into(),
+                    props: None,
                 },
             ],
             slave_id: None,

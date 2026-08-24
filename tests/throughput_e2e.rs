@@ -21,6 +21,7 @@ fn datasim_inst(i: u32) -> InstConfig {
             label: format!("p{j}"),
             value: format!("p{j}"),
             r#type: "float".into(),
+            props: None,
         })
         .collect();
     InstConfig {

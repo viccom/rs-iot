@@ -132,9 +132,18 @@ pub async fn startinst(State(st): State<AppState>, Json(req): Json<IdReq>) -> Re
     };
     match result {
         // 唯一启动守卫：已运行实例二次 startinst → 409（幂等与否交调用方决定）
-        Err(e @ crate::error::RsIotError::InstanceAlreadyRunning(_)) => err(StatusCode::CONFLICT, &e.to_string()),
+        Err(e @ crate::error::RsIotError::InstanceAlreadyRunning(_)) => {
+            err(StatusCode::CONFLICT, &e.to_string())
+        }
         Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
-        Ok(()) => Json(serde_json::json!({"status": "ok"})).into_response(),
+        Ok(()) => {
+            // Tag Registry 声明式初值增量刷新（实例配置可能改了 children[].props；
+            // fail-soft：失败不影响启动结果）。
+            if let Err(e) = crate::db::tag_registry::refresh_declared(&st.lux).await {
+                tracing::warn!("[tag-registry] startinst 后 declared 刷新失败: {e}");
+            }
+            Json(serde_json::json!({"status": "ok"})).into_response()
+        }
     }
 }
 

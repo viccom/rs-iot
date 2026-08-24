@@ -122,6 +122,44 @@ pub enum SampleValue {
     Str(String),
 }
 
+/// 标签全局属性（lux Hash `tags`；设计见 docs/designs/2026-08-24-tag-registry-plan.md）。
+///
+/// 叠加层——采集地址语义仍由各插件 `ChildSpec` 私有承载，本结构只存跨插件
+/// 共享属性。是后续历史存储归档白名单（`history`）、死区过滤（`deadband`）、
+/// 报警结构化绑定（P2 遗留）的唯一权威源。
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+pub struct TagProps {
+    /// 历史归档白名单（默认 false = 不归档；历史存储 feature 消费）。
+    #[serde(default)]
+    pub history: bool,
+    /// 绝对死区：|new − last_archived| ≥ deadband 才归档（PI exception 语义；
+    /// 仅数值型生效，Bool/Str 值变即写）。None = 无死区。
+    #[serde(default)]
+    pub deadband: Option<f64>,
+    /// 描述（UI 展示）。
+    #[serde(default)]
+    pub desc: Option<String>,
+    /// 工程单位（对齐 OPC UA EngineeringUnits）。
+    #[serde(default)]
+    pub unit: Option<String>,
+    /// 首个生产者实例 id（出口登记填；API set 不修改此字段）。
+    #[serde(default)]
+    pub owner_inst: String,
+}
+
+/// 标签身份单一规范化源：`(devid, tag)` → 全局唯一键 `<devid>.<tag>`。
+///
+/// rtdata field（`db/rtdata.rs`）、lux `tags` 表 field、后续 tsink series 与
+/// 报警 key 全部经本函数——保证"标签变量 id 一致性"。语义与 rtdata 历史行为
+/// 完全一致（tag 已含 devid 串则原样返回，不重复拼接）。
+pub fn tag_key(devid: &str, tag: &str) -> String {
+    if tag.contains(devid) {
+        tag.to_string()
+    } else {
+        format!("{devid}.{tag}")
+    }
+}
+
 /// 命令下行（对标 Lite_IOT `pluginM.CtlMessage`）。
 ///
 /// 由北向（MQTT `<hwid>/command`）或 REST 注入，按 `instance` 路由到对应插件 task。
@@ -202,6 +240,10 @@ pub struct ChildSpec {
     /// 值类型（"float"/"int"/"bool" 等）。
     #[serde(default)]
     pub r#type: String,
+    /// 声明式标签属性初值（Tag Registry）：出口登记首见建卡时落表——
+    /// tags 表已有记录则忽略（只补缺不覆盖；人工 API 修改优先）。缺省 None 向后兼容。
+    #[serde(default)]
+    pub props: Option<TagProps>,
 }
 
 /// 插件实例配置（对标 `sysutil.InstConfig`）。
@@ -239,6 +281,76 @@ mod tests {
         let json = serde_json::json!({"value":"m1","slave_id":2});
         let d: DeviceSpec = serde_json::from_value(json).unwrap();
         assert_eq!(d.slave_id, Some(2));
+    }
+
+    #[test]
+    fn child_spec_props_absent_is_none_for_backward_compat() {
+        // 旧配置无 props → None（全部既有实例配置零迁移）。
+        let json = serde_json::json!({"label":"t","value":"holding:0:f32","type":"float"});
+        let c: ChildSpec = serde_json::from_value(json).unwrap();
+        assert_eq!(c.props, None);
+    }
+
+    #[test]
+    fn child_spec_props_deserializes_and_roundtrips() {
+        let json = serde_json::json!({
+            "label":"炉温","value":"DB1.DBD0","type":"f32",
+            "props":{"history":true,"deadband":0.5,"unit":"°C"}
+        });
+        let c: ChildSpec = serde_json::from_value(json).unwrap();
+        let props = c.props.clone().unwrap();
+        assert!(props.history);
+        assert_eq!(props.deadband, Some(0.5));
+        assert_eq!(props.unit.as_deref(), Some("°C"));
+        assert_eq!(props.owner_inst, "", "声明式初值不填 owner（出口登记填）");
+        let back = serde_json::to_value(&c).unwrap();
+        let c2: ChildSpec = serde_json::from_value(back).unwrap();
+        assert_eq!(c2.props, c.props, "roundtrip");
+    }
+
+    #[test]
+    fn tag_key_joins_devid_and_tag() {
+        assert_eq!(tag_key("dev1", "temp"), "dev1.temp");
+        assert_eq!(
+            tag_key("furnace_02", "zone1.pressure"),
+            "furnace_02.zone1.pressure"
+        );
+    }
+
+    #[test]
+    fn tag_key_passthrough_when_tag_already_contains_devid() {
+        // 与 rtdata 历史行为一致：tag 已含 devid 串则原样（不重复拼接）。
+        assert_eq!(tag_key("dev1", "dev1.temp"), "dev1.temp");
+    }
+
+    #[test]
+    fn tag_key_empty_devid_passthrough() {
+        // devid 为空串 → contains 恒真 → 原样（兼容现状语义，防御性记录）。
+        assert_eq!(tag_key("", "temp"), "temp");
+    }
+
+    #[test]
+    fn tag_props_defaults_all_off() {
+        // 空 JSON → 全默认（history=false、无死区、无 owner）——归档白名单模型的安全默认。
+        let p: TagProps = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert_eq!(p, TagProps::default());
+        assert!(!p.history);
+        assert_eq!(p.deadband, None);
+        assert_eq!(p.owner_inst, "");
+    }
+
+    #[test]
+    fn tag_props_json_roundtrip() {
+        let p = TagProps {
+            history: true,
+            deadband: Some(0.5),
+            desc: Some("炉温".into()),
+            unit: Some("°C".into()),
+            owner_inst: "sim1".into(),
+        };
+        let v = serde_json::to_value(&p).unwrap();
+        let back: TagProps = serde_json::from_value(v).unwrap();
+        assert_eq!(back, p);
     }
 
     #[test]

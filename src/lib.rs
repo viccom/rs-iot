@@ -289,6 +289,11 @@ pub async fn run_app_with_shutdown(
     // 数据加工走 luaTransform 订阅型实例（阶段 C），Processor 插槽留给未来 Rust 原生处理器。
     let processor: Arc<dyn plugin::traits::Processor> =
         Arc::new(transform::passthrough::Passthrough);
+    // Tag Registry 声明式初值预载（fail-soft：props 是增强不是关键路径）。
+    match db::tag_registry::refresh_declared(&client).await {
+        Ok(n) => tracing::debug!("[tag-registry] declared props 预载 {n} 条"),
+        Err(e) => tracing::warn!("[tag-registry] declared props 预载失败(占位默认): {e}"),
+    }
     let pipeline_token = shutdown.child_token();
     let pipeline_handle = tokio::spawn(pipeline::run(
         ctx.clone(),

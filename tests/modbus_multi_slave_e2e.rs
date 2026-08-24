@@ -161,6 +161,7 @@ fn mk_dev(devid: &str, slave_id: u8) -> DeviceSpec {
             label: "v0".into(),
             value: "holding:0:i16".into(),
             r#type: "i16".into(),
+            props: None,
         }],
         slave_id: Some(slave_id),
     }
@@ -221,6 +222,7 @@ async fn backward_compat_legacy_single_slave_config() {
             label: "v0".into(),
             value: "holding:0:i16".into(),
             r#type: "i16".into(),
+            props: None,
         }],
         slave_id: None,
     }];
@@ -270,11 +272,13 @@ async fn sequential_breaks_on_timeout_skipping_dead_slave_remaining_regions() {
                 label: "v0".into(),
                 value: "holding:0:i16".into(),
                 r#type: "i16".into(),
+                props: None,
             },
             ChildSpec {
                 label: "v1".into(),
                 value: "holding:50:i16".into(),
                 r#type: "i16".into(),
+                props: None,
             },
         ],
         slave_id: Some(2),

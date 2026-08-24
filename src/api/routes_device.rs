@@ -451,6 +451,7 @@ mod tests {
                     label: "温度".into(),
                     value: "temp".into(),
                     r#type: "float".into(),
+                    props: None,
                 }],
                 slave_id: None,
             }],

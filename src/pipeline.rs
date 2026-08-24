@@ -214,6 +214,14 @@ async fn flush_batch(
                     &format!("write_batch {n_failed} devid 写失败(其余成功)"),
                 );
             }
+            // Tag Registry 出口登记（fail-soft，docs/designs/2026-08-24-tag-registry-plan.md
+            // 取舍3）：首见 (devid,tag) 建占位卡——稳态 once-set 命中零 lux 交互；
+            // 失败仅 warn，next flush 重试（note_once 失败项自动退出 seen）。
+            if let Err(e) =
+                db::tag_registry::note_once(lux, buf, &db::tag_registry::declared()).await
+            {
+                tracing::warn!("[tag-registry] note_once 失败(下批重试): {e}");
+            }
             // rtdata 变更通知（批次级聚合，模块 M2b）：一批一次 publish。
             // 50万点/秒下每点 publish 会爆 SSE——按 dev 聚合带最新值（Q6：前端直用
             // 即时刷新），dev_ids/samples 去重 + 截断 RTDATA_NOTIFY_MAX_DEVS（现场极端

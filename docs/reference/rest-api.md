@@ -12,7 +12,7 @@
 | 框架 | axum 0.8（`src/api/mod.rs::build_router`） |
 | 监听 | `0.0.0.0:{api_port}` |
 | 业务前缀 | `/api/v1/...` |
-| 持久层 | lux 嵌入式 KV（Hash: `users`/`passwords`/`instances`/`devices`/`groups`/`secrets`/`alarms`；string: `accesskey`；Hash: `rtdata:<devId>`；string: `stat:<inst>`；Hash: `ext_tokens`） |
+| 持久层 | lux 嵌入式 KV（Hash: `users`/`passwords`/`instances`/`devices`/`groups`/`secrets`/`alarms`/`tags`；string: `accesskey`；Hash: `rtdata:<devId>`；string: `stat:<inst>`；Hash: `ext_tokens`） |
 | 鉴权中间件 | 全局 `auth::auth_middleware`（`from_fn_with_state`）+ `tower_http::TraceLayer` |
 
 **错误响应格式（当前不统一，调用方需兼容两种）**：
@@ -339,6 +339,25 @@ curl -N -H "Authorization: Bearer $JWT" \
 - 与 `GET /api/v1/rtdatas` 的 cell 输出同构（`[ts, localTime, value]` 值串），客户端复用同一解析
 - 机制为**每连接读侧 poll-diff**（非 EventBus 转发，不受其 dev 截断/丢帧特性影响；设计依据：[2026-08-23-rtdata-subscribe-plan.md](../designs/2026-08-23-rtdata-subscribe-plan.md)）
 
+### 4.15 标签属性 Tag Registry（`routes_tag.rs`，lux Hash `tags`）
+
+标签级全局属性（`TagProps`：history 归档白名单 / deadband 死区 / desc / unit / owner_inst）——三路径登记（实例配置 `children[].props` 声明式初值 / pipeline 出口自动占位 / API 人工），**只补缺不覆盖**（人工修改优先）。设计：[2026-08-24-tag-registry-plan.md](../designs/2026-08-24-tag-registry-plan.md)。
+
+| Method | Path | 鉴权 | Body/Query | 响应 |
+|---|---|---|---|---|
+| GET | `/api/v1/tags` | JWT | `?dev_id=<设备ID>`（前缀过滤）`&history=true`（只列白名单） | `{"<dev.tag>": TagProps}` |
+| POST | `/api/v1/tag/set` | JWT | `{"dev_id","tag", history?, deadband?, desc?, unit?}`（全量覆盖：缺省=清除） | `{"status":"ok","key","props"}` |
+| POST | `/api/v1/tag/batch` | JWT | `{"pattern":"dev*.temp*","history":true,...}`（glob 批量改**已存在**记录） | `{"status":"ok","matched":n,"updated":n}` |
+| POST | `/api/v1/tag/delete` | JWT | `{"dev_id","tag"}`（只删属性记录；rtdata/历史不动；再出数重新占位默认卡） | `{"status":"ok"}` |
+
+```bash
+# 批量开归档 + 死区（历史存储 feature 消费这两个属性）
+curl -X POST -H "Authorization: Bearer $JWT" -H "Content-Type: application/json"   -d '{"pattern":"furnace*.temp*","history":true,"deadband":0.5}'   http://localhost:8790/api/v1/tag/batch
+```
+
+- `owner_inst` 系统管理（出口登记取 dev2inst 首宿主），API 不可改
+- glob `*` 通配匹配 `<devid>.<tag>` 全键；`set` 为全量覆盖语义（字段缺省即清除该属性）
+
 ## 5. 数据模型（`src/types.rs`）
 
 ```
@@ -353,7 +372,8 @@ InstConfig {
   host_kind: "builtin"|"external"  // 缺省 builtin
 }
 DeviceSpec { label, value:<设备ID>, children:[ChildSpec] }
-ChildSpec  { label:<数据点名>, value:<协议地址>, type:<值类型> }
+ChildSpec  { label:<数据点名>, value:<协议地址>, type:<值类型>, props?: TagProps }
+TagProps   { history:bool=false, deadband?:f64, desc?, unit?, owner_inst:Sys }  // lux Hash `tags`（field=`<devid>.<tag>`）
 CtlMessage { instance:InstId, devid, cmd, data:<JSON 文本> }
 ```
 
