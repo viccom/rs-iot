@@ -2,6 +2,12 @@
 //!
 //! 所有测试用**独立 data_dir + 端口 0（OS 自动分配）**启动 lux，
 //! 保证测试并行不冲突、不污染仓库 `./data/`。
+//!
+//! 本模块是全部测试 binary 的共享工具箱：各 binary 按需引用部分函数，未引用
+//! 方在 dead_code 检测下呈"未使用"（每 binary 独立编译判定——expect 会在
+//! 使用方 binary 误报 unused expectation，故文件级 allow；生产代码不适用本
+//! 惯例，见 CLAUDE.md 编码约定）。
+#![allow(dead_code)]
 
 use rs_iot::config::{AppConfig, LuxConfig};
 use std::path::PathBuf;
