@@ -1,0 +1,305 @@
+//! effective 属性合并纯函数（D-M2：`effective(tag) = 模板默认 ∪ 设备覆盖`）。
+//!
+//! 合并语义三态：`None` = 继承模板；`Some` = 覆盖；deadband 双层 Option 下
+//! `Some(None)` = 显式关死区（与"未设"区分）。覆盖键引用了模型不存在的 tag
+//! 时忽略（`validate` 拒于写入前，此处零成本防御）。
+//!
+//! 下游消费者：M-1 T8 物化缓存、M-4 REST effective 视图、Phase 1b 历史存储
+//! 白名单/死区过滤（master plan D11）。
+
+use crate::model::types::{DeviceEntry, DeviceModel, TagOverride};
+use crate::types::{tag_key, TagProps};
+use std::collections::{BTreeMap, HashMap};
+
+/// 单 tag 三态合并：模板默认 ∪ 覆盖。
+pub fn merge_tag_props(tmpl: &TagProps, ov: &TagOverride) -> TagProps {
+    TagProps {
+        history: ov.history.unwrap_or(tmpl.history),
+        deadband: ov.deadband.unwrap_or(tmpl.deadband),
+        desc: merge_opt_string(&tmpl.desc, &ov.desc),
+        unit: merge_opt_string(&tmpl.unit, &ov.unit),
+        // owner_inst 是运行时记账（出口登记填），模板默认通常为空、覆盖不可改。
+        owner_inst: tmpl.owner_inst.clone(),
+    }
+}
+
+/// 字符串覆盖语义：`None` 继承；空串显式清除（→ None）；非空覆盖。
+fn merge_opt_string(tmpl: &Option<String>, ov: &Option<String>) -> Option<String> {
+    match ov {
+        None => tmpl.clone(),
+        Some(s) if s.is_empty() => None,
+        Some(s) => Some(s.clone()),
+    }
+}
+
+/// 设备级合并：模型全部 tag → effective props（key = tag 名）。
+///
+/// 设备 overrides 中不在模型 tags 的键被忽略（validate 拒于写入前——防御）。
+pub fn effective_tags(model: &DeviceModel, dev: &DeviceEntry) -> BTreeMap<String, TagProps> {
+    let mut out = BTreeMap::new();
+    for t in &model.tags {
+        let props = match dev.overrides.get(&t.name) {
+            Some(ov) => merge_tag_props(&t.props, ov),
+            None => t.props.clone(),
+        };
+        out.insert(t.name.clone(), props);
+    }
+    out
+}
+
+/// 全局 effective 表：多设备 → `tag_key(devid, tag)` → effective props。
+///
+/// 模型引用悬空（devreg 指向不存在的 model_id）的设备跳过——validate 拒于
+/// 写入前，本函数不报错（装载路径容错）。同 key 冲突 last-wins。
+pub fn effective_all(
+    models: &HashMap<String, DeviceModel>,
+    devs: &[DeviceEntry],
+) -> HashMap<String, TagProps> {
+    let mut out = HashMap::new();
+    for dev in devs {
+        if let Some(model) = models.get(&dev.model) {
+            for (tag, props) in effective_tags(model, dev) {
+                out.insert(tag_key(&dev.devid, &tag), props);
+            }
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::types::TagTemplate;
+
+    fn tmpl_props() -> TagProps {
+        TagProps {
+            history: true,
+            deadband: Some(0.5),
+            desc: Some("模板描述".into()),
+            unit: Some("kPa".into()),
+            owner_inst: String::new(),
+        }
+    }
+
+    #[test]
+    fn empty_override_inherits_all_from_template() {
+        let merged = merge_tag_props(&tmpl_props(), &TagOverride::default());
+        assert_eq!(merged, tmpl_props());
+    }
+
+    #[test]
+    fn override_history_false_beats_template_true() {
+        let ov = TagOverride {
+            history: Some(false),
+            ..Default::default()
+        };
+        let merged = merge_tag_props(&tmpl_props(), &ov);
+        assert!(!merged.history, "Some(false) 显式关归档");
+        assert_eq!(merged.deadband, Some(0.5), "未覆盖字段继承");
+    }
+
+    #[test]
+    fn deadband_tri_state_inherit_off_and_override() {
+        let t = tmpl_props();
+        // None（缺省）= 继承模板 Some(0.5)。
+        assert_eq!(
+            merge_tag_props(&t, &TagOverride::default()).deadband,
+            Some(0.5)
+        );
+        // Some(None) = 显式关死区（模板有死区也被关掉）。
+        assert_eq!(
+            merge_tag_props(
+                &t,
+                &TagOverride {
+                    deadband: Some(None),
+                    ..Default::default()
+                }
+            )
+            .deadband,
+            None
+        );
+        // Some(Some(2.0)) = 覆盖。
+        assert_eq!(
+            merge_tag_props(
+                &t,
+                &TagOverride {
+                    deadband: Some(Some(2.0)),
+                    ..Default::default()
+                }
+            )
+            .deadband,
+            Some(2.0)
+        );
+    }
+
+    #[test]
+    fn desc_empty_string_clears_and_value_overrides() {
+        let t = tmpl_props();
+        // 空串 = 显式清除。
+        assert_eq!(
+            merge_tag_props(
+                &t,
+                &TagOverride {
+                    desc: Some(String::new()),
+                    ..Default::default()
+                }
+            )
+            .desc,
+            None
+        );
+        // 非空 = 覆盖。
+        assert_eq!(
+            merge_tag_props(
+                &t,
+                &TagOverride {
+                    desc: Some("现场描述".into()),
+                    ..Default::default()
+                }
+            )
+            .desc,
+            Some("现场描述".to_string())
+        );
+    }
+
+    #[test]
+    fn unit_override_and_clear() {
+        let t = tmpl_props();
+        assert_eq!(
+            merge_tag_props(
+                &t,
+                &TagOverride {
+                    unit: Some("MPa".into()),
+                    ..Default::default()
+                }
+            )
+            .unit,
+            Some("MPa".to_string())
+        );
+        assert_eq!(
+            merge_tag_props(
+                &t,
+                &TagOverride {
+                    unit: Some(String::new()),
+                    ..Default::default()
+                }
+            )
+            .unit,
+            None
+        );
+    }
+
+    #[test]
+    fn owner_inst_passes_through_from_template() {
+        let t = TagProps {
+            owner_inst: "sim1".into(),
+            ..tmpl_props()
+        };
+        let merged = merge_tag_props(
+            &t,
+            &TagOverride {
+                history: Some(true),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            merged.owner_inst, "sim1",
+            "owner_inst 运行时记账，覆盖不可改"
+        );
+    }
+
+    fn model_two_tags() -> DeviceModel {
+        DeviceModel {
+            model_id: "m1".into(),
+            params: vec!["base".into()],
+            tags: vec![
+                TagTemplate {
+                    name: "ua".into(),
+                    data_type: "f32".into(),
+                    addr: Some("holding:{base}:f32".into()),
+                    props: TagProps {
+                        history: true,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                TagTemplate {
+                    name: "ub".into(),
+                    data_type: "f32".into(),
+                    addr: Some("holding:{base}+2:f32".into()),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn effective_tags_covers_all_model_tags_and_merges() {
+        let m = model_two_tags();
+        let dev = DeviceEntry {
+            devid: "d1".into(),
+            model: "m1".into(),
+            params: [("base".to_string(), "100".to_string())].into(),
+            overrides: [(
+                "ub".to_string(),
+                TagOverride {
+                    history: Some(true),
+                    ..Default::default()
+                },
+            )]
+            .into(),
+            ..Default::default()
+        };
+        let eff = effective_tags(&m, &dev);
+        assert_eq!(eff.len(), 2);
+        assert!(eff["ua"].history, "无覆盖走模板默认");
+        assert!(eff["ub"].history, "覆盖生效");
+    }
+
+    #[test]
+    fn effective_tags_ignores_override_of_unknown_tag() {
+        // 覆盖键引用模型不存在的 tag：忽略不 panic（validate 拒于写入前）。
+        let m = model_two_tags();
+        let dev = DeviceEntry {
+            devid: "d1".into(),
+            model: "m1".into(),
+            overrides: [(
+                "no_such_tag".to_string(),
+                TagOverride {
+                    history: Some(true),
+                    ..Default::default()
+                },
+            )]
+            .into(),
+            ..Default::default()
+        };
+        let eff = effective_tags(&m, &dev);
+        assert_eq!(eff.len(), 2, "未知覆盖键不产出条目");
+    }
+
+    #[test]
+    fn effective_all_keys_by_tag_key_and_skips_dangling_model() {
+        let mut models = HashMap::new();
+        models.insert("m1".to_string(), model_two_tags());
+        let d1 = DeviceEntry {
+            devid: "devA".into(),
+            model: "m1".into(),
+            ..Default::default()
+        };
+        let d2 = DeviceEntry {
+            devid: "devB".into(),
+            model: "m1".into(),
+            ..Default::default()
+        };
+        // 悬空模型引用：validate 拒于写入前，装载容错跳过。
+        let dangling = DeviceEntry {
+            devid: "devC".into(),
+            model: "nope".into(),
+            ..Default::default()
+        };
+        let all = effective_all(&models, &[d1, d2, dangling]);
+        assert_eq!(all.len(), 4, "两设备 × 两 tag；悬空设备零条目");
+        assert!(all.contains_key("devA.ua"));
+        assert!(all.contains_key("devB.ub"));
+    }
+}

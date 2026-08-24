@@ -17,12 +17,14 @@ pub mod frontend;
 pub mod routes_alarm;
 pub mod routes_command;
 pub mod routes_device;
+pub mod routes_devreg;
 pub mod routes_events;
 pub mod routes_group;
 pub mod routes_inst;
 pub mod routes_logs;
 pub mod routes_lua;
 pub mod routes_metrics;
+pub mod routes_model;
 pub mod routes_rtdata;
 pub mod routes_rtdata_subscribe;
 pub mod routes_secret;
@@ -132,6 +134,17 @@ pub fn build_router(state: AppState) -> axum::Router {
         .route("/api/v1/tag/set", post(routes_tag::set))
         .route("/api/v1/tag/batch", post(routes_tag::batch))
         .route("/api/v1/tag/delete", post(routes_tag::delete))
+        // 设备模型注册表（M-1；devreg 为过渡路径，M-2 接管 /api/v1/devices 系）
+        .route("/api/v1/devmodels", get(routes_model::list))
+        .route("/api/v1/devmodel/set", post(routes_model::set))
+        .route("/api/v1/devmodel/delete", post(routes_model::delete))
+        .route("/api/v1/devreg", get(routes_devreg::list))
+        .route("/api/v1/devreg/set", post(routes_devreg::set))
+        .route("/api/v1/devreg/delete", post(routes_devreg::delete))
+        .route(
+            "/api/v1/migrate/inline-devices",
+            post(routes_devreg::migrate_inline),
+        )
         .route("/api/v1/devices", get(routes_device::list))
         .route("/api/v1/device/get", get(routes_device::get))
         .route("/api/v1/device/set", post(routes_device::set))

@@ -29,6 +29,8 @@ pub mod io_trace;
 mod log_cleanup;
 /// 日志 ring buffer（P1 子系统 3）：tracing layer 截获最近 N 条日志到内存。
 pub mod log_ringbuffer;
+/// 设备模型注册表（物模型）域：地址参数化/属性合并/类型校验/存储/迁移。
+pub mod model;
 pub mod pipeline;
 /// 插件系统（trait 契约、注册表、实例管理、内置实现）。
 pub mod plugin;
@@ -293,6 +295,12 @@ pub async fn run_app_with_shutdown(
     match db::tag_registry::refresh_declared(&client).await {
         Ok(n) => tracing::debug!("[tag-registry] declared props 预载 {n} 条"),
         Err(e) => tracing::warn!("[tag-registry] declared props 预载失败(占位默认): {e}"),
+    }
+    // 设备模型注册表 effective 物化缓存装载（M-1 T8；模型∪覆盖 → tag_key →
+    // TagProps，Phase 1b 历史/死区与 M-4 发现引擎的 O(1) 读侧；fail-soft 同上）。
+    match model::cache::reload(&client).await {
+        Ok(m) => tracing::debug!("[model] effective 物化缓存装载 {} 条", m.len()),
+        Err(e) => tracing::warn!("[model] effective 物化缓存装载失败(空快照): {e}"),
     }
     let pipeline_token = shutdown.child_token();
     let pipeline_handle = tokio::spawn(pipeline::run(
