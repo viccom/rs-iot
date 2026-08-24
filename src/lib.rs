@@ -29,6 +29,8 @@ pub mod io_trace;
 mod log_cleanup;
 /// 日志 ring buffer（P1 子系统 3）：tracing layer 截获最近 N 条日志到内存。
 pub mod log_ringbuffer;
+/// 设备模型注册表（物模型）域：地址参数化/属性合并/类型校验/存储/迁移。
+pub mod model;
 pub mod pipeline;
 /// 插件系统（trait 契约、注册表、实例管理、内置实现）。
 pub mod plugin;
