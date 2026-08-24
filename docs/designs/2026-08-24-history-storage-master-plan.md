@@ -47,7 +47,7 @@ L3 的批量操作面 = 已交付的 `POST /api/v1/tag/batch`（glob）。归档
 | # | 决策 | 要点/依据 |
 |---|---|---|
 | D1 | 形态=内嵌核心库 | 决策文档 §2.2 实测对比（写 2.2×/读快 1-4 个数量级/类型保真/零监听面） |
-| D2 | 依赖=同级 path 依赖 `../tsink_fork`（fork 本地克隆 `E:\Rs_Codes	sink_fork`，remote=github.com/viccom/tsink），pin 基线 tag | 对齐 lux path 先例与 CI 双 checkout 模式；实施前先打基线 tag |
+| D2 | 依赖=同级 path 依赖 `../tsink_fork`（fork 本地克隆 `E:\Rs_Codes\tsink_fork`，remote=github.com/viccom/tsink），pin 基线 tag | 对齐 lux path 先例与 CI 双 checkout 模式；实施前先打基线 tag |
 | D3 | 写路径=flush_batch 单点 fan-out → 有界 channel → 单写线程（8 MiB 栈） | tsink 并发实测：单写×2000 点批 182K pts/s 最优；50 并发小批 39K 最差（WAL 锁护航）——"少写者大批次"是该引擎的正确用法 |
 | D4 | 类型化写，取 pipeline 内存 `SampleValue` | 不走 lux 读回（那边已字符串化）；映射 Float→F64/Int→I64/Bool→Bool/Str→String；同 series 混型被 tsink 拒绝（有测试），写入侧自律 |
 | D5 | 映射：metric=tag（sanitize），labels=[devid,hwid]，时间戳 ms（`ts*1000`） | 与 rtdata field（tag_key）同源；ms 为高频源留余量 |
