@@ -9,5 +9,6 @@
 
 pub mod addr;
 pub mod effective;
+pub mod store;
 pub mod types;
 pub mod validate;

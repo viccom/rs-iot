@@ -53,6 +53,10 @@ pub enum RsIotError {
     /// 拒绝二次启动（REST 映射 409；Stopped/Failed 放行——stop 后可重启）。
     #[error("instance {0} already active (starting/running/stopping)")]
     InstanceAlreadyRunning(String),
+
+    /// 设备模型/注册表校验错误（结构或引用完整性）。
+    #[error("model error: {0}")]
+    Model(#[from] crate::model::validate::ModelError),
 }
 
 /// 库统一 Result 别名。
