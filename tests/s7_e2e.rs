@@ -549,16 +549,19 @@ async fn s7_read_roundtrip_to_rtdata() {
                 label: "temp".into(),
                 value: "DB1.DBD0".into(),
                 r#type: "f32".into(),
+                props: None,
             },
             ChildSpec {
                 label: "speed".into(),
                 value: "DB1.DBW4".into(),
                 r#type: "i16".into(),
+                props: None,
             },
             ChildSpec {
                 label: "motor_on".into(),
                 value: "M10.0".into(),
                 r#type: "bool".into(),
+                props: None,
             },
         ],
         slave_id: None,
@@ -605,6 +608,7 @@ async fn s7_write_roundtrip() {
             label: "temp".into(),
             value: "DB1.DBD0".into(),
             r#type: "f32".into(),
+            props: None,
         }],
         slave_id: None,
     }];
@@ -660,11 +664,13 @@ async fn s7_return_code_partial_failure() {
                 label: "ok_temp".into(),
                 value: "DB1.DBD0".into(),
                 r#type: "f32".into(),
+                props: None,
             },
             ChildSpec {
                 label: "bad_addr".into(),
                 value: "DB1.DBD100".into(),
                 r#type: "i16".into(),
+                props: None,
             },
         ],
         slave_id: None,
@@ -704,6 +710,7 @@ async fn s7_read_batching_over_20_items() {
             label: format!("p{i:02}"),
             value: format!("DB1.DBW{}", i * 2),
             r#type: "i16".into(),
+            props: None,
         })
         .collect();
     let devices = vec![DeviceSpec {

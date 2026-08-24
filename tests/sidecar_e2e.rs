@@ -131,6 +131,7 @@ async fn setup(inst_id: &str, hb_secs: u64) -> Env {
                 label: "温度".into(),
                 value: "temp".into(),
                 r#type: "float".into(),
+                props: None,
             }],
             slave_id: None,
         }],

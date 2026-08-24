@@ -57,6 +57,7 @@ async fn gated_plugin_returns_config_error_when_feature_off() {
                 label: "x".into(),
                 value: "holding:0:f32".into(),
                 r#type: "float".into(),
+                props: None,
             }],
             slave_id: None,
         }],

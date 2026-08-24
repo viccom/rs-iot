@@ -55,6 +55,7 @@ fn mk_dev(devid: &str, slave_id: u8, points: Vec<(&str, &str)>) -> DeviceSpec {
                 label: label.into(),
                 value: addr.into(),
                 r#type: "".into(),
+                props: None,
             })
             .collect(),
         slave_id: Some(slave_id),

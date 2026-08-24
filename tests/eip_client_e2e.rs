@@ -329,6 +329,7 @@ fn mk_child(label: &str, tag: &str, ty: &str) -> ChildSpec {
         label: label.into(),
         value: tag.into(),
         r#type: ty.into(),
+        props: None,
     }
 }
 
