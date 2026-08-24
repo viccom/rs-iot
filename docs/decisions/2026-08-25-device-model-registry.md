@@ -1,7 +1,9 @@
 # 决策：设备模型注册表（物模型）——元数据唯一来源原则落地
 
-> **状态**：accepted
+> **状态**：implemented（M-1~M-4 全并，实施计划同日四期完成）
 > **日期**：2026-08-25
+> **实施**：M-1 模型层（`feat/device-model-m1`）→ M-2 采集器接线 → M-3 lua/sidecar v2 → M-4 发现引擎 + tags 退役（`feat/device-model-m4`），TDD 全绿合并 master，见实施计划头部实施块。
+> **代码**：`src/model/` 九模块 + `src/api/routes_{model,devreg,discovery,tag}.rs`；`db/tag_registry.rs` 已删（tags 表退役）。
 > **原则（宪法级，rs-iot 必须遵循）**：**元数据必须有唯一性和唯一的来源与管理入口；否则系统设计就是失败的。** 设备与设备标签的元数据只能有一个出生地（模型+设备注册表）、一个管理面（其 REST/UI），任何采集实现（内置插件/lua 脚本/外置插件）都不得自行创建真实设备与标签。
 > **实施计划**：[2026-08-25-device-model-registry-plan.md](../designs/2026-08-25-device-model-registry-plan.md)（四期 M-1~M-4，TDD）
 > **背景授权**：用户明示——lua 脚本系统与外置插件**可以调整甚至重构**；rs-iot 处于初级阶段（工程验证级，核心管道性能已验证、业务面未达生产级），无现场存量负担，是结构性重构的唯一窗口。因此**不做运行时兼容层，不搞灰度双模式**，按第一性原理一步到位。

@@ -3,7 +3,7 @@
 > **状态**：accepted（Phase 1a 已实施；Phase 1b 待启动）
 > **日期**：2026-08-24
 > **决策依据**：[2026-08-24-history-storage-tsink-selection.md](../decisions/2026-08-24-history-storage-tsink-selection.md)（选型与定位，含实测数据）
-> **前置已完成**：Phase 1a Tag Registry（**注**：其 tags 表将在设备模型注册表 M-4 退役，由 devreg.overrides 吸收——见 [2026-08-25-device-model-registry-plan.md](2026-08-25-device-model-registry-plan.md) §三处置清单）（[2026-08-24-tag-registry-plan.md](2026-08-24-tag-registry-plan.md)，merge bd8e027）——lux `tags` 表、`TagProps{history,deadband,desc,unit,owner_inst}`、`tag_key()` 单一 id 源、三路径登记（配置声明式 `ChildSpec.props` / pipeline 出口 `note_once` / API 人工）、`GET /api/v1/tags`+`tag/set|batch|delete`。**本文是 ADR 权威版本**（tag-registry 计划附录的 D 表摘引自本文，以本文为准）。
+> **前置已完成**：Phase 1a Tag Registry（**其 tags 表已于设备模型注册表 M-4 退役（2026-08-25），由 devreg.overrides 吸收——见 [2026-08-25-device-model-registry-plan.md](2026-08-25-device-model-registry-plan.md)**。Phase 1b 消费接口不变：归档白名单/死区的读侧 = effective 物化缓存 `src/model/cache.rs::effective()`（模型模板默认 ∪ 设备覆盖三态合并，tag_key 同构）（[2026-08-24-tag-registry-plan.md](2026-08-24-tag-registry-plan.md)，merge bd8e027）——lux `tags` 表、`TagProps{history,deadband,desc,unit,owner_inst}`、`tag_key()` 单一 id 源、三路径登记（配置声明式 `ChildSpec.props` / pipeline 出口 `note_once` / API 人工）、`GET /api/v1/tags`+`tag/set|batch|delete`。**本文是 ADR 权威版本**（tag-registry 计划附录的 D 表摘引自本文，以本文为准）。
 
 **Goal:** rs-iot 获得有界资源、类型保真、标签属性驱动的嵌入式历史时序存储，支撑单机 10 万点位级轻量边缘 SCADA 定位；订阅读侧升级 KSUB 驱动；供应链自控（viccom/tsink fork）。
 
