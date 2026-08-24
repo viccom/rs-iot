@@ -36,6 +36,33 @@ async fn lua_modbus_collect_and_write_roundtrip() {
         .await
         .expect("bootstrap");
 
+    // M-2 语义：绑定设备注册（模型 tags=脚本产出 temp/speed——闸放行）。
+    common::register_devices_as_models(
+        &client,
+        "lua-it-modbus",
+        "luaClient",
+        vec![rs_iot::types::DeviceSpec {
+            label: "m".into(),
+            value: "devM".into(),
+            children: vec![
+                rs_iot::types::ChildSpec {
+                    label: "temp".into(),
+                    value: "temp".into(),
+                    r#type: "float".into(),
+                    props: None,
+                },
+                rs_iot::types::ChildSpec {
+                    label: "speed".into(),
+                    value: "speed".into(),
+                    r#type: "float".into(),
+                    props: None,
+                },
+            ],
+            slave_id: None,
+        }],
+    )
+    .await;
+
     // 预播种寄存器：reg0=125（→ temp=12.5）、reg1=32000（→ speed=32000）。
     let state = Arc::new(ServerState {
         regs: Mutex::new(HashMap::from([(0u16, 125u16), (1u16, 32000u16)])),

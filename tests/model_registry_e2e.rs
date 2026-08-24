@@ -482,16 +482,16 @@ async fn devmodel_update_propagates_and_conflict_guards() {
     let (app, _handle) = test_app("model-update").await;
     let token = jwt(&app).await;
     post_json(&app, &token, "/api/v1/devmodel/set", model_body("m_upd")).await;
-    post_json(&app, &token, "/api/v1/devreg/set", device_body("d_upd", "m_upd")).await;
-
-    // ① 更新不存在 → 404。
-    let (st, _) = post_json(
+    post_json(
         &app,
         &token,
-        "/api/v1/devmodel/update",
-        model_body("nope"),
+        "/api/v1/devreg/set",
+        device_body("d_upd", "m_upd"),
     )
     .await;
+
+    // ① 更新不存在 → 404。
+    let (st, _) = post_json(&app, &token, "/api/v1/devmodel/update", model_body("nope")).await;
     assert_eq!(st, StatusCode::NOT_FOUND, "更新不存在模型 404");
 
     // ② 合法更新：加 tag uc + ua 模板 deadband 0.5→1.0 → 设备 effective 跟随。
@@ -507,16 +507,22 @@ async fn devmodel_update_propagates_and_conflict_guards() {
     assert_eq!(st, StatusCode::OK, "合法更新");
     let (_, d) = get_json(&app, &token, "/api/v1/devreg?devid=d_upd").await;
     assert_eq!(
-        d["d_upd"]["effective"]["uc"]["history"],
-        false,
+        d["d_upd"]["effective"]["uc"]["history"], false,
         "新 tag 出现在设备 effective：{d}"
     );
     let (_, m) = get_json(&app, &token, "/api/v1/devmodels?model_id=m_upd").await;
-    assert_eq!(m["m_upd"]["tags"].as_array().unwrap().len(), 3, "模型已更新");
+    assert_eq!(
+        m["m_upd"]["tags"].as_array().unwrap().len(),
+        3,
+        "模型已更新"
+    );
 
     // ③ 新增必填参数而设备未提供 → 409 带冲突明细。
     let mut bad_params = model_body("m_upd");
-    bad_params["params"].as_array_mut().unwrap().push("extra".into());
+    bad_params["params"]
+        .as_array_mut()
+        .unwrap()
+        .push("extra".into());
     let (st, v) = post_json(&app, &token, "/api/v1/devmodel/update", bad_params).await;
     assert_eq!(st, StatusCode::CONFLICT, "破坏 params 齐套 409：{v}");
     let conflicts = v["conflicts"].as_array().expect("冲突明细");
@@ -532,5 +538,9 @@ async fn devmodel_update_propagates_and_conflict_guards() {
     assert_eq!(st, StatusCode::CONFLICT, "删被覆盖 tag 409");
     // ⑤ 两次 409 后模型保持 ② 的合法状态。
     let (_, m) = get_json(&app, &token, "/api/v1/devmodels?model_id=m_upd").await;
-    assert_eq!(m["m_upd"]["tags"].as_array().unwrap().len(), 3, "失败更新不落盘");
+    assert_eq!(
+        m["m_upd"]["tags"].as_array().unwrap().len(),
+        3,
+        "失败更新不落盘"
+    );
 }

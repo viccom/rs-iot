@@ -149,6 +149,8 @@ impl Sink for LuaNorth {
             role: core_::api::Role::North,
             self_writes: None, // North 无 EventBus 订阅面，无自环（T8）
             alarm: alarm.clone(),
+            model: None, // 加工/北向非采集源：无校验闸、无模型感知 API（M-3）
+            gate_rejected: Default::default(),
         };
 
         // 3. VM 组装：沙箱 → register + cfg 表（先于 load_main——脚本顶层可用

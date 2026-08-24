@@ -44,8 +44,9 @@ const T_COMMAND: u8 = 5;
 const T_COMMAND_ACK: u8 = 6;
 const T_HEARTBEAT: u8 = 7;
 
-/// 协议版本（`Hello.ver`，缺省视为该版本）。
-const PROTO_VER: &str = "1";
+/// 协议版本（`Hello.ver`，缺省视为该版本）。M-3 升 v2：v1 外部插件拒连
+/// （版本协商在 acceptor，msg 带升级指引）。
+const PROTO_VER: &str = "2";
 /// 单帧最大字节数（codec 上限，容纳大配置 push）。
 const MAX_FRAME: usize = 4 * 1024 * 1024;
 /// task 侧心跳超时缺省（`app_config.heartbeat_timeout_secs` 可覆盖）。
@@ -234,6 +235,8 @@ impl Source for SidecarClient {
         let mut reconnects: u64 = 0;
 
         let mut next_cmd_id: u64 = 1;
+        // M-3 DataUp 校验闸拒绝计数（flush 落 stat `gate_rejected`）。
+        let gate_rejected: std::sync::Arc<std::sync::atomic::AtomicU64> = Default::default();
 
         'outer: loop {
             let stream = tokio::select! {
@@ -277,9 +280,9 @@ impl Source for SidecarClient {
             {
                 continue;
             }
-            // M-2 模型驱动装配：绑定展开合成 v1 形态点表推给外部（label=tag 名，
-            // value=已解析地址或 tag 名——外部插件自行解释；协议 v2 形态属 M-3）。
-            let devices = match crate::model::expand::expand_to_specs(&ctx.lux, &inst.devices).await
+            // M-3 模型驱动装配（v2）：绑定展开 → 完整产物（devreg+模型）存会话级
+            // 快照——ConfigPush v2 载荷组装 + DataUp 校验闸共用。展开失败拒连。
+            let expanded = match crate::model::expand::expand_devices(&ctx.lux, &inst.devices).await
             {
                 Ok(d) => d,
                 Err(e) => {
@@ -289,9 +292,42 @@ impl Source for SidecarClient {
                     continue;
                 }
             };
+            let expanded = std::sync::Arc::new(expanded);
+            // ConfigPush v2：{inst_id, v:2, devices:[{devid, model, tags:[{name,type,
+            // addr(已解析),unit,rw}]}]}——外部插件按模型点表采集/上报。
+            let push_devices: Vec<serde_json::Value> = expanded
+                .iter()
+                .map(|ex| {
+                    let tags: Vec<serde_json::Value> = ex
+                        .model
+                        .tags
+                        .iter()
+                        .map(|t| {
+                            let addr = match &t.addr {
+                                Some(a) => crate::model::addr::resolve(a, &ex.entry.params)
+                                    .unwrap_or_else(|_| a.clone()),
+                                None => t.name.clone(), // 纯软 tag：addr=tag 名（v1 语义延续）
+                            };
+                            serde_json::json!({
+                                "name": t.name,
+                                "type": t.data_type,
+                                "addr": addr,
+                                "unit": t.unit,
+                                "rw": if t.rw == crate::model::types::TagRw::R { "r" } else { "rw" },
+                            })
+                        })
+                        .collect();
+                    serde_json::json!({
+                        "devid": ex.devid,
+                        "model": ex.model.model_id,
+                        "tags": tags,
+                    })
+                })
+                .collect();
             let cfg = serde_json::json!({
                 "inst_id": &inst_id,
-                "devices": &devices,
+                "v": 2,
+                "devices": push_devices,
             });
             if writer
                 .send(Bytes::from(encode_payload(T_CONFIG_PUSH, &cfg)))
@@ -309,6 +345,10 @@ impl Source for SidecarClient {
             // observed stat 周期 flush ticker（与采集 ticker 解耦；错峰 + 条件落盘，
             // 见 stat_tracker::flush_ticker / flush_if_due）。
             let mut flush_ticker = crate::plugin::stat_tracker::flush_ticker(&inst_id);
+            tracker.extra_insert(
+                "gate_rejected",
+                serde_json::json!(gate_rejected.load(std::sync::atomic::Ordering::Relaxed)),
+            );
             tracker.flush().await;
 
             loop {
@@ -338,11 +378,45 @@ impl Source for SidecarClient {
                             Some(Ok(bytes)) => match decode(&bytes) {
                                 Ok(Recv::DataUp(d)) => {
                                     last_hb = Instant::now();
+                                    // M-3 校验闸：devid ∈ 绑定展开 ∧ tag ∈ 模型点表
+                                    //（非空模型时；空 tags 模型=迁移空点表兼容放行）。
+                                    // 未建模 sample 拒收（warn+计数），合法保留。
+                                    let Some(dev_snap) = expanded.iter().find(|e| e.devid == d.devid)
+                                    else {
+                                        gate_rejected
+                                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                        tracing::warn!(
+                                            "[sidecarClient] inst {inst_id} DataUp 设备 {} 未绑定，整帧拒收",
+                                            d.devid
+                                        );
+                                        continue;
+                                    };
+                                    let mut kept: Vec<&DataUpSample> = Vec::new();
+                                    for samp in &d.samples {
+                                        if dev_snap.model.tags.is_empty()
+                                            || dev_snap
+                                                .model
+                                                .tags
+                                                .iter()
+                                                .any(|t| t.name == samp.tag)
+                                        {
+                                            kept.push(samp);
+                                        } else {
+                                            gate_rejected.fetch_add(
+                                                1,
+                                                std::sync::atomic::Ordering::Relaxed,
+                                            );
+                                            tracing::warn!(
+                                                "[sidecarClient] inst {inst_id} DataUp 标签 {}.{} 未在模型点表，拒收",
+                                                d.devid, samp.tag
+                                            );
+                                        }
+                                    }
                                     // 按 ts 合并同 devid 同时刻的多 tag 到一个 Sample
                                     //（Sample.values 语义=一设备一时刻多变量）。避免逐 tag 拆分成
                                     // 多 Sample 导致 N 次 pipeline/rtdata.write，且破坏下游整 Sample 聚合。
                                     let mut by_ts: BTreeMap<i64, BTreeMap<String, SampleValue>> = BTreeMap::new();
-                                    for samp in &d.samples {
+                                    for samp in kept {
                                         by_ts
                                             .entry(samp.ts)
                                             .or_default()
@@ -498,7 +572,12 @@ async fn handle_connect(
         }
     };
     if hello.ver != PROTO_VER {
-        let msg = format!("version mismatch: bridge={PROTO_VER} ext={}", hello.ver);
+        // M-3 版本协商：v1 拒连（带升级提示）——外部插件示例已同步 v2。
+        let msg = format!(
+            "protocol v{} 已停用，请升级到 v{PROTO_VER}（ConfigPush v2 载荷：\
+             devices[].tags[] 为模型点表）",
+            hello.ver
+        );
         tracing::warn!("[sidecarClient] {addr} inst {} {msg}", hello.inst_id);
         let p = encode_payload(T_HELLO_ACK, &serde_json::json!({"ok": false, "msg": msg}));
         let _ = write_one_frame(&mut stream, &p).await;

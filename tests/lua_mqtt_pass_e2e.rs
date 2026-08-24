@@ -213,6 +213,18 @@ async fn mqtt_pass_request_and_on_data() {
         }],
         host_kind: HostKind::Builtin,
     };
+    common::register_devices_as_models(
+        &client,
+        "lua-mqtt",
+        "luaClient",
+        vec![rs_iot::types::DeviceSpec {
+            label: "mq".into(),
+            value: "devMQ".into(),
+            children: vec![],
+            slave_id: None,
+        }],
+    )
+    .await;
     mgr.start_source(inst).await.expect("start lua");
 
     // request 闭环出数（10s 上限：容实例启动 + 首周期）。
@@ -288,6 +300,18 @@ async fn mqtt_dead_broker_errors_not_panics() {
         }],
         host_kind: HostKind::Builtin,
     };
+    common::register_devices_as_models(
+        &client,
+        "lua-mqtt-d",
+        "luaClient",
+        vec![rs_iot::types::DeviceSpec {
+            label: "mqd".into(),
+            value: "devMQd".into(),
+            children: vec![],
+            slave_id: None,
+        }],
+    )
+    .await;
     mgr.start_source(inst).await.expect("start lua");
 
     // 实例启动 + ≥1 轮 collect（每轮 request Err 后 kv 计数；并行负载下轮数不定，

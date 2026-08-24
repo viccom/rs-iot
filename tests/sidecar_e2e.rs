@@ -183,7 +183,7 @@ async fn sidecar_dataup_and_command_roundtrip() {
     writer
         .send(enc(
             T_HELLO,
-            &json!({"inst_id":"sc1","token":env.token,"ver":"1"}),
+            &json!({"inst_id":"sc1","token":env.token,"ver":"2"}),
         ))
         .await
         .expect("send hello");
@@ -285,7 +285,7 @@ async fn sidecar_wrong_token_rejected() {
     writer
         .send(enc(
             T_HELLO,
-            &json!({"inst_id":"sc2","token":"WRONG","ver":"1"}),
+            &json!({"inst_id":"sc2","token":"WRONG","ver":"2"}),
         ))
         .await
         .expect("send hello");
@@ -311,7 +311,7 @@ async fn sidecar_reconnect_resends_config() {
     writer
         .send(enc(
             T_HELLO,
-            &json!({"inst_id":"sc3","token":env.token,"ver":"1"}),
+            &json!({"inst_id":"sc3","token":env.token,"ver":"2"}),
         ))
         .await
         .expect("hello");
@@ -335,7 +335,7 @@ async fn sidecar_reconnect_resends_config() {
     writer2
         .send(enc(
             T_HELLO,
-            &json!({"inst_id":"sc3","token":env.token,"ver":"1"}),
+            &json!({"inst_id":"sc3","token":env.token,"ver":"2"}),
         ))
         .await
         .expect("hello2");
@@ -368,7 +368,7 @@ async fn sidecar_heartbeat_timeout_disconnects() {
     writer
         .send(enc(
             T_HELLO,
-            &json!({"inst_id":"sc4","token":env.token,"ver":"1"}),
+            &json!({"inst_id":"sc4","token":env.token,"ver":"2"}),
         ))
         .await
         .expect("hello");

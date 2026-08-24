@@ -29,9 +29,7 @@ use rs_iot::host::{BridgeRegistry, CtlRegistry, HostContext};
 use rs_iot::plugin::instance::{InstState, InstanceManager};
 use rs_iot::plugin::traits::Processor;
 use rs_iot::transform::passthrough::Passthrough;
-use rs_iot::types::{
-    AppType, HostKind, Hwid, InstConfig, PluginName, Sample, SampleValue,
-};
+use rs_iot::types::{AppType, HostKind, Hwid, InstConfig, PluginName, Sample, SampleValue};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use tokio::sync::mpsc;

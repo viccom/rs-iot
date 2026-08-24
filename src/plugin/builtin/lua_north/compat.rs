@@ -338,6 +338,8 @@ mod tests {
             role: core_::api::Role::North,
             self_writes: None, // North 无 EventBus 订阅面，无自环（T8）
             alarm: Default::default(),
+            model: None,
+            gate_rejected: Default::default(),
         };
         core_::api::register(&lua, &ac)?;
         let cfg_v = ncfg.to_script_cfg(ctx.hwid.as_str(), inst.inst_id.as_str());

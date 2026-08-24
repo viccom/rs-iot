@@ -32,6 +32,57 @@ use std::path::Path;
 /// §5.0 分层（B 阶段 luaTransform/luaNorth 复用 api 时会拖进 collector 壳）。
 pub(crate) type RuntimeDevs = std::sync::Arc<std::sync::Mutex<std::collections::BTreeSet<String>>>;
 
+// ---------- M-3 模型点表快照（校验闸 + 模型感知 API 的数据源） ----------
+
+/// 单 tag 模型快照（名称/类型/单位；地址已在装配期解析，脚本不感知地址语法）。
+#[derive(Debug, Clone)]
+pub(crate) struct TagSnap {
+    pub(crate) name: String,
+    pub(crate) data_type: String,
+    pub(crate) unit: Option<String>,
+}
+
+/// 单设备模型快照（devreg 条目 ∪ 模型模板，装配期 `expand` 产物）。
+#[derive(Debug, Clone)]
+pub(crate) struct DeviceSnap {
+    pub(crate) devid: String,
+    pub(crate) model_id: String,
+    pub(crate) params: std::collections::BTreeMap<String, String>,
+    /// 模型 tags（空 = 未定义点表——迁移空点表设备兼容放行）。
+    pub(crate) tags: Vec<TagSnap>,
+}
+
+/// 模型点表快照（Arc 共享只读；Collector 装配时建一次，reload 重建）。
+pub(crate) type ModelSnapshot =
+    std::sync::Arc<std::sync::Mutex<std::collections::BTreeMap<String, DeviceSnap>>>;
+
+/// 从装配展开产物构建快照（devid → 设备模型）。
+pub(crate) fn model_snapshot(expanded: &[crate::model::expand::ExpandedDevice]) -> ModelSnapshot {
+    let mut m = std::collections::BTreeMap::new();
+    for ex in expanded {
+        let tags = ex
+            .model
+            .tags
+            .iter()
+            .map(|t| TagSnap {
+                name: t.name.clone(),
+                data_type: t.data_type.clone(),
+                unit: t.unit.clone(),
+            })
+            .collect();
+        m.insert(
+            ex.devid.clone(),
+            DeviceSnap {
+                devid: ex.devid.clone(),
+                model_id: ex.model.model_id.clone(),
+                params: ex.entry.params.clone(),
+                tags,
+            },
+        );
+    }
+    std::sync::Arc::new(std::sync::Mutex::new(m))
+}
+
 /// 自写点记录表（Q6 自环防护，阶段 C T8）：`(devid, tag)` → 最近一次写入时刻。
 /// 仅 Role::Transform（luaTransform 壳）构造 ApiCtx 时传 Some——api 层
 /// `push_sample` 发送成功后记录，壳层收 Rtdata 时窗口内命中即跳过（自身输出
@@ -103,6 +154,46 @@ pub(crate) fn try_send_outcome(tx: &SampleSender, sample: Sample) -> SendOutcome
         Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => SendOutcome::Dropped,
         Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => SendOutcome::Closed,
     }
+}
+
+/// M-3 校验闸：devid ∈ 快照设备 ∧ tags ⊆ 模型 tags（模型 tags 非空时）。
+///
+/// 语义：**未建模不放行**（严格校验，决策 D-M4）；空 tags 模型 = 迁移空点表设备，
+/// 兼容放行（无点表可校验，新建设备模型必有 tags）。返回 Err 消息并计数。
+pub(crate) fn gate_check(
+    model: &Option<ModelSnapshot>,
+    devid: &str,
+    tags: &[String],
+    gate_rejected: &std::sync::Arc<std::sync::atomic::AtomicU64>,
+) -> Result<(), String> {
+    let Some(snapshot) = model else {
+        return Ok(()); // 非 Collector（transform/north）：无闸
+    };
+    let snap = snapshot.lock().unwrap();
+    let Some(dev) = snap.get(devid) else {
+        gate_rejected.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        return Err(format!(
+            "设备 {devid} 未绑定到本实例（模型点表快照无此设备）——先建设备并绑定"
+        ));
+    };
+    if dev.tags.is_empty() {
+        return Ok(()); // 空模型（迁移空点表）：兼容放行
+    }
+    for t in tags {
+        if !dev.tags.iter().any(|s| s.name == *t) {
+            gate_rejected.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            return Err(format!(
+                "标签 {devid}.{t} 未在模型 {} 点表（tags: {})——先建模",
+                dev.model_id,
+                dev.tags
+                    .iter()
+                    .map(|s| s.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// 组 `Sample` 推 hub（`set_value`/`set_values` 共用，DRY）。
@@ -262,6 +353,13 @@ pub(crate) struct ApiCtx<'a> {
     /// `clear_event` 消费（C6 跨角色全注入），壳层 flush 读计数落 stat
     /// `alarm_rate_limited`（详见 [`alarm::AlarmState`]）。
     pub(crate) alarm: AlarmStats,
+    /// 模型点表快照（M-3）：Collector 装配期展开产物——`set_value/set_values`
+    /// 校验闸 + `ctx:devices()/tags()/param()` 数据源。Transform/North 传 None
+    /// （加工/北向不是采集源，无闸、无模型感知 API）。
+    pub(crate) model: Option<ModelSnapshot>,
+    /// 校验闸拒绝计数（M-3，`set_value` 未建模上报；collect 闸用同 Arc 共享，
+    /// 壳层 flush 落 stat `gate_rejected`）。
+    pub(crate) gate_rejected: std::sync::Arc<std::sync::atomic::AtomicU64>,
 }
 
 /// 在 `lua` 上注册 ctx 全局对象 + host 函数（`run` 调用）。
@@ -468,11 +566,15 @@ pub(crate) fn register(lua: &Lua, ac: &ApiCtx<'_>) -> mlua::Result<()> {
     // --- L2 ctx:set_value(devid, tag, v) → 推 Sample 到 hub（数据上行总线）---
     // devid 由脚本显式传入（多设备支持：脚本可对 ctx:list_devices() 的任一 devid 上报）。
     // value 经 lua_value_to_sample 转 SampleValue；单点便捷，等价 set_values(devid,{[tag]=v})。
+    // M-3 校验闸（Collector + 快照）：devid ∈ 绑定 ∧ tag ∈ 模型 tags → 否则 lua error
+    //（脚本 pcall 可捕获）+ 宿主 warn + gate_rejected 计数。
     let tx_set = ac.tx.clone();
     let hwid_set = ac.ctx_host.hwid.clone();
     let rt_set = ac.runtime_devs.clone();
     let drop_set = ac.dropped.clone();
     let sw_set = ac.self_writes.clone();
+    let model_set = ac.model.clone();
+    let gate_set = ac.gate_rejected.clone();
     let set_value_fn = lua.create_async_function(
         move |_lua, (_self, devid, tag, v): (Value, LuaString, LuaString, Value)| {
             let tx = tx_set.clone();
@@ -480,9 +582,14 @@ pub(crate) fn register(lua: &Lua, ac: &ApiCtx<'_>) -> mlua::Result<()> {
             let rt = rt_set.clone();
             let dropped = drop_set.clone();
             let self_writes = sw_set.clone();
+            let model = model_set.clone();
+            let gate = gate_set.clone();
             async move {
                 let devid = devid.to_string_lossy().to_string();
                 let tag = tag.to_string_lossy().to_string();
+                if let Err(msg) = gate_check(&model, &devid, &[tag.clone()], &gate) {
+                    return Err(mlua::Error::RuntimeError(msg));
+                }
                 let sv = lua_value_to_sample(&v)
                     .ok_or_else(|| mlua::Error::RuntimeError("set_value: 不支持的值类型".into()))?;
                 let mut values = std::collections::BTreeMap::new();
@@ -496,12 +603,14 @@ pub(crate) fn register(lua: &Lua, ac: &ApiCtx<'_>) -> mlua::Result<()> {
 
     // --- L2 ctx:set_values(devid, {tag=v,...}) → 批量推一个设备多 tag（一个 Sample）---
     // 贴合 Sample 多变量语义：on_data 解析被动帧多点一次上报（点间同时刻 timestamp）。
-    // table 经 pairs 遍历 → BTreeMap；空 table 不上报。
+    // table 经 pairs 遍历 → BTreeMap；空 table 不上报。M-3 校验闸同 set_value。
     let tx_sv = ac.tx.clone();
     let hwid_sv = ac.ctx_host.hwid.clone();
     let rt_sv = ac.runtime_devs.clone();
     let drop_sv = ac.dropped.clone();
     let sw_sv = ac.self_writes.clone();
+    let model_sv = ac.model.clone();
+    let gate_sv = ac.gate_rejected.clone();
     let set_values_fn = lua.create_async_function(
         move |_lua, (_self, devid, table): (Value, LuaString, mlua::Table)| {
             let tx = tx_sv.clone();
@@ -509,6 +618,8 @@ pub(crate) fn register(lua: &Lua, ac: &ApiCtx<'_>) -> mlua::Result<()> {
             let rt = rt_sv.clone();
             let dropped = drop_sv.clone();
             let self_writes = sw_sv.clone();
+            let model = model_sv.clone();
+            let gate = gate_sv.clone();
             async move {
                 let devid = devid.to_string_lossy().to_string();
                 let mut values = std::collections::BTreeMap::new();
@@ -517,6 +628,10 @@ pub(crate) fn register(lua: &Lua, ac: &ApiCtx<'_>) -> mlua::Result<()> {
                     if let Some(sv) = lua_value_to_sample(&v) {
                         values.insert(k, sv);
                     }
+                }
+                let tags: Vec<String> = values.keys().cloned().collect();
+                if let Err(msg) = gate_check(&model, &devid, &tags, &gate) {
+                    return Err(mlua::Error::RuntimeError(msg));
                 }
                 push_sample(&tx, &hwid, &rt, &dropped, &self_writes, devid, values).await;
                 Ok(())
@@ -637,6 +752,53 @@ pub(crate) fn register(lua: &Lua, ac: &ApiCtx<'_>) -> mlua::Result<()> {
         Ok(t)
     })?;
     ctx.set("list_devices", list_devices_fn)?;
+
+    // --- M-3 lua v2 模型感知 API（Collector 快照注入时注册）---
+    // ctx:devices() -> [{devid=..., model=...}]：绑定设备全量（含模型 id）。
+    // ctx:tags(devid) -> {name=type,...}：设备模型点表（名→类型）；未绑定/无快照 → 空表。
+    // ctx:param(devid, name) -> str|nil：设备实例化参数。
+    // 快照为装配期展开产物（Arc 只读）；Transform/North 无快照 → 不注册（脚本调
+    // 用报 nil——能力面按角色裁剪，与 transport 同语义）。
+    if let Some(snapshot) = &ac.model {
+        let snap_devices = snapshot.clone();
+        let devices_fn = lua.create_function(move |lua, _self: Value| {
+            let t = lua.create_table()?;
+            let snap = snap_devices.lock().unwrap();
+            for (i, dev) in snap.values().enumerate() {
+                let row = lua.create_table()?;
+                row.set("devid", dev.devid.clone())?;
+                row.set("model", dev.model_id.clone())?;
+                t.set(i + 1, row)?;
+            }
+            Ok(t)
+        })?;
+        ctx.set("devices", devices_fn)?;
+
+        let snap_tags = snapshot.clone();
+        let tags_fn = lua.create_function(move |lua, (_self, devid): (Value, String)| {
+            let t = lua.create_table()?;
+            let snap = snap_tags.lock().unwrap();
+            if let Some(dev) = snap.get(&devid) {
+                for tag in &dev.tags {
+                    t.set(tag.name.clone(), tag.data_type.clone())?;
+                }
+            }
+            Ok(t)
+        })?;
+        ctx.set("tags", tags_fn)?;
+
+        let snap_param = snapshot.clone();
+        let param_fn =
+            lua.create_function(move |lua, (_self, devid, name): (Value, String, String)| {
+                let snap = snap_param.lock().unwrap();
+                let v = snap.get(&devid).and_then(|d| d.params.get(&name)).cloned();
+                match v {
+                    Some(s) => Ok(Value::String(lua.create_string(&s)?)),
+                    None => Ok(Value::Nil),
+                }
+            })?;
+        ctx.set("param", param_fn)?;
+    }
 
     // --- L1+ ctx:transport() -> str：底层链路类型（tcp/serial/udp）---
     // 脚本据此选帧格式（serial → PDU+CRC16、tcp → MBAP 头、udp → 裸 RTU/自定义）。

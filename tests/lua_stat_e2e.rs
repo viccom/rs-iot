@@ -59,6 +59,19 @@ async fn stat_written_after_collect() {
     let pt = shutdown.child_token();
     let _pipeline = tokio::spawn(rs_iot::pipeline::run(ctx, hub_rx, proc, 1, pt));
 
+    // M-2 语义：绑定设备注册（空点表 → 空模型 → 闸放行）。
+    common::register_devices_as_models(
+        &client,
+        "lua-st",
+        "luaClient",
+        vec![rs_iot::types::DeviceSpec {
+            label: "d".into(),
+            value: "devST".into(),
+            children: vec![],
+            slave_id: None,
+        }],
+    )
+    .await;
     let inst = InstConfig {
         inst_id: "lua-st".into(),
         inst_name: "st".into(),
@@ -170,6 +183,19 @@ async fn runtime_devices_recorded_in_stat() {
     let pt = shutdown.child_token();
     let _pipeline = tokio::spawn(rs_iot::pipeline::run(ctx, hub_rx, proc, 1, pt));
 
+    // M-2 语义：绑定设备注册（空点表 → 空模型 → 闸放行）。
+    common::register_devices_as_models(
+        &client,
+        "lua-rt",
+        "luaClient",
+        vec![rs_iot::types::DeviceSpec {
+            label: "d".into(),
+            value: "devCF".into(),
+            children: vec![],
+            slave_id: None,
+        }],
+    )
+    .await;
     let inst = InstConfig {
         inst_id: "lua-rt".into(),
         inst_name: "rt".into(),
@@ -207,9 +233,11 @@ async fn runtime_devices_recorded_in_stat() {
         devs.contains(&"devCF".to_string()),
         "配置内设备 devCF 应被记录，得到 {devs:?}"
     );
+    // M-3 严格校验（D-M4）：配置外动态设备 devRT 未绑定 → collect 整设备被闸拒
+    // （不记录、不上报）——测试语义从"动态设备被记录"改为"未建模设备被拒"。
     assert!(
-        devs.contains(&"devRT".to_string()),
-        "配置外运行时上报设备 devRT 也应被记录（前端追溯数据源），得到 {devs:?}"
+        !devs.contains(&"devRT".to_string()),
+        "未建模动态设备 devRT 应被闸拒（不记录），得到 {devs:?}"
     );
 
     shutdown.cancel();
@@ -258,6 +286,19 @@ async fn stat_marked_stopped_on_exit() {
     let pt = shutdown.child_token();
     let _pipeline = tokio::spawn(rs_iot::pipeline::run(ctx, hub_rx, proc, 1, pt));
 
+    // M-2 语义：绑定设备注册（空点表 → 空模型 → 闸放行）。
+    common::register_devices_as_models(
+        &client,
+        "lua-st2",
+        "luaClient",
+        vec![rs_iot::types::DeviceSpec {
+            label: "d".into(),
+            value: "devST2".into(),
+            children: vec![],
+            slave_id: None,
+        }],
+    )
+    .await;
     let inst = InstConfig {
         inst_id: "lua-st2".into(),
         inst_name: "st2".into(),

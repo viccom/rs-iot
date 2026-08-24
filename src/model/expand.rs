@@ -118,8 +118,21 @@ pub async fn expand_to_specs(
     bindings: &[DeviceBinding],
 ) -> Result<Vec<DeviceSpec>, RsIotError> {
     let mut out = Vec::with_capacity(bindings.len());
+    for ex in expand_devices(c, bindings).await? {
+        out.push(ex.to_device_spec());
+    }
+    Ok(out)
+}
+
+/// 展开实例全部绑定 → 完整展开产物列表（M-3 模型快照/校验闸的数据源；
+/// 含 devreg 条目与设备模型，供 effective props/标签查询）。
+pub async fn expand_devices(
+    c: &EmbeddedClient,
+    bindings: &[DeviceBinding],
+) -> Result<Vec<ExpandedDevice>, RsIotError> {
+    let mut out = Vec::with_capacity(bindings.len());
     for b in bindings {
-        out.push(expand_binding(c, b).await?.to_device_spec());
+        out.push(expand_binding(c, b).await?);
     }
     Ok(out)
 }

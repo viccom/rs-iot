@@ -59,6 +59,19 @@ async fn l2_set_value_writes_rtdata() {
     let pt = shutdown.child_token();
     let _pipeline = tokio::spawn(rs_iot::pipeline::run(ctx, hub_rx, proc, 1, pt));
 
+    // M-2 语义：绑定设备注册（空点表 → 空模型 → 闸放行脚本动态 tag）。
+    common::register_devices_as_models(
+        &client,
+        "lua-l2",
+        "luaClient",
+        vec![rs_iot::types::DeviceSpec {
+            label: "d".into(),
+            value: "devL2".into(),
+            children: vec![],
+            slave_id: None,
+        }],
+    )
+    .await;
     let inst = InstConfig {
         inst_id: "lua-l2".into(),
         inst_name: "l2".into(),
@@ -143,6 +156,27 @@ async fn flat_collect_attributed_to_first_device() {
     let pt = shutdown.child_token();
     let _pipeline = tokio::spawn(rs_iot::pipeline::run(ctx, hub_rx, proc, 1, pt));
 
+    // M-2 语义：绑定设备注册（空点表 → 空模型 → 闸放行）。
+    common::register_devices_as_models(
+        &client,
+        "lua-md",
+        "luaClient",
+        vec![
+            rs_iot::types::DeviceSpec {
+                label: "f".into(),
+                value: "devFirst".into(),
+                children: vec![],
+                slave_id: None,
+            },
+            rs_iot::types::DeviceSpec {
+                label: "s".into(),
+                value: "devSecond".into(),
+                children: vec![],
+                slave_id: None,
+            },
+        ],
+    )
+    .await;
     let inst = InstConfig {
         inst_id: "lua-md".into(),
         inst_name: "md".into(),
