@@ -20,9 +20,14 @@ use tokio_util::sync::CancellationToken;
 use tower::ServiceExt;
 
 /// 建测试 app：lux + InstanceManager + REST 路由（模型面无数据链路，不起
-/// pipeline）。返回 (router, lux handle)。
+/// pipeline）。data_dir 先整删（lux WAL 持久化跨运行残留——重复跑同套件时
+/// 旧数据会让 create-only 断言误判；lua_transform_e2e real_chain 同款先整删）。
+/// 返回 (router, lux handle)。
 async fn test_app(name: &str) -> (axum::Router, lux::ServerHandle) {
     let data_dir = common::test_data_dir(name);
+    if data_dir.exists() {
+        std::fs::remove_dir_all(&data_dir).expect("清空上轮测试 data_dir");
+    }
     let (handle, client) = common::start_lux(data_dir.to_str().expect("utf8")).await;
     rs_iot::db::identity::bootstrap(&client)
         .await
@@ -403,4 +408,69 @@ async fn devreg_list_filter_effective_and_delete() {
     )
     .await;
     assert_eq!(st, StatusCode::NOT_FOUND);
+}
+
+/// 一次性迁移：旧内联实例 → 隐式模型 + devreg 条目；幂等重跑零转换。
+#[tokio::test]
+async fn migrate_inline_devices_idempotent() {
+    let (app, handle) = test_app("migrate").await;
+    let token = jwt(&app).await;
+
+    // 种旧式实例（modbus 内联点表，带 props 初值与 slave_id）。
+    let legacy = serde_json::json!({
+        "inst_id": "mb1", "app_code": "modbusClient", "app_type": "south",
+        "app_config": {"endpoint": "127.0.0.1:1502"},
+        "devices": [{
+            "label": "1号表", "value": "mvx1",
+            "children": [
+                {"label": "温度", "value": "holding:0:f32", "type": "f32",
+                 "props": {"history": true}},
+                {"label": "电压", "value": "holding:2:f32", "type": "f32"}
+            ],
+            "slave_id": 3
+        }]
+    });
+    handle
+        .client()
+        .execute("HSET", &["instances", "mb1", &legacy.to_string()])
+        .await
+        .unwrap();
+
+    // 首跑：1 模型 + 1 设备 + 1 实例。
+    let (st, v) = post_json(
+        &app,
+        &token,
+        "/api/v1/migrate/inline-devices",
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "迁移成功：{v}");
+    assert_eq!(v["converted_models"], 1, "{v}");
+    assert_eq!(v["converted_devices"], 1, "{v}");
+    assert_eq!(v["converted_instances"], 1, "{v}");
+
+    // 新结构生效（可采集前验证）：模型 addr 原样、props 带入；设备入册。
+    let (_, m) = get_json(&app, &token, "/api/v1/devmodels?model_id=_inline_mb1_mvx1").await;
+    assert!(m.get("_inline_mb1_mvx1").is_some(), "隐式模型已建：{m}");
+    let model = &m["_inline_mb1_mvx1"];
+    assert_eq!(model["tags"][0]["addr"], "holding:0:f32");
+    assert_eq!(model["tags"][0]["props"]["history"], true);
+    let (_, d) = get_json(&app, &token, "/api/v1/devreg?devid=mvx1").await;
+    assert!(d.get("mvx1").is_some(), "设备入册：{d}");
+    assert_eq!(d["mvx1"]["model"], "_inline_mb1_mvx1");
+    // effective 摘要可算（模板默认流转）。
+    assert_eq!(d["mvx1"]["effective"]["温度"]["history"], true);
+
+    // 幂等重跑：零转换。
+    let (st, v) = post_json(
+        &app,
+        &token,
+        "/api/v1/migrate/inline-devices",
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(v["converted_models"], 0, "重跑零转换：{v}");
+    assert_eq!(v["converted_devices"], 0, "{v}");
+    assert_eq!(v["converted_instances"], 0, "{v}");
 }

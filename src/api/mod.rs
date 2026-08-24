@@ -141,6 +141,10 @@ pub fn build_router(state: AppState) -> axum::Router {
         .route("/api/v1/devreg", get(routes_devreg::list))
         .route("/api/v1/devreg/set", post(routes_devreg::set))
         .route("/api/v1/devreg/delete", post(routes_devreg::delete))
+        .route(
+            "/api/v1/migrate/inline-devices",
+            post(routes_devreg::migrate_inline),
+        )
         .route("/api/v1/devices", get(routes_device::list))
         .route("/api/v1/device/get", get(routes_device::get))
         .route("/api/v1/device/set", post(routes_device::set))
