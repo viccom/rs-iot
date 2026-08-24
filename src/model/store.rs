@@ -32,6 +32,7 @@ pub async fn set_model(c: &EmbeddedClient, m: &DeviceModel) -> Result<(), RsIotE
     validate::validate_model(m)?;
     let raw = serde_json::to_string(m)?;
     c.execute("HSET", &[MODELS, &m.model_id, &raw]).await?;
+    crate::model::cache::refresh_after_write(c).await;
     Ok(())
 }
 
@@ -106,6 +107,7 @@ pub async fn delete_model(
         return Ok(Some(DeleteOutcome::Referenced(refs)));
     }
     c.execute("HDEL", &[MODELS, model_id]).await?;
+    crate::model::cache::refresh_after_write(c).await;
     Ok(Some(DeleteOutcome::Deleted))
 }
 
@@ -126,6 +128,7 @@ pub async fn set_device(c: &EmbeddedClient, dev: &DeviceEntry) -> Result<(), RsI
     validate::validate_device_entry(dev, &model)?;
     let raw = serde_json::to_string(dev)?;
     c.execute("HSET", &[DEVICES, &dev.devid, &raw]).await?;
+    crate::model::cache::refresh_after_write(c).await;
     Ok(())
 }
 
@@ -169,6 +172,7 @@ pub async fn delete_device(c: &EmbeddedClient, devid: &str) -> Result<Option<()>
     if let Err(e) = crate::db::rtdata::delete_device(c, devid).await {
         tracing::warn!("[model] delete rtdata:{devid} failed: {e}");
     }
+    crate::model::cache::refresh_after_write(c).await;
     Ok(Some(()))
 }
 

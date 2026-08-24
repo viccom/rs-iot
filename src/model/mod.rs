@@ -8,6 +8,7 @@
 //! 声明：模型化只发生在配置与元数据面。
 
 pub mod addr;
+pub mod cache;
 pub mod effective;
 pub mod migrate;
 pub mod store;
