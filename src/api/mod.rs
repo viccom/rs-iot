@@ -28,6 +28,7 @@ pub mod routes_rtdata_subscribe;
 pub mod routes_secret;
 pub mod routes_stat;
 pub mod routes_sys;
+pub mod routes_tag;
 pub mod routes_trace;
 pub mod routes_user;
 
@@ -127,6 +128,10 @@ pub fn build_router(state: AppState) -> axum::Router {
         .route("/api/v1/purge", post(routes_inst::purge))
         .route("/api/v1/inst/stats", get(routes_stat::stats))
         // device CRUD
+        .route("/api/v1/tags", get(routes_tag::list))
+        .route("/api/v1/tag/set", post(routes_tag::set))
+        .route("/api/v1/tag/batch", post(routes_tag::batch))
+        .route("/api/v1/tag/delete", post(routes_tag::delete))
         .route("/api/v1/devices", get(routes_device::list))
         .route("/api/v1/device/get", get(routes_device::get))
         .route("/api/v1/device/set", post(routes_device::set))
