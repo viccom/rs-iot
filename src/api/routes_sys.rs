@@ -154,10 +154,10 @@ pub async fn startinst(State(st): State<AppState>, Json(req): Json<IdReq>) -> Re
         }
         Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
         Ok(()) => {
-            // Tag Registry 声明式初值增量刷新（实例配置可能改了 children[].props；
-            // fail-soft：失败不影响启动结果）。
-            if let Err(e) = crate::db::tag_registry::refresh_declared(&st.lux).await {
-                tracing::warn!("[tag-registry] startinst 后 declared 刷新失败: {e}");
+            // effective 物化缓存增量刷新（实例启动可能伴随模型/设备注册变更；
+            // fail-soft：失败不影响启动结果——下个写路径兜底）。
+            if let Err(e) = crate::model::cache::reload(&st.lux).await {
+                tracing::warn!("[model] startinst 后 effective 缓存刷新失败: {e}");
             }
             Json(serde_json::json!({"status": "ok"})).into_response()
         }

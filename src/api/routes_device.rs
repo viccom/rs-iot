@@ -250,9 +250,9 @@ mod tests {
             .as_object()
             .unwrap()
             .iter()
-            .filter_map(|(k, v)| match v {
-                serde_json::Value::String(s) => Some((k.clone(), s.clone())),
-                other => Some((k.clone(), other.to_string())),
+            .map(|(k, v)| match v {
+                serde_json::Value::String(s) => (k.clone(), s.clone()),
+                other => (k.clone(), other.to_string()),
             })
             .collect();
         assert_eq!(bind.get("slave_id").map(String::as_str), Some("2"));

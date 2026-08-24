@@ -39,6 +39,9 @@ pub(crate) type RuntimeDevs = std::sync::Arc<std::sync::Mutex<std::collections::
 pub(crate) struct TagSnap {
     pub(crate) name: String,
     pub(crate) data_type: String,
+    /// 工程单位（快照预留字段：ctx:tags 当前只暴露名→类型，unit 待 API 增强时
+    /// 消费——届时编译器提示移除本 expect）。
+    #[expect(dead_code)]
     pub(crate) unit: Option<String>,
 }
 
@@ -587,7 +590,7 @@ pub(crate) fn register(lua: &Lua, ac: &ApiCtx<'_>) -> mlua::Result<()> {
             async move {
                 let devid = devid.to_string_lossy().to_string();
                 let tag = tag.to_string_lossy().to_string();
-                if let Err(msg) = gate_check(&model, &devid, &[tag.clone()], &gate) {
+                if let Err(msg) = gate_check(&model, &devid, std::slice::from_ref(&tag), &gate) {
                     return Err(mlua::Error::RuntimeError(msg));
                 }
                 let sv = lua_value_to_sample(&v)

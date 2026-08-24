@@ -14,6 +14,10 @@
 //! - `rtdata:<devId>` : Hash，field=tag, value=[ts, localTime, value]（M2 实时数据缓存）
 //! - `devmodels` : Hash，field=model_id, value=DeviceModel JSON（设备模型注册表 M-1，`src/model/`）
 //! - `devreg`    : Hash，field=devid, value=DeviceEntry JSON（全局设备注册表 M-1）
+//! - `discoveries`: Hash，field=tag_key, value=Discovery JSON（发现队列 M-4，`src/model/discovery.rs`——未建模标签待人工 adopt）
+//! - `tags`      : **已退役**（M-4 T3）——Phase 1a 运行时属性卡被 devreg.overrides
+//!   吸收（D-M3）；遗留数据只读导出过渡（GET /api/v1/tags/legacy-export），升级
+//!   后可人工删除
 
 use crate::error::RsIotError;
 use lux::{EmbeddedClient, EmbeddedValue};

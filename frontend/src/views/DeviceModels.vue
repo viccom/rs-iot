@@ -1,14 +1,15 @@
 <script setup lang="ts">
 // frontend/src/views/DeviceModels.vue
-// 设备模型页（元数据唯一来源管理面，M-1）：三面板——
+// 设备模型页（元数据唯一来源管理面，M-1）：四面板——
 // ① 模型面板（devmodels：建/改/删 + 参数化地址模板 + 模板默认 props）；
 // ② 设备注册表面板（devreg：建设备选模型 + 实例化参数 + per-tag 三态覆盖）；
-// ③ 标签总览（全设备 effective 平铺：模板∪覆盖 的最终生效视图）。
+// ③ 标签总览（全设备 effective 平铺：模板∪覆盖 的最终生效视图）；
+// ④ 发现队列（M-4：未建模标签列出 + 多选 adopt 一键建模 + 按设备清除）。
 import { computed, onMounted, ref } from 'vue'
-import { useDevregStore } from '../stores/devreg'
+import { useDevregStore, type DiscoveryItem } from '../stores/devreg'
 import { useWorkspacePage } from '../composables/useWorkspacePage'
 import {
-  extractParams, isValidId, mergeTagProps, triStateText,
+  baseProps, extractParams, isValidId, mergeTagProps, triStateText,
   validateDevice, validateModel,
   type DeviceEntry, type DeviceModel, type TagOverride, type TagTemplate,
 } from '../lib/devmeta'
@@ -108,7 +109,7 @@ const flatRows = computed<FlatRow[]>(() => {
     if (!model) continue // 悬空引用（防御，写入侧已拒）
     for (const t of model.tags) {
       const ov = dev.overrides[t.name]
-      const eff = mergeTagProps(t.props, ov)
+      const eff = mergeTagProps(baseProps(t), ov)
       rows.push({
         key: `${dev.devid}.${t.name}`,
         devid: dev.devid,
@@ -133,6 +134,70 @@ const filteredRows = computed(() => {
   return flatRows.value.filter(r =>
     r.key.toLowerCase().includes(q) || r.model.toLowerCase().includes(q))
 })
+
+// ---- 发现队列（M-4：未建模标签 → 人工确认 adopt 一键建模）----
+/** 面板选中条目 key 集合（`<devid>.<tag>`）。 */
+const pickedDisc = ref(new Set<string>())
+const adoptModelId = ref('')
+const adoptDataType = ref('f32')
+const adoptBusy = ref(false)
+const adoptNotice = ref('')
+
+function togglePick(key: string) {
+  const s = new Set(pickedDisc.value)
+  if (s.has(key)) s.delete(key)
+  else s.add(key)
+  pickedDisc.value = s
+}
+/** 按目标模型分组的待采纳建议（同 tag 名去重——REST adopt 同名跳过）。 */
+const pickedByModel = computed(() => {
+  const groups = new Map<string, Set<string>>()
+  for (const item of store.discoveries) {
+    if (!pickedDisc.value.has(`${item.devid}.${item.tag}`)) continue
+    const dev = store.devices[item.devid]
+    const target = adoptModelId.value || dev?.model || ''
+    if (!target) continue
+    if (!groups.has(target)) groups.set(target, new Set())
+    groups.get(target)!.add(item.tag)
+  }
+  return groups
+})
+
+async function onAdopt() {
+  if (adoptBusy.value || !pickedByModel.value.size) return
+  if (!isValidId(adoptDataType.value) && adoptDataType.value.includes(' ')) return
+  adoptBusy.value = true
+  adoptNotice.value = ''
+  const merged = { merged: 0, swept: 0 }
+  for (const [modelId, tags] of pickedByModel.value) {
+    const r = await store.adopt(modelId, [...tags].map(name => ({
+      name, data_type: adoptDataType.value.trim(),
+    })))
+    if (!r) {
+      adoptBusy.value = false
+      return
+    }
+    merged.merged += r.merged
+    merged.swept += r.swept
+  }
+  adoptBusy.value = false
+  pickedDisc.value = new Set()
+  adoptNotice.value = `采纳完成：并入 ${merged.merged} 个 tag，队列清除 ${merged.swept} 条`
+}
+
+async function onClearDisc() {
+  if (opBusy.value) return
+  if (!confirm('清空发现队列？（未建模数据将重新计数发现）')) return
+  opBusy.value = true
+  await store.clearDiscoveries()
+  opBusy.value = false
+  pickedDisc.value = new Set()
+}
+
+async function onClearDiscDevice(devId: string) {
+  if (!confirm(`清除设备 ${devId} 的发现条目？`)) return
+  await store.clearDiscoveries(devId)
+}
 
 // ---- 一次性迁移 ----
 const migrating = ref(false)
@@ -164,7 +229,10 @@ function notify(msg: string) {
   noticeTimer = setTimeout(() => { opNotice.value = '' }, 3000)
 }
 
-onMounted(() => { void store.loadAll() })
+onMounted(() => {
+  void store.loadAll()
+  void store.loadDiscoveries()
+})
 
 useWorkspacePage(() => ({
   pageSummary: selectedModelId.value
@@ -174,7 +242,7 @@ useWorkspacePage(() => ({
     `模型 ${modelList.value.length} 个`,
     `设备 ${deviceList.value.length} 台`,
     `标签（effective）${flatRows.value.length} 个`,
-    `当前模型 ${selectedModelId.value || '未选中'}`,
+    `待建模发现 ${store.discoveries.length} 条`,
   ],
 }))
 </script>
@@ -234,9 +302,9 @@ useWorkspacePage(() => ({
               <td>{{ t.data_type }}</td>
               <td class="mono addr" :title="`占位符: ${(extractParams(t.addr ?? '') ?? []).join(', ') || '无'}`">{{ t.addr || '—' }}</td>
               <td>{{ t.rw === 'r' ? '只读' : '读写' }}</td>
-              <td>{{ t.props.history ? '✓' : '—' }}</td>
-              <td>{{ t.props.deadband ?? '—' }}</td>
-              <td>{{ t.props.unit || '—' }}</td>
+              <td>{{ baseProps(t).history ? '✓' : '—' }}</td>
+              <td>{{ baseProps(t).deadband ?? '—' }}</td>
+              <td>{{ baseProps(t).unit || '—' }}</td>
             </tr>
           </tbody>
         </table>
@@ -286,10 +354,10 @@ useWorkspacePage(() => ({
           <tbody>
             <tr v-for="t in deviceModelOf(selectedDevice)!.tags" :key="t.name">
               <td class="mono">{{ t.name }}</td>
-              <td>{{ triStateText(t.props.history ? '✓' : '—', selectedDevice.overrides[t.name]?.history === undefined ? undefined : String(selectedDevice.overrides[t.name]?.history), '—') }}</td>
-              <td>{{ triStateText(String(t.props.deadband ?? '—'), selectedDevice.overrides[t.name]?.deadband, '（显式关）') }}</td>
-              <td>{{ triStateText(t.props.unit ?? '—', selectedDevice.overrides[t.name]?.unit ?? undefined, '（已清）') }}</td>
-              <td>{{ triStateText(t.props.desc ?? '—', selectedDevice.overrides[t.name]?.desc ?? undefined, '（已清）') }}</td>
+              <td>{{ triStateText(baseProps(t).history ? '✓' : '—', selectedDevice.overrides[t.name]?.history === undefined ? undefined : String(selectedDevice.overrides[t.name]?.history), '—') }}</td>
+              <td>{{ triStateText(String(baseProps(t).deadband ?? '—'), selectedDevice.overrides[t.name]?.deadband, '（显式关）') }}</td>
+              <td>{{ triStateText(baseProps(t).unit ?? '—', selectedDevice.overrides[t.name]?.unit ?? undefined, '（已清）') }}</td>
+              <td>{{ triStateText(baseProps(t).desc ?? '—', selectedDevice.overrides[t.name]?.desc ?? undefined, '（已清）') }}</td>
               <td>
                 <span class="src" :class="{ ov: !!selectedDevice.overrides[t.name] }">
                   {{ selectedDevice.overrides[t.name] ? '覆盖' : '模板' }}
@@ -332,6 +400,62 @@ useWorkspacePage(() => ({
         </tbody>
       </table>
       <p v-if="!filteredRows.length" class="empty">无标签（先建模 + 建设备，或执行迁移）。</p>
+    </article>
+
+    <!-- 面板④：发现队列（M-4：未建模标签 → adopt 一键建模）-->
+    <article class="page-panel wide">
+      <div class="panel-head">
+        <div>
+          <p class="panel-label">建模工作流入口</p>
+          <h3>发现队列（{{ store.discoveries.length }}）</h3>
+        </div>
+        <div class="head-actions">
+          <button class="btn-ghost" :disabled="!store.discoveries.length || opBusy" @click="onClearDisc">清空队列</button>
+        </div>
+      </div>
+      <p v-if="!store.discoveries.length" class="empty">
+        队列为空——出口数据全部已建模（或暂无脏数据）。数据流中出现未建模标签时会在此列出。
+      </p>
+      <template v-else>
+        <div class="disc-toolbar">
+          <label class="disc-field">
+            <span>目标模型（缺省 = 条目设备所属模型）</span>
+            <select v-model="adoptModelId">
+              <option value="">（设备所属模型）</option>
+              <option v-for="m in modelList" :key="m.model_id" :value="m.model_id">{{ m.model_id }}</option>
+            </select>
+          </label>
+          <label class="disc-field">
+            <span>数据类型</span>
+            <input v-model="adoptDataType" placeholder="f32 / f64 / i16 / bool / string…" />
+          </label>
+          <button
+            class="btn-adopt" :disabled="!pickedDisc.size || adoptBusy"
+            @click="onAdopt"
+          >{{ adoptBusy ? '采纳中…' : `采纳所选（${pickedByModel.size} 模型）` }}</button>
+        </div>
+        <table class="mini-table flat">
+          <thead>
+            <tr><th></th><th>标签</th><th>所属模型</th><th>计数</th><th>最近值</th><th>最近时间</th><th></th></tr>
+          </thead>
+          <tbody>
+            <tr v-for="d in store.discoveries" :key="`${d.devid}.${d.tag}`" :class="{ picked: pickedDisc.has(`${d.devid}.${d.tag}`) }">
+              <td><input
+                type="checkbox"
+                :checked="pickedDisc.has(`${d.devid}.${d.tag}`)"
+                @change="togglePick(`${d.devid}.${d.tag}`)"
+              /></td>
+              <td class="mono">{{ d.devid }}.{{ d.tag }}</td>
+              <td>{{ store.devices[d.devid]?.model || '（未注册设备）' }}</td>
+              <td>{{ d.count }}</td>
+              <td class="mono">{{ d.sample_value }}</td>
+              <td class="mono">{{ new Date(d.last_ts * 1000).toLocaleString() }}</td>
+              <td><button class="link-del" @click="onClearDiscDevice(d.devid)">清此设备</button></td>
+            </tr>
+          </tbody>
+        </table>
+      </template>
+      <p v-if="adoptNotice" class="op-ok">{{ adoptNotice }}</p>
     </article>
 
     <p v-if="store.error" class="op-error">{{ store.error }}</p>
@@ -456,6 +580,30 @@ useWorkspacePage(() => ({
   border: 1px solid var(--card-border); background: var(--card-bg);
   color: inherit; min-width: 220px;
 }
+
+/* 发现队列面板 */
+.disc-toolbar {
+  display: flex; gap: 12px; align-items: end; flex-wrap: wrap; margin-bottom: 10px;
+}
+.disc-field { display: flex; flex-direction: column; gap: 4px; font-size: 11px; }
+.disc-field span { color: var(--color-ink-dim); }
+.disc-field select, .disc-field input {
+  padding: 6px 10px; border-radius: 8px; font-size: 12px;
+  border: 1px solid var(--card-border); background: var(--card-bg); color: inherit;
+}
+.disc-field input { width: 180px; }
+.btn-adopt {
+  padding: 7px 16px; border-radius: 8px; font-size: 12px;
+  border: 1px solid var(--color-primary); background: var(--color-primary);
+  color: white; cursor: pointer;
+}
+.btn-adopt:disabled { opacity: 0.4; cursor: not-allowed; }
+tr.picked td { background: color-mix(in srgb, var(--color-primary) 8%, transparent); }
+.link-del {
+  background: transparent; border: none; cursor: pointer;
+  color: var(--color-ink-dim); font-size: 11px; text-decoration: underline;
+}
+.link-del:hover { color: var(--color-danger); }
 
 .ops { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
 .op {

@@ -1,6 +1,6 @@
 # 标签/设备元数据统一存储（Tag Registry）实施计划
 
-> **状态**：implemented
+> **状态**：implemented（**tags 表已于 2026-08-25 M-4 退役**——被设备模型注册表 devreg.overrides 吸收，出口登记转型发现引擎；本计划为 Phase 1a 历史记述，演进见 [2026-08-25-device-model-registry-plan.md](2026-08-25-device-model-registry-plan.md)。`src/db/tag_registry.rs` 已删、`tests/tag_registry_e2e.rs` 语义平移为 `tests/tag_effective_e2e.rs`）
 > **日期**：2026-08-24（于 worktree feat/tag-registry 执行完毕，T1-T7 全落地）
 > **实施**：T1 tag_key+TagProps → T2 tag_registry 存储（glob/note_once/declared）→ T3 ChildSpec.props → T4 pipeline 接线+吞吐门槛 → T5 REST 四端点 → T6 e2e 六场景 → T7 文档收口
 > **代码**：`src/db/tag_registry.rs`（新增）、`src/api/routes_tag.rs`（新增）、`src/types.rs`（tag_key/TagProps/ChildSpec.props）、`src/db/rtdata.rs`（改用 tag_key）、`src/pipeline.rs`（flush 出口登记）、`src/lib.rs`+`src/api/routes_sys.rs`（declared 双刷新点）、`src/api/mod.rs`（路由）

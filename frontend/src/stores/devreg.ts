@@ -1,5 +1,6 @@
 // frontend/src/stores/devreg.ts
-// 设备模型注册表 store（M-1）：devmodels/devreg 双表 + 一次性迁移。
+// 设备模型注册表 store（M-1）：devmodels/devreg 双表 + 一次性迁移 + 发现队列
+// （M-4：未建模标签进 discoveries，adopt 一键建模）。
 // API 走 gateway 前缀 /api/rsiot（同 monitor.ts）；postJson 模式同 monitor
 // （不 import api/client.ts——router 依赖会破坏 vitest）。
 import { defineStore } from 'pinia'
@@ -20,6 +21,31 @@ export interface ConflictInfo {
   status: string
   referenced_by?: string[]
   conflicts?: { devid: string; reason: string }[]
+}
+
+/** 发现队列条目（GET /discoveries；count 降序）。 */
+export interface DiscoveryItem {
+  devid: string
+  tag: string
+  first_ts: number
+  last_ts: number
+  count: number
+  sample_value: string
+}
+
+/** adopt 结果摘要。 */
+export interface AdoptResult {
+  merged: number
+  swept: number
+}
+
+/** adopt 请求的单 tag 建议。 */
+export interface AdoptTagReq {
+  name: string
+  data_type: string
+  addr?: string | null
+  unit?: string | null
+  desc?: string | null
 }
 
 export const useDevregStore = defineStore('devreg', () => {
@@ -171,6 +197,48 @@ export const useDevregStore = defineStore('devreg', () => {
     }
   }
 
+  // ---- 发现队列（M-4：未建模标签 → 人工确认 adopt 建模）----
+
+  /** 发现队列（count 降序；空 = 全部已建模/无脏数据）。 */
+  const discoveries = ref<DiscoveryItem[]>([])
+  /** 拉队列（进入面板/adopt/clear 后）。 */
+  async function loadDiscoveries(): Promise<void> {
+    const v = await fetchJson('/api/rsiot/api/v1/discoveries')
+    discoveries.value = Array.isArray(v) ? (v as DiscoveryItem[]) : []
+  }
+  /** 清除队列（devId 限定或全清）。 */
+  async function clearDiscoveries(devId?: string): Promise<boolean> {
+    const r = await postJson('/api/rsiot/api/v1/discovery/clear', devId ? { dev_id: devId } : {})
+    if (!r || !r.ok) {
+      error.value = r ? `清除失败 (${r.status})` : '网络错误'
+      return false
+    }
+    await loadDiscoveries()
+    return true
+  }
+  /** adopt 一键建模：tag 建议并入目标模型 + 队列对账清除；刷新双表与队列。 */
+  async function adopt(modelId: string, tags: AdoptTagReq[]): Promise<AdoptResult | null> {
+    const r = await postJson('/api/rsiot/api/v1/discovery/adopt', { model_id: modelId, tags })
+    if (!r || !r.ok) {
+      error.value = r
+        ? r.status === 404
+          ? `目标模型 ${modelId} 不存在`
+          : r.status === 400 || r.status === 409
+            ? await r.text()
+            : `adopt 失败 (${r.status})`
+        : '网络错误'
+      return null
+    }
+    try {
+      const v = (await r.json()) as Partial<AdoptResult>
+      const out: AdoptResult = { merged: v.merged ?? 0, swept: v.swept ?? 0 }
+      await Promise.all([loadAll(), loadDiscoveries()])
+      return out
+    } catch {
+      return null
+    }
+  }
+
   function clearError() {
     error.value = ''
   }
@@ -180,6 +248,7 @@ export const useDevregStore = defineStore('devreg', () => {
     devices,
     loading,
     error,
+    discoveries,
     loadAll,
     createModel,
     updateModel,
@@ -187,6 +256,9 @@ export const useDevregStore = defineStore('devreg', () => {
     saveDevice,
     deleteDevice,
     migrateInline,
+    loadDiscoveries,
+    clearDiscoveries,
+    adopt,
     clearError,
   }
 })

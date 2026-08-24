@@ -3,10 +3,12 @@ import { describe, expect, it } from 'vitest'
 import {
   extractParams,
   isValidId,
+  baseProps,
   mergeTagProps,
   triStateText,
   validateDevice,
   validateModel,
+  type TagTemplate,
   type DeviceEntry,
   type DeviceModel,
 } from './devmeta'
@@ -131,5 +133,21 @@ describe('triStateText（三态展示）', () => {
     expect(triStateText('继承值', null, '(已关)')).toBe('(已关)')
     expect(triStateText('继承值', 2.5, '—')).toBe('2.5')
     expect(triStateText('继承值', '', '(已清)')).toBe('(已清)')
+  })
+})
+
+describe('baseProps（模板顶层 unit/desc 垫底，镜像后端 effective_tags）', () => {
+  const tmpl = (topUnit: string | null, propsUnit: string | null): TagTemplate => ({
+    name: 'ua', data_type: 'f32', desc: '顶层描述', unit: topUnit,
+    addr: null, rw: 'r',
+    props: { history: false, deadband: null, desc: null, unit: propsUnit },
+  })
+  it('props 有值优先，顶层垫底', () => {
+    expect(baseProps(tmpl('V', 'props 单位')).unit).toBe('props 单位')
+    expect(baseProps(tmpl('V', null)).unit).toBe('V')
+    expect(baseProps(tmpl(null, null)).unit).toBeNull()
+  })
+  it('desc 同款垫底', () => {
+    expect(baseProps(tmpl(null, null)).desc).toBe('顶层描述')
   })
 })

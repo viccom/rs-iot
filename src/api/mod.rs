@@ -18,6 +18,7 @@ pub mod routes_alarm;
 pub mod routes_command;
 pub mod routes_device;
 pub mod routes_devreg;
+pub mod routes_discovery;
 pub mod routes_events;
 pub mod routes_group;
 pub mod routes_inst;
@@ -131,6 +132,7 @@ pub fn build_router(state: AppState) -> axum::Router {
         .route("/api/v1/inst/stats", get(routes_stat::stats))
         // device CRUD
         .route("/api/v1/tags", get(routes_tag::list))
+        .route("/api/v1/tags/legacy-export", get(routes_tag::legacy_export))
         .route("/api/v1/tag/set", post(routes_tag::set))
         .route("/api/v1/tag/batch", post(routes_tag::batch))
         .route("/api/v1/tag/delete", post(routes_tag::delete))
@@ -146,6 +148,10 @@ pub fn build_router(state: AppState) -> axum::Router {
             "/api/v1/migrate/inline-devices",
             post(routes_devreg::migrate_inline),
         )
+        // 发现队列（M-4 T2；发现是建模工作流的入口，D-M3）
+        .route("/api/v1/discoveries", get(routes_discovery::list))
+        .route("/api/v1/discovery/clear", post(routes_discovery::clear))
+        .route("/api/v1/discovery/adopt", post(routes_discovery::adopt))
         .route("/api/v1/devices", get(routes_device::list))
         .route("/api/v1/device/get", get(routes_device::get))
         .route("/api/v1/device/set", post(routes_device::set))

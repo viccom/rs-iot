@@ -12,7 +12,7 @@
 | 框架 | axum 0.8（`src/api/mod.rs::build_router`） |
 | 监听 | `0.0.0.0:{api_port}` |
 | 业务前缀 | `/api/v1/...` |
-| 持久层 | lux 嵌入式 KV（Hash: `users`/`passwords`/`instances`/`devices`/`groups`/`secrets`/`alarms`/`tags`；string: `accesskey`；Hash: `rtdata:<devId>`；string: `stat:<inst>`；Hash: `ext_tokens`） |
+| 持久层 | lux 嵌入式 KV（Hash: `users`/`passwords`/`instances`/`devices`(遗留)/`groups`/`secrets`/`alarms`/`devmodels`/`devreg`/`discoveries`；string: `accesskey`；Hash: `rtdata:<devId>`；string: `stat:<inst>`；Hash: `ext_tokens`。旧 `tags` 表已退役 M-4——被 devreg.overrides 吸收，遗留数据经 `/api/v1/tags/legacy-export` 导出） |
 | 鉴权中间件 | 全局 `auth::auth_middleware`（`from_fn_with_state`）+ `tower_http::TraceLayer` |
 
 **错误响应格式（当前不统一，调用方需兼容两种）**：
@@ -339,24 +339,61 @@ curl -N -H "Authorization: Bearer $JWT" \
 - 与 `GET /api/v1/rtdatas` 的 cell 输出同构（`[ts, localTime, value]` 值串），客户端复用同一解析
 - 机制为**每连接读侧 poll-diff**（非 EventBus 转发，不受其 dev 截断/丢帧特性影响；设计依据：[2026-08-23-rtdata-subscribe-plan.md](../designs/2026-08-23-rtdata-subscribe-plan.md)）
 
-### 4.15 标签属性 Tag Registry（`routes_tag.rs`，lux Hash `tags`）
+### 4.15 标签元数据 effective 视图（`routes_tag.rs`，M-4 T3 改造）
 
-标签级全局属性（`TagProps`：history 归档白名单 / deadband 死区 / desc / unit / owner_inst）——三路径登记（实例配置 `children[].props` 声明式初值 / pipeline 出口自动占位 / API 人工），**只补缺不覆盖**（人工修改优先）。设计：[2026-08-24-tag-registry-plan.md](../designs/2026-08-24-tag-registry-plan.md)。
+标签级属性读写全部走**设备模型注册表**（旧 lux `tags` 表已退役——被 `devreg.overrides` 吸收，决策 D-M3）：读侧 = 模板默认 ∪ 覆盖三态合并（effective）；写侧 = 设备覆盖（`TagOverride` 三态）。设计：[2026-08-25-device-model-registry-plan.md](../designs/2026-08-25-device-model-registry-plan.md)。
 
 | Method | Path | 鉴权 | Body/Query | 响应 |
 |---|---|---|---|---|
-| GET | `/api/v1/tags` | JWT | `?dev_id=<设备ID>`（前缀过滤）`&history=true`（只列白名单） | `{"<dev.tag>": TagProps}` |
-| POST | `/api/v1/tag/set` | JWT | `{"dev_id","tag", history?, deadband?, desc?, unit?}`（全量覆盖：缺省=清除） | `{"status":"ok","key","props"}` |
-| POST | `/api/v1/tag/batch` | JWT | `{"pattern":"dev*.temp*","history":true,...}`（glob 批量改**已存在**记录） | `{"status":"ok","matched":n,"updated":n}` |
-| POST | `/api/v1/tag/delete` | JWT | `{"dev_id","tag"}`（只删属性记录；rtdata/历史不动；再出数重新占位默认卡） | `{"status":"ok"}` |
+| GET | `/api/v1/tags` | JWT | `?dev_id=<设备ID>` `&history=true`（按 effective 值过滤） | `{"<dev.tag>": {…TagProps, _source: "model" 或 "override"}}` |
+| GET | `/api/v1/tags/legacy-export` | JWT | —（旧 `tags` 表只读快照，升级过渡一个版本） | `{"<dev.tag>": TagProps}` |
+| POST | `/api/v1/tag/set` | JWT | `{"dev_id","tag", history?, deadband?, desc?, unit?}`（三态：缺省=不动，`null`=恢复继承模板，值=覆盖） | `{"status":"ok","key","props"}`（合并后 effective） |
+| POST | `/api/v1/tag/batch` | JWT | `{"pattern":"dev*.temp*","history":true,...}`（glob 批量写覆盖） | `{"status":"ok","matched":n,"updated":n}` |
+| POST | `/api/v1/tag/delete` | JWT | `{"dev_id","tag"}`（清该 tag 全部覆盖回模板默认；模型 tag 不删） | `{"status":"ok","cleared":bool}` |
 
 ```bash
-# 批量开归档 + 死区（历史存储 feature 消费这两个属性）
+# 批量开归档 + 死区（历史存储 feature 消费这两个属性；写的是设备覆盖）
 curl -X POST -H "Authorization: Bearer $JWT" -H "Content-Type: application/json"   -d '{"pattern":"furnace*.temp*","history":true,"deadband":0.5}'   http://localhost:8790/api/v1/tag/batch
 ```
 
-- `owner_inst` 系统管理（出口登记取 dev2inst 首宿主），API 不可改
-- glob `*` 通配匹配 `<devid>.<tag>` 全键；`set` 为全量覆盖语义（字段缺省即清除该属性）
+- 三态语义：字段**缺省**=不动现有覆盖，显式 `null`=恢复继承模板，值=覆盖；`deadband` 显式关死区传 `0.0`（下游过滤语义与无死区等价——API 不暴露双层 Option）
+- `_source` 标注条目来源（"model"=纯模板派生 / "override"=含设备覆盖）；模板顶层 `unit`/`desc` 是 props 同名字段的垫底默认
+- 设备不在 devreg → 404；tag 不在设备模型 → 400
+- glob `*` 通配匹配 `<devid>.<tag>` 全键（匹配域 = 模型 tag 全集）
+
+### 4.16 设备模型注册表（`routes_model.rs`/`routes_devreg.rs`，M-1 起）
+
+物模型（devmodels：参数化地址模板 + 型号级默认属性）+ 全局设备注册表（devreg：模型引用 + 实例化参数 + per-tag 三态覆盖）。**元数据唯一出生地**（决策 [2026-08-25-device-model-registry.md](../decisions/2026-08-25-device-model-registry.md)）。
+
+| Method | Path | 鉴权 | Body/Query | 响应 |
+|---|---|---|---|---|
+| GET | `/api/v1/devmodels` | JWT | `?model_id=`（单查） | `{model_id: DeviceModel}` |
+| POST | `/api/v1/devmodel/set` | JWT | DeviceModel JSON（**create-only**：重名 409） | `{"status":"ok","model_id"}` |
+| POST | `/api/v1/devmodel/update` | JWT | DeviceModel JSON（整包替换；引用设备预检 409 带明细） | `{"status":"ok"}` |
+| POST | `/api/v1/devmodel/delete` | JWT | `{"model_id"}`（被 devreg 引用 → 409 带引用列表） | `{"status":"ok"}` |
+| GET | `/api/v1/devreg` | JWT | `?devid=` `?model=` | `{devid: {…DeviceEntry, effective}}` |
+| POST | `/api/v1/devreg/set` | JWT | DeviceEntry JSON（upsert；写前三级校验：模型存在/params 齐/覆盖 tag ∈ 模型） | `{"status":"ok","devid"}` |
+| POST | `/api/v1/devreg/delete` | JWT | `{"devid"}`（级联 dev2inst + rtdata；历史不动） | `{"status":"ok"}` |
+| POST | `/api/v1/migrate/inline-devices` | JWT | —（幂等；M-2 起**升级必经**——旧内联形态无法反序列化） | `{converted_models, converted_devices, converted_instances, failures}` |
+
+### 4.17 发现队列（`routes_discovery.rs`，M-4）
+
+数据流中未建模标签进 `discoveries` 队列（发现引擎出口接线 pipeline flush；不自动入正式册）——**发现是建模工作流的入口**（人工确认后 adopt 一键建模），D-M3。
+
+| Method | Path | 鉴权 | Body/Query | 响应 |
+|---|---|---|---|---|
+| GET | `/api/v1/discoveries` | JWT | `?dev_id=`（按设备过滤） | `[Discovery]`（count 降序） |
+| POST | `/api/v1/discovery/clear` | JWT | `{"dev_id"?}`（缺省全清） | `{"status":"ok","cleared":n}` |
+| POST | `/api/v1/discovery/adopt` | JWT | `{"model_id", "tags":[{name,data_type,addr?,unit?,desc?}]}`（同名跳过；引用预检 409/结构 400/模型缺 404） | `{"status":"ok","merged":n,"swept":n}`（swept=对账清除的已建模队列条目） |
+
+```bash
+# 一键建模：发现的 ghost tag 并入模型 m1，队列自动对账清除
+curl -X POST -H "Authorization: Bearer $JWT" -H "Content-Type: application/json" \
+  -d '{"model_id":"m1","tags":[{"name":"ghost","data_type":"f32","unit":"V"}]}' \
+  http://localhost:8790/api/v1/discovery/adopt
+```
+
+- 引擎行为（`src/model/discovery.rs`）：effective 缓存 O(1) 比对（已建模 once-set 纯内存）；未建模 per-entry 60s 节流聚合 count/样本；上限 5000 LRU 批量逐出；重启 count 接续
 
 ## 5. 数据模型（`src/types.rs`）
 
@@ -364,21 +401,26 @@ curl -X POST -H "Authorization: Bearer $JWT" -H "Content-Type: application/json"
 InstConfig {
   inst_id: String,          // 实例 ID（rtdata key 组成部分）
   inst_name: String,        // 显示名
-  app_code: String,         // 插件注册名：dataSim/opcuaClient/modbusClient/s7Client/luaClient/luaNorth/sidecarClient
+  app_code: String,         // 插件注册名：dataSim/opcuaClient/modbusClient/s7Client/eipClient/luaClient/luaNorth/sidecarClient
   app_type: "south"|"north",
   auto_start: bool,         // 启动时自动拉起
   app_config: <任意 JSON>,   // 插件自解析（period/endpoint/...）
-  devices: [DeviceSpec],
+  devices: [DeviceBinding], // M-2：绑定全局设备（点表来自设备模型，不在实例配置）
   host_kind: "builtin"|"external"  // 缺省 builtin
 }
-DeviceSpec { label, value:<设备ID>, children:[ChildSpec] }
-ChildSpec  { label:<数据点名>, value:<协议地址>, type:<值类型>, props?: TagProps }
-TagProps   { history:bool=false, deadband?:f64, desc?, unit?, owner_inst:Sys }  // lux Hash `tags`（field=`<devid>.<tag>`）
-CtlMessage { instance:InstId, devid, cmd, data:<JSON 文本> }
+DeviceBinding { devid, bind:{slave_id?…} }          // 引用 devreg（M-2，旧 DeviceSpec/ChildSpec 已退役）
+DeviceModel  { model_id, vendor?, model_no?, category?, desc?, params:[..], tags:[TagTemplate] }  // lux `devmodels`
+TagTemplate  { name, data_type, desc?, unit?, addr?(参数化), rw:"r"|"rw", props:TagProps }         // addr 语法 {name} 占位 + +N 偏移
+DeviceEntry  { devid, model, params:{..}, overrides:{tag→TagOverride}, desc? }                      // lux `devreg`
+TagOverride  { history?, deadband?(双层), desc?, unit? }  // 三态：缺省=继承模板（deadband null=显式关）
+TagProps     { history:bool=false, deadband?:f64, desc?, unit?, owner_inst:Sys }  // 模板默认（effective = 模板 ∪ 覆盖）
+Discovery    { devid, tag, first_ts, last_ts, count, sample_value }               // lux `discoveries`（M-4 发现队列）
+CtlMessage   { instance:InstId, devid, cmd, data:<JSON 文本> }
 ```
 
 - `app_code` 一经发布**锁定不改**（持久化在 lux `instances`，改名破坏已部署实例）
-- 各插件 `app_config`/`ChildSpec.value`/`ChildSpec.type` 的语义见各插件文档（CLAUDE.md「验证规则」段）
+- 各插件 `app_config` 与模型 `addr` 的协议语义见各插件文档（CLAUDE.md「验证规则」段）
+- **元数据唯一来源**：设备/标签元数据只能出自 devmodels+devreg（决策 2026-08-25）；实例只绑定设备，采集实现不得自行创建真实设备与标签
 
 ## 6. 已知限制与完备性
 
