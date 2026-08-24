@@ -46,6 +46,27 @@ pub enum ModelError {
         /// 非法原因。
         reason: String,
     },
+    /// devreg 引用的模型不存在（store 写入时查表）。
+    ModelNotFound {
+        /// 设备 id。
+        devid: String,
+        /// 引用的模型 id。
+        model: String,
+    },
+    /// 设备 params 缺模型声明的参数（齐套校验：模型 params ⊆ 设备 params）。
+    MissingDeviceParam {
+        /// 设备 id。
+        devid: String,
+        /// 缺失参数名。
+        param: String,
+    },
+    /// 设备覆盖的 tag 不在模型 tags。
+    UnknownTagOverride {
+        /// 设备 id。
+        devid: String,
+        /// 覆盖键（tag 名）。
+        tag: String,
+    },
 }
 
 impl fmt::Display for ModelError {
@@ -64,6 +85,15 @@ impl fmt::Display for ModelError {
             ),
             Self::BadAddr { model, tag, reason } => {
                 write!(f, "模型 {model} 的 tag {tag:?} 地址模板非法：{reason}")
+            }
+            Self::ModelNotFound { devid, model } => {
+                write!(f, "设备 {devid} 引用的模型 {model:?} 不存在")
+            }
+            Self::MissingDeviceParam { devid, param } => {
+                write!(f, "设备 {devid} 缺模型声明参数 {{{param}}}")
+            }
+            Self::UnknownTagOverride { devid, tag } => {
+                write!(f, "设备 {devid} 覆盖的 tag {tag:?} 不在其模型 tags")
             }
         }
     }
@@ -129,6 +159,33 @@ pub fn validate_device_id(dev: &DeviceEntry) -> Result<(), ModelError> {
             what: "devid",
             value: dev.devid.clone(),
         });
+    }
+    Ok(())
+}
+
+/// 引用完整性校验（写入前，纯函数）：params 齐套（模型声明 ⊆ 设备提供；
+/// 多余参数容忍——与 `addr::resolve` 容忍口径一致，参数可服务非 addr 用途）
+/// + 覆盖 tag ∈ 模型 tags。
+///
+/// 模型存在性由 store 层查 lux（→ [`ModelError::ModelNotFound`]）；
+/// DeviceBinding 合法性预留 M-2（实例接线期才有消费方）。
+pub fn validate_device_entry(dev: &DeviceEntry, model: &DeviceModel) -> Result<(), ModelError> {
+    for p in &model.params {
+        if !dev.params.contains_key(p) {
+            return Err(ModelError::MissingDeviceParam {
+                devid: dev.devid.clone(),
+                param: p.clone(),
+            });
+        }
+    }
+    let known: BTreeSet<&str> = model.tags.iter().map(|t| t.name.as_str()).collect();
+    for tag in dev.overrides.keys() {
+        if !known.contains(tag.as_str()) {
+            return Err(ModelError::UnknownTagOverride {
+                devid: dev.devid.clone(),
+                tag: tag.clone(),
+            });
+        }
     }
     Ok(())
 }
@@ -299,5 +356,83 @@ mod tests {
         assert!(valid_id("ua"));
         assert!(!valid_id("u a"));
         let _ = TagOverride::default();
+    }
+
+    // ===== T5 引用完整性 =====
+
+    fn host_model() -> DeviceModel {
+        DeviceModel {
+            model_id: "m1".into(),
+            params: vec!["base".into()],
+            tags: vec![TagTemplate {
+                name: "ua".into(),
+                data_type: "f32".into(),
+                addr: Some("holding:{base}:f32".into()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
+    fn device(params: &[(&str, &str)], overrides: &[(&str, TagOverride)]) -> DeviceEntry {
+        DeviceEntry {
+            devid: "d1".into(),
+            model: "m1".into(),
+            params: params
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+            overrides: overrides
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.clone()))
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn complete_params_and_known_override_pass() {
+        let dev = device(
+            &[("base", "100")],
+            &[(
+                "ua",
+                TagOverride {
+                    deadband: Some(None),
+                    ..Default::default()
+                },
+            )],
+        );
+        assert_eq!(validate_device_entry(&dev, &host_model()), Ok(()));
+    }
+
+    #[test]
+    fn missing_param_rejected() {
+        let dev = device(&[], &[]);
+        assert_eq!(
+            validate_device_entry(&dev, &host_model()),
+            Err(ModelError::MissingDeviceParam {
+                devid: "d1".into(),
+                param: "base".into()
+            })
+        );
+    }
+
+    #[test]
+    fn extra_param_tolerated() {
+        // 齐套 = 模型声明 ⊆ 设备提供；多余容忍（与 resolve 口径一致）。
+        let dev = device(&[("base", "100"), ("spare", "x")], &[]);
+        assert_eq!(validate_device_entry(&dev, &host_model()), Ok(()));
+    }
+
+    #[test]
+    fn unknown_tag_override_rejected() {
+        let dev = device(&[("base", "100")], &[("nope", TagOverride::default())]);
+        assert_eq!(
+            validate_device_entry(&dev, &host_model()),
+            Err(ModelError::UnknownTagOverride {
+                devid: "d1".into(),
+                tag: "nope".into()
+            })
+        );
     }
 }

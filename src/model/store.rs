@@ -5,7 +5,7 @@
 //! T4：devmodels CRUD + 删除引用校验；T5：devreg CRUD。
 
 use crate::error::RsIotError;
-use crate::model::types::DeviceModel;
+use crate::model::types::{DeviceEntry, DeviceModel};
 use crate::model::validate;
 use lux::EmbeddedClient;
 use std::collections::HashMap;
@@ -107,6 +107,69 @@ pub async fn delete_model(
     }
     c.execute("HDEL", &[MODELS, model_id]).await?;
     Ok(Some(DeleteOutcome::Deleted))
+}
+
+// ---------- devreg（T5） ----------
+
+/// 写入设备条目：结构校验 + 模型存在（→ `ModelNotFound`）+ 引用完整性后 HSET。
+///
+/// upsert 语义（同 devid 整体替换）——设备覆盖编辑（三态 overrides）是常规
+/// 工作流，与模型的 create-only（REST 重名 409）不同。
+pub async fn set_device(c: &EmbeddedClient, dev: &DeviceEntry) -> Result<(), RsIotError> {
+    validate::validate_device_id(dev)?;
+    let model = get_model(c, &dev.model).await?.ok_or_else(|| {
+        RsIotError::Model(validate::ModelError::ModelNotFound {
+            devid: dev.devid.clone(),
+            model: dev.model.clone(),
+        })
+    })?;
+    validate::validate_device_entry(dev, &model)?;
+    let raw = serde_json::to_string(dev)?;
+    c.execute("HSET", &[DEVICES, &dev.devid, &raw]).await?;
+    Ok(())
+}
+
+/// 读单设备（缺 → None）。
+pub async fn get_device(
+    c: &EmbeddedClient,
+    devid: &str,
+) -> Result<Option<DeviceEntry>, RsIotError> {
+    let v = c.execute_value("HGET", &[DEVICES, devid]).await?;
+    match embedded_to_string(v) {
+        Some(raw) => Ok(Some(serde_json::from_str(&raw)?)),
+        None => Ok(None),
+    }
+}
+
+/// 全设备表（HGETALL；坏值条目跳过）。
+pub async fn list_devices(c: &EmbeddedClient) -> Result<Vec<DeviceEntry>, RsIotError> {
+    let v = c.execute_value("HGETALL", &[DEVICES]).await?;
+    let mut out = Vec::new();
+    if let lux::EmbeddedValue::Array(arr) = v {
+        let mut i = 0;
+        while i + 1 < arr.len() {
+            let raw = embedded_to_string(arr[i + 1].clone()).unwrap_or_default();
+            if let Ok(dev) = serde_json::from_str::<DeviceEntry>(&raw) {
+                out.push(dev);
+            }
+            i += 2;
+        }
+    }
+    Ok(out)
+}
+
+/// 删除设备 + 级联：HDEL devreg + 清 dev2inst 归属 + 删 `rtdata:<devid>`（best-effort，
+/// 对齐 routes_device 删除口径；历史不级联——master plan D9）。不存在 → `None`。
+pub async fn delete_device(c: &EmbeddedClient, devid: &str) -> Result<Option<()>, RsIotError> {
+    if get_device(c, devid).await?.is_none() {
+        return Ok(None);
+    }
+    c.execute("HDEL", &[DEVICES, devid]).await?;
+    c.execute("HDEL", &["dev2inst", devid]).await?;
+    if let Err(e) = crate::db::rtdata::delete_device(c, devid).await {
+        tracing::warn!("[model] delete rtdata:{devid} failed: {e}");
+    }
+    Ok(Some(()))
 }
 
 /// lux EmbeddedValue → String（Bulk/Simple；同 dev_registry 口径）。
@@ -271,5 +334,137 @@ mod tests {
             .unwrap();
         assert!(referencing_devices(&c, "m").await.unwrap().is_empty());
         let _ = TagOverride::default();
+    }
+
+    // ===== T5 devreg CRUD =====
+
+    fn device_entry(devid: &str) -> crate::model::types::DeviceEntry {
+        crate::model::types::DeviceEntry {
+            devid: devid.into(),
+            model: "vx_dtz341".into(),
+            params: [("base".to_string(), "100".to_string())].into(),
+            overrides: [(
+                "ua".to_string(),
+                TagOverride {
+                    deadband: Some(Some(0.5)),
+                    ..Default::default()
+                },
+            )]
+            .into(),
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn set_get_device_roundtrip() {
+        let c = test_client("dev-rt").await;
+        set_model(&c, &sample_model()).await.unwrap();
+        set_device(&c, &device_entry("d1")).await.unwrap();
+        let got = get_device(&c, "d1").await.unwrap().expect("存在");
+        assert_eq!(got, device_entry("d1"));
+    }
+
+    #[tokio::test]
+    async fn set_device_unknown_model_rejected() {
+        let c = test_client("dev-nomodel").await;
+        let err = set_device(&c, &device_entry("d1")).await.unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                RsIotError::Model(ModelError::ModelNotFound { model, .. }) if model == "vx_dtz341"
+            ),
+            "应为 ModelNotFound，实际 {err:?}"
+        );
+        assert!(get_device(&c, "d1").await.unwrap().is_none(), "不入表");
+    }
+
+    #[tokio::test]
+    async fn set_device_incomplete_params_rejected() {
+        let c = test_client("dev-param").await;
+        set_model(&c, &sample_model()).await.unwrap();
+        let mut dev = device_entry("d1");
+        dev.params.clear();
+        let err = set_device(&c, &dev).await.unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                RsIotError::Model(ModelError::MissingDeviceParam { param, .. }) if param == "base"
+            ),
+            "应为 MissingDeviceParam，实际 {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn set_device_unknown_override_rejected() {
+        let c = test_client("dev-ov").await;
+        set_model(&c, &sample_model()).await.unwrap();
+        let mut dev = device_entry("d1");
+        dev.overrides
+            .insert("nope".to_string(), TagOverride::default());
+        assert!(matches!(
+            set_device(&c, &dev).await,
+            Err(RsIotError::Model(ModelError::UnknownTagOverride { .. }))
+        ));
+    }
+
+    #[tokio::test]
+    async fn set_device_upserts_overrides() {
+        // 设备 upsert：覆盖编辑是常规工作流（与模型 create-only 不同）。
+        let c = test_client("dev-upsert").await;
+        set_model(&c, &sample_model()).await.unwrap();
+        set_device(&c, &device_entry("d1")).await.unwrap();
+        let mut edited = device_entry("d1");
+        edited.overrides.insert(
+            "ua".to_string(),
+            TagOverride {
+                history: Some(true),
+                ..Default::default()
+            },
+        );
+        set_device(&c, &edited).await.unwrap();
+        let got = get_device(&c, "d1").await.unwrap().unwrap();
+        assert_eq!(got, edited, "同 devid 整体替换");
+    }
+
+    #[tokio::test]
+    async fn list_devices_maps_entries() {
+        let c = test_client("dev-list").await;
+        set_model(&c, &sample_model()).await.unwrap();
+        set_device(&c, &device_entry("d1")).await.unwrap();
+        set_device(&c, &device_entry("d2")).await.unwrap();
+        c.execute("HSET", &["devreg", "bad", "{not json"])
+            .await
+            .unwrap();
+        let all = list_devices(&c).await.unwrap();
+        assert_eq!(all.len(), 2, "坏值跳过：{all:?}");
+    }
+
+    #[tokio::test]
+    async fn delete_device_cascades_dev2inst_and_rtdata() {
+        let c = test_client("dev-del").await;
+        set_model(&c, &sample_model()).await.unwrap();
+        set_device(&c, &device_entry("d1")).await.unwrap();
+        // 种归属与实时数据。
+        crate::db::dev_registry::note(&c, "d1", "inst-a")
+            .await
+            .unwrap();
+        c.execute("HSET", &["rtdata:d1", "d1.temp", "[1,1,42]"])
+            .await
+            .unwrap();
+        assert_eq!(delete_device(&c, "d1").await.unwrap(), Some(()));
+        assert!(get_device(&c, "d1").await.unwrap().is_none());
+        let v = c.execute_value("HGET", &["dev2inst", "d1"]).await.unwrap();
+        assert!(matches!(v, lux::EmbeddedValue::Nil), "归属清理");
+        let exists = c.execute_value("EXISTS", &["rtdata:d1"]).await.unwrap();
+        assert!(
+            !matches!(exists, lux::EmbeddedValue::Int(n) if n != 0),
+            "rtdata 清理"
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_device_missing_returns_none() {
+        let c = test_client("dev-del-miss").await;
+        assert!(delete_device(&c, "nope").await.unwrap().is_none());
     }
 }
