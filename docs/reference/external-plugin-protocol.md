@@ -106,6 +106,7 @@ rs-iot 收到写命令（MQTT `<hwid>/command` 或 REST `POST /api/v1/command/se
 - device `value`：设备 ID（`rtdata:<devid>` 的 key，DataUp 的 `devid`）
 - `children[].value`：点位 tag（DataUp 的 `tag`）
 - `children[].type`：值类型提示（"float"/"int"/"bool" 等，外部按实际采集类型用）
+- `children[].props`：可选，标签属性初值（Tag Registry 声明式；未声明时不出帧，外部插件可忽略）
 
 **配置变更生效**：重启实例（REST `stopinst` + `startinst`），外部重连拿新 ConfigPush。PoC 不做自动 notify。
 

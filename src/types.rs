@@ -242,7 +242,8 @@ pub struct ChildSpec {
     pub r#type: String,
     /// 声明式标签属性初值（Tag Registry）：出口登记首见建卡时落表——
     /// tags 表已有记录则忽略（只补缺不覆盖；人工 API 修改优先）。缺省 None 向后兼容。
-    #[serde(default)]
+    /// `skip_serializing_if`：None 不出 wire（sidecar ConfigPush/instances 存储零噪声）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub props: Option<TagProps>,
 }
 
@@ -289,6 +290,19 @@ mod tests {
         let json = serde_json::json!({"label":"t","value":"holding:0:f32","type":"float"});
         let c: ChildSpec = serde_json::from_value(json).unwrap();
         assert_eq!(c.props, None);
+    }
+
+    #[test]
+    fn child_spec_props_none_omitted_from_wire() {
+        // sidecar ConfigPush 直接序列化 devices——None 不出帧（外部协议零噪声）。
+        let c = ChildSpec {
+            label: "t".into(),
+            value: "temp".into(),
+            r#type: "float".into(),
+            props: None,
+        };
+        let v = serde_json::to_value(&c).unwrap();
+        assert!(v.get("props").is_none(), "None 时字段整体省略: {v}");
     }
 
     #[test]
