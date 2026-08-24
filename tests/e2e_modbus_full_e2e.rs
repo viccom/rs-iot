@@ -105,6 +105,8 @@ async fn collect_via_serial(
     let want_devids: std::collections::HashSet<String> =
         devices.iter().map(|d| d.value.clone()).collect();
 
+    let bindings =
+        common::register_devices_as_models(&client, inst_id, "modbusClient", devices).await;
     let inst = InstConfig {
         inst_id: inst_id.into(),
         inst_name: "e2e modbus serial".into(),
@@ -122,7 +124,7 @@ async fn collect_via_serial(
             "period": 1,
             "request_timeout_secs": 2,
         }),
-        devices,
+        devices: bindings,
         host_kind: HostKind::Builtin,
     };
     mgr.start_source(inst)
@@ -340,7 +342,8 @@ async fn collect_via_tcp(
             "period": 1,
             "request_timeout_secs": 1,
         }),
-        devices,
+        devices: common::register_devices_as_models(&client, inst_id, "modbusClient", devices)
+            .await,
         host_kind: HostKind::Builtin,
     };
     mgr.start_source(inst).await.expect("start modbus tcp");
@@ -528,7 +531,13 @@ end
             "period": 1,
             "recv_idle_ms": 100,
         }),
-        devices: vec![mk_dev("ldev1", 1, vec![]), mk_dev("ldev2", 2, vec![])],
+        devices: common::register_devices_as_models(
+            &client,
+            "lua_modbus",
+            "luaClient",
+            vec![mk_dev("ldev1", 1, vec![]), mk_dev("ldev2", 2, vec![])],
+        )
+        .await,
         host_kind: HostKind::Builtin,
     };
     mgr.start_source(inst).await.expect("start lua");
@@ -671,11 +680,17 @@ async fn p1_three_subsystems_metrics_logs_trace() {
             "request_timeout_secs": 1,
             "slave_id": 1,
         }),
-        devices: vec![mk_dev(
-            "p1dev",
-            1,
-            vec![("v0", "input:0:i16"), ("v1", "input:1:i16")],
-        )],
+        devices: common::register_devices_as_models(
+            &client,
+            "p1modbus",
+            "modbusClient",
+            vec![mk_dev(
+                "p1dev",
+                1,
+                vec![("v0", "input:0:i16"), ("v1", "input:1:i16")],
+            )],
+        )
+        .await,
         host_kind: HostKind::Builtin,
     };
     mgr.start_source(inst).await.expect("start p1 modbus");

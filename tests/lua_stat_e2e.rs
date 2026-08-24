@@ -9,7 +9,7 @@ use rs_iot::host::{BridgeRegistry, CtlRegistry, HostContext};
 use rs_iot::plugin::instance::InstanceManager;
 use rs_iot::plugin::traits::Processor;
 use rs_iot::transform::passthrough::Passthrough;
-use rs_iot::types::{AppType, DeviceSpec, HostKind, Hwid, InstConfig, PluginName, Sample};
+use rs_iot::types::{AppType, DeviceBinding, HostKind, Hwid, InstConfig, PluginName, Sample};
 use serde_json::json;
 use std::sync::Arc;
 use std::time::Duration;
@@ -72,11 +72,9 @@ async fn stat_written_after_collect() {
             "period": 1,
             "scripts_root": scripts.to_str().expect("utf8"),
         }),
-        devices: vec![DeviceSpec {
-            label: "d".into(),
-            value: "devST".into(),
-            children: vec![],
-            slave_id: None,
+        devices: vec![DeviceBinding {
+            devid: "devST".into(),
+            bind: Default::default(),
         }],
         host_kind: HostKind::Builtin,
     };
@@ -185,11 +183,9 @@ async fn runtime_devices_recorded_in_stat() {
             "period": 1,
             "scripts_root": scripts.to_str().expect("utf8"),
         }),
-        devices: vec![DeviceSpec {
-            label: "d".into(),
-            value: "devCF".into(),
-            children: vec![],
-            slave_id: None,
+        devices: vec![DeviceBinding {
+            devid: "devCF".into(),
+            bind: Default::default(),
         }],
         host_kind: HostKind::Builtin,
     };
@@ -275,11 +271,9 @@ async fn stat_marked_stopped_on_exit() {
             "period": 1,
             "scripts_root": scripts.to_str().expect("utf8"),
         }),
-        devices: vec![DeviceSpec {
-            label: "d".into(),
-            value: "devST2".into(),
-            children: vec![],
-            slave_id: None,
+        devices: vec![DeviceBinding {
+            devid: "devST2".into(),
+            bind: Default::default(),
         }],
         host_kind: HostKind::Builtin,
     };

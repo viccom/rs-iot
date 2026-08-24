@@ -115,16 +115,12 @@ async fn setup(inst_id: &str, hb_secs: u64) -> Env {
         bt,
     ));
 
-    // 创建 sidecarClient External 实例 + 签发 token + start。
-    let inst = InstConfig {
-        inst_id: inst_id.into(),
-        inst_name: "it sidecar".into(),
-        app_code: PluginName::new("sidecarClient"),
-        app_type: AppType::South,
-        auto_start: false,
-        // 测试心跳超时（hb_secs 参数化）：默认长超时避免误判，心跳超时用例传小值。
-        app_config: json!({"heartbeat_timeout_secs": hb_secs}),
-        devices: vec![DeviceSpec {
+    // M-2 模型驱动：devS 注册隐式模型+devreg（纯软），实例持绑定。
+    let bindings = common::register_devices_as_models(
+        &client,
+        inst_id,
+        "sidecarClient",
+        vec![DeviceSpec {
             label: "d".into(),
             value: "devS".into(),
             children: vec![rs_iot::types::ChildSpec {
@@ -135,6 +131,18 @@ async fn setup(inst_id: &str, hb_secs: u64) -> Env {
             }],
             slave_id: None,
         }],
+    )
+    .await;
+    // 创建 sidecarClient External 实例 + 签发 token + start。
+    let inst = InstConfig {
+        inst_id: inst_id.into(),
+        inst_name: "it sidecar".into(),
+        app_code: PluginName::new("sidecarClient"),
+        app_type: AppType::South,
+        auto_start: false,
+        // 测试心跳超时（hb_secs 参数化）：默认长超时避免误判，心跳超时用例传小值。
+        app_config: json!({"heartbeat_timeout_secs": hb_secs}),
+        devices: bindings,
         host_kind: HostKind::External,
     };
     let token = ext_token::issue(&client, SECRET, inst_id)

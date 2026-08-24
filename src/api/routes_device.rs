@@ -242,8 +242,6 @@ pub async fn delete(State(st): State<AppState>, Json(req): Json<DelReq>) -> Resp
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     /// 绑定参数 object → bind map（整数/字符串值统一字符串化）。
     #[test]
     fn bind_object_normalizes_values() {

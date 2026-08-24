@@ -30,7 +30,7 @@ use rs_iot::plugin::instance::{InstState, InstanceManager};
 use rs_iot::plugin::traits::Processor;
 use rs_iot::transform::passthrough::Passthrough;
 use rs_iot::types::{
-    AppType, DeviceSpec, HostKind, Hwid, InstConfig, PluginName, Sample, SampleValue,
+    AppType, HostKind, Hwid, InstConfig, PluginName, Sample, SampleValue,
 };
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -39,7 +39,25 @@ use tokio_util::sync::CancellationToken;
 use tower::ServiceExt;
 
 /// 南向（Source）transform 实例配置。
-fn transform_inst(id: &str, app_code: &str, app_config: serde_json::Value) -> InstConfig {
+async fn transform_inst(
+    id: &str,
+    app_code: &str,
+    app_config: serde_json::Value,
+    client: &lux::EmbeddedClient,
+) -> InstConfig {
+    // M-2：绑定设备注册隐式模型+devreg（luaTransform/luaClient 纯软，tag 由脚本产出）。
+    let bindings = common::register_devices_as_models(
+        client,
+        id,
+        app_code,
+        vec![rs_iot::types::DeviceSpec {
+            label: id.into(),
+            value: id.into(),
+            children: vec![],
+            slave_id: None,
+        }],
+    )
+    .await;
     InstConfig {
         inst_id: id.into(),
         inst_name: id.into(),
@@ -47,12 +65,7 @@ fn transform_inst(id: &str, app_code: &str, app_config: serde_json::Value) -> In
         app_type: AppType::South,
         auto_start: true,
         app_config,
-        devices: vec![DeviceSpec {
-            label: "d".into(),
-            value: id.into(),
-            children: vec![],
-            slave_id: None,
-        }],
+        devices: bindings,
         host_kind: HostKind::Builtin,
     }
 }
@@ -77,7 +90,12 @@ fn test_ctx(client: lux::EmbeddedClient, event_bus: EventBus) -> HostContext {
 async fn test_app(
     tag: &str,
     event_bus: EventBus,
-) -> (axum::Router, Arc<InstanceManager>, lux::ServerHandle) {
+) -> (
+    axum::Router,
+    Arc<InstanceManager>,
+    lux::ServerHandle,
+    lux::EmbeddedClient,
+) {
     let data_dir = common::test_data_dir(tag);
     // 复审 P2-5：先清历史残留（同机重跑时 kv 残留会致精确断言假绿/假红——
     // real_chain 先例；tag 按测试隔离，并行安全）。
@@ -104,7 +122,7 @@ async fn test_app(
         event_bus,
         config: Arc::new(rs_iot::config::AppConfig::default()),
     };
-    (build_router(state), mgr, handle)
+    (build_router(state), mgr, handle, client)
 }
 
 async fn body_text(resp: axum::response::Response) -> String {
@@ -229,7 +247,7 @@ end
 /// stat（script_version 已埋）→ stopinst → Stopped（退出 flush status=stopped）。
 #[tokio::test]
 async fn transform_lifecycle_running_stats_stop() {
-    let (app, mgr, handle) = test_app("lua_transform_t7", EventBus::dummy()).await;
+    let (app, mgr, handle, client) = test_app("lua_transform_t7", EventBus::dummy()).await;
     let token = login_token(app.clone()).await;
 
     // 临时脚本目录（transform 最小契约 + 能力探针 + on_timer 计数）。
@@ -246,7 +264,9 @@ async fn transform_lifecycle_running_stats_stop() {
             "period": 1,
             "scripts_root": scripts.to_str().expect("utf8"),
         }),
-    );
+        &client,
+    )
+    .await;
     inst_set(app.clone(), &token, &inst).await;
 
     // 启动（South→start_source 分发；脚本探针/dry-run 任一失败 → 不进 Running）。
@@ -339,7 +359,7 @@ fn rtdata_sample(devid: &str, vals: &[(&str, SampleValue)]) -> RtdataSample {
 #[tokio::test]
 async fn transform_on_rtdata_matching_and_filtered() {
     let event_bus = EventBus::new(64);
-    let (app, mgr, handle) = test_app("lua_transform_rtdata", event_bus.clone()).await;
+    let (app, mgr, handle, client) = test_app("lua_transform_rtdata", event_bus.clone()).await;
     let token = login_token(app.clone()).await;
 
     let scripts = std::env::temp_dir().join(format!("lua-transform-rt-{}", std::process::id()));
@@ -364,7 +384,9 @@ end
             "subscribe": ["dev1.temp*", "dev2"],
             "scripts_root": scripts.to_str().expect("utf8"),
         }),
-    );
+        &client,
+    )
+    .await;
     inst_set(app.clone(), &token, &inst).await;
     let resp = start_inst(app.clone(), &token, "transform-2").await;
     assert_eq!(resp.status(), StatusCode::OK, "{}", body_text(resp).await);
@@ -466,7 +488,9 @@ async fn transform_manifest_missing_callbacks_rejected() {
             "script": "tbad",
             "scripts_root": scripts.to_str().expect("utf8"),
         }),
-    );
+        &client,
+    )
+    .await;
     mgr.start_source(inst)
         .await
         .expect("start_source 本身成功（拒载在 task 内）");
@@ -523,6 +547,7 @@ async fn real_chain(
     EventBus,
     lux::ServerHandle,
     CancellationToken,
+    lux::EmbeddedClient,
 ) {
     let data_dir = common::test_data_dir(tag);
     // 清历史残留（common::test_data_dir 不清理目录：上一轮运行留下的 luakv 会让
@@ -556,7 +581,7 @@ async fn real_chain(
         1,
         shutdown.child_token(),
     ));
-    (mgr, event_bus, handle, shutdown)
+    (mgr, event_bus, handle, shutdown, client)
 }
 
 /// 自环防护（T8 硬性验收，Q6 路线图 C 行）：实例订阅自身会写的 tag（`devX.*`），
@@ -566,7 +591,7 @@ async fn real_chain(
 /// 不投——断言 kv 计数稳定不增长（2.5s 轮询五采样）。
 #[tokio::test]
 async fn transform_self_loop_guard_suppresses_own_output() {
-    let (mgr, event_bus, handle, shutdown) = real_chain("lua_transform_selfloop").await;
+    let (mgr, event_bus, handle, shutdown, client) = real_chain("lua_transform_selfloop").await;
 
     let scripts = std::env::temp_dir().join(format!("lua-transform-loop-{}", std::process::id()));
     let script_dir = scripts.join("loop");
@@ -584,16 +609,20 @@ end
     .expect("write");
 
     // period=0 纯订阅（无 on_timer，计数只来自 on_rtdata）；订阅面覆盖自身写点。
-    mgr.start_source(transform_inst(
-        "transform-loop",
-        "luaTransform",
-        serde_json::json!({
-            "script": "loop",
-            "period": 0,
-            "subscribe": ["devX.*"],
-            "scripts_root": scripts.to_str().expect("utf8"),
-        }),
-    ))
+    mgr.start_source(
+        transform_inst(
+            "transform-loop",
+            "luaTransform",
+            serde_json::json!({
+                "script": "loop",
+                "period": 0,
+                "subscribe": ["devX.*"],
+                "scripts_root": scripts.to_str().expect("utf8"),
+            }),
+            &client,
+        )
+        .await,
+    )
     .await
     .expect("start_source");
 
@@ -674,7 +703,7 @@ const AGG_FILTER_EXAMPLE: &str = include_str!("../examples/lua-scripts/agg-filte
 ///   → 派生点 `dev.agg.temp_avg` 落库值 = 20（均值），窗口 kv = [10,20,30]。
 #[tokio::test]
 async fn agg_filter_example_end_to_end() {
-    let (mgr, event_bus, handle, shutdown) = real_chain("lua_transform_aggfilter").await;
+    let (mgr, event_bus, handle, shutdown, client) = real_chain("lua_transform_aggfilter").await;
 
     let scripts = std::env::temp_dir().join(format!("lua-transform-agg-{}", std::process::id()));
     let script_dir = scripts.join("agg-filter");
@@ -686,16 +715,20 @@ async fn agg_filter_example_end_to_end() {
         .await
         .expect("预写 cfg_window");
 
-    mgr.start_source(transform_inst(
-        "agg-filter-1",
-        "luaTransform",
-        serde_json::json!({
-            "script": "agg-filter",
-            "period": 0,
-            "subscribe": ["raw1.temp*"],
-            "scripts_root": scripts.to_str().expect("utf8"),
-        }),
-    ))
+    mgr.start_source(
+        transform_inst(
+            "agg-filter-1",
+            "luaTransform",
+            serde_json::json!({
+                "script": "agg-filter",
+                "period": 0,
+                "subscribe": ["raw1.temp*"],
+                "scripts_root": scripts.to_str().expect("utf8"),
+            }),
+            &client,
+        )
+        .await,
+    )
     .await
     .expect("start agg-filter");
 
@@ -799,7 +832,7 @@ async fn agg_filter_example_end_to_end() {
 /// 传播（单跳）。
 #[tokio::test]
 async fn transform_cross_instance_propagation_not_blocked() {
-    let (mgr, _event_bus, handle, shutdown) = real_chain("lua_transform_cross").await;
+    let (mgr, _event_bus, handle, shutdown, client) = real_chain("lua_transform_cross").await;
 
     let scripts = std::env::temp_dir().join(format!("lua-transform-x-{}", std::process::id()));
     for (dir, src) in [
@@ -829,27 +862,35 @@ end
         std::fs::write(script_dir.join("main.lua"), src).expect("write");
     }
 
-    mgr.start_source(transform_inst(
-        "transform-a",
-        "luaTransform",
-        serde_json::json!({
-            "script": "a",
-            "period": 1,
-            "scripts_root": scripts.to_str().expect("utf8"),
-        }),
-    ))
+    mgr.start_source(
+        transform_inst(
+            "transform-a",
+            "luaTransform",
+            serde_json::json!({
+                "script": "a",
+                "period": 1,
+                "scripts_root": scripts.to_str().expect("utf8"),
+            }),
+            &client,
+        )
+        .await,
+    )
     .await
     .expect("start A");
-    mgr.start_source(transform_inst(
-        "transform-b",
-        "luaTransform",
-        serde_json::json!({
-            "script": "b",
-            "period": 0,
-            "subscribe": ["devB"],
-            "scripts_root": scripts.to_str().expect("utf8"),
-        }),
-    ))
+    mgr.start_source(
+        transform_inst(
+            "transform-b",
+            "luaTransform",
+            serde_json::json!({
+                "script": "b",
+                "period": 0,
+                "subscribe": ["devB"],
+                "scripts_root": scripts.to_str().expect("utf8"),
+            }),
+            &client,
+        )
+        .await,
+    )
     .await
     .expect("start B");
 
@@ -944,7 +985,9 @@ end
             "scripts_root": scripts.to_str().expect("utf8"),
             "callback_timeout_ms": 200
         }),
-    );
+        &client,
+    )
+    .await;
     let (_cmd_tx, cmd_rx) = mpsc::channel::<rs_iot::types::CtlMessage>(4);
     let token = CancellationToken::new();
     let run_token = token.child_token();
@@ -1034,7 +1077,7 @@ end
 #[tokio::test]
 async fn transform_on_rtdata_failures_degrade_after_threshold() {
     let event_bus = EventBus::new(64);
-    let (app, mgr, handle) = test_app("lua_transform_degrade", event_bus.clone()).await;
+    let (app, mgr, handle, client) = test_app("lua_transform_degrade", event_bus.clone()).await;
     let token = login_token(app.clone()).await;
 
     let scripts = std::env::temp_dir().join(format!("lua-transform-deg-{}", std::process::id()));
@@ -1055,7 +1098,9 @@ async fn transform_on_rtdata_failures_degrade_after_threshold() {
             "scripts_root": scripts.to_str().expect("utf8"),
             "fail_threshold": 2
         }),
-    );
+        &client,
+    )
+    .await;
     inst_set(app.clone(), &token, &inst).await;
     let resp = start_inst(app.clone(), &token, "transform-10").await;
     assert_eq!(resp.status(), StatusCode::OK, "{}", body_text(resp).await);

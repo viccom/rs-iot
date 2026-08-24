@@ -18,15 +18,13 @@ use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
 /// 构造 datasim 实例配置：period=1s（默认 3s，测试加快）。
-fn datasim_inst() -> InstConfig {
-    InstConfig {
-        inst_id: "sim_it".into(),
-        inst_name: "it datasim".into(),
-        app_code: PluginName::new("dataSim"),
-        app_type: AppType::South,
-        auto_start: true,
-        app_config: serde_json::json!({ "period": 1 }),
-        devices: vec![DeviceSpec {
+/// M-2 模型驱动：先注册隐式模型 + devreg（纯软 tag），返回绑定形态。
+async fn datasim_inst(client: &lux::EmbeddedClient) -> InstConfig {
+    let bindings = common::register_devices_as_models(
+        client,
+        "sim_it",
+        "dataSim",
+        vec![DeviceSpec {
             label: "demo".into(),
             value: "devA".into(),
             children: vec![
@@ -45,6 +43,16 @@ fn datasim_inst() -> InstConfig {
             ],
             slave_id: None,
         }],
+    )
+    .await;
+    InstConfig {
+        inst_id: "sim_it".into(),
+        inst_name: "it datasim".into(),
+        app_code: PluginName::new("dataSim"),
+        app_type: AppType::South,
+        auto_start: true,
+        app_config: serde_json::json!({ "period": 1 }),
+        devices: bindings,
         host_kind: HostKind::Builtin,
     }
 }
@@ -98,7 +106,7 @@ async fn datasim_to_rtdata_end_to_end() {
     ));
 
     // 3. 启动 datasim 实例（南向插件注册表查找 → 独立 task）
-    mgr.start_source(datasim_inst())
+    mgr.start_source(datasim_inst(&client).await)
         .await
         .expect("start datasim");
 

@@ -12,7 +12,7 @@ use rs_iot::host::{BridgeRegistry, CtlRegistry, HostContext};
 use rs_iot::plugin::instance::InstanceManager;
 use rs_iot::plugin::traits::Processor;
 use rs_iot::transform::passthrough::Passthrough;
-use rs_iot::types::{AppType, DeviceSpec, HostKind, Hwid, InstConfig, PluginName, Sample};
+use rs_iot::types::{AppType, DeviceBinding, HostKind, Hwid, InstConfig, PluginName, Sample};
 use serde_json::json;
 use std::sync::Arc;
 use std::time::Duration;
@@ -76,11 +76,9 @@ async fn hotload_picks_up_script_change() {
             "period": 1,
             "scripts_root": scripts.to_str().expect("utf8"),
         }),
-        devices: vec![DeviceSpec {
-            label: "d".into(),
-            value: "devHL".into(),
-            children: vec![],
-            slave_id: None,
+        devices: vec![DeviceBinding {
+            devid: "devHL".into(),
+            bind: Default::default(),
         }],
         host_kind: HostKind::Builtin,
     };

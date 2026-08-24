@@ -15,7 +15,7 @@ const ownership = computed(() => buildDeviceOwnership(monitor.instanceConfigs, m
  *  （实例过滤的收窄口径——归属表多宿主逗号串拆分）。 */
 function instanceDeviceSet(instId: string): Set<string> {
   const cfg = monitor.instanceConfigs[instId]
-  const s = new Set<string>(cfg?.devices.map(d => d.value).filter(Boolean) ?? [])
+  const s = new Set<string>(cfg?.devices.map(d => d.devid).filter(Boolean) ?? [])
   const rt = monitor.roster.find(i => i.inst_id === instId)?.health?.runtime_devices ?? []
   for (const d of rt) if (d) s.add(d)
   for (const [devId, owners] of Object.entries(monitor.deviceOwners)) {

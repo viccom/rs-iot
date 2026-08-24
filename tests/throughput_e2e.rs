@@ -15,7 +15,8 @@ use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
 /// datasim 实例：devid=dev{i},50 点,period 1s。
-fn datasim_inst(i: u32) -> InstConfig {
+/// M-2 模型驱动：点表注册隐式模型+devreg，实例持绑定。
+async fn datasim_inst(i: u32, client: &lux::EmbeddedClient) -> InstConfig {
     let children: Vec<ChildSpec> = (0..50)
         .map(|j| ChildSpec {
             label: format!("p{j}"),
@@ -24,6 +25,18 @@ fn datasim_inst(i: u32) -> InstConfig {
             props: None,
         })
         .collect();
+    let bindings = common::register_devices_as_models(
+        client,
+        &format!("sim{i}"),
+        "dataSim",
+        vec![DeviceSpec {
+            label: "d".into(),
+            value: format!("dev{i}"),
+            children,
+            slave_id: None,
+        }],
+    )
+    .await;
     InstConfig {
         inst_id: format!("sim{i}").into(),
         inst_name: format!("it sim{i}"),
@@ -31,12 +44,7 @@ fn datasim_inst(i: u32) -> InstConfig {
         app_type: AppType::South,
         auto_start: true,
         app_config: serde_json::json!({"period":1}),
-        devices: vec![DeviceSpec {
-            label: "d".into(),
-            value: format!("dev{i}"),
-            children,
-            slave_id: None,
-        }],
+        devices: bindings,
         host_kind: HostKind::Builtin,
     }
 }
@@ -75,7 +83,7 @@ async fn multi_source_persist_across_workers() {
 
     // 起 4 实例 × 50 点 = 200 点,经 2 worker 路由
     for i in 0..4u32 {
-        mgr.start_source(datasim_inst(i))
+        mgr.start_source(datasim_inst(i, &client).await)
             .await
             .unwrap_or_else(|e| panic!("start sim{i}: {e}"));
     }

@@ -10,7 +10,7 @@ use common::test_data_dir;
 use rs_iot::error::RsIotError;
 use rs_iot::host::{BridgeRegistry, CtlRegistry, HostContext};
 use rs_iot::plugin::instance::InstanceManager;
-use rs_iot::types::{AppType, DeviceSpec, HostKind, Hwid, InstConfig, PluginName, Sample};
+use rs_iot::types::{AppType, HostKind, Hwid, InstConfig, PluginName, Sample};
 use serde_json::json;
 use std::sync::Arc;
 use std::time::Duration;
@@ -24,6 +24,7 @@ async fn harness(
     tokio::sync::mpsc::Receiver<Sample>,
     CancellationToken,
     lux::ServerHandle,
+    lux::EmbeddedClient,
 ) {
     let data_dir = test_data_dir(tag);
     let (handle, client) = common::start_lux(data_dir.to_str().expect("utf8")).await;
@@ -47,11 +48,25 @@ async fn harness(
         hub_rx,
         shutdown,
         handle,
+        client,
     )
 }
 
 /// dataSim 实例（period 1s、单设备单标签——采样速率可控可断言）。
-fn sim_inst(inst_id: &str) -> InstConfig {
+/// M-2：先注册隐式模型+devreg 设备，返回绑定形态实例。
+async fn sim_inst(inst_id: &str, client: &lux::EmbeddedClient) -> InstConfig {
+    let bindings = common::register_devices_as_models(
+        client,
+        inst_id,
+        "dataSim",
+        vec![rs_iot::types::DeviceSpec {
+            label: "d".into(),
+            value: "devGuard".into(),
+            children: vec![],
+            slave_id: None,
+        }],
+    )
+    .await;
     InstConfig {
         inst_id: inst_id.into(),
         inst_name: "guard".into(),
@@ -59,12 +74,7 @@ fn sim_inst(inst_id: &str) -> InstConfig {
         app_type: AppType::South,
         auto_start: false,
         app_config: json!({ "period": 1 }),
-        devices: vec![DeviceSpec {
-            label: "d".into(),
-            value: "devGuard".into(),
-            children: vec![],
-            slave_id: None,
-        }],
+        devices: bindings,
         host_kind: HostKind::Builtin,
     }
 }
@@ -82,14 +92,16 @@ async fn count_samples(rx: &mut tokio::sync::mpsc::Receiver<Sample>, secs: f64) 
 
 #[tokio::test]
 async fn double_start_rejected_no_ghost_and_restartable() {
-    let (mgr, mut hub_rx, shutdown, handle) = harness("guard-mgr").await;
+    let (mgr, mut hub_rx, shutdown, handle, client) = harness("guard-mgr").await;
 
     // 首次启动 Ok
-    mgr.start_source(sim_inst("g1")).await.expect("首次启动");
+    mgr.start_source(sim_inst("g1", &client).await)
+        .await
+        .expect("首次启动");
 
     // 二次启动必须被拒（当前 bug：返回 Ok 且产生幽灵任务——此断言先红）
     let err = mgr
-        .start_source(sim_inst("g1"))
+        .start_source(sim_inst("g1", &client).await)
         .await
         .expect_err("对运行中实例二次启动应被拒");
     assert!(
@@ -107,7 +119,7 @@ async fn double_start_rejected_no_ghost_and_restartable() {
 
     // stop 后重启放行（ed76dc2「stop 后可重启」语义）
     mgr.stop("g1").await.expect("stop");
-    mgr.start_source(sim_inst("g1"))
+    mgr.start_source(sim_inst("g1", &client).await)
         .await
         .expect("stop 后重启应放行");
 
@@ -175,7 +187,7 @@ async fn rest_startinst_double_returns_409() {
         .to_string();
 
     // 持久化实例配置（startinst 从 lux instances 读）
-    let cfg = sim_inst("g2");
+    let cfg = sim_inst("g2", &client).await;
     let resp = app
         .clone()
         .oneshot(

@@ -94,14 +94,14 @@ async fn collect_samples(
     deadline_secs: u64,
 ) -> HashMap<String, String> {
     let data_dir = common::test_data_dir(&format!("modbus-ms-{inst_id}"));
-    let (handle, _client) = common::start_lux(data_dir.to_str().expect("utf8")).await;
-    rs_iot::db::identity::bootstrap(&_client)
+    let (handle, client) = common::start_lux(data_dir.to_str().expect("utf8")).await;
+    rs_iot::db::identity::bootstrap(&client)
         .await
         .expect("bootstrap");
 
     let shutdown = CancellationToken::new();
     let ctx = HostContext {
-        lux: _client,
+        lux: client.clone(),
         hwid: Hwid::new("it-hwid"),
         shutdown: shutdown.clone(),
         ctl_registry: CtlRegistry::new(std::sync::Arc::new(
@@ -115,6 +115,9 @@ async fn collect_samples(
     let (hub_tx, mut hub_rx) = tokio::sync::mpsc::channel::<Sample>(64);
     let mgr = std::sync::Arc::new(InstanceManager::new(ctx, hub_tx));
 
+    // M-2 模型驱动：多 slave 点表注册隐式模型+devreg（slave_id → bind），实例持绑定。
+    let bindings =
+        common::register_devices_as_models(&client, inst_id, "modbusClient", devices).await;
     let inst = InstConfig {
         inst_id: inst_id.into(),
         inst_name: "it modbus multi-slave".into(),
@@ -122,7 +125,7 @@ async fn collect_samples(
         app_type: AppType::South,
         auto_start: false,
         app_config,
-        devices,
+        devices: bindings,
         host_kind: HostKind::Builtin,
     };
     mgr.start_source(inst).await.expect("start modbus");

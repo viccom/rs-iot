@@ -19,12 +19,7 @@ function luaCfg(instId: string, script: string, devices: string[]): InstConfig {
     app_type: 'south',
     auto_start: true,
     app_config: { script },
-    devices: devices.map(d => ({
-      label: d,
-      value: d,
-      children: [{ label: 'v', value: `${d}.v`, type: 'float' }],
-      slave_id: null,
-    })),
+    devices: devices.map(d => ({ devid: d, bind: {} })),
     host_kind: 'builtin',
   }
 }
@@ -186,9 +181,10 @@ describe('instDeviceView', () => {
   it('配置 ∪ 运行时并集，来源标注 + hasData', () => {
     const cfg = luaCfg('i', 's', ['d1', 'd2'])
     const got = instDeviceView(cfg, rtdata, ['d1', 'rt1'])
+    // M-2 绑定形态：tagCount = rtdata 实测点数（d2 无数据 → 0；模型点数在设备模型页）。
     expect(got).toEqual([
       { devId: 'd1', tagCount: 1, source: 'configured', hasData: true },
-      { devId: 'd2', tagCount: 1, source: 'configured', hasData: false },
+      { devId: 'd2', tagCount: 0, source: 'configured', hasData: false },
       { devId: 'rt1', tagCount: 1, source: 'runtime-only', hasData: true },
     ])
   })
