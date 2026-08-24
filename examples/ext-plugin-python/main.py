@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
 """
-rs-iot 外部插件 Python 样例（sidecarClient bridge 协议 v1）。
+rs-iot 外部插件 Python 样例（sidecarClient bridge 协议 v2，M-3）。
 
-演示完整闭环：连接 + 握手 + 配置接收 + 模拟采集(DataUp) +
-写命令(Command/Ack) + 心跳 + 断连缓存补传 + 指数退避重连。
+与 v1 的差异（协议文档 docs/reference/external-plugin-protocol.md）：
+- HELLO 携带 ver="2"（v1 被 bridge 拒连，带升级提示）；
+- ConfigPush v2 载荷：{inst_id, v:2, devices:[{devid, model, tags:[{name,type,
+  addr,unit,rw}]}]}——tags 为设备模型点表（已解析地址），外部按名采集/上报；
+- DataUp 校验闸：devid/tag 必须 ∈ 模型点表（未建模 sample 被 bridge 拒收）。
 
 用法：
     python main.py --inst ext1 --token <token> --host 127.0.0.1 --port 8781
 
 要求 Python 3.10+，无第三方依赖（仅标准库 asyncio + struct + json）。
-协议详见 ../../docs/reference/external-plugin-protocol.md。
 """
 import argparse
 import asyncio
@@ -18,7 +20,7 @@ import random
 import struct
 import time
 
-# 帧类型（与 docs/reference/external-plugin-protocol.md 一致）
+# 帧类型（与 bridge 侧一致）
 T_HELLO = 0x01
 T_HELLO_ACK = 0x02
 T_CONFIG_PUSH = 0x03
@@ -27,7 +29,7 @@ T_COMMAND = 0x05
 T_COMMAND_ACK = 0x06
 T_HEARTBEAT = 0x07
 
-PROTO_VER = "1"
+PROTO_VER = "2"
 
 
 def send_frame(writer: asyncio.StreamWriter, typ: int, body: dict | None) -> None:
@@ -55,24 +57,22 @@ class ExternalPlugin:
         self.token = token
         self.host = host
         self.port = port
-        self.devices: list[dict] = []  # ConfigPush 的 devices
+        self.devices: list[dict] = []  # ConfigPush v2 的 devices（含 tags 模型点表）
         self.heartbeat_secs = 15
-        # 断连缓存：未上报的 (devid, samples)，重连后按 ts 顺序补传。
         self.buffer: list[tuple[str, list[dict]]] = []
         self.buffer_max = 10000
 
-    def sample(self) -> tuple[str, list[dict]]:
-        """模拟采集：对 ConfigPush 里每个 device 的 child 产一个随机值。"""
+    def sample_all(self) -> list[tuple[str, list[dict]]]:
+        """对每个 device 的 tags 产一个变化值（v2：按模型点表名采集）。"""
         ts = int(time.time())
-        if not self.devices:
-            return "", []
-        dev = self.devices[0]
-        devid = dev["value"]
-        samples = [
-            {"tag": ch["value"], "value": round(random.uniform(0, 100), 2), "ts": ts}
-            for ch in dev.get("children", [])
-        ]
-        return devid, samples
+        out = []
+        for i, dev in enumerate(self.devices):
+            samples = [
+                {"tag": t["name"], "value": round(random.uniform(0, 100) + i, 2), "ts": ts}
+                for t in dev.get("tags", [])
+            ]
+            out.append((dev["devid"], samples))
+        return out
 
     async def run(self) -> None:
         """外层重连循环：指数退避。"""
@@ -81,30 +81,34 @@ class ExternalPlugin:
             try:
                 await self.session()
             except (OSError, asyncio.IncompleteReadError, RuntimeError) as e:
-                print(f"[{self.inst}] disconnected: {e}; reconnect in {backoff}s")
+                print(f"[{self.inst}] disconnected: {e}; reconnect in {backoff}s", flush=True)
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, 30)
 
     async def session(self) -> None:
         """一次连接的完整生命周期：握手 → 配置 → 并发采集/命令/心跳。"""
-        print(f"[{self.inst}] connecting {self.host}:{self.port}")
+        print(f"[{self.inst}] connecting {self.host}:{self.port}", flush=True)
         reader, writer = await asyncio.open_connection(self.host, self.port)
 
-        # 1. 握手
+        # 1. 握手（v2：ver 字段必须为 "2"，否则 bridge 拒连）
         send_frame(writer, T_HELLO, {"inst_id": self.inst, "token": self.token, "ver": PROTO_VER})
         await writer.drain()
         typ, body = await read_frame(reader)
         if typ != T_HELLO_ACK or not body.get("ok"):
             raise RuntimeError(f"handshake rejected: {body}")
         self.heartbeat_secs = body.get("heartbeat_secs", 15)
-        print(f"[{self.inst}] handshake ok, heartbeat={self.heartbeat_secs}s")
+        print(f"[{self.inst}] handshake ok, heartbeat={self.heartbeat_secs}s", flush=True)
 
-        # 2. 收 ConfigPush
+        # 2. 收 ConfigPush v2（devices[].tags 为模型点表）
         typ, body = await read_frame(reader)
         if typ != T_CONFIG_PUSH:
             raise RuntimeError(f"expected ConfigPush, got type={typ}")
         self.devices = body.get("devices", [])
-        print(f"[{self.inst}] config received: {len(self.devices)} device(s)")
+        total_tags = sum(len(d.get("tags", [])) for d in self.devices)
+        print(
+            f"[{self.inst}] config v2: {len(self.devices)} device(s), {total_tags} tag(s)",
+            flush=True,
+        )
 
         # 3. 并发：采集+上报 / 收命令 / 心跳。任一异常 → 本次 session 结束 → 外层重连。
         await asyncio.gather(
@@ -114,29 +118,26 @@ class ExternalPlugin:
         )
 
     async def collect_loop(self, writer: asyncio.StreamWriter) -> None:
-        """周期采集 → DataUp；断连时入缓存，重连后先补传缓存。"""
+        """周期采集 → 逐设备 DataUp；断连时入缓存，重连后先补传缓存。"""
         period = 2
         while True:
             await asyncio.sleep(period)
-            devid, samples = self.sample()
-            if not devid:
-                continue
             try:
-                # 先补传缓存（按 ts 顺序）
                 while self.buffer:
                     buf_devid, buf_samples = self.buffer.pop(0)
                     send_frame(writer, T_DATA_UP, {"devid": buf_devid, "samples": buf_samples})
-                # 再发当前
-                send_frame(writer, T_DATA_UP, {"devid": devid, "samples": samples})
+                for devid, samples in self.sample_all():
+                    send_frame(writer, T_DATA_UP, {"devid": devid, "samples": samples})
                 await writer.drain()
             except OSError:
-                self._cache(devid, samples)
+                for devid, samples in self.sample_all():
+                    self._cache(devid, samples)
                 raise
 
     def _cache(self, devid: str, samples: list[dict]) -> None:
         self.buffer.append((devid, samples))
         if len(self.buffer) > self.buffer_max:
-            self.buffer.pop(0)  # 丢最旧
+            self.buffer.pop(0)
 
     async def command_loop(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         """收 Command → 执行（此处仅打印）→ 回 Ack。"""
@@ -144,10 +145,9 @@ class ExternalPlugin:
             typ, body = await read_frame(reader)
             if typ == T_COMMAND:
                 print(
-                    f"[{self.inst}] CMD #{body.get('cmd_id')} "
-                    f"{body.get('cmd')}: {body.get('data')}"
+                    f"[{self.inst}] CMD #{body.get('cmd_id')} {body.get('cmd')}: {body.get('data')}",
+                    flush=True,
                 )
-                # TODO: 实际执行写设备；此处仅回成功。
                 send_frame(writer, T_COMMAND_ACK, {"cmd_id": body["cmd_id"], "ok": True})
                 await writer.drain()
 
@@ -159,7 +159,7 @@ class ExternalPlugin:
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="rs-iot external plugin (Python sidecarClient sample)")
+    ap = argparse.ArgumentParser(description="rs-iot external plugin (Python sidecarClient v2 sample)")
     ap.add_argument("--inst", required=True, help="instance id（rs-iot 中注册的 inst_id）")
     ap.add_argument("--token", required=True, help="plugin token（建实例时 rs-iot 返回一次）")
     ap.add_argument("--host", default="127.0.0.1")

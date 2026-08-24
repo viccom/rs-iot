@@ -107,7 +107,19 @@ luaClient 是 rs-iot 的南向 `Source`（与 modbus/opcua/s7 同构，`inventor
 - `ctx:get_value(devid, tag) -> str|nil`：async，读 lux `rtdata:<devid>` 的 `tag` 最新值字符串。
 - `ctx:get_device(devid) -> table|nil`：async，读设备全部数据点 `{tag = value_str, ...}`；
   缺省设备（无数据）返 `nil`。
-- `ctx:list_devices() -> table`：返当前实例设备树 `[{label=.., value=..}, ...]`（同步）。
+- `ctx:list_devices() -> table`：返当前实例绑定设备 `[{label=devid, value=devid}, ...]`（同步）。
+
+**M-3 模型感知 API**（采集器 Collector；点表来自设备模型注册表——设备/标签元数据
+唯一出生地，脚本只读模型、不自行定义标签）：
+- `ctx:devices() -> table`：绑定设备全量 `[{devid=.., model=..}, ...]`（含模型 id）。
+- `ctx:tags(devid) -> table`：该设备模型点表 `{name = type, ...}`（如 `{temp="f32"}`）；
+  未绑定设备返空表。
+- `ctx:param(devid, name) -> str|nil`：设备实例化参数（如 `ctx:param("devA","base")` → `"100"`）。
+
+**M-3 校验闸**（`set_value/set_values`/`collect` 返回值）：devid 必须 ∈ 本实例绑定 ∧
+tag 必须 ∈ 该设备模型点表——**未建模上报被拒**（`set_value` 抛错脚本 `pcall` 可捕获，
+`collect` 未建模 tag 被过滤；宿主 warn + stat `gate_rejected` 计数）。空点表模型
+（迁移的空点表设备）放行；`luaTransform`/`luaNorth` 无闸（非采集源）。
 
 ### L3 控制（联动）
 

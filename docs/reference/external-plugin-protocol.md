@@ -1,6 +1,6 @@
-# rs-iot 外部插件 Bridge 协议规约（v1）
+# rs-iot 外部插件 Bridge 协议规约（v2）
 
-> **状态**：v1 已实施（sidecarClient，M7）
+> **状态**：v2 已实施（M-3：版本协商 + ConfigPush v2 模型点表 + DataUp 校验闸；v1 拒连）
 
 rs-iot 通过 **sidecarClient bridge** 接入任意语言（C/C++/Go/Rust/Java/Python/Node…）的外部南向采集插件。外部插件是**纯运行时**：配置/数据/状态全在 rs-iot，本地仅缓存数据待补传。经 TCP 连 bridge，token 鉴权，lux 不对暴露（方案 C）。
 
@@ -22,7 +22,7 @@ rs-iot 通过 **sidecarClient bridge** 接入任意语言（C/C++/Go/Rust/Java/P
 | 端口 | `config.bridge.port`（默认 8781） |
 | bind | `config.bridge.bind_host`（默认 `127.0.0.1`；跨机改 `0.0.0.0`） |
 | 启用 | `config.bridge.enable = true`（默认 `false`，现有部署零影响） |
-| 协议版本 | `1`（`Hello.ver`） |
+| 协议版本 | `2`（`Hello.ver`；v1 拒连带升级提示） |
 
 ## 2. 帧格式
 
@@ -49,9 +49,9 @@ rs-iot 通过 **sidecarClient bridge** 接入任意语言（C/C++/Go/Rust/Java/P
 ## 4. 连接与握手
 
 1. 外部进程 TCP connect bridge 端口
-2. 外部发 `Hello{inst_id, token, ver:"1"}`
+2. 外部发 `Hello{inst_id, token, ver:"2"}`（**版本协商**：ver 缺失或 ≠ "2" → 拒连，`HelloAck{ok:false, msg}` 带升级提示——v1 外部插件自动被拒）
 3. bridge 校验 token（`hmac_sha256(jwt_secret, token)` 与 lux `ext_tokens` 存的 hash 比对）：
-   - **通过** → 回 `HelloAck{ok:true, heartbeat_secs}`，紧接发 `ConfigPush{完整配置}`
+   - **通过** → 回 `HelloAck{ok:true, heartbeat_secs}`，紧接发 `ConfigPush v2{完整配置}`
    - **失败**（token 错 / 版本不符 / 实例未启动 / slot 满）→ `HelloAck{ok:false, msg}`，连接关闭
 4. 外部进入数据/命令/心跳循环
 
@@ -62,6 +62,7 @@ rs-iot 通过 **sidecarClient bridge** 接入任意语言（C/C++/Go/Rust/Java/P
 - **批量**：一帧可带多 sample（不同 ts 也行），bridge 拆成多个 Sample 逐个入库
 - **value**：JSON 数字 / 布尔 / 字符串（bridge 按 `SampleValue` 解析：整数→Int、浮点→Float、布尔→Bool、字符串→Str）
 - **ts**：Unix 秒，用**采集时刻**（非发送时刻）——补传时保留原 ts
+- **校验闸（M-3）**：devid 必须 ∈ 本实例绑定设备 ∧ tag 必须 ∈ 该设备模型点表（ConfigPush v2 的 `tags[].name`）——未建模 sample 被 bridge 拒收（warn + `gate_rejected` 计数），合法 sample 正常入库
 
 ## 6. 写命令 Command
 
@@ -85,28 +86,31 @@ rs-iot 收到写命令（MQTT `<hwid>/command` 或 REST `POST /api/v1/command/se
 
 ## 9. 配置 ConfigPush
 
-握手后 + 每次重连后下发。配置结构：
+握手后 + 每次重连后下发。**v2 配置结构**（点表来自设备模型——`tags[].addr` 为装配期按设备 params 解析后的绝对地址）：
 
 ```json
 {
   "inst_id": "ext1",
+  "v": 2,
   "devices": [
     {
-      "label": "温度计",
-      "value": "devT",
-      "children": [
-        {"label": "温度", "value": "temp", "type": "float"},
-        {"label": "湿度", "value": "humidity", "type": "float"}
+      "devid": "devT",
+      "model": "vx_dtz341",
+      "tags": [
+        {"name": "温度", "type": "f32", "addr": "holding:100:f32", "unit": "V", "rw": "r"},
+        {"name": "湿度", "type": "f32", "addr": "holding:124:f32", "unit": null, "rw": "r"}
       ]
     }
   ]
 }
 ```
 
-- device `value`：设备 ID（`rtdata:<devid>` 的 key，DataUp 的 `devid`）
-- `children[].value`：点位 tag（DataUp 的 `tag`）
-- `children[].type`：值类型提示（"float"/"int"/"bool" 等，外部按实际采集类型用）
-- `children[].props`：可选，标签属性初值（Tag Registry 声明式；未声明时不出帧，外部插件可忽略）
+- `devid`：设备 ID（`rtdata:<devid>` 的 key，DataUp 的 `devid`）
+- `model`：设备模型 id（元数据追溯）
+- `tags[]`：设备模型点表——`name`（DataUp 的 `tag`）、`type`（值类型）、`addr`（已解析绝对地址或纯软 tag 名）、`unit`（单位，可 null）、`rw`（"r"/"rw"）
+- **外部按 `tags[].name` 采集/上报**（`addr` 供协议寻址参考；外部自有协议解释）
+
+**配置变更生效**：重启实例（REST `stopinst` + `startinst`），外部重连拿新 ConfigPush。PoC 不做自动 notify。
 
 **配置变更生效**：重启实例（REST `stopinst` + `startinst`），外部重连拿新 ConfigPush。PoC 不做自动 notify。
 

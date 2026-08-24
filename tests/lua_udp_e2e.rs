@@ -73,6 +73,19 @@ async fn udp_collect_writes_rtdata() {
     let pt = shutdown.child_token();
     let _pipeline = tokio::spawn(rs_iot::pipeline::run(ctx, hub_rx, proc, 1, pt));
 
+    // M-2 语义：绑定设备注册（空点表 → 空模型 → 闸放行）。
+    common::register_devices_as_models(
+        &client,
+        "lua-udp",
+        "luaClient",
+        vec![rs_iot::types::DeviceSpec {
+            label: "u".into(),
+            value: "devU".into(),
+            children: vec![],
+            slave_id: None,
+        }],
+    )
+    .await;
     let inst = InstConfig {
         inst_id: "lua-udp".into(),
         inst_name: "u".into(),

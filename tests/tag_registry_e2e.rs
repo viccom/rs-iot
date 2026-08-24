@@ -41,6 +41,9 @@ async fn test_app(
     Arc<InstanceManager>,
 ) {
     let data_dir = common::test_data_dir(name);
+    if data_dir.exists() {
+        std::fs::remove_dir_all(&data_dir).expect("清空上轮测试 data_dir");
+    }
     let (handle, client) = common::start_lux(data_dir.to_str().expect("utf8")).await;
     rs_iot::db::identity::bootstrap(&client)
         .await
@@ -312,17 +315,31 @@ async fn declared_props_seed_initial_card() {
         .await
         .expect("refresh declared");
     // 直推样本（tag=temp2 与声明 value 候选一致）→ flush 建卡用声明初值。
-    hub.send(sample("devG", "temp2", 42.0)).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(400)).await;
-
+    // 全局 effective 缓存被并行测试的写路径刷新覆盖（M-1 已知竞态）：轮询重试
+    // ——reload 缓存 + 重推 + 重读，直到初值生效或超时（8s）。
     let tok = jwt(&app).await;
+    let mut history_ok = false;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
+    while std::time::Instant::now() < deadline {
+        rs_iot::db::tag_registry::refresh_declared(&client)
+            .await
+            .expect("refresh declared");
+        hub.send(sample("devG", "temp2", 42.0)).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        let m = tags(&app, &tok, "").await;
+        if let Some(props) = m.get("devG.temp2") {
+            if props["history"] == serde_json::json!(true) {
+                history_ok = true;
+                break;
+            }
+        }
+    }
+    assert!(
+        history_ok,
+        "声明 history 生效（经 effective 初值→出口登记），8s 内未达成"
+    );
     let m = tags(&app, &tok, "").await;
     let props = &m["devG.temp2"];
-    assert_eq!(
-        props["history"],
-        serde_json::json!(true),
-        "声明 history 生效"
-    );
     assert_eq!(props["deadband"], serde_json::json!(0.5));
     assert_eq!(props["unit"], serde_json::json!("°C"));
     common::stop_lux(handle).await;

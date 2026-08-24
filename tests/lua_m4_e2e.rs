@@ -15,7 +15,9 @@ use rs_iot::host::{BridgeRegistry, CtlRegistry, HostContext};
 use rs_iot::plugin::instance::InstanceManager;
 use rs_iot::plugin::traits::Processor;
 use rs_iot::transform::passthrough::Passthrough;
-use rs_iot::types::{AppType, DeviceSpec, HostKind, Hwid, InstConfig, PluginName, Sample};
+use rs_iot::types::{
+    AppType, ChildSpec, DeviceSpec, HostKind, Hwid, InstConfig, PluginName, Sample,
+};
 use serde_json::json;
 use std::sync::Arc;
 use std::time::Duration;
@@ -101,8 +103,6 @@ async fn lua_kv_set_persists_to_lux() {
         "collect 内 ctx:kv_set('counter',42) 应落 lux luakv:lua-kv-it，得到 '{v}'"
     );
 
-    shutdown.cancel();
-    mgr.stop_all().await;
     common::stop_lux(handle).await;
     let _ = std::fs::remove_dir_all(&scripts);
 }
@@ -115,4 +115,112 @@ async fn hget_cell(client: &lux::EmbeddedClient, key: &str, field: &str) -> Stri
         Ok(EmbeddedValue::Simple(s)) => s,
         _ => String::new(),
     }
+}
+
+/// M-3 校验闸 e2e：collect 产出未建模 tag 被过滤（rtdata 只落建模 tag）+ 计数。
+#[tokio::test]
+async fn collect_gate_filters_unmodeled_tags() {
+    let data_dir = common::test_data_dir("lua_gate");
+    let _ = std::fs::remove_dir_all(&data_dir);
+    let (handle, client) = common::start_lux(data_dir.to_str().expect("utf8")).await;
+    rs_iot::db::identity::bootstrap(&client)
+        .await
+        .expect("bootstrap");
+
+    let shutdown = CancellationToken::new();
+    let ctx = HostContext {
+        lux: client.clone(),
+        hwid: Hwid::new("it-hwid"),
+        shutdown: shutdown.clone(),
+        ctl_registry: CtlRegistry::new(Arc::new(rs_iot::process_metrics::ProcessMetrics::new())),
+        bridge_registry: BridgeRegistry::new(),
+        metrics: Arc::new(rs_iot::process_metrics::ProcessMetrics::new()),
+        trace_registry: rs_iot::io_trace::TraceRegistry::new(),
+        event_tx: rs_iot::event_bus::EventBus::dummy(),
+    };
+    let (hub_tx, hub_rx) = tokio::sync::mpsc::channel::<Sample>(64);
+    let mgr = Arc::new(InstanceManager::new(ctx.clone(), hub_tx));
+    let proc: Arc<dyn Processor> = Arc::new(Passthrough);
+    let pt = shutdown.child_token();
+    let _pipeline = tokio::spawn(rs_iot::pipeline::run(ctx, hub_rx, proc, 1, pt));
+
+    // 脚本：collect 返 { x=1, ghost=2 }——ghost 未建模应被闸过滤。
+    let scripts = std::env::temp_dir().join(format!("lua-gate-{}", std::process::id()));
+    let script_dir = scripts.join("gate");
+    std::fs::create_dir_all(&script_dir).expect("mkdir");
+    std::fs::write(
+        script_dir.join("main.lua"),
+        "function collect() return { x = 1, ghost = 2 } end",
+    )
+    .expect("write");
+
+    // 注册 devG：模型 tags=[x]（非空——闸生效）；实例绑定 devG。
+    let bindings = common::register_devices_as_models(
+        &client,
+        "lua-gate",
+        "luaClient",
+        vec![DeviceSpec {
+            label: "g".into(),
+            value: "devG".into(),
+            children: vec![ChildSpec {
+                label: "x".into(),
+                value: "x".into(),
+                r#type: "int".into(),
+                props: None,
+            }],
+            slave_id: None,
+        }],
+    )
+    .await;
+
+    let inst = InstConfig {
+        inst_id: "lua-gate".into(),
+        inst_name: "gate".into(),
+        app_code: PluginName::new("luaClient"),
+        app_type: AppType::South,
+        auto_start: true,
+        app_config: json!({
+            "script": "gate",
+            "kind": "tcp",
+            "endpoint": "127.0.0.1:1",
+            "period": 1,
+            "scripts_root": scripts.to_str().expect("utf8"),
+        }),
+        devices: bindings,
+        host_kind: HostKind::Builtin,
+    };
+    mgr.start_source(inst).await.expect("start lua");
+    tokio::time::sleep(Duration::from_millis(2300)).await;
+
+    // rtdata：x 落库（建模放行），ghost 无（未建模被闸过滤）。
+    let x = hget_cell(&client, "rtdata:devG", "devG.x").await;
+    assert!(!x.is_empty(), "建模 tag x 应落库，得到 '{x}'");
+    let ghost = client
+        .execute_value("HGET", &["rtdata:devG", "devG.ghost"])
+        .await
+        .unwrap();
+    assert!(
+        matches!(ghost, lux::EmbeddedValue::Nil),
+        "未建模 tag ghost 不应落库"
+    );
+
+    // 闸拒绝计数可见：stop 触发退出 flush（无条件落盘，免周期 flush 的 select
+    // 竞争时序）后读 stat——gate_rejected 应 ≥1（ghost 每轮被拒）。
+    shutdown.cancel();
+    mgr.stop_all().await;
+    let rejected = match rs_iot::db::stat::read(&client, "lua-gate").await {
+        Ok(Some(stat)) => stat
+            .extra
+            .get("gate_rejected")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0),
+        _ => 0,
+    };
+    assert!(
+        rejected >= 1,
+        "gate_rejected 应 ≥1（ghost 每轮被拒），得到 {rejected}"
+    );
+
+    common::stop_lux(handle).await;
+    let _ = std::fs::remove_dir_all(&scripts);
 }

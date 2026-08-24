@@ -27,6 +27,7 @@ fn sync_dropped_samples(
     dropped: &std::sync::atomic::AtomicU64,
     dropped_frames: &std::sync::atomic::AtomicU64,
     alarm: &core_::api::AlarmStats,
+    gate_rejected: &std::sync::atomic::AtomicU64,
 ) {
     tracker.extra_insert(
         "dropped_samples",
@@ -47,6 +48,51 @@ fn sync_dropped_samples(
         "alarm_hash_capped",
         serde_json::json!(alarm.hash_capped_count()),
     );
+    // M-3：校验闸拒绝计数（未建模上报被拒的可见性）。
+    tracker.extra_insert(
+        "gate_rejected",
+        serde_json::json!(gate_rejected.load(std::sync::atomic::Ordering::Relaxed)),
+    );
+}
+
+/// M-3 collect 校验闸：devid ∈ 快照 ∧ tags ⊆ 模型点表（非空模型时）。
+///
+/// 未绑定 → None（整设备拒，warn+计数）；未建模 tag → 过滤（合法 tag 保留，
+/// warn+计数）；空模型（迁移空点表）→ 原样放行。
+fn gate_collect(
+    snapshot: &core_::api::ModelSnapshot,
+    gate_rejected: &std::sync::Arc<std::sync::atomic::AtomicU64>,
+    devid: &str,
+    values: BTreeMap<String, crate::types::SampleValue>,
+) -> Option<BTreeMap<String, crate::types::SampleValue>> {
+    let snap = snapshot.lock().unwrap();
+    let Some(dev) = snap.get(devid) else {
+        gate_rejected.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        tracing::warn!(
+            "[luaClient] collect 设备 {devid} 未绑定到本实例，整设备拒收（gate_rejected）"
+        );
+        return None;
+    };
+    if dev.tags.is_empty() {
+        return Some(values); // 空模型（迁移空点表）：兼容放行
+    }
+    let mut kept = BTreeMap::new();
+    for (tag, v) in values {
+        if dev.tags.iter().any(|t| t.name == tag) {
+            kept.insert(tag, v);
+        } else {
+            gate_rejected.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            tracing::warn!(
+                "[luaClient] collect 标签 {devid}.{tag} 未在模型 {} 点表，拒收（gate_rejected）",
+                dev.model_id
+            );
+        }
+    }
+    if kept.is_empty() {
+        None
+    } else {
+        Some(kept)
+    }
 }
 
 /// 主循环事件（spec §5.4）：解耦 select! 与 `&lua` / `&mut lua` 借用，
@@ -172,10 +218,25 @@ impl Source for LuaClient {
 
         // 4. 注册 ctx API（runtime_devs：L2 上报出口的设备记录，与 collect 出口共用；
         //    dropped：丢样计数，set_value(s) 与 collect 双出口共享，flush 落 stat）。
+        //    M-3：模型点表快照（装配期 expand）+ 校验闸拒绝计数。
         let runtime_devs: RuntimeDevs = Default::default();
         let dropped: std::sync::Arc<std::sync::atomic::AtomicU64> = Default::default();
+        let gate_rejected: std::sync::Arc<std::sync::atomic::AtomicU64> = Default::default();
         // 告警护栏（Q12 T4）：fire 频控 + 抖动表 + 频控计数（flush 落 stat）。
         let alarm: core_::api::AlarmStats = Default::default();
+        // M-3 模型驱动装配：绑定 → devreg/devmodels 展开 → 点表快照（闸 + 感知 API
+        // 数据源）。展开失败拒启动（设备未注册/参数不齐——startinst 已预检，双保险）。
+        let expanded = match crate::model::expand::expand_devices(&ctx.lux, &inst.devices).await {
+            Ok(d) => d,
+            Err(e) => {
+                tracing::error!(
+                    "[luaClient] inst {} 绑定展开失败（设备未注册？）: {e}",
+                    inst.inst_id
+                );
+                return;
+            }
+        };
+        let model_snapshot = core_::api::model_snapshot(&expanded);
         // ApiCtx（9 参收敛 struct，B 阶段 T3）：启动注册与 Evt::Reload 两处共用一份；
         // 字段为廉价句柄克隆 + 借用 inst/scripts_root。role 缺省 Collector（本插件
         // 全量能力，行为零变化；B 阶段 T6 起 north 按 §5.2 矩阵裁剪 C1）。
@@ -191,6 +252,8 @@ impl Source for LuaClient {
             role: core_::api::Role::default(),
             self_writes: None, // Collector 无 EventBus 订阅面，无自环（T8）
             alarm: alarm.clone(),
+            model: Some(model_snapshot.clone()),
+            gate_rejected: gate_rejected.clone(),
         };
         if let Err(e) = core_::api::register(&lua, &ac) {
             tracing::warn!("[luaClient] inst {} ctx API 注册失败：{e}", inst.inst_id);
@@ -272,7 +335,7 @@ impl Source for LuaClient {
                 },
                 Some(frame) = data_rx.recv() => Evt::Data(frame),
                 Some(()) = reload_rx.recv() => Evt::Reload, // None（watcher 退出/失败）忽略，不忙循环
-                _ = flush_ticker.tick() => { core_::budget::sync_runtime_devs(&mut tracker, &runtime_devs); sync_dropped_samples(&mut tracker, &dropped, &dropped_frames, &alarm); tracker.flush_if_due().await; continue; }
+                _ = flush_ticker.tick() => { core_::budget::sync_runtime_devs(&mut tracker, &runtime_devs); sync_dropped_samples(&mut tracker, &dropped, &dropped_frames, &alarm, &gate_rejected); tracker.flush_if_due().await; continue; }
                 _ = ticker.tick() => Evt::Tick,
             };
             match evt {
@@ -344,6 +407,12 @@ impl Source for LuaClient {
                             // （send 不在 with_budget 内，阶段 A 审查修复）。
                             let mut hub_stalled = false;
                             for (devid, values) in samples {
+                                // M-3 校验闸：devid ∈ 绑定 ∧ tags ⊆ 模型点表（非空模型
+                                // 时）。未绑定 → 拒整设备；未建模 tag → 过滤（合法 tag
+                                // 保留上报）+ warn + 计数。空模型（迁移空点表）放行。
+                                let filtered =
+                                    gate_collect(&model_snapshot, &gate_rejected, &devid, values);
+                                let Some(values) = filtered else { continue };
                                 if let Ok(mut set) = runtime_devs.lock() {
                                     set.insert(devid.clone());
                                 }
@@ -403,7 +472,13 @@ impl Source for LuaClient {
                     }
                     if tracker.should_flush() {
                         core_::budget::sync_runtime_devs(&mut tracker, &runtime_devs);
-                        sync_dropped_samples(&mut tracker, &dropped, &dropped_frames, &alarm);
+                        sync_dropped_samples(
+                            &mut tracker,
+                            &dropped,
+                            &dropped_frames,
+                            &alarm,
+                            &gate_rejected,
+                        );
                         tracker.flush().await;
                     }
                 }
@@ -426,7 +501,13 @@ impl Source for LuaClient {
                             consecutive_fail = 0;
                             tracker.set_status("running");
                             core_::budget::sync_runtime_devs(&mut tracker, &runtime_devs);
-                            sync_dropped_samples(&mut tracker, &dropped, &dropped_frames, &alarm);
+                            sync_dropped_samples(
+                                &mut tracker,
+                                &dropped,
+                                &dropped_frames,
+                                &alarm,
+                                &gate_rejected,
+                            );
                             tracker.flush().await;
                             tracing::info!("[luaClient] inst {} 热加载成功", inst.inst_id);
                         }
@@ -446,7 +527,13 @@ impl Source for LuaClient {
         io_join.abort();
         tracker.set_status("stopped");
         core_::budget::sync_runtime_devs(&mut tracker, &runtime_devs);
-        sync_dropped_samples(&mut tracker, &dropped, &dropped_frames, &alarm);
+        sync_dropped_samples(
+            &mut tracker,
+            &dropped,
+            &dropped_frames,
+            &alarm,
+            &gate_rejected,
+        );
         tracker.flush().await;
     }
 }

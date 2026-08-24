@@ -97,8 +97,10 @@ async fn collect_pushes_sample_to_hub() {
     .unwrap();
 
     let (tx, mut rx) = mpsc::channel::<crate::types::Sample>(8);
+    let lux_client = mock_lux().await;
+    seed_model(&lux_client).await;
     let ctx = HostContext {
-        lux: mock_lux().await,
+        lux: lux_client,
         hwid: Hwid::new("it"),
         shutdown: CancellationToken::new(),
         ctl_registry: CtlRegistry::new(std::sync::Arc::new(
@@ -290,6 +292,71 @@ async fn spike_timeout_drop_leaves_vm_usable() {
     println!("SPIKE1: a={a} has_b={has_b}"); // 预期 a=1, has_b=false → 半途态证实
 }
 
+/// M-3 测试种子：devA 注册隐式模型（纯软 tags）——run 装配展开需要 devreg 有设备。
+async fn seed_model(client: &lux::EmbeddedClient) {
+    use crate::model::store;
+    use crate::model::types::{DeviceEntry, DeviceModel, TagTemplate};
+    use crate::types::TagProps;
+    store::set_model(
+        client,
+        &DeviceModel {
+            model_id: "_it_lua".into(),
+            tags: vec![
+                TagTemplate {
+                    name: "temp".into(),
+                    data_type: "float".into(),
+                    addr: None,
+                    props: TagProps::default(),
+                    ..Default::default()
+                },
+                TagTemplate {
+                    name: "humi".into(),
+                    data_type: "float".into(),
+                    addr: None,
+                    props: TagProps::default(),
+                    ..Default::default()
+                },
+                TagTemplate {
+                    name: "v".into(),
+                    data_type: "int".into(),
+                    addr: None,
+                    props: TagProps::default(),
+                    ..Default::default()
+                },
+                TagTemplate {
+                    name: "x".into(),
+                    data_type: "int".into(),
+                    addr: None,
+                    props: TagProps::default(),
+                    ..Default::default()
+                },
+                TagTemplate {
+                    name: "boots".into(),
+                    data_type: "int".into(),
+                    addr: None,
+                    props: TagProps::default(),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    for devid in ["devA", "devM", "devI", "devR"] {
+        store::set_device(
+            client,
+            &DeviceEntry {
+                devid: devid.into(),
+                model: "_it_lua".into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    }
+}
+
 async fn mock_lux() -> lux::EmbeddedClient {
     let cfg = crate::config::AppConfig {
         lux: crate::config::LuxConfig {
@@ -332,8 +399,10 @@ fn lua_inst_config(tmp: &std::path::Path, script: &str) -> InstConfig {
 
 /// T11 集成共用：最小 HostContext（mock lux + dummy 事件总线）。
 async fn lua_host_ctx() -> HostContext {
+    let lux_client = mock_lux().await;
+    seed_model(&lux_client).await;
     HostContext {
-        lux: mock_lux().await,
+        lux: lux_client,
         hwid: Hwid::new("it"),
         shutdown: CancellationToken::new(),
         ctl_registry: CtlRegistry::new(std::sync::Arc::new(
@@ -473,6 +542,8 @@ async fn reload_vm_rejects_bad_manifest() {
         dropped: Default::default(),
         self_writes: None,
         alarm: Default::default(),
+        model: None,
+        gate_rejected: Default::default(),
         transport: cfg.transport.as_str(),
         scripts_root: &tmp,
     };
@@ -615,6 +686,8 @@ async fn reload_vm_on_init_budget_timeout_falls_back() {
         dropped: Default::default(),
         self_writes: None,
         alarm: Default::default(),
+        model: None,
+        gate_rejected: Default::default(),
         transport: cfg.transport.as_str(),
         scripts_root: &tmp,
     };

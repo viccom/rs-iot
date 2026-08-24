@@ -27,6 +27,20 @@ async fn hotload_picks_up_script_change() {
         .await
         .expect("bootstrap");
 
+    // M-2 语义：绑定设备必须注册（空点表 → 空模型 → 闸放行脚本动态 tag）。
+    common::register_devices_as_models(
+        &client,
+        "lua-hl",
+        "luaClient",
+        vec![rs_iot::types::DeviceSpec {
+            label: "hl".into(),
+            value: "devHL".into(),
+            children: vec![],
+            slave_id: None,
+        }],
+    )
+    .await;
+
     // 临时脚本目录：v1 返回 v=1。
     let scripts = std::env::temp_dir().join(format!("lua-hl-{}", std::process::id()));
     let script_dir = scripts.join("hl");

@@ -112,6 +112,8 @@ impl Source for LuaTransform {
             scripts_root: &scripts_root,
             role: core_::api::Role::Transform,
             alarm: alarm.clone(),
+            model: None, // 加工/北向非采集源：无校验闸、无模型感知 API（M-3）
+            gate_rejected: Default::default(),
         };
 
         // 3. VM 组装（north 序：register 先于 load_main——顶层能力探针可用）+

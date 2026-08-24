@@ -72,6 +72,8 @@ async fn register_exposes_ctx_api() {
             dropped: zero_dropped(),
             self_writes: None,
             alarm: AlarmStats::default(),
+            model: None,
+            gate_rejected: Default::default(),
             transport: "tcp",
             scripts_root: Path::new("scripts"),
         },
@@ -141,6 +143,8 @@ async fn register_exposes_stdlib_table() {
             dropped: zero_dropped(),
             self_writes: None,
             alarm: AlarmStats::default(),
+            model: None,
+            gate_rejected: Default::default(),
             transport: "tcp",
             scripts_root: &tmp,
         },
@@ -193,6 +197,8 @@ async fn kv_set_get_roundtrip() {
             dropped: zero_dropped(),
             self_writes: None,
             alarm: AlarmStats::default(),
+            model: None,
+            gate_rejected: Default::default(),
             transport: "tcp",
             scripts_root: Path::new("scripts"),
         },
@@ -293,6 +299,8 @@ async fn send_command_routes_to_target() {
             dropped: zero_dropped(),
             self_writes: None,
             alarm: AlarmStats::default(),
+            model: None,
+            gate_rejected: Default::default(),
             transport: "tcp",
             scripts_root: Path::new("scripts"),
         },
@@ -378,6 +386,8 @@ async fn http_get_returns_status_and_body() {
             dropped: zero_dropped(),
             self_writes: None,
             alarm: AlarmStats::default(),
+            model: None,
+            gate_rejected: Default::default(),
             transport: "tcp",
             scripts_root: Path::new("scripts"),
         },
@@ -545,6 +555,8 @@ async fn capability_cards_match_registered_ctx() {
             dropped: zero_dropped(),
             self_writes: None,
             alarm: AlarmStats::default(),
+            model: None,
+            gate_rejected: Default::default(),
             transport: "tcp",
             scripts_root: Path::new("scripts"),
         },
@@ -706,6 +718,8 @@ async fn set_value_pushes_sample_to_hub() {
             dropped: zero_dropped(),
             self_writes: None,
             alarm: AlarmStats::default(),
+            model: None,
+            gate_rejected: Default::default(),
             transport: "tcp",
             scripts_root: Path::new("scripts"),
         },
@@ -766,6 +780,8 @@ async fn set_values_pushes_multi_tag_sample() {
             dropped: zero_dropped(),
             self_writes: None,
             alarm: AlarmStats::default(),
+            model: None,
+            gate_rejected: Default::default(),
             transport: "tcp",
             scripts_root: Path::new("scripts"),
         },
@@ -836,6 +852,8 @@ async fn set_value_routes_by_devid() {
             dropped: zero_dropped(),
             self_writes: None,
             alarm: AlarmStats::default(),
+            model: None,
+            gate_rejected: Default::default(),
             transport: "tcp",
             scripts_root: Path::new("scripts"),
         },
@@ -894,6 +912,8 @@ async fn get_value_reads_rtdata() {
             dropped: zero_dropped(),
             self_writes: None,
             alarm: AlarmStats::default(),
+            model: None,
+            gate_rejected: Default::default(),
             transport: "tcp",
             scripts_root: Path::new("scripts"),
         },
@@ -956,6 +976,8 @@ async fn get_device_returns_rtdata_values() {
             dropped: zero_dropped(),
             self_writes: None,
             alarm: AlarmStats::default(),
+            model: None,
+            gate_rejected: Default::default(),
             transport: "tcp",
             scripts_root: Path::new("scripts"),
         },
@@ -1019,6 +1041,8 @@ async fn list_devices_returns_inst_devices() {
             dropped: zero_dropped(),
             self_writes: None,
             alarm: AlarmStats::default(),
+            model: None,
+            gate_rejected: Default::default(),
             transport: "tcp",
             scripts_root: Path::new("scripts"),
         },
@@ -1140,6 +1164,8 @@ async fn ctx_transport_returns_configured_kind() {
                 dropped: zero_dropped(),
                 self_writes: None,
                 alarm: AlarmStats::default(),
+                model: None,
+                gate_rejected: Default::default(),
                 transport: kind,
                 scripts_root: Path::new("scripts"),
             },
@@ -1197,6 +1223,8 @@ async fn secret_get_allowlist_semantics() {
             dropped: zero_dropped(),
             self_writes: None,
             alarm: AlarmStats::default(),
+            model: None,
+            gate_rejected: Default::default(),
             transport: "tcp",
             scripts_root: Path::new("scripts"),
         },
@@ -1287,6 +1315,8 @@ async fn north_role_skips_c1_request_transport() {
             dropped: zero_dropped(),
             self_writes: None,
             alarm: AlarmStats::default(),
+            model: None,
+            gate_rejected: Default::default(),
             transport: "mqtt",
             scripts_root: Path::new("scripts"),
             role: Role::North,
@@ -1355,6 +1385,8 @@ async fn transform_role_trims_c1_c3_c5() {
             dropped: zero_dropped(),
             self_writes: None,
             alarm: AlarmStats::default(),
+            model: None,
+            gate_rejected: Default::default(),
             transport: "none", // 占位（transform 不注册 transport，值不被消费）
             scripts_root: Path::new("scripts"),
             role: Role::Transform,
@@ -1435,6 +1467,8 @@ async fn secret_get_always_registered_with_default_empty_allowlist() {
                 dropped: zero_dropped(),
                 self_writes: None,
                 alarm: AlarmStats::default(),
+                model: None,
+                gate_rejected: Default::default(),
                 transport: "tcp",
                 scripts_root: Path::new("scripts"),
             },
@@ -1567,6 +1601,8 @@ async fn alarm_vm(
             scripts_root: Path::new("scripts"),
             role,
             alarm: alarm.clone(),
+            model: None,
+            gate_rejected: Default::default(),
         },
     )
     .expect("register");
@@ -1893,4 +1929,173 @@ async fn fire_and_recv(
         matches!(f.action, crate::event_bus::AlarmAction::Fire),
         "前置 fire 应发 Fire 帧"
     );
+}
+
+// ---------- M-3 模型感知 API + 校验闸 ----------
+
+/// 构造带模型快照的 ApiCtx（devA：tags ua/ub + params base=100）并注册。
+async fn register_with_model(
+    lua: &mlua::Lua,
+    tag: &str,
+) -> (
+    crate::plugin::lua_core::api::ModelSnapshot,
+    std::sync::Arc<std::sync::atomic::AtomicU64>,
+) {
+    let snapshot = super::model_snapshot(&[crate::model::expand::ExpandedDevice {
+        devid: "devA".into(),
+        bind: Default::default(),
+        entry: crate::model::types::DeviceEntry {
+            devid: "devA".into(),
+            model: "mx".into(),
+            params: [("base".to_string(), "100".to_string())].into(),
+            ..Default::default()
+        },
+        model: crate::model::types::DeviceModel {
+            model_id: "mx".into(),
+            params: vec!["base".into()],
+            tags: vec![
+                crate::model::types::TagTemplate {
+                    name: "ua".into(),
+                    data_type: "f32".into(),
+                    addr: Some("holding:{base}:f32".into()),
+                    ..Default::default()
+                },
+                crate::model::types::TagTemplate {
+                    name: "ub".into(),
+                    data_type: "f32".into(),
+                    addr: Some("holding:{base}+2:f32".into()),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        },
+    }]);
+    let gate = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let io = spawn_mock_io();
+    let (ctx_host, handle, data_dir) = setup_ctx(tag).await;
+    let inst = InstConfig {
+        inst_id: "it".into(),
+        inst_name: "it".into(),
+        app_code: PluginName::new("luaClient"),
+        app_type: AppType::South,
+        auto_start: false,
+        app_config: serde_json::json!({"script":"a","endpoint":"x"}),
+        devices: vec![crate::types::DeviceBinding {
+            devid: "devA".into(),
+            bind: Default::default(),
+        }],
+        host_kind: HostKind::Builtin,
+    };
+    register(
+        lua,
+        &ApiCtx {
+            ctx_host,
+            inst: &inst,
+            io: Some(io),
+            role: Role::default(),
+            tx: mock_hub_tx(),
+            runtime_devs: RuntimeDevs::default(),
+            dropped: Default::default(),
+            self_writes: None,
+            transport: "tcp",
+            scripts_root: std::path::Path::new("scripts"),
+            alarm: AlarmStats::default(),
+            model: Some(snapshot.clone()),
+            gate_rejected: gate.clone(),
+        },
+    )
+    .expect("register");
+    let _ = crate::db::shutdown_lux(handle).await;
+    let _ = std::fs::remove_dir_all(&data_dir);
+    (snapshot, gate)
+}
+
+/// ctx:devices() 返回绑定设备（含模型 id）。
+#[tokio::test]
+async fn ctx_devices_lists_bound_devices() {
+    let lua = Lua::new();
+    let (_snap, _gate) = register_with_model(&lua, "m3-model-devices").await;
+    let t: mlua::Table = lua.load("return ctx:devices()").eval().expect("devices");
+    assert_eq!(t.len().unwrap(), 1);
+    let d: mlua::Table = t.get::<mlua::Table>(1).unwrap();
+    assert_eq!(d.get::<String>("devid").unwrap(), "devA");
+    assert_eq!(d.get::<String>("model").unwrap(), "mx");
+}
+
+/// ctx:tags(devid) 返回模型点表（名→类型）；未知设备空表。
+#[tokio::test]
+async fn ctx_tags_returns_model_points() {
+    let lua = Lua::new();
+    let (_snap, _gate) = register_with_model(&lua, "m3-model-devices").await;
+    let t: mlua::Table = lua.load("return ctx:tags('devA')").eval().expect("tags");
+    assert_eq!(t.get::<String>("ua").unwrap(), "f32");
+    assert_eq!(t.get::<String>("ub").unwrap(), "f32");
+    let empty: mlua::Table = lua
+        .load("return ctx:tags('ghost')")
+        .eval()
+        .expect("tags ghost");
+    assert_eq!(empty.len().unwrap(), 0, "未知设备空表");
+}
+
+/// ctx:param(devid, name) 返回实例化参数；未知 nil。
+#[tokio::test]
+async fn ctx_param_returns_device_params() {
+    let lua = Lua::new();
+    let (_snap, _gate) = register_with_model(&lua, "m3-model-devices").await;
+    let v: mlua::Value = lua
+        .load("return ctx:param('devA', 'base')")
+        .eval()
+        .expect("param");
+    assert_eq!(v, mlua::Value::String(lua.create_string("100").unwrap()));
+    let nil: mlua::Value = lua
+        .load("return ctx:param('devA', 'nope')")
+        .eval()
+        .expect("param nil");
+    assert!(matches!(nil, mlua::Value::Nil));
+}
+
+/// 校验闸：set_value 未绑定设备 → lua error（pcall 可捕获）+ 计数。
+#[tokio::test]
+async fn set_value_gate_rejects_unbound_device() {
+    let lua = Lua::new();
+    let (_snap, gate) = register_with_model(&lua, "m3-model-ghost").await;
+    let ok: bool = lua
+        .load("local ok, err = pcall(function() ctx:set_value('ghost', 'ua', 1) end); return ok")
+        .eval_async()
+        .await
+        .expect("set_value ghost");
+    assert!(!ok, "未绑定设备应抛错（pcall 捕获）");
+    assert_eq!(
+        gate.load(std::sync::atomic::Ordering::Relaxed),
+        1,
+        "拒绝计数 +1"
+    );
+}
+
+/// 校验闸：set_value 未建模 tag → lua error + 计数。
+#[tokio::test]
+async fn set_value_gate_rejects_unmodeled_tag() {
+    let lua = Lua::new();
+    let (_snap, gate) = register_with_model(&lua, "m3-model-notag").await;
+    let ok: bool = lua
+        .load("local ok, err = pcall(function() ctx:set_value('devA', 'nope', 1) end); return ok")
+        .eval_async()
+        .await
+        .expect("set_value nope");
+    assert!(!ok, "未建模 tag 应抛错");
+    assert_eq!(gate.load(std::sync::atomic::Ordering::Relaxed), 1);
+}
+
+/// 校验闸：建模 tag 放行（set_value 成功）。
+#[tokio::test]
+async fn set_value_gate_allows_modeled_tag() {
+    let lua = Lua::new();
+    let (_snap, gate) = register_with_model(&lua, "m3-model-ok").await;
+    let ok: bool = lua
+        .load("local ok = pcall(function() ctx:set_value('devA', 'ua', 1) end); return ok")
+        .eval_async()
+        .await
+        .expect("set_value ua");
+    assert!(ok, "建模 tag 应放行");
+    assert_eq!(gate.load(std::sync::atomic::Ordering::Relaxed), 0);
 }

@@ -66,6 +66,19 @@ async fn on_data_pushes_to_luakv() {
     let pt = shutdown.child_token();
     let _pipeline = tokio::spawn(rs_iot::pipeline::run(ctx, hub_rx, proc, 1, pt));
 
+    // M-2 语义：绑定设备注册（空点表 → 空模型 → 闸放行）。
+    common::register_devices_as_models(
+        &client,
+        "lua-ond",
+        "luaClient",
+        vec![rs_iot::types::DeviceSpec {
+            label: "od".into(),
+            value: "devOnd".into(),
+            children: vec![],
+            slave_id: None,
+        }],
+    )
+    .await;
     let inst = InstConfig {
         inst_id: "lua-ond".into(),
         inst_name: "ond".into(),

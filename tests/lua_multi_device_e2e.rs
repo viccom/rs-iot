@@ -60,6 +60,27 @@ async fn nested_collect_writes_multi_devid_rtdata() {
     let pt = shutdown.child_token();
     let _pipeline = tokio::spawn(rs_iot::pipeline::run(ctx, hub_rx, proc, 1, pt));
 
+    // M-2 语义：绑定设备注册（空点表 → 空模型 → 闸放行脚本动态 tag）。
+    common::register_devices_as_models(
+        &client,
+        "lua-mdn",
+        "luaClient",
+        vec![
+            rs_iot::types::DeviceSpec {
+                label: "1".into(),
+                value: "dev1".into(),
+                children: vec![],
+                slave_id: None,
+            },
+            rs_iot::types::DeviceSpec {
+                label: "2".into(),
+                value: "dev2".into(),
+                children: vec![],
+                slave_id: None,
+            },
+        ],
+    )
+    .await;
     let inst = InstConfig {
         inst_id: "lua-mdn".into(),
         inst_name: "mdn".into(),
@@ -150,6 +171,19 @@ async fn set_values_writes_multi_tag_rtdata() {
     let pt = shutdown.child_token();
     let _pipeline = tokio::spawn(rs_iot::pipeline::run(ctx, hub_rx, proc, 1, pt));
 
+    // M-2 语义：绑定设备注册。
+    common::register_devices_as_models(
+        &client,
+        "lua-mdsv",
+        "luaClient",
+        vec![rs_iot::types::DeviceSpec {
+            label: "s".into(),
+            value: "devS".into(),
+            children: vec![],
+            slave_id: None,
+        }],
+    )
+    .await;
     let inst = InstConfig {
         inst_id: "lua-mdsv".into(),
         inst_name: "mdsv".into(),
