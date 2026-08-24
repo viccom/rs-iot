@@ -43,6 +43,23 @@
 </div>
 
 <div class="row">
+  <span class="muted">模型注册表（M-1~M-4）：</span>
+  <button onclick="call('/api/v1/devmodels')">devmodels</button>
+  <button onclick="call('/api/v1/devreg')">devreg</button>
+  <button onclick="call('/api/v1/discoveries')">discoveries</button>
+  <button onclick="call('/api/v1/tags')">tags(effective)</button>
+  <button onclick="call('/api/v1/tags/legacy-export')">tags/legacy-export</button>
+</div>
+
+<div class="row">
+  devid: <input id="dvid" style="width:90px">
+  <button onclick="call('/api/v1/devreg?devid=' + encodeURIComponent(document.getElementById('dvid').value))">devreg?devid</button>
+  <button onclick="call('/api/v1/discoveries?dev_id=' + encodeURIComponent(document.getElementById('dvid').value))">discoveries?dev_id</button>
+  <button onclick="discClear()">discovery/clear</button>
+  <button onclick="call('/api/v1/migrate/inline-devices', { method: 'POST', body: '{}' })">migrate/inline-devices</button>
+</div>
+
+<div class="row">
   startinst id: <input id="sid" style="width:100px"><button onclick="startinst()">startinst</button>
   stopinst id: <input id="xid" style="width:100px"><button onclick="stopinst()">stopinst</button>
 </div>
@@ -81,6 +98,7 @@ async function startinst() { const id = document.getElementById('sid').value; ca
 async function stopinst() { const id = document.getElementById('xid').value; call('/api/v1/stopinst', { method: 'POST', body: JSON.stringify({ inst_id: id }) }); }
 async function secretSet() { const ref = document.getElementById('sref').value, val = document.getElementById('sval').value; call('/api/v1/secret/set', { method: 'POST', body: JSON.stringify({ ref: ref, value: val }) }); }
 async function secretDel() { const ref = document.getElementById('sref').value; call('/api/v1/secret?ref=' + encodeURIComponent(ref), { method: 'DELETE' }); }
+async function discClear() { const id = document.getElementById('dvid').value; call('/api/v1/discovery/clear', { method: 'POST', body: JSON.stringify(id ? { dev_id: id } : {}) }); }
 async function alarmClear() { const key = document.getElementById('akey').value; call('/api/v1/alarms?key=' + encodeURIComponent(key), { method: 'DELETE' }); }
 async function loadSys() { const r = await call('/api/v1/sysinfo'); try { const j = JSON.parse(r.body); document.getElementById('hwid').textContent = j.hwid; document.getElementById('ver').textContent = j.version; } catch (e) {} }
 

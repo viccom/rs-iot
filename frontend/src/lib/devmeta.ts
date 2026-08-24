@@ -118,6 +118,15 @@ export function mergeTagProps(tmpl: TagProps, ov: TagOverride | undefined): TagP
   }
 }
 
+/** 模板 props 基准：顶层 `unit`/`desc` 为 props 同名字段垫底默认
+ *  （镜像后端 effective::effective_tags——建模两处任写一处 effective 均可见）。 */
+export function baseProps(t: TagTemplate): TagProps {
+  const base = { ...t.props }
+  if (base.unit == null) base.unit = t.unit
+  if (base.desc == null) base.desc = t.desc
+  return base
+}
+
 /** 设备表单校验（镜像后端 validate_device_entry：params 齐套 + 覆盖 tag ∈ 模型）。 */
 export function validateDevice(dev: DeviceEntry, model: DeviceModel): string[] {
   const errs: string[] = []

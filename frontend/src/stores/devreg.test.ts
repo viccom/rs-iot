@@ -132,3 +132,72 @@ describe('devreg store', () => {
     expect(r).toEqual({ converted_models: 3, converted_devices: 3, converted_instances: 2, failures: [] })
   })
 })
+
+describe('devreg store 发现队列（M-4）', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    const store: Record<string, string> = {}
+    ;(globalThis as { localStorage?: Storage }).localStorage = {
+      getItem: (k: string) => store[k] ?? null,
+      setItem: (k: string, v: string) => { store[k] = v },
+      removeItem: (k: string) => { delete store[k] },
+      clear: () => { for (const k of Object.keys(store)) delete store[k] },
+      key: (i: number) => Object.keys(store)[i] ?? null,
+      get length() { return Object.keys(store).length },
+    } as Storage
+    useAuthStore().setAuth('tok', 'admin')
+  })
+  afterEach(() => vi.unstubAllGlobals())
+
+  it('loadDiscoveries 拉队列（数组载荷）', async () => {
+    stubFetch({
+      '/api/rsiot/api/v1/discoveries': {
+        ok: true, status: 200,
+        body: [{ devid: 'd1', tag: 'ghost', first_ts: 1, last_ts: 2, count: 3, sample_value: '42.5' }],
+      },
+    })
+    const s = useDevregStore()
+    await s.loadDiscoveries()
+    expect(s.discoveries).toHaveLength(1)
+    expect(s.discoveries[0].tag).toBe('ghost')
+  })
+
+  it('clearDiscoveries 带 dev_id 作用域', async () => {
+    const calls = stubFetch({
+      '/api/rsiot/api/v1/discovery/clear': { ok: true, status: 200, body: { status: 'ok', cleared: 1 } },
+      '/api/rsiot/api/v1/discoveries': { ok: true, status: 200, body: [] },
+    })
+    const s = useDevregStore()
+    const ok = await s.clearDiscoveries('d1')
+    expect(ok).toBe(true)
+    const clear = calls.find(c => c.url.includes('/discovery/clear'))
+    expect(JSON.parse(String(clear?.init?.body))).toEqual({ dev_id: 'd1' })
+    expect(s.discoveries).toHaveLength(0)
+  })
+
+  it('adopt 成功刷新双表与队列 / 404 报目标模型缺失', async () => {
+    const calls = stubFetch({
+      '/api/rsiot/api/v1/discovery/adopt': { ok: true, status: 200, body: { status: 'ok', merged: 1, swept: 2 } },
+      '/api/rsiot/api/v1/devmodels': { ok: true, status: 200, body: {} },
+      '/api/rsiot/api/v1/devreg': { ok: true, status: 200, body: {} },
+      '/api/rsiot/api/v1/discoveries': { ok: true, status: 200, body: [] },
+    })
+    const s = useDevregStore()
+    const r = await s.adopt('m1', [{ name: 'ghost', data_type: 'f32' }])
+    expect(r).toEqual({ merged: 1, swept: 2 })
+    const adoptCall = calls.find(c => c.url.includes('/discovery/adopt'))
+    expect(adoptCall?.init?.method).toBe('POST')
+    expect(JSON.parse(String(adoptCall?.init?.body))).toEqual({
+      model_id: 'm1', tags: [{ name: 'ghost', data_type: 'f32' }],
+    })
+
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      ok: false, status: 404,
+      json: async () => ({}),
+      text: async () => 'model not found',
+    }) as unknown as Response))
+    const r404 = await s.adopt('nope', [{ name: 'x', data_type: 'f32' }])
+    expect(r404).toBeNull()
+    expect(s.error).toContain('nope')
+  })
+})
