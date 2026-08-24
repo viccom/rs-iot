@@ -26,7 +26,7 @@ use rs_iot::host::{BridgeRegistry, CtlRegistry, HostContext};
 use rs_iot::plugin::instance::InstanceManager;
 use rs_iot::plugin::traits::Processor;
 use rs_iot::transform::passthrough::Passthrough;
-use rs_iot::types::{AppType, DeviceSpec, HostKind, Hwid, InstConfig, PluginName, Sample};
+use rs_iot::types::{AppType, DeviceBinding, HostKind, Hwid, InstConfig, PluginName, Sample};
 use serde_json::json;
 use std::sync::Arc;
 use std::time::Duration;
@@ -207,11 +207,9 @@ async fn mqtt_pass_request_and_on_data() {
             "timeout_ms": 500,
             "scripts_root": scripts.to_str().expect("utf8"),
         }),
-        devices: vec![DeviceSpec {
-            label: "d".into(),
-            value: "devMQ".into(),
-            children: vec![],
-            slave_id: None,
+        devices: vec![DeviceBinding {
+            devid: "devMQ".into(),
+            bind: Default::default(),
         }],
         host_kind: HostKind::Builtin,
     };
@@ -284,11 +282,9 @@ async fn mqtt_dead_broker_errors_not_panics() {
             "timeout_ms": 500,
             "scripts_root": scripts.to_str().expect("utf8"),
         }),
-        devices: vec![DeviceSpec {
-            label: "d".into(),
-            value: "devMQd".into(),
-            children: vec![],
-            slave_id: None,
+        devices: vec![DeviceBinding {
+            devid: "devMQd".into(),
+            bind: Default::default(),
         }],
         host_kind: HostKind::Builtin,
     };

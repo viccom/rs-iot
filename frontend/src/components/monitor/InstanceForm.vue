@@ -4,9 +4,10 @@
   （后端无单点端点——读-改-写覆盖）。参照 PermissionModal 的 mask/card 骨骼。
 -->
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
-import type { InstConfig, DeviceSpec, ChildSpec, AppType, HostKind } from '../../types'
+import { computed, onMounted, ref, watch } from 'vue'
+import type { InstConfig, AppType, HostKind } from '../../types'
 import { SOUTH_APP_CODES, schemaFor, defaultAppConfig } from '../../lib/pluginSchemas'
+import { useDevregStore } from '../../stores/devreg'
 
 const props = defineProps<{
   /** 编辑的实例配置；null 表示新建（用默认空配置）。 */
@@ -90,36 +91,52 @@ function setField(key: string, type: string, raw: string) {
   }
 }
 
-// ---- 采集点表（devices/children 增删改）----
+// ---- 设备绑定（M-2：实例只绑定 devreg 全局设备，点表来自设备模型）----
 
-/** 新增设备。 */
+const devreg = useDevregStore()
+onMounted(() => { void devreg.loadAll() })
+
+/** devreg 设备清单（下拉候选；含 model 便于识别）。 */
+const registryDevices = computed(() =>
+  Object.values(devreg.devices).sort((a, b) => a.devid.localeCompare(b.devid)))
+
+/** 新增绑定（默认选第一台在册设备；无设备时占位空，校验会拦）。 */
 function addDevice() {
-  form.value.devices.push({ label: '', value: '', children: [] })
+  form.value.devices.push({ devid: registryDevices.value[0]?.devid ?? '', bind: {} })
 }
-/** 删除设备。 */
+/** 删除绑定。 */
 function removeDevice(i: number) {
   form.value.devices.splice(i, 1)
 }
-/** 新增采集点。 */
-function addChild(dev: DeviceSpec) {
-  dev.children.push({ label: '', value: '', type: 'float' })
+/** slave_id 绑定参数写入（空 = 删键走后端缺省；DeviceBinding.bind 值统一字符串）。 */
+function setBindSlave(b: { bind: Record<string, string> }, raw: string) {
+  if (raw === '') delete b.bind.slave_id
+  else b.bind.slave_id = raw
 }
-/** 删除采集点。 */
-function removeChild(dev: DeviceSpec, i: number) {
-  dev.children.splice(i, 1)
+
+/** 选中设备的模型标签数预览（绑定行下展示点表来源概览）。 */
+function deviceTagsPreview(devid: string): string {
+  const dev = devreg.devices[devid]
+  if (!dev) return '（未在注册表）'
+  const model = devreg.models[dev.model]
+  const n = model?.tags.length ?? 0
+  const params = Object.entries(dev.params).map(([k, v]) => `${k}=${v}`).join(' ')
+  return `${dev.model} · ${n} tag${params ? ' · ' + params : ''}`
 }
 
 /** 是否新建实例（inst_id 可编辑）。 */
 const isNew = computed(() => !props.modelValue)
 
-/** 点表校验错误（空串=合法）：devId 为空 → 无名设备（rtdata 空键、前端点位无法定位）；
- *  同实例内重复 → rtdata 键互相覆盖。 */
+/** 绑定校验错误（空串=合法）：devid 为空/重复/不在注册表。 */
 const devicesError = computed(() => {
   const ids = new Set<string>()
-  for (const dev of form.value.devices) {
-    const id = dev.value.trim()
-    if (!id) return '存在设备 ID 为空的条目（会产生无名设备）'
-    if (ids.has(id)) return `设备 ID 重复：${id}`
+  if (!registryDevices.value.length && form.value.devices.length)
+    return '设备注册表为空——先到「设备模型」页建设备或执行迁移'
+  for (const b of form.value.devices) {
+    const id = b.devid.trim()
+    if (!id) return '存在未选择设备的绑定条目'
+    if (!devreg.devices[id]) return `设备 ${id} 不在注册表（先建设备）`
+    if (ids.has(id)) return `重复绑定设备：${id}`
     ids.add(id)
   }
   return ''
@@ -228,44 +245,33 @@ function submit() {
           </template>
         </section>
 
-        <!-- 采集点表（devices/children）-->
+        <!-- 设备绑定（M-2：点表权威在设备模型注册表，实例只绑定）-->
         <section class="sec">
           <div class="sec-head">
-            <h4>采集点表</h4>
-            <button class="btn-add" @click="addDevice">+ 设备</button>
+            <h4>设备绑定（点表来自设备模型）</h4>
+            <button class="btn-add" @click="addDevice" :disabled="!registryDevices.length">+ 绑定设备</button>
           </div>
-          <div v-for="(dev, di) in form.devices" :key="di" class="device-block">
+          <div v-for="(b, di) in form.devices" :key="di" class="device-block">
             <div class="device-head">
-              <input v-model="dev.value" placeholder="设备 ID (devId)" class="dev-id" />
-              <input v-model="dev.label" placeholder="设备标签（可选）" />
+              <select v-model="b.devid" class="dev-id">
+                <option value="" disabled>选择设备…</option>
+                <option v-for="d in registryDevices" :key="d.devid" :value="d.devid">
+                  {{ d.devid }}（{{ d.model }}）
+                </option>
+              </select>
               <label v-if="form.app_code === 'modbusClient'" class="slave">
                 <span>slave_id</span>
-                <input type="number" v-model.number="dev.slave_id" placeholder="默认" />
+                <input
+                  :value="b.bind.slave_id ?? ''"
+                  type="number" placeholder="默认"
+                  @input="setBindSlave(b, ($event.target as HTMLInputElement).value)"
+                >
               </label>
-              <button class="btn-del" @click="removeDevice(di)">删设备</button>
+              <button class="btn-del" @click="removeDevice(di)">解绑</button>
             </div>
-            <table class="child-table">
-              <thead>
-                <tr><th>地址串 / 变量（value）</th><th>类型</th><th>显示名（label）</th><th></th></tr>
-              </thead>
-              <tbody>
-                <tr v-for="(c, ci) in dev.children" :key="ci">
-                  <td><input v-model="c.value" placeholder="如 holding:0:f32:ABCD / temp" /></td>
-                  <td>
-                    <select v-model="c.type">
-                      <option>float</option><option>int</option><option>bool</option>
-                      <option>i16</option><option>u16</option><option>i32</option>
-                      <option>u32</option><option>f32</option><option>f64</option><option>bit</option>
-                    </select>
-                  </td>
-                  <td><input v-model="c.label" placeholder="可选" /></td>
-                  <td><button class="btn-del-sm" @click="removeChild(dev, ci)">✕</button></td>
-                </tr>
-              </tbody>
-            </table>
-            <button class="btn-add-sm" @click="addChild(dev)">+ 采集点</button>
+            <p class="bind-preview">{{ deviceTagsPreview(b.devid) }}</p>
           </div>
-          <p v-if="!form.devices.length" class="empty-hint">暂无设备，点「+ 设备」添加</p>
+          <p v-if="!form.devices.length" class="empty-hint">暂无绑定。设备与点表在「设备模型」页管理（模型模板 → 建设备 → 此处绑定）。</p>
           <p v-if="devicesError" class="json-err">{{ devicesError }}（保存已禁用）</p>
         </section>
       </div>
@@ -366,6 +372,7 @@ function submit() {
 }
 .btn-del-sm { padding: 2px 6px; border: none; }
 .empty-hint { color: var(--color-ink-muted); font-size: 12px; padding: 8px 0; }
+.bind-preview { margin: 4px 0 0; font-size: 11px; color: var(--color-ink-muted); font-family: Consolas, monospace; }
 .actions {
   display: flex; gap: 8px; justify-content: flex-end;
   padding: 14px 20px; border-top: 1px solid var(--color-divider);

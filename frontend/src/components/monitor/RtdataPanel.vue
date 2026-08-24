@@ -24,19 +24,15 @@ const scrollTop = ref(0)
 /** 滚动容器可视高度（决定渲染行数）。 */
 const viewportH = ref(480)
 
-/** devId → { tag → type } 映射（从 instanceConfigs 的 devices.children 建）。
- *  rtdata cell 无类型，类型在 ChildSpec（实例配置）。 */
+/** devId → { tag → type } 映射（M-2：从设备模型聚合视图 GET /devices 的
+ *  children 建——点表权威在模型注册表）。 */
 const typeMap = computed(() => {
   const m: Record<string, Record<string, string>> = {}
-  for (const cfg of Object.values(monitor.instanceConfigs)) {
-    for (const dev of cfg.devices) {
-      const devId = dev.value
-      if (!devId) continue
-      m[devId] ??= {}
-      for (const ch of dev.children) {
-        const tag = ch.value.split('.').pop() || ch.value
-        if (ch.type) m[devId][tag] = ch.type
-      }
+  for (const [devId, dev] of Object.entries(monitor.deviceCatalog)) {
+    m[devId] ??= {}
+    for (const ch of dev.children ?? []) {
+      const tag = ch.value.split('.').pop() || ch.value
+      if (ch.type) m[devId][tag] = ch.type
     }
   }
   return m

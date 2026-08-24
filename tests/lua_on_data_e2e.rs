@@ -11,7 +11,7 @@ use rs_iot::host::{BridgeRegistry, CtlRegistry, HostContext};
 use rs_iot::plugin::instance::InstanceManager;
 use rs_iot::plugin::traits::Processor;
 use rs_iot::transform::passthrough::Passthrough;
-use rs_iot::types::{AppType, DeviceSpec, HostKind, Hwid, InstConfig, PluginName, Sample};
+use rs_iot::types::{AppType, DeviceBinding, HostKind, Hwid, InstConfig, PluginName, Sample};
 use serde_json::json;
 use std::sync::Arc;
 use std::time::Duration;
@@ -80,11 +80,9 @@ async fn on_data_pushes_to_luakv() {
             "recv_idle_ms": 80,
             "scripts_root": scripts.to_str().expect("utf8"),
         }),
-        devices: vec![DeviceSpec {
-            label: "d".into(),
-            value: "devOnd".into(),
-            children: vec![],
-            slave_id: None,
+        devices: vec![DeviceBinding {
+            devid: "devOnd".into(),
+            bind: Default::default(),
         }],
         host_kind: HostKind::Builtin,
     };

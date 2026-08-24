@@ -130,17 +130,28 @@ export interface ChildSpec {
   type: string
 }
 
-/** 设备规格（对标 DeviceSpec：label/value(=devId)/children/slave_id）。 */
+/** 设备规格（旧内联形态；M-2 起仅 /api/v1/devices 聚合视图使用——点表权威在设备模型）。 */
 export interface DeviceSpec {
   label: string
   value: string
   children: ChildSpec[]
   slave_id?: number | null
+  model?: string
+  runtime?: boolean
+  owner_inst?: string
+  inst_id?: string
+}
+
+/** 设备绑定（M-2 起 `InstConfig.devices` 元素）——实例只绑定 devreg 全局设备。 */
+export interface DeviceBinding {
+  devid: string
+  bind: Record<string, string>
 }
 
 /**
  * 插件实例配置（对标 InstConfig）。app_config 为任意 JSON（各插件自行解析：
  * modbus/lua/opcua/s7 各自字段）。经 `GET /insts` 拉取、`POST /inst/set` 整包写。
+ * M-2：devices 为绑定列表（devid 引用设备注册表，点表来自设备模型）。
  */
 export interface InstConfig {
   inst_id: string
@@ -149,7 +160,7 @@ export interface InstConfig {
   app_type: AppType
   auto_start: boolean
   app_config: Record<string, unknown>
-  devices: DeviceSpec[]
+  devices: DeviceBinding[]
   host_kind: HostKind
 }
 

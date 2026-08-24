@@ -13,6 +13,7 @@ import type {
   RtdataSample,
   InstConfig,
   InstanceConfigs,
+  DeviceSpec,
 } from '../types'
 import { useAuthStore } from './auth'
 import { createPreviewSnapshot, isPreviewAuthToken } from '../lib/previewSession'
@@ -81,6 +82,8 @@ export const useMonitorStore = defineStore('monitor', () => {
   /** 后端归属表（GET /devices 运行时条目的 owner_inst——dev2inst 全插件口径；
    *  配置设备不在此（配置源已覆盖），仅运行时产生设备有键。 */
   const deviceOwners = ref<Record<string, string>>({})
+  /** 设备聚合视图全量（GET /devices；M-2 起点表来自设备模型——类型映射/预览用）。 */
+  const deviceCatalog = ref<Record<string, DeviceSpec>>({})
   /** sysstatus 快照（dbsize / metrics / process 等）。 */
   const sysstatus = ref<Record<string, unknown>>({})
   /** 活跃告警清单（最新在前；来源 GET /alarms 拉取 + SSE alarm 帧收敛，Q12 T5）。 */
@@ -274,7 +277,8 @@ export const useMonitorStore = defineStore('monitor', () => {
       })
       if (r.status === 401) { handleUnauthorized(); return }
       if (!r.ok) return
-      const data = (await r.json()) as Record<string, { runtime?: boolean; owner_inst?: string }>
+      const data = (await r.json()) as Record<string, DeviceSpec>
+      deviceCatalog.value = data
       const out: Record<string, string> = {}
       for (const [devId, entry] of Object.entries(data)) {
         if (entry?.runtime && entry.owner_inst) out[devId] = entry.owner_inst
@@ -698,6 +702,7 @@ export const useMonitorStore = defineStore('monitor', () => {
     packets,
     rtdata,
     deviceOwners,
+    deviceCatalog,
     sysstatus,
     alarms,
     selectedInstance,

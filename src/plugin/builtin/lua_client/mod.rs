@@ -331,7 +331,7 @@ impl Source for LuaClient {
                         cfg.callback_timeout_ms,
                         call_collect(
                             &lua,
-                            inst.devices.first().map(|d| d.value.as_str()).unwrap_or(""),
+                            inst.devices.first().map(|d| d.devid.as_str()).unwrap_or(""),
                         ),
                     )
                     .await

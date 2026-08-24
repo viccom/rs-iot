@@ -1383,7 +1383,7 @@ mod tests {
     async fn reconnect_reinvokes_auth() {
         use crate::host::{BridgeRegistry, CtlRegistry, HostContext};
         use crate::plugin::traits::Sink;
-        use crate::types::{AppType, DeviceSpec, HostKind, Hwid, InstConfig, PluginName};
+        use crate::types::{AppType, DeviceBinding, HostKind, Hwid, InstConfig, PluginName};
         use serde_json::json;
 
         let tmp = std::env::temp_dir().join(format!("lua-north-auth-{}", std::process::id()));
@@ -1435,11 +1435,9 @@ mod tests {
             inst_name: "it".into(),
             app_code: PluginName::new("luaNorth"),
             app_type: AppType::North,
-            devices: vec![DeviceSpec {
-                label: "d".into(),
-                value: "devN".into(),
-                children: vec![],
-                slave_id: None,
+            devices: vec![DeviceBinding {
+                devid: "devN".into(),
+                bind: Default::default(),
             }],
             app_config: json!({
                 "script": "cloudN", "host": "127.0.0.1", "port": 1,
@@ -1483,7 +1481,7 @@ mod tests {
     async fn tls_instance_never_handshakes_cleartext_with_plain_broker() {
         use crate::host::{BridgeRegistry, CtlRegistry, HostContext};
         use crate::plugin::traits::Sink;
-        use crate::types::{AppType, DeviceSpec, HostKind, Hwid, InstConfig, PluginName};
+        use crate::types::{AppType, DeviceBinding, HostKind, Hwid, InstConfig, PluginName};
         use serde_json::json;
 
         let port = spawn_inproc_broker("north-tls");
@@ -1536,11 +1534,9 @@ mod tests {
             inst_name: "it".into(),
             app_code: PluginName::new("luaNorth"),
             app_type: AppType::North,
-            devices: vec![DeviceSpec {
-                label: "d".into(),
-                value: "devT".into(),
-                children: vec![],
-                slave_id: None,
+            devices: vec![DeviceBinding {
+                devid: "devT".into(),
+                bind: Default::default(),
             }],
             app_config: json!({
                 "script": "tlsN", "host": "127.0.0.1", "port": port,
@@ -1591,7 +1587,7 @@ mod tests {
     async fn e2e_north_contract_over_broker() {
         use crate::host::{BridgeRegistry, CtlRegistry, HostContext};
         use crate::plugin::traits::Sink;
-        use crate::types::{AppType, DeviceSpec, HostKind, Hwid, InstConfig, PluginName};
+        use crate::types::{AppType, DeviceBinding, HostKind, Hwid, InstConfig, PluginName};
         use rumqttc::{AsyncClient, Event, MqttOptions, Packet, QoS};
         use serde_json::json;
 
@@ -1649,11 +1645,9 @@ end"#,
             inst_name: "e2e".into(),
             app_code: PluginName::new("luaNorth"),
             app_type: AppType::North,
-            devices: vec![DeviceSpec {
-                label: "d".into(),
-                value: "devE".into(),
-                children: vec![],
-                slave_id: None,
+            devices: vec![DeviceBinding {
+                devid: "devE".into(),
+                bind: Default::default(),
             }],
             app_config: json!({
                 "script": "cloudE2E", "host": host, "port": port,
@@ -1827,7 +1821,7 @@ end"#,
     async fn publish_batch_over_channel_cap_no_deadlock() {
         use crate::host::{BridgeRegistry, CtlRegistry, HostContext};
         use crate::plugin::traits::Sink;
-        use crate::types::{AppType, DeviceSpec, HostKind, Hwid, InstConfig, PluginName};
+        use crate::types::{AppType, DeviceBinding, HostKind, Hwid, InstConfig, PluginName};
         use rumqttc::{AsyncClient, Event, MqttOptions, Packet, QoS};
         use serde_json::json;
 
@@ -1880,11 +1874,9 @@ function down(topic, payload) end"#
             inst_name: "burst".into(),
             app_code: PluginName::new("luaNorth"),
             app_type: AppType::North,
-            devices: vec![DeviceSpec {
-                label: "d".into(),
-                value: "devB".into(),
-                children: vec![],
-                slave_id: None,
+            devices: vec![DeviceBinding {
+                devid: "devB".into(),
+                bind: Default::default(),
             }],
             app_config: json!({
                 "script": "burstN", "host": "127.0.0.1", "port": port,
@@ -1980,7 +1972,7 @@ function down(topic, payload) end"#
     async fn e2e_north_contract_inproc_broker() {
         use crate::host::{BridgeRegistry, CtlRegistry, HostContext};
         use crate::plugin::traits::Sink;
-        use crate::types::{AppType, DeviceSpec, HostKind, Hwid, InstConfig, PluginName};
+        use crate::types::{AppType, DeviceBinding, HostKind, Hwid, InstConfig, PluginName};
         use rumqttc::{AsyncClient, Event, MqttOptions, Packet, QoS};
         use serde_json::json;
 
@@ -2061,11 +2053,9 @@ end"#
             inst_name: "e2e2".into(),
             app_code: PluginName::new("luaNorth"),
             app_type: AppType::North,
-            devices: vec![DeviceSpec {
-                label: "d".into(),
-                value: "devE".into(),
-                children: vec![],
-                slave_id: None,
+            devices: vec![DeviceBinding {
+                devid: "devE".into(),
+                bind: Default::default(),
             }],
             app_config: json!({
                 "script": "cloudE2E2", "host": "127.0.0.1", "port": port,

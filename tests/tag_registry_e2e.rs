@@ -202,15 +202,12 @@ async fn tags_api_requires_jwt() {
 #[tokio::test]
 async fn datasim_flow_registers_default_cards_with_owner() {
     let (app, handle, hub, mgr) = test_app("tagreg-flow").await;
-    // dataSim 实例（period 1s）——devA 命名空间。
-    let inst = InstConfig {
-        inst_id: "sim_flow".into(),
-        inst_name: "it".into(),
-        app_code: PluginName::new("dataSim"),
-        app_type: AppType::South,
-        auto_start: false,
-        app_config: serde_json::json!({ "period": 1 }),
-        devices: vec![DeviceSpec {
+    // M-2 模型驱动：devA 注册为隐式模型（dataSim 纯软：tag=temp/humidity）。
+    let bindings = common::register_devices_as_models(
+        &handle.client(),
+        "sim_flow",
+        "dataSim",
+        vec![DeviceSpec {
             label: "d".into(),
             value: "devA".into(),
             children: vec![
@@ -229,6 +226,16 @@ async fn datasim_flow_registers_default_cards_with_owner() {
             ],
             slave_id: None,
         }],
+    )
+    .await;
+    let inst = InstConfig {
+        inst_id: "sim_flow".into(),
+        inst_name: "it".into(),
+        app_code: PluginName::new("dataSim"),
+        app_type: AppType::South,
+        auto_start: false,
+        app_config: serde_json::json!({ "period": 1 }),
+        devices: bindings,
         host_kind: HostKind::Builtin,
     };
     drop(hub); // 释放直推通道（本测试走真实 Source）
@@ -254,15 +261,13 @@ async fn datasim_flow_registers_default_cards_with_owner() {
 #[tokio::test]
 async fn declared_props_seed_initial_card() {
     let (app, handle, hub, _mgr) = test_app("tagreg-decl").await;
-    // instances 配置带 props（devG 命名空间）+ refresh_declared（模拟 startinst 接线）。
-    let inst = InstConfig {
-        inst_id: "sim_decl".into(),
-        inst_name: "it".into(),
-        app_code: PluginName::new("dataSim"),
-        app_type: AppType::South,
-        auto_start: false,
-        app_config: serde_json::json!({}),
-        devices: vec![DeviceSpec {
+    // M-2：声明式 props 初值 = 模型模板默认（devG 建隐式模型，temp2 模板 props
+    // 带声明值）+ refresh_declared（= effective 装载，模拟 startinst 接线）。
+    let bindings = common::register_devices_as_models(
+        &handle.client(),
+        "sim_decl",
+        "dataSim",
+        vec![DeviceSpec {
             label: "d".into(),
             value: "devG".into(),
             children: vec![ChildSpec {
@@ -279,6 +284,16 @@ async fn declared_props_seed_initial_card() {
             }],
             slave_id: None,
         }],
+    )
+    .await;
+    let inst = InstConfig {
+        inst_id: "sim_decl".into(),
+        inst_name: "it".into(),
+        app_code: PluginName::new("dataSim"),
+        app_type: AppType::South,
+        auto_start: false,
+        app_config: serde_json::json!({}),
+        devices: bindings,
         host_kind: HostKind::Builtin,
     };
     let client = handle.client();

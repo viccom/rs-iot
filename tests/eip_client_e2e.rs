@@ -352,6 +352,8 @@ async fn start_instance(
     rs_iot::db::identity::bootstrap(&client)
         .await
         .expect("bootstrap");
+    // M-2 模型驱动：点表注册隐式模型+devreg，实例持绑定（生产迁移同款 convert）。
+    let bindings = common::register_devices_as_models(&client, inst_id, "eipClient", devices).await;
 
     let shutdown = CancellationToken::new();
     let ctx = HostContext {
@@ -373,7 +375,7 @@ async fn start_instance(
         app_type: AppType::South,
         auto_start: false,
         app_config: app,
-        devices,
+        devices: bindings,
         host_kind: HostKind::Builtin,
     };
     mgr.start_source(inst).await.expect("start eip");

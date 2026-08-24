@@ -21,7 +21,7 @@ use axum::http::{header, Request, StatusCode};
 use rs_iot::api::{build_router, AppState};
 use rs_iot::host::{BridgeRegistry, CtlRegistry, HostContext};
 use rs_iot::plugin::instance::{InstState, InstanceManager};
-use rs_iot::types::{AppType, DeviceSpec, HostKind, Hwid, InstConfig, PluginName, Sample};
+use rs_iot::types::{AppType, DeviceBinding, HostKind, Hwid, InstConfig, PluginName, Sample};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -37,11 +37,9 @@ fn north_inst(id: &str, app_code: &str, app_config: serde_json::Value) -> InstCo
         app_type: AppType::North,
         auto_start: true,
         app_config,
-        devices: vec![DeviceSpec {
-            label: "d".into(),
-            value: id.into(),
-            children: vec![],
-            slave_id: None,
+        devices: vec![DeviceBinding {
+            devid: id.into(),
+            bind: Default::default(),
         }],
         host_kind: HostKind::Builtin,
     }

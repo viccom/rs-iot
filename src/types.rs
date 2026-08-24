@@ -210,7 +210,8 @@ impl HostKind {
     }
 }
 
-/// 设备规格（对标 Lite_IOT devices：label/value/children）。
+/// 设备规格（旧内联点表形态；M-2 起仅迁移命令消费 + `model::expand` 合成
+/// 插件的装配期视图——持久层不再写入，M-4 随 tags 表一并清理）。
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct DeviceSpec {
     /// 显示标签。
@@ -226,6 +227,18 @@ pub struct DeviceSpec {
     /// 缺省 `None` → modbus 回退到 `app_config.slave_id`（向后兼容旧单 slave 配置）。
     #[serde(default)]
     pub slave_id: Option<u8>,
+}
+
+/// 采集器实例的设备绑定（M-2 起 `InstConfig.devices` 元素）——实例只绑定
+/// 全局设备（devreg devid），不拥有设备/点表；点表由设备模型展开
+/// （`model::expand`，装配期一次性完成）。
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+pub struct DeviceBinding {
+    /// 引用的 devreg 设备 id。
+    pub devid: String,
+    /// 协议绑定参数（如 `{"slave_id":"2"}`；`DeviceSpec.slave_id` 迁移目标）。
+    #[serde(default)]
+    pub bind: BTreeMap<String, String>,
 }
 
 /// 变量规格（对标 Lite_IOT devices.children）。
@@ -265,9 +278,10 @@ pub struct InstConfig {
     /// 任意 JSON 配置，由各插件自行解析。
     #[serde(default)]
     pub app_config: serde_json::Value,
-    /// 设备规格列表（南向采集用）。
+    /// 设备绑定列表（南向采集用；M-2 起实例只绑定 devreg 全局设备，点表来自
+    /// 设备模型——旧内联形态经一次性迁移 `POST /api/v1/migrate/inline-devices` 转换）。
     #[serde(default)]
-    pub devices: Vec<DeviceSpec>,
+    pub devices: Vec<DeviceBinding>,
     /// 插件形态（内置/外部）。缺省 `Builtin`，向后兼容老配置。
     #[serde(default)]
     pub host_kind: HostKind,

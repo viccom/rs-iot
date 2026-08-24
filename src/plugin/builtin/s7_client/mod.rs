@@ -409,10 +409,17 @@ impl Source for S7Client {
                 return;
             }
         };
+        // M-2 模型驱动装配：绑定展开（模板 addr × devreg params → 绝对 S7 地址）。
+        let expanded = match crate::model::expand::expand_to_specs(&ctx.lux, &inst.devices).await {
+            Ok(d) => d,
+            Err(e) => {
+                tracing::error!("[s7Client] inst {inst_id} 绑定展开失败（设备未注册？）: {e}");
+                return;
+            }
+        };
         // 预解析所有设备的点位分组（采集循环内不再重复 parse）：
         // 数值/位 → 批量读（按 max_items_per_request 分片）；string/wstring → 单点读。
-        let devices: Vec<DevPoints> = inst
-            .devices
+        let devices: Vec<DevPoints> = expanded
             .iter()
             .map(|dev| {
                 let mut batch = Vec::new();

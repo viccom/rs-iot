@@ -277,9 +277,21 @@ impl Source for SidecarClient {
             {
                 continue;
             }
+            // M-2 模型驱动装配：绑定展开合成 v1 形态点表推给外部（label=tag 名，
+            // value=已解析地址或 tag 名——外部插件自行解释；协议 v2 形态属 M-3）。
+            let devices = match crate::model::expand::expand_to_specs(&ctx.lux, &inst.devices).await
+            {
+                Ok(d) => d,
+                Err(e) => {
+                    tracing::error!(
+                        "[sidecarClient] inst {inst_id} 绑定展开失败（设备未注册？）: {e}"
+                    );
+                    continue;
+                }
+            };
             let cfg = serde_json::json!({
                 "inst_id": &inst_id,
-                "devices": &inst.devices,
+                "devices": &devices,
             });
             if writer
                 .send(Bytes::from(encode_payload(T_CONFIG_PUSH, &cfg)))

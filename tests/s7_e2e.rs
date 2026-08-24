@@ -460,12 +460,16 @@ struct Env {
 }
 
 /// 起 lux + identity + mock S7 server + pipeline + s7Client 实例。
+///
+/// M-2 模型驱动：入参旧形态点表在内部注册为隐式模型 + devreg 设备（生产迁移
+/// 同款 convert），实例配置只持绑定——测试用例仍以"点表"语义书写，零改动。
 async fn setup(inst_id: &str, devices: Vec<DeviceSpec>, state: Arc<ServerState>) -> Env {
     let data_dir = test_data_dir(&format!("s7-{inst_id}"));
     let (handle, client) = common::start_lux(data_dir.to_str().expect("utf8")).await;
     rs_iot::db::identity::bootstrap(&client)
         .await
         .expect("bootstrap");
+    let bindings = common::register_devices_as_models(&client, inst_id, "s7Client", devices).await;
 
     // mock S7 server（127.0.0.1:0，OS 分配端口）。
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
@@ -507,7 +511,7 @@ async fn setup(inst_id: &str, devices: Vec<DeviceSpec>, state: Arc<ServerState>)
             "plc_type": "s1200",
             "period": 1,
         }),
-        devices,
+        devices: bindings,
         host_kind: HostKind::Builtin,
     };
     mgr.start_source(inst).await.expect("start s7");

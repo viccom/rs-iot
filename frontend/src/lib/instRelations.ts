@@ -74,7 +74,7 @@ export function buildDeviceOwnership(
   }
   for (const cfg of Object.values(instanceConfigs)) {
     for (const dev of cfg.devices) {
-      add(dev.value, cfg.inst_id, cfg.app_code)
+      add(dev.devid, cfg.inst_id, cfg.app_code)
     }
   }
   // 运行时上报归属（lua stat 的 runtime_devices；旧后端无此字段 → 空，优雅降级）。
@@ -110,14 +110,15 @@ export function instDeviceView(
   rtdata: Record<string, Record<string, RtdataCell>>,
   runtimeDevs: string[],
 ): InstDeviceRow[] {
-  const configured = new Set(cfg.devices.map(d => d.value).filter(Boolean))
+  const configured = new Set(cfg.devices.map(d => d.devid).filter(Boolean))
   const rows: InstDeviceRow[] = cfg.devices
-    .filter(d => d.value)
+    .filter(d => d.devid)
     .map(d => ({
-      devId: d.value,
-      tagCount: d.children.length,
+      devId: d.devid,
+      // M-2 绑定形态无内联点表——tag 数以 rtdata 实测键数呈现（模型权威在设备注册表页）。
+      tagCount: rtdata[d.devid] ? Object.keys(rtdata[d.devid]).length : 0,
       source: 'configured' as const,
-      hasData: Boolean(rtdata[d.value] && Object.keys(rtdata[d.value]).length > 0),
+      hasData: Boolean(rtdata[d.devid] && Object.keys(rtdata[d.devid]).length > 0),
     }))
   const extra = [...new Set(runtimeDevs)]
     .filter(d => d && !configured.has(d))

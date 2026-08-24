@@ -12,7 +12,7 @@ use axum::http::{header, Request, StatusCode};
 use rs_iot::api::{build_router, AppState};
 use rs_iot::host::{CtlRegistry, HostContext};
 use rs_iot::plugin::instance::InstanceManager;
-use rs_iot::types::{AppType, DeviceSpec, HostKind, Hwid, InstConfig, PluginName};
+use rs_iot::types::{AppType, HostKind, Hwid, InstConfig, PluginName};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use tower::ServiceExt;
@@ -114,7 +114,17 @@ async fn post_json(
 
 /// dataSim 实例配置：period=3600 保证测试窗口内不出数（归属只能来自启动预登记，
 /// 排除 SampleSender 出口登记的干扰——那正是本套件要与之区分的另一条登记路径）。
-fn sim_inst(inst_id: &str, devices: &[&str]) -> InstConfig {
+async fn sim_inst(inst_id: &str, devices: &[&str], client: &lux::EmbeddedClient) -> InstConfig {
+    let specs: Vec<rs_iot::types::DeviceSpec> = devices
+        .iter()
+        .map(|d| rs_iot::types::DeviceSpec {
+            label: (*d).into(),
+            value: (*d).into(),
+            children: vec![],
+            slave_id: None,
+        })
+        .collect();
+    let bindings = common::register_devices_as_models(client, inst_id, "dataSim", specs).await;
     InstConfig {
         inst_id: inst_id.into(),
         inst_name: inst_id.into(),
@@ -122,15 +132,7 @@ fn sim_inst(inst_id: &str, devices: &[&str]) -> InstConfig {
         app_type: AppType::South,
         auto_start: false,
         app_config: serde_json::json!({"period": 3600}),
-        devices: devices
-            .iter()
-            .map(|d| DeviceSpec {
-                label: (*d).into(),
-                value: (*d).into(),
-                children: vec![],
-                slave_id: None,
-            })
-            .collect(),
+        devices: bindings,
         host_kind: HostKind::Builtin,
     }
 }
@@ -163,7 +165,7 @@ async fn dev2inst_raw(c: &lux::EmbeddedClient, devid: &str) -> Option<String> {
 async fn start_source_preregisters_config_devices() {
     let (_app, handle, mgr, lux) = test_app("own_preregister").await;
 
-    mgr.start_source(sim_inst("own-a", &["own-dev1"]))
+    mgr.start_source(sim_inst("own-a", &["own-dev1"], &lux).await)
         .await
         .expect("start");
 
@@ -189,7 +191,7 @@ async fn cascade_delete_closes_ownership_loop() {
     let token = login_token(&app).await;
 
     // 1. 真启动实例（配置设备 own-dev1/own-devU 经预登记在册；period=3600 不出数）。
-    mgr.start_source(sim_inst("own-a", &["own-dev1", "own-devU"]))
+    mgr.start_source(sim_inst("own-a", &["own-dev1", "own-devU"], &lux).await)
         .await
         .expect("start");
     // 安全网构造：抹掉 own-devU 的归属记录——模拟"归属表缺记录"（预登记失败/

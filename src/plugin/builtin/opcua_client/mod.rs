@@ -286,9 +286,16 @@ impl Source for OpcuaClient {
                 return;
             }
         };
+        // M-2 模型驱动装配：绑定展开（模板 addr × devreg params → 绝对 NodeId）。
+        let expanded = match crate::model::expand::expand_to_specs(&ctx.lux, &inst.devices).await {
+            Ok(d) => d,
+            Err(e) => {
+                tracing::error!("[opcuaClient] inst {inst_id} 绑定展开失败（设备未注册？）: {e}");
+                return;
+            }
+        };
         // 预解析所有设备的 (devid, [(field, NodeId)])，采集循环内不再重复 parse。
-        let devices: Vec<(String, Vec<(String, NodeId)>)> = inst
-            .devices
+        let devices: Vec<(String, Vec<(String, NodeId)>)> = expanded
             .iter()
             .map(|dev| {
                 let pairs: Vec<(String, NodeId)> = dev

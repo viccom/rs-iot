@@ -12,7 +12,7 @@ use rs_iot::plugin::instance::InstanceManager;
 use rs_iot::plugin::traits::Processor;
 use rs_iot::transform::passthrough::Passthrough;
 use rs_iot::types::{
-    AppType, CtlMessage, DeviceSpec, HostKind, Hwid, InstConfig, InstId, PluginName, Sample,
+    AppType, CtlMessage, DeviceBinding, HostKind, Hwid, InstConfig, InstId, PluginName, Sample,
 };
 use serde_json::json;
 use std::collections::HashMap;
@@ -83,11 +83,9 @@ async fn lua_modbus_collect_and_write_roundtrip() {
             "recv_idle_ms": 80,
             "scripts_root": scripts_root,
         }),
-        devices: vec![DeviceSpec {
-            label: "m".into(),
-            value: "devM".into(),
-            children: vec![],
-            slave_id: None,
+        devices: vec![DeviceBinding {
+            devid: "devM".into(),
+            bind: Default::default(),
         }],
         host_kind: HostKind::Builtin,
     };

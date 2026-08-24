@@ -277,11 +277,12 @@ mod tests {
         let period = Duration::from_secs(FLUSH_INTERVAL_SECS);
         let phases: Vec<u64> = ["i0", "i1", "i2", "i3", "i4", "i5", "i6", "i7"]
             .iter()
-            .map(|id| {
-                crate::plugin::ticker::phase_ms(&format!("{id}#stat"), period)
-            })
+            .map(|id| crate::plugin::ticker::phase_ms(&format!("{id}#stat"), period))
             .collect();
-        let distinct = phases.iter().collect::<std::collections::HashSet<_>>().len();
+        let distinct = phases
+            .iter()
+            .collect::<std::collections::HashSet<_>>()
+            .len();
         assert!(distinct >= 2, "多实例相位应散布（非全部同相）");
     }
 }

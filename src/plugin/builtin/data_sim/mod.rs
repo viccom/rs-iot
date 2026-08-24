@@ -31,7 +31,18 @@ impl Source for DataSim {
         mut cmd_rx: mpsc::Receiver<CtlMessage>,
         token: CancellationToken,
     ) {
-        let devices = inst.devices.clone();
+        // M-2 模型驱动装配：绑定 → devreg/devmodels 展开 → 合成点表
+        // （纯软模型 addr=None → child.value = tag 名，本插件只消费 tag 名/类型）。
+        let devices = match crate::model::expand::expand_to_specs(&ctx.lux, &inst.devices).await {
+            Ok(d) => d,
+            Err(e) => {
+                tracing::error!(
+                    "[dataSim] inst {} 绑定展开失败（设备未注册？）: {e}",
+                    inst.inst_id
+                );
+                return;
+            }
+        };
         if devices.is_empty() {
             tracing::warn!("[dataSim] inst {} has no devices, exiting", inst.inst_id);
             return;

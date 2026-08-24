@@ -8,7 +8,7 @@ use rs_iot::host::{BridgeRegistry, CtlRegistry, HostContext};
 use rs_iot::plugin::instance::InstanceManager;
 use rs_iot::plugin::traits::Processor;
 use rs_iot::transform::passthrough::Passthrough;
-use rs_iot::types::{AppType, DeviceSpec, HostKind, Hwid, InstConfig, PluginName, Sample};
+use rs_iot::types::{AppType, DeviceBinding, HostKind, Hwid, InstConfig, PluginName, Sample};
 use serde_json::json;
 use std::sync::Arc;
 use std::time::Duration;
@@ -72,11 +72,9 @@ async fn l2_set_value_writes_rtdata() {
             "period": 1,
             "scripts_root": scripts.to_str().expect("utf8"),
         }),
-        devices: vec![DeviceSpec {
-            label: "d".into(),
-            value: "devL2".into(),
-            children: vec![],
-            slave_id: None,
+        devices: vec![DeviceBinding {
+            devid: "devL2".into(),
+            bind: Default::default(),
         }],
         host_kind: HostKind::Builtin,
     };
@@ -159,17 +157,13 @@ async fn flat_collect_attributed_to_first_device() {
             "scripts_root": scripts.to_str().expect("utf8"),
         }),
         devices: vec![
-            DeviceSpec {
-                label: "A".into(),
-                value: "devFirst".into(),
-                children: vec![],
-                slave_id: None,
+            DeviceBinding {
+                devid: "devFirst".into(),
+                bind: Default::default(),
             },
-            DeviceSpec {
-                label: "B".into(),
-                value: "devSecond".into(),
-                children: vec![],
-                slave_id: None,
+            DeviceBinding {
+                devid: "devSecond".into(),
+                bind: Default::default(),
             },
         ],
         host_kind: HostKind::Builtin,

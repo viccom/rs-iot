@@ -617,13 +617,14 @@ pub(crate) fn register(lua: &Lua, ac: &ApiCtx<'_>) -> mlua::Result<()> {
     ctx.set("get_device", get_device_fn)?;
 
     // --- L2 ctx:list_devices() -> table ---
-    // 返 inst.devices（当前实例设备树，{label, value} 数组）。同步（inst.devices 已知，
+    // 返实例绑定设备（M-2 起绑定形态 {label=devid, value=devid} 数组；点表经
+    // 模型查询——L3 ctx:tags(devid) 属 M-3 lua v2）。同步（inst.devices 已知，
     // 无 lux IO）。
     let devices: Vec<(String, String)> = ac
         .inst
         .devices
         .iter()
-        .map(|d| (d.label.clone(), d.value.clone()))
+        .map(|d| (d.devid.clone(), d.devid.clone()))
         .collect();
     let list_devices_fn = lua.create_function(move |lua, _self: Value| {
         let t = lua.create_table()?;

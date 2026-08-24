@@ -291,7 +291,11 @@ pub async fn run_app_with_shutdown(
     // 数据加工走 luaTransform 订阅型实例（阶段 C），Processor 插槽留给未来 Rust 原生处理器。
     let processor: Arc<dyn plugin::traits::Processor> =
         Arc::new(transform::passthrough::Passthrough);
-    // Tag Registry 声明式初值预载（fail-soft：props 是增强不是关键路径）。
+    // selfMonitor 隐式模型注册（M-2 T5）：`_sys_rsiot` 模型 + devreg 设备 rsiot
+    // 幂等入册——运行时设备也走模型的完整性验证。须在 effective 装载**之前**
+    // （缓存含 rsiot 标签）。
+    crate::plugin::builtin::self_monitor::ensure_sys_model_registered(&client).await;
+    // Tag Registry 声明式初值预载（M-2 起数据源 = effective 物化缓存）。
     match db::tag_registry::refresh_declared(&client).await {
         Ok(n) => tracing::debug!("[tag-registry] declared props 预载 {n} 条"),
         Err(e) => tracing::warn!("[tag-registry] declared props 预载失败(占位默认): {e}"),
@@ -315,12 +319,12 @@ pub async fn run_app_with_shutdown(
     let started = try_start_from_lux(&mgr, &client).await;
     tracing::info!("started {started} source instance(s) from lux");
 
-    // D-CLN-1：lux `devices` Hash 是历史遗留死表（权威源=实例配置 ∪ dev2inst，见
+    // D-CLN-1：lux `devices` Hash 是历史遗留死表（权威源=模型注册表，见
     // routes_device）——存量非空仅提示，不自动删数据（保守）。
     if let Ok(lux::EmbeddedValue::Int(n)) = client.execute_value("HLEN", &["devices"]).await {
         if n > 0 {
             tracing::warn!(
-                "[startup] lux `devices` Hash 存在 {n} 条历史遗留数据（已废弃，设备权威源=实例配置；可 DEL devices 清理）"
+                "[startup] lux `devices` Hash 存在 {n} 条历史遗留数据（已废弃，设备权威源=模型注册表；可 DEL devices 清理）"
             );
         }
     }
@@ -465,16 +469,23 @@ async fn try_start_from_lux(
                     count += 1;
                 }
             }
+        } else {
+            // M-2：旧内联形态实例在新类型下无法反序列化——强提示迁移（升级必经）。
+            tracing::warn!(
+                "[startup] 实例配置反序列化失败（旧内联点表形态？）：{}——执行 POST /api/v1/migrate/inline-devices 迁移后重启",
+                crate::api::str_from_value(&arr[i])
+            );
         }
         i += 2;
     }
     count
 }
 
-/// selfMonitor 实例配置（rs-iot 自监控设备，`selfMonitor` 计划 T3）。
+/// selfMonitor 实例配置（rs-iot 自监控设备，`selfMonitor` 计划 T3；M-2 T5 模型化）。
 ///
-/// `devices` 留空——tag 由插件代码生成（self_monitor 模块的 `collect` 一张表），
-/// 不由配置驱动；实例 runtime-only（不落 lux `instances`），随进程无条件自启。
+/// `devices` 绑定 devreg 设备 `rsiot`（模型 `_sys_rsiot`，启动幂等注册）——运行时
+/// 设备也走模型的完整性验证；tag 值仍由插件代码生成（`self_monitor::collect`），
+/// 实例 runtime-only（不落 lux `instances`），随进程无条件自启。
 fn self_monitor_config() -> types::InstConfig {
     types::InstConfig {
         inst_id: "self".into(),
@@ -483,7 +494,10 @@ fn self_monitor_config() -> types::InstConfig {
         app_type: types::AppType::South,
         auto_start: true,
         app_config: serde_json::json!({}),
-        devices: vec![],
+        devices: vec![types::DeviceBinding {
+            devid: "rsiot".into(),
+            bind: Default::default(),
+        }],
         host_kind: types::HostKind::Builtin,
     }
 }
@@ -492,7 +506,7 @@ fn self_monitor_config() -> types::InstConfig {
 mod self_monitor_tests {
     use crate::self_monitor_config;
 
-    /// self 实例编排配置形态：无条件自启的 rsiot 自监控设备。
+    /// self 实例编排配置形态：无条件自启的 rsiot 自监控设备（绑定 devreg）。
     #[test]
     fn self_monitor_config_shape() {
         let c = self_monitor_config();
@@ -501,9 +515,26 @@ mod self_monitor_tests {
         assert_eq!(c.app_code.as_str(), "selfMonitor");
         assert_eq!(c.app_type, crate::types::AppType::South);
         assert!(c.auto_start, "随进程无条件自启");
-        assert!(c.devices.is_empty(), "tag 由代码生成，不由配置驱动");
+        assert_eq!(c.devices.len(), 1, "绑定 devreg 设备 rsiot（模型化）");
+        assert_eq!(c.devices[0].devid, "rsiot");
         assert!(matches!(c.host_kind, crate::types::HostKind::Builtin));
         assert!(c.app_config.as_object().is_some(), "app_config 为空对象");
+    }
+
+    /// 隐式模型 tags 与 collect 表同源锁定（加标签两处同步的漂移守卫）。
+    #[test]
+    fn sys_model_matches_collect() {
+        let model = crate::plugin::builtin::self_monitor::sys_model();
+        let obs = crate::plugin::builtin::self_monitor::SelfObservation::default();
+        let collected = crate::plugin::builtin::self_monitor::collect(&obs);
+        let model_tags: std::collections::BTreeSet<&str> =
+            model.tags.iter().map(|t| t.name.as_str()).collect();
+        for key in collected.keys() {
+            assert!(
+                model_tags.contains(key.as_str()),
+                "collect 标签 {key} 未登记进 _sys_rsiot 模型（两处同步，见 sys_model 注释）"
+            );
+        }
     }
 }
 

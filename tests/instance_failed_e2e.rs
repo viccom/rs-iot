@@ -9,7 +9,7 @@ use rs_iot::plugin::instance::{InstState, InstanceManager};
 use rs_iot::plugin::registry::SourceEntry;
 use rs_iot::plugin::sample_sender::SampleSender;
 use rs_iot::plugin::traits::Source;
-use rs_iot::types::{AppType, DeviceSpec, HostKind, Hwid, InstConfig, PluginName, Sample};
+use rs_iot::types::{AppType, DeviceBinding, HostKind, Hwid, InstConfig, PluginName, Sample};
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -91,11 +91,9 @@ fn inst(id: &str, app_code: &str) -> InstConfig {
         app_type: AppType::South,
         auto_start: false,
         app_config: serde_json::json!({}),
-        devices: vec![DeviceSpec {
-            label: "d".into(),
-            value: id.into(),
-            children: vec![],
-            slave_id: None,
+        devices: vec![DeviceBinding {
+            devid: id.into(),
+            bind: Default::default(),
         }],
         host_kind: HostKind::Builtin,
     }

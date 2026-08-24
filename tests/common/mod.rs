@@ -37,3 +37,42 @@ pub async fn start_lux(data_dir: &str) -> (lux::ServerHandle, lux::EmbeddedClien
 pub async fn stop_lux(handle: lux::ServerHandle) {
     let _ = rs_iot::db::shutdown_lux(handle).await;
 }
+
+/// M-2 模型驱动建实例 helper：旧形态点表（DeviceSpec）注册为隐式模型 + devreg
+/// 设备，返回绑定列表（实例 `devices` 字段直接使用）。
+///
+/// 内部复用 `model::migrate::convert`（tag 名/地址语义与生产迁移完全一致：
+/// 地址类插件[modbus/opcua/s7/eip] addr 原样 + tag 名=label；纯软 addr=None）。
+/// 注册后 effective 缓存自动刷新（store 写路径）。
+pub async fn register_devices_as_models(
+    client: &lux::EmbeddedClient,
+    inst_id: &str,
+    app_code: &str,
+    devices: Vec<rs_iot::types::DeviceSpec>,
+) -> Vec<rs_iot::types::DeviceBinding> {
+    use rs_iot::model::migrate::{convert, LegacyDevice, LegacyInst};
+    let legacy = LegacyInst {
+        inst_id: inst_id.to_string(),
+        app_code: app_code.to_string(),
+        devices: devices
+            .into_iter()
+            .map(|d| LegacyDevice {
+                value: d.value,
+                children: d.children,
+                slave_id: d.slave_id,
+            })
+            .collect(),
+    };
+    let outcome = convert(&legacy);
+    for m in &outcome.models {
+        rs_iot::model::store::set_model(client, m)
+            .await
+            .expect("set_model");
+    }
+    for d in &outcome.devices {
+        rs_iot::model::store::set_device(client, d)
+            .await
+            .expect("set_device");
+    }
+    outcome.bindings
+}

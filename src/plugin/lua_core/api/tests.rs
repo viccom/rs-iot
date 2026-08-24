@@ -7,7 +7,7 @@ use super::*;
 use crate::host::{BridgeRegistry, CtlRegistry, HostContext};
 use crate::plugin::lua_core::io_engine::{spawn_io_task, IoEngine, MockIoTask};
 use crate::plugin::sample_sender::SampleSender;
-use crate::types::{AppType, DeviceSpec, HostKind, InstConfig, PluginName};
+use crate::types::{AppType, DeviceBinding, HostKind, InstConfig, PluginName};
 use tokio_util::sync::CancellationToken;
 
 /// 测试用：spawn_io_task 配丢弃被动帧的 on_data channel（api 单测不测 on_data）。
@@ -54,11 +54,9 @@ async fn register_exposes_ctx_api() {
         app_type: AppType::South,
         auto_start: false,
         app_config: serde_json::json!({"script":"a","endpoint":"x"}),
-        devices: vec![DeviceSpec {
-            label: "d".into(),
-            value: "d".into(),
-            children: vec![],
-            slave_id: None,
+        devices: vec![DeviceBinding {
+            devid: "d".into(),
+            bind: Default::default(),
         }],
         host_kind: HostKind::Builtin,
     };
@@ -122,11 +120,9 @@ async fn register_exposes_stdlib_table() {
         app_type: AppType::South,
         auto_start: false,
         app_config: serde_json::json!({"script":"a","endpoint":"x"}),
-        devices: vec![DeviceSpec {
-            label: "d".into(),
-            value: "d".into(),
-            children: vec![],
-            slave_id: None,
+        devices: vec![DeviceBinding {
+            devid: "d".into(),
+            bind: Default::default(),
         }],
         host_kind: HostKind::Builtin,
     };
@@ -179,11 +175,9 @@ async fn kv_set_get_roundtrip() {
         app_type: AppType::South,
         auto_start: false,
         app_config: serde_json::json!({"script":"a","endpoint":"x"}),
-        devices: vec![DeviceSpec {
-            label: "d".into(),
-            value: "d".into(),
-            children: vec![],
-            slave_id: None,
+        devices: vec![DeviceBinding {
+            devid: "d".into(),
+            bind: Default::default(),
         }],
         host_kind: HostKind::Builtin,
     };
@@ -281,11 +275,9 @@ async fn send_command_routes_to_target() {
         app_type: AppType::South,
         auto_start: false,
         app_config: serde_json::json!({"script":"a","endpoint":"x"}),
-        devices: vec![DeviceSpec {
-            label: "d".into(),
-            value: "d".into(),
-            children: vec![],
-            slave_id: None,
+        devices: vec![DeviceBinding {
+            devid: "d".into(),
+            bind: Default::default(),
         }],
         host_kind: HostKind::Builtin,
     };
@@ -368,11 +360,9 @@ async fn http_get_returns_status_and_body() {
         app_type: AppType::South,
         auto_start: false,
         app_config: serde_json::json!({"script":"a","endpoint":"x"}),
-        devices: vec![DeviceSpec {
-            label: "d".into(),
-            value: "d".into(),
-            children: vec![],
-            slave_id: None,
+        devices: vec![DeviceBinding {
+            devid: "d".into(),
+            bind: Default::default(),
         }],
         host_kind: HostKind::Builtin,
     };
@@ -418,11 +408,9 @@ fn http_only_vm() -> Lua {
         app_type: AppType::South,
         auto_start: false,
         app_config: serde_json::json!({"script":"a","endpoint":"x"}),
-        devices: vec![DeviceSpec {
-            label: "d".into(),
-            value: "d".into(),
-            children: vec![],
-            slave_id: None,
+        devices: vec![DeviceBinding {
+            devid: "d".into(),
+            bind: Default::default(),
         }],
         host_kind: HostKind::Builtin,
     };
@@ -539,11 +527,9 @@ async fn capability_cards_match_registered_ctx() {
         app_type: AppType::South,
         auto_start: false,
         app_config: serde_json::json!({"script":"a","endpoint":"x"}),
-        devices: vec![DeviceSpec {
-            label: "d".into(),
-            value: "d".into(),
-            children: vec![],
-            slave_id: None,
+        devices: vec![DeviceBinding {
+            devid: "d".into(),
+            bind: Default::default(),
         }],
         host_kind: HostKind::Builtin,
     };
@@ -702,11 +688,9 @@ async fn set_value_pushes_sample_to_hub() {
         app_type: AppType::South,
         auto_start: false,
         app_config: serde_json::json!({"script":"a","endpoint":"x"}),
-        devices: vec![DeviceSpec {
-            label: "d".into(),
-            value: "devX".into(),
-            children: vec![],
-            slave_id: None,
+        devices: vec![DeviceBinding {
+            devid: "devX".into(),
+            bind: Default::default(),
         }],
         host_kind: HostKind::Builtin,
     };
@@ -764,11 +748,9 @@ async fn set_values_pushes_multi_tag_sample() {
         app_type: AppType::South,
         auto_start: false,
         app_config: serde_json::json!({"script":"a","endpoint":"x"}),
-        devices: vec![DeviceSpec {
-            label: "d".into(),
-            value: "devX".into(),
-            children: vec![],
-            slave_id: None,
+        devices: vec![DeviceBinding {
+            devid: "devX".into(),
+            bind: Default::default(),
         }],
         host_kind: HostKind::Builtin,
     };
@@ -831,17 +813,13 @@ async fn set_value_routes_by_devid() {
         auto_start: false,
         app_config: serde_json::json!({"script":"a","endpoint":"x"}),
         devices: vec![
-            DeviceSpec {
-                label: "A".into(),
-                value: "devA".into(),
-                children: vec![],
-                slave_id: None,
+            DeviceBinding {
+                devid: "devA".into(),
+                bind: Default::default(),
             },
-            DeviceSpec {
-                label: "B".into(),
-                value: "devB".into(),
-                children: vec![],
-                slave_id: None,
+            DeviceBinding {
+                devid: "devB".into(),
+                bind: Default::default(),
             },
         ],
         host_kind: HostKind::Builtin,
@@ -892,11 +870,9 @@ async fn get_value_reads_rtdata() {
         app_type: AppType::South,
         auto_start: false,
         app_config: serde_json::json!({"script":"a","endpoint":"x"}),
-        devices: vec![DeviceSpec {
-            label: "d".into(),
-            value: "devX".into(),
-            children: vec![],
-            slave_id: None,
+        devices: vec![DeviceBinding {
+            devid: "devX".into(),
+            bind: Default::default(),
         }],
         host_kind: HostKind::Builtin,
     };
@@ -956,11 +932,9 @@ async fn get_device_returns_rtdata_values() {
         app_type: AppType::South,
         auto_start: false,
         app_config: serde_json::json!({"script":"a","endpoint":"x"}),
-        devices: vec![DeviceSpec {
-            label: "d".into(),
-            value: "devX".into(),
-            children: vec![],
-            slave_id: None,
+        devices: vec![DeviceBinding {
+            devid: "devX".into(),
+            bind: Default::default(),
         }],
         host_kind: HostKind::Builtin,
     };
@@ -1022,17 +996,13 @@ async fn list_devices_returns_inst_devices() {
         auto_start: false,
         app_config: serde_json::json!({"script":"a","endpoint":"x"}),
         devices: vec![
-            DeviceSpec {
-                label: "A".into(),
-                value: "devX".into(),
-                children: vec![],
-                slave_id: None,
+            DeviceBinding {
+                devid: "devX".into(),
+                bind: Default::default(),
             },
-            DeviceSpec {
-                label: "B".into(),
-                value: "devY".into(),
-                children: vec![],
-                slave_id: None,
+            DeviceBinding {
+                devid: "devY".into(),
+                bind: Default::default(),
             },
         ],
         host_kind: HostKind::Builtin,
@@ -1061,11 +1031,12 @@ async fn list_devices_returns_inst_devices() {
         .eval()
         .expect("list_devices");
     assert_eq!(t.len().unwrap(), 2, "应返 2 个设备");
+    // M-2：list_devices 返绑定设备（label=value=devid；点表查询属 M-3 lua v2）。
     let d1: mlua::Table = t.get::<mlua::Table>(1).unwrap();
-    assert_eq!(d1.get::<String>("label").unwrap(), "A");
+    assert_eq!(d1.get::<String>("label").unwrap(), "devX");
     assert_eq!(d1.get::<String>("value").unwrap(), "devX");
     let d2: mlua::Table = t.get::<mlua::Table>(2).unwrap();
-    assert_eq!(d2.get::<String>("label").unwrap(), "B");
+    assert_eq!(d2.get::<String>("label").unwrap(), "devY");
     assert_eq!(d2.get::<String>("value").unwrap(), "devY");
 
     let _ = crate::db::shutdown_lux(handle).await;
@@ -1151,11 +1122,9 @@ async fn ctx_transport_returns_configured_kind() {
             app_type: AppType::South,
             auto_start: false,
             app_config: serde_json::json!({"script":"a","endpoint":"x"}),
-            devices: vec![DeviceSpec {
-                label: "d".into(),
-                value: "d".into(),
-                children: vec![],
-                slave_id: None,
+            devices: vec![DeviceBinding {
+                devid: "d".into(),
+                bind: Default::default(),
             }],
             host_kind: HostKind::Builtin,
         };
@@ -1206,11 +1175,9 @@ async fn secret_get_allowlist_semantics() {
             "script": "a", "endpoint": "x",
             "secrets": ["secret:test_key", "secret:absent_key"]
         }),
-        devices: vec![DeviceSpec {
-            label: "d".into(),
-            value: "d".into(),
-            children: vec![],
-            slave_id: None,
+        devices: vec![DeviceBinding {
+            devid: "d".into(),
+            bind: Default::default(),
         }],
         host_kind: HostKind::Builtin,
     };
@@ -1303,11 +1270,9 @@ async fn north_role_skips_c1_request_transport() {
         app_type: AppType::North,
         auto_start: false,
         app_config: serde_json::json!({"script":"a","host":"127.0.0.1"}),
-        devices: vec![DeviceSpec {
-            label: "d".into(),
-            value: "d".into(),
-            children: vec![],
-            slave_id: None,
+        devices: vec![DeviceBinding {
+            devid: "d".into(),
+            bind: Default::default(),
         }],
         host_kind: HostKind::Builtin,
     };
@@ -1373,11 +1338,9 @@ async fn transform_role_trims_c1_c3_c5() {
         app_type: AppType::South, // Source 订阅型实例（Q19/D1），不走 Processor
         auto_start: false,
         app_config: serde_json::json!({"script":"a"}),
-        devices: vec![DeviceSpec {
-            label: "d".into(),
-            value: "d".into(),
-            children: vec![],
-            slave_id: None,
+        devices: vec![DeviceBinding {
+            devid: "d".into(),
+            bind: Default::default(),
         }],
         host_kind: HostKind::Builtin,
     };
@@ -1454,11 +1417,9 @@ async fn secret_get_always_registered_with_default_empty_allowlist() {
             app_type: AppType::South,
             auto_start: false,
             app_config,
-            devices: vec![DeviceSpec {
-                label: "d".into(),
-                value: "d".into(),
-                children: vec![],
-                slave_id: None,
+            devices: vec![DeviceBinding {
+                devid: "d".into(),
+                bind: Default::default(),
             }],
             host_kind: HostKind::Builtin,
         };
@@ -1579,11 +1540,9 @@ async fn alarm_vm(
         app_type,
         auto_start: false,
         app_config,
-        devices: vec![DeviceSpec {
-            label: "d".into(),
-            value: "d".into(),
-            children: vec![],
-            slave_id: None,
+        devices: vec![DeviceBinding {
+            devid: "d".into(),
+            bind: Default::default(),
         }],
         host_kind: HostKind::Builtin,
     };

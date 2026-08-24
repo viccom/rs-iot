@@ -123,19 +123,19 @@ impl InstanceManager {
         self.emit_state(&id_key, InstState::Starting);
 
         let ctx = self.ctx.clone();
-        // D-OWN-2 启动预登记：配置 devices[].value 在首条数据前就入册 dev2inst——
+        // D-OWN-2 启动预登记：绑定 devices[].devid 在首条数据前就入册 dev2inst——
         // 防"启动后未出数即删"漏归属（SampleSender 只登记实际出过数的 devid，
         // 预登记补齐零出数窗口）。失败仅 warn：登记是管理面记账，最终一致；
         // cascade 的配置回退路径仍是安全网（见 routes_inst::cascade_delete）。
         for dev in &inst.devices {
-            if dev.value.is_empty() {
+            if dev.devid.is_empty() {
                 continue;
             }
-            if let Err(e) = crate::db::dev_registry::note(&self.ctx.lux, &dev.value, &id_key).await
+            if let Err(e) = crate::db::dev_registry::note(&self.ctx.lux, &dev.devid, &id_key).await
             {
                 tracing::warn!(
                     "[instance] dev2inst 预登记 {} <- {id_key} 失败（不阻断启动）: {e}",
-                    dev.value
+                    dev.devid
                 );
             }
         }

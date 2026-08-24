@@ -300,8 +300,17 @@ impl Source for ModbusClient {
                 return;
             }
         };
+        // M-2 模型驱动装配：绑定展开（模板 addr × devreg params → 绝对地址，
+        // slave_id ← bind），后续 plan/轮询逻辑零改动。
+        let devices = match crate::model::expand::expand_to_specs(&ctx.lux, &inst.devices).await {
+            Ok(d) => d,
+            Err(e) => {
+                tracing::error!("[modbusClient] inst {inst_id} 绑定展开失败（设备未注册？）: {e}");
+                return;
+            }
+        };
         // 预解析 devices → SlavePlan（每 slave 独立 regions + slave_id）+ 轮询顺序。
-        let plans = plan_devices(&inst.devices, cfg.gap_threshold, cfg.max_regs, cfg.slave_id);
+        let plans = plan_devices(&devices, cfg.gap_threshold, cfg.max_regs, cfg.slave_id);
         let poll_order = build_poll_order(&plans, cfg.poll_strategy);
         let req_timeout = Duration::from_secs(cfg.request_timeout_secs);
         // handle_write 反查 devid → slave_id（写命令按目标设备切 slave）。

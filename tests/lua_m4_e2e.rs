@@ -62,6 +62,18 @@ async fn lua_kv_set_persists_to_lux() {
     let pt = shutdown.child_token();
     let _pipeline = tokio::spawn(rs_iot::pipeline::run(ctx, hub_rx, proc, 1, pt));
 
+    let bindings = common::register_devices_as_models(
+        &client,
+        "lua-kv-it",
+        "luaClient",
+        vec![DeviceSpec {
+            label: "d".into(),
+            value: "devKV".into(),
+            children: vec![],
+            slave_id: None,
+        }],
+    )
+    .await;
     let inst = InstConfig {
         inst_id: "lua-kv-it".into(),
         inst_name: "kv it".into(),
@@ -75,12 +87,7 @@ async fn lua_kv_set_persists_to_lux() {
             "period": 1,
             "scripts_root": scripts.to_str().expect("utf8"),
         }),
-        devices: vec![DeviceSpec {
-            label: "d".into(),
-            value: "devKV".into(),
-            children: vec![],
-            slave_id: None,
-        }],
+        devices: bindings,
         host_kind: HostKind::Builtin,
     };
     mgr.start_source(inst).await.expect("start lua");
