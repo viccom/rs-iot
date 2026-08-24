@@ -61,7 +61,11 @@ pub fn parse_dev_ids(raw: Option<&str>) -> Option<HashSet<String>> {
         .filter(|s| !s.is_empty())
         .map(String::from)
         .collect();
-    if set.is_empty() { None } else { Some(set) }
+    if set.is_empty() {
+        None
+    } else {
+        Some(set)
+    }
 }
 
 /// cell（`[ts, localTime, value]`）→ 值串（diff 比较键）。非数组/越界/非串 → 整体
@@ -151,10 +155,7 @@ async fn read_scope(
 ///
 /// 连接建立：snapshot 逐设备全量推送 + 建基线；之后每 interval 读侧 diff，
 /// 变化才推 datachange。客户端断开 → send 失败 → producer task 退出（资源回收）。
-pub async fn subscribe(
-    State(st): State<AppState>,
-    Query(q): Query<SubQuery>,
-) -> impl IntoResponse {
+pub async fn subscribe(State(st): State<AppState>, Query(q): Query<SubQuery>) -> impl IntoResponse {
     let dev_filter = parse_dev_ids(q.dev_id.as_deref());
     let tag_filter = q.tag.clone();
     let interval = Duration::from_millis(clamp_interval(q.interval));
@@ -259,7 +260,10 @@ mod tests {
         assert!(parse_dev_ids(None).is_none());
         assert!(parse_dev_ids(Some("")).is_none());
         assert!(parse_dev_ids(Some("  ")).is_none());
-        assert!(parse_dev_ids(Some(",,")).is_none(), "全空段 = None（全部设备）");
+        assert!(
+            parse_dev_ids(Some(",,")).is_none(),
+            "全空段 = None（全部设备）"
+        );
     }
 
     #[test]
@@ -320,7 +324,10 @@ mod tests {
         .into_iter()
         .collect();
         let (changes, removed) = diff_scope(cur, &last);
-        assert!(changes.is_empty() && removed.is_empty(), "值未变不推: {changes:?}");
+        assert!(
+            changes.is_empty() && removed.is_empty(),
+            "值未变不推: {changes:?}"
+        );
     }
 
     #[test]

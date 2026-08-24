@@ -75,6 +75,31 @@ pub struct DeleteReq {
     pub model_id: String,
 }
 
+/// `POST /api/v1/devmodel/update` body = DeviceModel JSON（model_id 定位，整包替换）。
+///
+/// 引用完整性预检：新模板必须让全部引用设备仍通过校验（params 齐/覆盖 tag
+/// ∈ tags），否则 409 带冲突明细不落盘——"改模板 → 同型号设备生效"的安全面。
+pub async fn update(State(st): State<AppState>, Json(m): Json<DeviceModel>) -> Response {
+    match store::update_model(&st.lux, &m).await {
+        Ok(store::UpdateOutcome::Updated) => {
+            Json(json!({"status": "ok", "model_id": m.model_id})).into_response()
+        }
+        Ok(store::UpdateOutcome::NotFound) => err(StatusCode::NOT_FOUND, "model not found"),
+        Ok(store::UpdateOutcome::Conflict(list)) => {
+            let conflicts: Vec<serde_json::Value> = list
+                .iter()
+                .map(|(devid, e)| json!({"devid": devid, "reason": e.to_string()}))
+                .collect();
+            (
+                StatusCode::CONFLICT,
+                Json(json!({"status": "conflict", "conflicts": conflicts})),
+            )
+                .into_response()
+        }
+        Err(e) => err(StatusCode::BAD_REQUEST, &e.to_string()),
+    }
+}
+
 pub async fn delete(State(st): State<AppState>, Json(req): Json<DeleteReq>) -> Response {
     match store::delete_model(&st.lux, &req.model_id).await {
         Ok(None) => err(StatusCode::NOT_FOUND, "model not found"),

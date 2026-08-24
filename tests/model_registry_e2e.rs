@@ -174,6 +174,7 @@ async fn model_endpoints_require_jwt() {
     for (method, uri) in [
         ("GET", "/api/v1/devmodels"),
         ("POST", "/api/v1/devmodel/set"),
+        ("POST", "/api/v1/devmodel/update"),
         ("POST", "/api/v1/devmodel/delete"),
         ("GET", "/api/v1/devreg"),
         ("POST", "/api/v1/devreg/set"),
@@ -473,4 +474,63 @@ async fn migrate_inline_devices_idempotent() {
     assert_eq!(v["converted_models"], 0, "重跑零转换：{v}");
     assert_eq!(v["converted_devices"], 0, "{v}");
     assert_eq!(v["converted_instances"], 0, "{v}");
+}
+
+/// devmodel/update：改模板 → 引用设备 effective 跟随；破坏引用完整性 → 409 带冲突明细。
+#[tokio::test]
+async fn devmodel_update_propagates_and_conflict_guards() {
+    let (app, _handle) = test_app("model-update").await;
+    let token = jwt(&app).await;
+    post_json(&app, &token, "/api/v1/devmodel/set", model_body("m_upd")).await;
+    post_json(&app, &token, "/api/v1/devreg/set", device_body("d_upd", "m_upd")).await;
+
+    // ① 更新不存在 → 404。
+    let (st, _) = post_json(
+        &app,
+        &token,
+        "/api/v1/devmodel/update",
+        model_body("nope"),
+    )
+    .await;
+    assert_eq!(st, StatusCode::NOT_FOUND, "更新不存在模型 404");
+
+    // ② 合法更新：加 tag uc + ua 模板 deadband 0.5→1.0 → 设备 effective 跟随。
+    let mut updated = model_body("m_upd");
+    updated["tags"][0]["props"]["deadband"] = serde_json::json!(1.0);
+    updated["tags"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!({
+            "name": "uc", "data_type": "u16", "addr": "holding:{base}+4:u16"
+        }));
+    let (st, _) = post_json(&app, &token, "/api/v1/devmodel/update", updated).await;
+    assert_eq!(st, StatusCode::OK, "合法更新");
+    let (_, d) = get_json(&app, &token, "/api/v1/devreg?devid=d_upd").await;
+    assert_eq!(
+        d["d_upd"]["effective"]["uc"]["history"],
+        false,
+        "新 tag 出现在设备 effective：{d}"
+    );
+    let (_, m) = get_json(&app, &token, "/api/v1/devmodels?model_id=m_upd").await;
+    assert_eq!(m["m_upd"]["tags"].as_array().unwrap().len(), 3, "模型已更新");
+
+    // ③ 新增必填参数而设备未提供 → 409 带冲突明细。
+    let mut bad_params = model_body("m_upd");
+    bad_params["params"].as_array_mut().unwrap().push("extra".into());
+    let (st, v) = post_json(&app, &token, "/api/v1/devmodel/update", bad_params).await;
+    assert_eq!(st, StatusCode::CONFLICT, "破坏 params 齐套 409：{v}");
+    let conflicts = v["conflicts"].as_array().expect("冲突明细");
+    assert!(
+        conflicts.iter().any(|c| c["devid"] == "d_upd"),
+        "冲突列出违规设备：{v}"
+    );
+    // ④ 删除被设备覆盖的 tag → 409。
+    let mut bad_tags = model_body("m_upd");
+    bad_tags["params"] = serde_json::json!(["base"]);
+    bad_tags["tags"].as_array_mut().unwrap().remove(0); // 删掉 ua（device_body 覆盖了 ua）
+    let (st, _) = post_json(&app, &token, "/api/v1/devmodel/update", bad_tags).await;
+    assert_eq!(st, StatusCode::CONFLICT, "删被覆盖 tag 409");
+    // ⑤ 两次 409 后模型保持 ② 的合法状态。
+    let (_, m) = get_json(&app, &token, "/api/v1/devmodels?model_id=m_upd").await;
+    assert_eq!(m["m_upd"]["tags"].as_array().unwrap().len(), 3, "失败更新不落盘");
 }
