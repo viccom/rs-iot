@@ -61,11 +61,7 @@ pub async fn write_batch(
     for s in samples {
         let entry = by_devid.entry(s.devid.as_str()).or_default();
         for (tag, val) in &s.values {
-            let field = if tag.contains(s.devid.as_str()) {
-                tag.clone()
-            } else {
-                format!("{}.{}", s.devid, tag)
-            };
+            let field = crate::types::tag_key(&s.devid, tag);
             let val_str = match val {
                 crate::types::SampleValue::Float(f) => f.to_string(),
                 crate::types::SampleValue::Int(i) => i.to_string(),
