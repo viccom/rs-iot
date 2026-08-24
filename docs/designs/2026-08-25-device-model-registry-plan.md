@@ -1,13 +1,13 @@
 # 设备模型注册表（物模型）实施计划
 
-> **状态**：partially-implemented（M-1 已合并 master；M-2~M-4 待启动）
+> **状态**：partially-implemented（M-1、M-2 已合并 master；M-3~M-4 待启动）
 > **日期**：2026-08-25
 > **决策**：[2026-08-25-device-model-registry.md](../decisions/2026-08-25-device-model-registry.md)（元数据唯一来源原则 + D-M1~D-M4，执行不再议）
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
-> **实施**：M-1（分支 `feat/device-model-m1`，worktree `../rs-iot-devmodel-m1`）T1~T8 全绿合并；TDD 每任务 red→green→commit。
+> **实施**：M-1（分支 `feat/device-model-m1`）T1~T8 全绿合并；M-2（分支 `feat/device-model-m2`）T1~T5 + e2e 全量模型驱动改造 + 前端绑定式全绿合并。TDD 每任务 red→green→commit。
 > **代码**：M-1 = `src/model/`（addr/effective/types/validate/store/migrate/cache 七模块）+ `src/api/routes_model.rs` + `src/api/routes_devreg.rs`（含 `POST /api/v1/migrate/inline-devices`）+ `src/error.rs`（`Model(#[from] ModelError)`）。
 > **测试**：M-1 = `cargo test --lib model::` 73 单测 + `tests/model_registry_e2e.rs` 9 e2e（401/CRUD/409/4xx 矩阵/级联/迁移幂等）；全量 `cargo test --all-targets` 绿。
-> **遗留**：M-2~M-4 未实施；另有 M-1 两项裁量项 M-2 必办——① 设备注册表 REST 走**过渡路径** `/api/v1/devreg*`（`/api/v1/devices|/device/set|delete` 仍属 routes_device：MCP 4 工具+前端 monitor 在用，直接替换=静默回归），M-2 InstConfig 切换时接管路径并更新消费方；② 迁移端点只入册模型+设备，**实例配置改写 DeviceBinding 留 M-2 T1**（`InstConfig.devices` 类型升级时），`migrate::convert` 的 bindings 产物即 M-2 消费物。
+> **遗留**：M-3（lua v2 模型感知 API/校验闸、sidecar 协议 v2、外部示例重写）、M-4（发现引擎、tags 退役、前端向导收口、文档总收口）未实施。M-1 两项裁量项已随 M-2 落地：① `/api/v1/devices|/device/set|delete` 已切 devreg 派生/绑定语义（旧聚合视图退役）；② 迁移端点已完成实例配置改写（升级必经路径）。原 M-1 遗留备注：① 设备注册表 REST 走**过渡路径** `/api/v1/devreg*`（`/api/v1/devices|/device/set|delete` 仍属 routes_device：MCP 4 工具+前端 monitor 在用，直接替换=静默回归），M-2 InstConfig 切换时接管路径并更新消费方；② 迁移端点只入册模型+设备，**实例配置改写 DeviceBinding 留 M-2 T1**（`InstConfig.devices` 类型升级时），`migrate::convert` 的 bindings 产物即 M-2 消费物。
 
 **Goal:** 落地设备模型（devmodels）+ 全局设备注册表（devreg）+ 发现队列（discoveries），使设备/标签元数据有唯一出生地与唯一管理面；三类采集实现（内置插件/lua/sidecar）全部改为消费模型；Phase 1a 的 tags 表退役。**对业务流/数据流是夯实不是破坏：数据面（pipeline/rtdata/tag_key/吞吐资产）一行不动。**
 
