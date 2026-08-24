@@ -113,8 +113,9 @@ pub struct TagOverride {
 }
 
 /// 双层 Option 反序列化 helper：serde 默认把 JSON `null` 折叠成外层 `None`，
-/// 此 helper 让 `null` 到达内层（`Some(None)` = 显式关）。
-fn deserialize_some<'de, T, D>(de: D) -> Result<Option<T>, D::Error>
+/// 此 helper 让 `null` 到达内层（`Some(None)` = 显式关）。pub(crate)：REST
+/// 三态请求体（routes_tag "字段缺省=不动 / null=恢复继承"）复用。
+pub(crate) fn deserialize_some<'de, T, D>(de: D) -> Result<Option<T>, D::Error>
 where
     T: Deserialize<'de>,
     D: serde::Deserializer<'de>,

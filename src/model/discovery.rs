@@ -299,6 +299,30 @@ pub async fn sweep_modeled(
     Ok(keys.len())
 }
 
+/// 极简 glob：`*` 通配任意串（含空）。pattern 无 `*` = 精确匹配。
+///
+/// 分段算法（无回溯）：按 `*` 切段，首段必须前缀、末段必须后缀、中间段依序
+/// `contains` 且不重叠。`*furnace*.temp*` 形态覆盖 dev 前缀 + tag 后缀场景。
+/// Phase 1a `db::tag_registry` 同名实现迁移（tags 表退役，批量建模/清理复用）。
+pub fn glob_match(pattern: &str, key: &str) -> bool {
+    let parts: Vec<&str> = pattern.split('*').collect();
+    if parts.len() == 1 {
+        return pattern == key;
+    }
+    let mut rest = key;
+    if !rest.starts_with(parts[0]) {
+        return false;
+    }
+    rest = &rest[parts[0].len()..];
+    for part in &parts[1..parts.len() - 1] {
+        match rest.find(part) {
+            Some(pos) => rest = &rest[pos + part.len()..],
+            None => return false,
+        }
+    }
+    rest.ends_with(parts[parts.len() - 1])
+}
+
 /// lux EmbeddedValue → String（Bulk/Simple；同 store 口径）。
 fn embedded_to_string(v: lux::EmbeddedValue) -> Option<String> {
     match v {
@@ -367,6 +391,36 @@ mod tests {
     /// 全局 ENGINE 进程级共享——各用例用互不重叠 devid（Phase 1a SEEN 约定）。
     const D: &str = "discdev1";
     const D2: &str = "discdev2";
+
+    #[test]
+    fn glob_exact_match_without_star() {
+        assert!(glob_match("dev1.temp", "dev1.temp"));
+        assert!(!glob_match("dev1.temp", "dev1.temp2"));
+    }
+
+    #[test]
+    fn glob_star_prefix_and_suffix() {
+        assert!(glob_match("furnace*", "furnace_02.zone1.temp"));
+        assert!(glob_match("*.temp", "furnace_02.temp"));
+        assert!(!glob_match("*.temp", "furnace_02.pressure"));
+    }
+
+    #[test]
+    fn glob_middle_segment_ordered_no_overlap() {
+        assert!(glob_match("*zone*.temp*", "furnace_02.zone1.temp"));
+        assert!(
+            !glob_match("*temp*.zone*", "furnace_02.zone1.temp"),
+            "中间段须依序"
+        );
+        assert!(!glob_match("a*a*a", "aa"));
+        assert!(glob_match("a*a*a", "aaa"));
+    }
+
+    #[test]
+    fn glob_single_star_matches_all() {
+        assert!(glob_match("*", "anything.at.all"));
+        assert!(glob_match("*", ""));
+    }
 
     #[tokio::test]
     async fn modeled_tag_skipped_entirely() {

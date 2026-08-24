@@ -34,13 +34,24 @@ fn merge_opt_string(tmpl: &Option<String>, ov: &Option<String>) -> Option<String
 
 /// 设备级合并：模型全部 tag → effective props（key = tag 名）。
 ///
+/// 模板顶层 `unit`/`desc`（建模自然位、ConfigPush v2 载荷消费）为 props
+/// 同名字段的**垫底默认**——props 显式值优先，缺省回落顶层（建模者两处
+/// 任写一处，effective 视图均可见）。
+///
 /// 设备 overrides 中不在模型 tags 的键被忽略（validate 拒于写入前——防御）。
 pub fn effective_tags(model: &DeviceModel, dev: &DeviceEntry) -> BTreeMap<String, TagProps> {
     let mut out = BTreeMap::new();
     for t in &model.tags {
+        let mut base = t.props.clone();
+        if base.unit.is_none() {
+            base.unit = t.unit.clone();
+        }
+        if base.desc.is_none() {
+            base.desc = t.desc.clone();
+        }
         let props = match dev.overrides.get(&t.name) {
-            Some(ov) => merge_tag_props(&t.props, ov),
-            None => t.props.clone(),
+            Some(ov) => merge_tag_props(&base, ov),
+            None => base,
         };
         out.insert(t.name.clone(), props);
     }
@@ -254,6 +265,29 @@ mod tests {
         assert_eq!(eff.len(), 2);
         assert!(eff["ua"].history, "无覆盖走模板默认");
         assert!(eff["ub"].history, "覆盖生效");
+    }
+
+    #[test]
+    fn template_toplevel_unit_desc_fallback_into_props() {
+        // 顶层 unit/desc 是 props 同名字段的垫底默认（props 优先）。
+        let mut m = model_two_tags();
+        m.tags[0].unit = Some("V".into());
+        m.tags[0].desc = Some("顶层描述".into());
+        m.tags[1].unit = Some("A".into());
+        m.tags[1].props.unit = Some("props 优先".into());
+        let dev = DeviceEntry {
+            devid: "d1".into(),
+            model: "m1".into(),
+            ..Default::default()
+        };
+        let eff = effective_tags(&m, &dev);
+        assert_eq!(eff["ua"].unit.as_deref(), Some("V"), "顶层垫底");
+        assert_eq!(eff["ua"].desc.as_deref(), Some("顶层描述"));
+        assert_eq!(
+            eff["ub"].unit.as_deref(),
+            Some("props 优先"),
+            "props 显式值优先于顶层"
+        );
     }
 
     #[test]

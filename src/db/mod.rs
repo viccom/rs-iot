@@ -6,7 +6,6 @@ pub mod luakv;
 pub mod rtdata;
 pub mod secrets;
 pub mod stat;
-pub mod tag_registry;
 
 use crate::config::AppConfig;
 use lux::{ServerConfig, StorageConfig, StorageMode};

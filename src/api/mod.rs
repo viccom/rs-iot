@@ -132,6 +132,7 @@ pub fn build_router(state: AppState) -> axum::Router {
         .route("/api/v1/inst/stats", get(routes_stat::stats))
         // device CRUD
         .route("/api/v1/tags", get(routes_tag::list))
+        .route("/api/v1/tags/legacy-export", get(routes_tag::legacy_export))
         .route("/api/v1/tag/set", post(routes_tag::set))
         .route("/api/v1/tag/batch", post(routes_tag::batch))
         .route("/api/v1/tag/delete", post(routes_tag::delete))
