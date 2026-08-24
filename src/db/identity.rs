@@ -12,6 +12,8 @@
 //! - `luakv:<instId>` : Hash，field=key，value=JSON（M4 脚本本地持久化状态）
 //! - `stat:<instId>`  : string，JSON 实例状态快照（M7 luaClient 运行指标：status/collect 计数/脚本版本）
 //! - `rtdata:<devId>` : Hash，field=tag, value=[ts, localTime, value]（M2 实时数据缓存）
+//! - `devmodels` : Hash，field=model_id, value=DeviceModel JSON（设备模型注册表 M-1，`src/model/`）
+//! - `devreg`    : Hash，field=devid, value=DeviceEntry JSON（全局设备注册表 M-1）
 
 use crate::error::RsIotError;
 use lux::{EmbeddedClient, EmbeddedValue};
