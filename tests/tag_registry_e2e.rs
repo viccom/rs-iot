@@ -267,7 +267,7 @@ async fn datasim_modeled_flow_passes_gate() {
 
 #[tokio::test]
 async fn template_props_seed_effective_cache() {
-    let (app, handle, hub, _mgr) = test_app("tagreg-decl").await;
+    let (_app, handle, hub, _mgr) = test_app("tagreg-decl").await;
     // M-2：声明式 props 初值 = 模型模板默认（devG 建隐式模型，temp2 模板 props
     // 带声明值）+ refresh_declared（= effective 装载，模拟 startinst 接线）。
     let bindings = common::register_devices_as_models(
@@ -319,7 +319,7 @@ async fn template_props_seed_effective_cache() {
     // 确定性断言——全局快照被并行测试刷新覆盖是 M-1 已知竞态）。
     let m = rs_iot::model::cache::reload(&client).await.expect("reload");
     let props = m.get("devG.temp2").expect("effective 缓存含模板 tag");
-    assert_eq!(props.history, true, "模板声明 history 默认");
+    assert!(props.history, "模板声明 history 默认");
     assert_eq!(props.deadband, Some(0.5));
     assert_eq!(props.unit.as_deref(), Some("°C"));
     // 直推同样本：已建模过闸（不进队列），effective 不因数据流变化。

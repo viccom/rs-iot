@@ -315,12 +315,12 @@ mod tests {
     use std::collections::BTreeMap;
 
     /// 全局 ENGINE 进程级共享且并行测试多 lux 实例——本套件内**串行**执行
-    /// （每测试持锁到结束）+ 起点重置，使 LRU/节流断言只依赖自己的 key
-    /// （毒化防御：`unwrap_or_else(into_inner)`）。
-    static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    /// （每测试持锁到结束；tokio Mutex——guard 可跨 await 点）+ 起点重置，
+    /// 使 LRU/节流断言只依赖自己的 key（毒化防御：`unwrap_or_else(into_inner)`）。
+    static TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-    fn serialized_and_reset() -> std::sync::MutexGuard<'static, ()> {
-        let g = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    async fn serialized_and_reset() -> tokio::sync::MutexGuard<'static, ()> {
+        let g = TEST_LOCK.lock().await;
         let mut e = engine().lock().unwrap_or_else(|e| e.into_inner());
         e.pending.clear();
         e.seen_modeled.clear();
@@ -370,7 +370,7 @@ mod tests {
 
     #[tokio::test]
     async fn modeled_tag_skipped_entirely() {
-        let _serial = serialized_and_reset();
+        let _serial = serialized_and_reset().await;
         let c = test_client("modeled").await;
         let e = eff(&["discdev1.temp"]);
         note_with_window(&c, &[sample(D, "temp", 1.0, 100)], &e, Duration::ZERO, 100)
@@ -391,7 +391,7 @@ mod tests {
 
     #[tokio::test]
     async fn unmodeled_tag_enters_queue_with_sample() {
-        let _serial = serialized_and_reset();
+        let _serial = serialized_and_reset().await;
         let c = test_client("unmodeled").await;
         note_with_window(
             &c,
@@ -413,7 +413,7 @@ mod tests {
 
     #[tokio::test]
     async fn count_accumulates_same_key_no_new_entry() {
-        let _serial = serialized_and_reset();
+        let _serial = serialized_and_reset().await;
         let c = test_client("count").await;
         let e = eff(&[]);
         note_with_window(&c, &[sample(D, "c1", 1.0, 100)], &e, Duration::ZERO, 100)
@@ -432,7 +432,7 @@ mod tests {
 
     #[tokio::test]
     async fn throttle_window_defers_flush() {
-        let _serial = serialized_and_reset();
+        let _serial = serialized_and_reset().await;
         let c = test_client("throttle").await;
         // 大窗口：首见立即落一次（尽快可见），其后窗口内纯内存。
         note_with_window(
@@ -475,7 +475,7 @@ mod tests {
 
     #[tokio::test]
     async fn lru_cap_evicts_oldest_by_last_ts() {
-        let _serial = serialized_and_reset();
+        let _serial = serialized_and_reset().await;
         let c = test_client("lru").await;
         let e = eff(&[]);
         note_with_window(&c, &[sample(D2, "a", 1.0, 100)], &e, Duration::ZERO, 2)
@@ -499,7 +499,7 @@ mod tests {
 
     #[tokio::test]
     async fn load_resumes_counts_across_restart() {
-        let _serial = serialized_and_reset();
+        let _serial = serialized_and_reset().await;
         let c = test_client("load").await;
         // 模拟前次运行留下的队列条目。
         let seed = Discovery {
@@ -538,7 +538,7 @@ mod tests {
 
     #[tokio::test]
     async fn clear_all_and_by_device() {
-        let _serial = serialized_and_reset();
+        let _serial = serialized_and_reset().await;
         let c = test_client("clear").await;
         let e = eff(&[]);
         note_with_window(&c, &[sample(D, "x", 1.0, 100)], &e, Duration::ZERO, 100)
@@ -564,7 +564,7 @@ mod tests {
 
     #[tokio::test]
     async fn sweep_modeled_removes_adopted_entries() {
-        let _serial = serialized_and_reset();
+        let _serial = serialized_and_reset().await;
         let c = test_client("sweep").await;
         note_with_window(
             &c,

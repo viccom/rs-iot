@@ -544,3 +544,228 @@ async fn devmodel_update_propagates_and_conflict_guards() {
         "失败更新不落盘"
     );
 }
+
+// ========== M-4 T2 发现队列 + adopt 一键建模 ==========
+
+/// 直推未建模样本进发现引擎（本套件无 pipeline——e2e 直调引擎面，
+/// REST 面走 build_router；与 lib 单测不同测试进程，全局 ENGINE 不互扰）。
+async fn discover(handle: &lux::ServerHandle, devid: &str, tag: &str, times: usize) {
+    let client = handle.client();
+    let effective = rs_iot::model::cache::effective();
+    for i in 0..times {
+        let mut values = std::collections::BTreeMap::new();
+        values.insert(
+            tag.to_string(),
+            rs_iot::types::SampleValue::Float(i as f64 + 0.5),
+        );
+        let s = Sample {
+            hwid: Hwid::new("it-hwid"),
+            devid: devid.to_string(),
+            values,
+            timestamp: 1_790_000_000 + i as i64,
+        };
+        rs_iot::model::discovery::note_with_window(
+            &client,
+            &[s],
+            &effective,
+            std::time::Duration::ZERO,
+            5000,
+        )
+        .await
+        .expect("note");
+    }
+}
+
+#[tokio::test]
+async fn discoveries_api_requires_jwt() {
+    let (app, handle) = test_app("m4-disc-401").await;
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/discoveries")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    drop(resp);
+    common::stop_lux(handle).await;
+}
+
+#[tokio::test]
+async fn discovery_list_sorted_by_count_and_filtered_by_dev() {
+    let (app, handle) = test_app("m4-disc-list").await;
+    let token = jwt(&app).await;
+    discover(&handle, "ddA", "x", 1).await;
+    discover(&handle, "ddB", "y", 3).await;
+
+    let (st, v) = get_json(&app, &token, "/api/v1/discoveries").await;
+    assert_eq!(st, StatusCode::OK, "{v:?}");
+    let arr = v.as_array().expect("数组载荷（count 降序）");
+    assert_eq!(arr.len(), 2, "{v:?}");
+    assert_eq!(arr[0]["tag"], serde_json::json!("y"), "count 高在前");
+    assert_eq!(arr[0]["count"], serde_json::json!(3));
+    assert_eq!(arr[0]["devid"], serde_json::json!("ddB"));
+    assert_eq!(arr[1]["count"], serde_json::json!(1));
+
+    let (st, v) = get_json(&app, &token, "/api/v1/discoveries?dev_id=ddA").await;
+    assert_eq!(st, StatusCode::OK);
+    let arr = v.as_array().unwrap();
+    assert_eq!(arr.len(), 1);
+    assert_eq!(arr[0]["tag"], serde_json::json!("x"));
+    common::stop_lux(handle).await;
+}
+
+#[tokio::test]
+async fn discovery_clear_scoped_by_device_and_all() {
+    let (app, handle) = test_app("m4-disc-clear").await;
+    let token = jwt(&app).await;
+    discover(&handle, "ddA", "x", 1).await;
+    discover(&handle, "ddB", "y", 1).await;
+
+    let (st, v) = post_json(
+        &app,
+        &token,
+        "/api/v1/discovery/clear",
+        serde_json::json!({"dev_id": "ddA"}),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v:?}");
+    assert_eq!(v["cleared"], serde_json::json!(1));
+    let (_, v) = get_json(&app, &token, "/api/v1/discoveries").await;
+    assert_eq!(v.as_array().unwrap().len(), 1, "仅清指定设备");
+
+    let (st, v) = post_json(
+        &app,
+        &token,
+        "/api/v1/discovery/clear",
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(v["cleared"], serde_json::json!(1));
+    let (_, v) = get_json(&app, &token, "/api/v1/discoveries").await;
+    assert!(v.as_array().unwrap().is_empty(), "全清");
+    common::stop_lux(handle).await;
+}
+
+#[tokio::test]
+async fn adopt_merges_tags_sweeps_queue_and_gates_reflow() {
+    let (app, handle) = test_app("m4-disc-adopt").await;
+    let token = jwt(&app).await;
+    // 模型 madopt（tag: ua）+ 设备 ddC。
+    let (st, _) = post_json(
+        &app,
+        &token,
+        "/api/v1/devmodel/set",
+        serde_json::json!({
+            "model_id": "madopt",
+            "tags": [{"name": "ua", "data_type": "f32"}]
+        }),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    let (st, _) = post_json(
+        &app,
+        &token,
+        "/api/v1/devreg/set",
+        serde_json::json!({"devid": "ddC", "model": "madopt"}),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+
+    // 未建模 tag 进队列。
+    discover(&handle, "ddC", "ghost", 2).await;
+    let (_, v) = get_json(&app, &token, "/api/v1/discoveries").await;
+    assert_eq!(v.as_array().unwrap().len(), 1);
+
+    // adopt：新 tag 并入模型 + 队列对账清除。
+    let (st, v) = post_json(
+        &app,
+        &token,
+        "/api/v1/discovery/adopt",
+        serde_json::json!({
+            "model_id": "madopt",
+            "tags": [
+                {"name": "ghost", "data_type": "f32", "unit": "V"},
+                {"name": "ua", "data_type": "f32"}
+            ]
+        }),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v:?}");
+    assert_eq!(v["merged"], serde_json::json!(1), "同名 ua 跳过：{v:?}");
+    assert_eq!(v["swept"], serde_json::json!(1), "队列对账清除：{v:?}");
+
+    // 模型已含新 tag（含 unit 建议）。
+    let (_, m) = get_json(&app, &token, "/api/v1/devmodels?model_id=madopt").await;
+    let tags = m["madopt"]["tags"].as_array().unwrap();
+    let ghost = tags
+        .iter()
+        .find(|t| t["name"] == "ghost")
+        .expect("新 tag 入模型");
+    assert_eq!(ghost["unit"], serde_json::json!("V"));
+
+    // 再流同 tag 数据：已建模过闸（effective 缓存竞态下轮询重试——并行测试
+    // 的 store 写会刷掉全局缓存，M-1 已知）。
+    let client = handle.client();
+    let mut gated = false;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
+    while std::time::Instant::now() < deadline {
+        let eff = rs_iot::model::cache::reload(&client).await.unwrap();
+        discover(&handle, "ddC", "ghost", 1).await;
+        let (_, v) = get_json(&app, &token, "/api/v1/discoveries").await;
+        if eff.contains_key("ddC.ghost") && v.as_array().unwrap().is_empty() {
+            gated = true;
+            break;
+        }
+        // 队列若被重新污染则清掉重试。
+        let _ = post_json(
+            &app,
+            &token,
+            "/api/v1/discovery/clear",
+            serde_json::json!({}),
+        )
+        .await;
+    }
+    assert!(gated, "建模后同 tag 数据不再进队列（8s 内未达成）");
+    common::stop_lux(handle).await;
+}
+
+#[tokio::test]
+async fn adopt_rejects_unknown_model_and_undeclared_param_addr() {
+    let (app, handle) = test_app("m4-disc-adopt-bad").await;
+    let token = jwt(&app).await;
+    // 目标模型不存在 → 404。
+    let (st, _) = post_json(
+        &app,
+        &token,
+        "/api/v1/discovery/adopt",
+        serde_json::json!({"model_id": "nope", "tags": [{"name": "x", "data_type": "f32"}]}),
+    )
+    .await;
+    assert_eq!(st, StatusCode::NOT_FOUND);
+    // addr 引用未声明参数 → 400（结构校验）。
+    let (st, _) = post_json(
+        &app,
+        &token,
+        "/api/v1/devmodel/set",
+        serde_json::json!({"model_id": "maddr", "tags": []}),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    let (st, v) = post_json(
+        &app,
+        &token,
+        "/api/v1/discovery/adopt",
+        serde_json::json!({
+            "model_id": "maddr",
+            "tags": [{"name": "x", "data_type": "f32", "addr": "holding:{base}:f32"}]
+        }),
+    )
+    .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "{v:?}");
+    common::stop_lux(handle).await;
+}
