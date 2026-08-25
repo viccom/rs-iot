@@ -19,7 +19,7 @@ L2 部署期  config.toml [history] enabled = false       （编译进了，现�
 L3 标签期  TagProps.history = false                    （开了历史，逐标签白名单归档；默认零归档）
 ```
 
-L3 的批量操作面 = 已交付的 `POST /api/v1/tag/batch`（glob）。归档运行时过滤只认 lux `tags` 表（无 include/exclude 配置项）。
+L3 的批量操作面 = 已交付的 `POST /api/v1/tag/batch`（glob）。归档运行时过滤只认 `effective()`（模型模板默认∪设备覆盖三态合并，`src/model/cache.rs`——tags 表已随 M-4 退役，见 D11；无 include/exclude 配置项）。
 
 ## 二、架构（写/读/订阅三路径）
 
@@ -72,7 +72,7 @@ L3 的批量操作面 = 已交付的 `POST /api/v1/tag/batch`（glob）。归档
 |---|---|---|
 | 1a | Tag Registry（标签/设备元数据统一存储地基） | **已实施**（bd8e027；508 单测+6 e2e；A/B bench 出口登记开销 -8%，≥50 万门槛 4.5× 余量；优化项登记：per-worker 本地 seen+代际失效、布隆预过滤） |
 | 1b | 历史写路径：L1/L2/L3 三层开关骨架（feature/配置/门禁 e2e）→ tsink path 依赖接线 → props+deadband 过滤 → 单写线程 → e2e（白名单外零写入/死区生效/kill 恢复零丢失/主链路劣化 <5%） | 待启动；另立 plan 引用本文 ADR |
-| **M-1~M-4** | **设备模型注册表（物模型）**：devmodels/devreg/discoveries 三表 + tags 退役 + lua/sidecar v2 + 前端三页——元数据唯一来源原则落地，属业务/元数据面重构（数据面冻结） | **accepted 待启动**；[决策](../decisions/2026-08-25-device-model-registry.md) + [实施计划](2026-08-25-device-model-registry-plan.md)（四期 TDD）。**与 1b 的关系**：1b 消费 `effective()`（M-1 T8 稳定后任意点可切入 1b；若 1b 先行，其 props 消费接口预留从 tags 表切换为 effective() 的单点替换） |
+| **M-1~M-4** | **设备模型注册表（物模型）**：devmodels/devreg/discoveries 三表 + tags 退役 + lua/sidecar v2 + 前端三页——元数据唯一来源原则落地，属业务/元数据面重构（数据面冻结） | **已实施并合并**（M-1~M-4 全并 master e8c32e2 + 审查修复 f230e5e，2026-08-25）；[决策](../decisions/2026-08-25-device-model-registry.md) + [实施计划](2026-08-25-device-model-registry-plan.md)（四期 TDD）。**与 1b 的关系**：1b 消费 `effective()`（M-1 T8 稳定后任意点可切入 1b；若 1b 先行，其 props 消费接口预留从 tags 表切换为 effective() 的单点替换） |
 | 2 | `/api/v1/history` 读路径 + KSUB dirty-set 订阅升级（双 impl 过渡，行为等价 e2e） | 待启动；可与 1b 部分并行 |
 | 3 | 治理运维：`rs_iot_history_*` metrics（archived_tags/deadband 削减率/写错误/内存水位）+ 关停序列 D10 + 前端标签管理页 | 待启动 |
 | 4 | 10 万点位 PoC 大压测 + ≥24h soak：10 万 series 混合周期（1s/3s/5s）、100%/20% 两档归档、写+订阅+读三线同场 | 门禁：主链路劣化 <5%；历史写 ≥100K pts/s（100% 归档档，本机）；soak 内存无单调增长/磁盘 ≈8-9B/点±20%；kill -9 零丢失；deadband 实测削减率 ≥50%（缓变负载）；series 数 === history=true 计数 |
