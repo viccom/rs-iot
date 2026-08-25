@@ -717,6 +717,7 @@ async fn p1_three_subsystems_metrics_logs_trace() {
         history_stats: None,
         history_engine_state: std::sync::Arc::from("disabled"),
         history_reader: None,
+        rtdata_watch: std::sync::Arc::new(rs_iot::api::rtdata_watch::RtdataWatchService::new()),
     };
     let (base_url, axum_h) = spawn_axum(state).await;
 

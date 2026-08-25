@@ -28,6 +28,9 @@ pub struct AppConfig {
     /// [history] 历史时序存储配置（L2 部署期开关，详见 `HistoryConfig`）。
     #[serde(default)]
     pub history: HistoryConfig,
+    /// [rtdata] 实时数据订阅配置（读源实现选型，详见 `RtdataConfig`）。
+    #[serde(default)]
+    pub rtdata: RtdataConfig,
     /// Lua stdlib 官方源/镜像 upstream 基址（设计 §3.6 D1/D2）。
     /// `POST /api/v1/lua/stdlib/sync` body 未传 upstream 时用它；内网镜像 =
     /// 官方静态目录完整拷贝，改此键指向镜像即切换。v1 占位官方 Pages URL（T13 建置）；
@@ -100,6 +103,7 @@ impl Default for AppConfig {
             bridge: BridgeConfig::default(),
             pipeline: PipelineConfig::default(),
             history: HistoryConfig::default(),
+            rtdata: RtdataConfig::default(),
             lua_stdlib_upstream: "https://rsiot.github.io/lualib/".into(),
             lua_stdlib_pin: None,
             event_bus_capacity: DEFAULT_EVENT_BUS_CAPACITY,
@@ -222,6 +226,32 @@ impl Default for HistoryConfig {
             close_timeout_secs: 15,
         }
     }
+}
+
+/// [rtdata] 实时数据订阅读源实现选型（P8）。
+///
+/// serde 线上名小写：`sub_impl = "ksub" | "poll"`。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SubImpl {
+    /// lux `ksubscribe("rtdata:*")` key 事件驱动（缺省）：watcher 常驻维护
+    /// per-devid 版本表，订阅连接按脏集精准 HGETALL（P7/P9）。
+    #[default]
+    Ksub,
+    /// 每 tick 轮询 `read_scope`（原实现，显式回退开关）：watcher 不启动，
+    /// lux 无订阅者零开销承诺保持（P8）。
+    Poll,
+}
+
+/// [rtdata] 实时数据订阅配置（订阅升级 Phase 2，P8）。
+///
+/// 缺省 `sub_impl = "ksub"`——默认开，否则功能成暗线；回退 poll 仅需显式
+/// 配置一个键（`sub_impl = "poll"`）。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RtdataConfig {
+    /// 订阅读源实现（ksub 事件驱动 / poll 轮询）。
+    pub sub_impl: SubImpl,
 }
 
 /// 日志配置。终端输出始终开启；`dir` 非空时额外写文件（daily 轮转 + 保留期清理）。
@@ -480,5 +510,33 @@ close_timeout_secs = 30"#,
         assert_eq!(h.channel_capacity, 65536);
         assert_eq!(h.batch_max_rows, 8192);
         assert_eq!(h.close_timeout_secs, 15);
+    }
+
+    /// [rtdata] 默认值（P8 裁定）：订阅读源缺省 ksub——默认开，否则功能成暗线；
+    /// 回退 poll 仅需显式配置一个键。
+    #[test]
+    fn rtdata_config_default_ksub() {
+        let r = RtdataConfig::default();
+        assert_eq!(r.sub_impl, SubImpl::Ksub, "P8：缺省 ksub");
+        assert_eq!(
+            AppConfig::default().rtdata.sub_impl,
+            SubImpl::Ksub,
+            "AppConfig 缺省同样 ksub"
+        );
+    }
+
+    /// [rtdata] toml 解析：显式 poll/ksub 覆盖；缺节走 Default（ksub）。
+    #[test]
+    fn rtdata_config_toml_parse() {
+        let cfg: AppConfig = toml::from_str("[rtdata]\nsub_impl = \"poll\"\n").unwrap();
+        assert_eq!(cfg.rtdata.sub_impl, SubImpl::Poll, "显式 poll 回退开关");
+        let cfg: AppConfig = toml::from_str("[rtdata]\nsub_impl = \"ksub\"\n").unwrap();
+        assert_eq!(cfg.rtdata.sub_impl, SubImpl::Ksub);
+        let cfg: AppConfig = toml::from_str("[pipeline]\nworkers = 2\n").unwrap();
+        assert_eq!(
+            cfg.rtdata.sub_impl,
+            SubImpl::Ksub,
+            "无 [rtdata] 节走 Default（ksub）"
+        );
     }
 }

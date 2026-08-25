@@ -372,6 +372,18 @@ pub async fn run_app_with_shutdown(
         pipeline_token,
     ));
 
+    // RtdataWatchService（订阅升级 Phase 2，P7/P9）：常驻构造注入 AppState；
+    // 仅 ksub 模式 spawn 消费循环（poll 时 lux 无订阅者零开销承诺保持，P8）。
+    // token 用 shutdown.child_token()——进程退出即退。T5 将接 subscribe
+    // producer 消费本服务做精准 HGETALL。
+    let rtdata_watch = Arc::new(api::rtdata_watch::RtdataWatchService::new());
+    if cfg.rtdata.sub_impl == config::SubImpl::Ksub {
+        // JoinHandle 分离运行（token 级联取消即退，无需 join）；命名绑定
+        // `_watcher` 满足 must_use 且避开 clippy::let_underscore_future。
+        let _watcher = rtdata_watch.spawn(client.clone(), shutdown.child_token());
+        tracing::info!("[rtdataWatch] watcher started (sub_impl=ksub)");
+    }
+
     // lux autoStart 实例（南向 Source / 北向 Sink）
     let started = try_start_from_lux(&mgr, &client).await;
     tracing::info!("started {started} source instance(s) from lux");
@@ -419,6 +431,7 @@ pub async fn run_app_with_shutdown(
         history_stats,
         history_engine_state,
         history_reader,
+        rtdata_watch,
     };
     let app = api::build_router(state);
     let api_port = cfg.api_port;

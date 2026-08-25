@@ -35,6 +35,7 @@ pub mod routes_sys;
 pub mod routes_tag;
 pub mod routes_trace;
 pub mod routes_user;
+pub mod rtdata_watch;
 
 /// axum 共享状态。
 #[derive(Clone)]
@@ -66,6 +67,11 @@ pub struct AppState {
     /// 无条件编译（`history/mod.rs`），本字段零 cfg 散布；feature off 构建
     /// 恒 None。
     pub history_reader: Option<std::sync::Arc<dyn crate::history::HistoryReader>>,
+    /// 实时数据订阅 watcher（订阅升级 Phase 2，P7/P9）：ksub 模式下消费
+    /// `ksubscribe("rtdata:*")` 维护 per-devid 版本表；poll 模式常驻构造但不
+    /// 启动消费循环（零开销承诺，P8）。无条件编译（T5 将接 subscribe producer
+    /// 消费本服务做精准 HGETALL）。
+    pub rtdata_watch: Arc<rtdata_watch::RtdataWatchService>,
 }
 
 /// 白名单路径（无需 JWT）。

@@ -59,6 +59,7 @@ async fn test_app(name: &str) -> (axum::Router, lux::ServerHandle, lux::Embedded
         history_stats: None,
         history_engine_state: std::sync::Arc::from("disabled"),
         history_reader: None,
+        rtdata_watch: std::sync::Arc::new(rs_iot::api::rtdata_watch::RtdataWatchService::new()),
     };
     (build_router(state), handle, client)
 }
