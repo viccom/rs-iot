@@ -100,19 +100,41 @@ impl HistoryHandle {
             mpsc::error::TrySendError::Closed(_) => SendFail::Closed,
         })
     }
+
+    /// channel 是否已满（P11 饱和快速路径）：剩余容量为 0 即满。
+    ///
+    /// 语义：容量探测仅是发送前的**先验短路**——探测与实际 `try_send` 之间
+    /// 无锁同步（writer 并发消费会释放容量），结果可能瞬时过时；调用方
+    /// （`fan_out`）以满探测先行计 `dropped` 并跳过整行构造，后续行的
+    /// `try_send` 仍以自身结果为准。
+    pub(crate) fn is_full(&self) -> bool {
+        self.tx.capacity() == 0
+    }
 }
 
 /// pipeline `flush_batch` 出口旁路：白名单过滤 + 行构造 + 满即丢发送
-/// （L3/D3/D4/D5/P1）。
+/// （L3/D3/D4/D5/P1/P11）。
 ///
-/// 逐 Sample 逐 `(tag, value)`：tag 空名、effective 无 `tag_key(devid, tag)`
-/// 卡、或 `history != true` 三类一律 `skipped++`（缺卡与显式 false 同语义，
+/// 逐 Sample 逐 `(tag, value)`：**P11 饱和快速路径先行**——channel 满时
+/// 该行直接计 `dropped` 并跳过（不构造 tag_key、不判白名单、不构造行，
+/// 零分配）；即满时非白名单行也计 `dropped`，仅非饱和路径区分 `skipped`。
+/// 非饱和时按 L3 三类前置过滤：tag 空名、effective 无 `tag_key(devid, tag)`
+/// 卡、或 `history != true` 一律 `skipped++`（缺卡与显式 false 同语义，
 /// history 默认 false 是安全默认）；白名单命中则构造 [`HistoryRow`]
 /// （ts_ms = timestamp 秒 ×1000）经 `try_send` 直通——Ok 计 `sent`，
 /// Err（满或断开）计 `dropped`，均不阻塞。
+///
+/// 计数本地累积（P11）：三计数在循环内只动本地变量，循环外每 flush
+/// 一次性原子合并（SeqCst 保持），消除逐行原子争用。
 pub fn fan_out(samples: &[Sample], effective: &HashMap<String, TagProps>, h: &HistoryHandle) {
+    let (mut sent, mut dropped, mut skipped) = (0u64, 0u64, 0u64);
     for sample in samples {
         for (tag, value) in &sample.values {
+            // P11 饱和快速路径：满即丢先行，白名单判定/行构造整体短路
+            if h.is_full() {
+                dropped += 1;
+                continue;
+            }
             // L3 白名单三类前置过滤：空名 / 缺卡 / 未开归档
             let props = if tag.is_empty() {
                 None
@@ -122,7 +144,7 @@ pub fn fan_out(samples: &[Sample], effective: &HashMap<String, TagProps>, h: &Hi
             let props = match props {
                 Some(props) if props.history => props,
                 _ => {
-                    h.stats.skipped.fetch_add(1, Ordering::SeqCst);
+                    skipped += 1;
                     continue;
                 }
             };
@@ -135,15 +157,15 @@ pub fn fan_out(samples: &[Sample], effective: &HashMap<String, TagProps>, h: &Hi
                 deadband: props.deadband,
             };
             match h.send(row) {
-                Ok(()) => {
-                    h.stats.sent.fetch_add(1, Ordering::SeqCst);
-                }
-                Err(_) => {
-                    h.stats.dropped.fetch_add(1, Ordering::SeqCst);
-                }
+                Ok(()) => sent += 1,
+                Err(_) => dropped += 1,
             }
         }
     }
+    let stats = &h.stats;
+    stats.sent.fetch_add(sent, Ordering::SeqCst);
+    stats.dropped.fetch_add(dropped, Ordering::SeqCst);
+    stats.skipped.fetch_add(skipped, Ordering::SeqCst);
 }
 
 #[cfg(test)]
@@ -365,5 +387,75 @@ mod tests {
         assert_eq!(handle.stats().skipped.load(Ordering::SeqCst), 1);
         assert_eq!(handle.stats().sent.load(Ordering::SeqCst), 0);
         assert_eq!(handle.stats().dropped.load(Ordering::SeqCst), 0);
+    }
+
+    /// 5. 饱和快速路径（P11）：cap=1 预填满后发 2 行——tagA（history=true
+    ///    白名单）与 tagB（history=false 非白名单）。新语义：满即丢先行，
+    ///    该行直接计 dropped，不再判定白名单（不构造 tag_key/不构造行）——
+    ///    dropped==2、skipped==0、sent==0；接收端只剩预填行。
+    ///    现实现白名单判定先于容量检查：tagA 走 dropped==1、tagB 走
+    ///    skipped==1——本测试锁定该行为翻转（R8 根因修复）。
+    #[test]
+    fn fan_out_saturation_short_circuit() {
+        let (tx, mut rx) = mpsc::channel(1);
+        let handle = HistoryHandle::new(tx.clone(), fresh_stats());
+
+        // 预填占满容量（空 channel 上 try_send 必成功）
+        tx.try_send(HistoryRow {
+            devid: "dev1".into(),
+            hwid: "hw1".into(),
+            tag: "prefill".into(),
+            ts_ms: 1,
+            value: SampleValue::Float(0.0),
+            deadband: None,
+        })
+        .expect("空 channel 预填 1 行必须成功");
+
+        let ts = 1_700_000_000i64;
+        let samples = vec![sample(
+            "dev1",
+            "hw1",
+            ts,
+            &[
+                ("tagA", SampleValue::Float(1.0)),
+                ("tagB", SampleValue::Float(2.0)),
+            ],
+        )];
+        let mut effective = HashMap::new();
+        effective.insert(
+            tag_key("dev1", "tagA"),
+            TagProps {
+                history: true,
+                ..TagProps::default()
+            },
+        );
+        effective.insert(
+            tag_key("dev1", "tagB"),
+            TagProps {
+                history: false,
+                ..TagProps::default()
+            },
+        );
+
+        fan_out(&samples, &effective, &handle);
+
+        assert_eq!(
+            handle.stats().dropped.load(Ordering::SeqCst),
+            2,
+            "满即丢先行:白名单 tagA 与非白名单 tagB 都直接计 dropped"
+        );
+        assert_eq!(
+            handle.stats().skipped.load(Ordering::SeqCst),
+            0,
+            "饱和行不再判定白名单,tagB 不单独落 skipped"
+        );
+        assert_eq!(
+            handle.stats().sent.load(Ordering::SeqCst),
+            0,
+            "dropped 不计 sent"
+        );
+        let rows = drain(&mut rx);
+        assert_eq!(rows.len(), 1, "接收端只剩预填行");
+        assert_eq!(rows[0].tag, "prefill");
     }
 }

@@ -64,6 +64,7 @@
 | P8 | engine init 失败(锁被占/磁盘错)→ `error!` 日志 + 归档停用,主程序继续 | 旁路 fail-soft(总方案 §六);锁占用是部署错误须显式告警 |
 | P9 | `wal_sync_ms=0` 映射 PerAppend(严格档),>0 映射 Periodic(ms) | D6"PerAppend 严格档可选" |
 | P10 | kill 恢复 e2e 优先在 Periodic(500ms) 默认档验证;若实测丢窗口,则该测试改 PerAppend 档跑 + 文档记录 Periodic 崩溃窗口语义 | WAL append 语义待实测(风险 R2) |
+| P11 | 饱和快速路径:channel 满时该行直接计 dropped(不判白名单/不构造行/不分配 tag_key);计数本地累积每 flush 合并一次原子 | R8 门禁四劣化 23.96% 的根因修复;非饱和语义零变化 |
 
 ---
 
