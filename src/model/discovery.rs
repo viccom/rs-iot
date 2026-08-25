@@ -205,9 +205,27 @@ pub async fn note_with_window(
         }
     }
     for (k, raw) in &to_flush {
-        c.execute("HSET", &[HASH, k, raw]).await?;
+        if let Err(e) = c.execute("HSET", &[HASH, k, raw]).await {
+            // 落盘失败回滚本批落盘标记（审查修复）：last_flush 已在锁内置位，
+            // 不回滚则 60s 窗口内不重试——回滚后下一批立即重新到期落盘。
+            tracing::warn!("[discovery] 落盘失败（回滚标记，下批重试）: {e}");
+            let keys: Vec<String> = to_flush.iter().map(|(k, _)| k.clone()).collect();
+            unmark_flushed(&keys);
+            return Err(e.into());
+        }
     }
     Ok(())
+}
+
+/// 落盘失败回滚：把 keys 的 `last_flush` 重置为 None（下一批重新视为到期，
+/// 立即重试落盘）。幂等——不在缓冲的键跳过；并发批次已重置/推进则维持其值。
+fn unmark_flushed(keys: &[String]) {
+    let mut g = engine().lock().unwrap();
+    for k in keys {
+        if let Some(p) = g.pending.get_mut(k) {
+            p.last_flush = None;
+        }
+    }
 }
 
 /// 闸拒登记（决策 D-M4"不过闸进 discoveries"）：lua `set_value/set_values/collect`
@@ -800,5 +818,35 @@ mod tests {
         // 空集零开销跳过（不产生条目、不触 lux）。
         note_rejected(&c, &Hwid::new("it-hwid"), D, Default::default()).await;
         assert_eq!(list(&c).await.unwrap().len(), 1);
+    }
+
+    /// 落盘失败回滚（审查修复）：unmark_flushed 重置 last_flush 后，同节流窗口
+    /// 内下一批重新视为到期落盘（HSET 失败不再吞掉整窗口的队列更新）。
+    #[tokio::test]
+    async fn unmark_flushed_retries_within_window() {
+        let _serial = serialized_and_reset().await;
+        let c = test_client("unmark").await;
+        let w = Duration::from_secs(3600);
+        // 首见立即落盘 count=1；窗口内第二笔只内存累计不落盘。
+        note_with_window(&c, &[sample(D, "fl", 1.0, 100)], &eff(&[]), w, 100)
+            .await
+            .unwrap();
+        note_with_window(&c, &[sample(D, "fl", 2.0, 200)], &eff(&[]), w, 100)
+            .await
+            .unwrap();
+        assert_eq!(
+            list(&c).await.unwrap()["discdev1.fl"].count,
+            1,
+            "窗口内不落盘"
+        );
+        // 模拟 HSET 失败后的标记回滚。
+        unmark_flushed(&["discdev1.fl".to_string()]);
+        // 同窗口下一批：重新到期，聚合值落盘。
+        note_with_window(&c, &[sample(D, "fl", 3.0, 300)], &eff(&[]), w, 100)
+            .await
+            .unwrap();
+        let d = &list(&c).await.unwrap()["discdev1.fl"];
+        assert_eq!(d.count, 3, "回滚后窗口内重试落盘");
+        assert_eq!(d.last_ts, 300);
     }
 }
