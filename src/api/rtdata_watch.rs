@@ -16,6 +16,7 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
@@ -139,8 +140,13 @@ impl RtdataWatchService {
 
     /// spawn 事件消费循环：先 `KEYS rtdata:*` 铺底（存量设备注册），再
     /// `ksubscribe("rtdata:*")` 消费 key 事件（同步建订阅、RAII 退订——drop 即
-    /// kunsub；不能走 RESP `cmd("KSUB")`，lux 显式拦截）。退出路径：token 取消
-    /// 或订阅 Closed → 退订结束；Lagged → `bump_epoch` + 重铺 KEYS 后继续。
+    /// kunsub；不能走 RESP `cmd("KSUB")`，lux 显式拦截）。
+    ///
+    /// 退出与重建（P7"Lagged/退订异常 → epoch+1"兑现）：token 取消或订阅
+    /// Closed（lux 关闭，重建无意义）→ 退订结束；Lagged → `bump_epoch` +
+    /// 重铺 KEYS 后原地继续；**其余异常 → 退订重建**——epoch+1 强制连接全量
+    /// 重读、重铺 KEYS 补注册断订期间设备、退避 1s 防 tight loop 后重建订阅。
+    /// 静默退出会让版本表停更，所有 ksub 连接冻结在旧值（审查 High#2）。
     ///
     /// 返回 JoinHandle 供测试 join；进程编排层可不 join（token 级联取消即退）。
     pub fn spawn(
@@ -151,41 +157,76 @@ impl RtdataWatchService {
         let svc = Arc::clone(self);
         tokio::spawn(async move {
             svc.backfill_keys(&client).await;
-            let mut sub = client.ksubscribe("rtdata:*");
-            loop {
-                tokio::select! {
-                    _ = token.cancelled() => break,
-                    r = sub.recv() => match r {
-                        Ok(msg) => {
-                            if matches!(msg.kind, lux::EmbeddedMessageKind::KeyEvent) {
-                                if let Some(devid) = msg.channel.strip_prefix("rtdata:") {
-                                    // payload=b"del" 也 mark（P9）：版本 bump 后
-                                    // 消费方 HGETALL 空 → diff_scope 自然出 removed。
-                                    svc.mark(devid);
+            'subscribe: loop {
+                let mut sub = client.ksubscribe("rtdata:*");
+                loop {
+                    tokio::select! {
+                        _ = token.cancelled() => break 'subscribe,
+                        r = sub.recv() => match r {
+                            Ok(msg) => {
+                                if matches!(msg.kind, lux::EmbeddedMessageKind::KeyEvent) {
+                                    if let Some(devid) = msg.channel.strip_prefix("rtdata:") {
+                                        // payload=b"del" 也 mark（P9）：版本 bump 后
+                                        // 消费方 HGETALL 空 → diff_scope 自然出 removed。
+                                        svc.mark(devid);
+                                    }
                                 }
                             }
-                        }
-                        Err(lux::LuxError::SubscriptionLagged(skipped)) => {
-                            warn!(
-                                "[rtdataWatch] 订阅滞后丢 {skipped} 事件，epoch+1 全量重同步并重铺 KEYS"
-                            );
-                            svc.bump_epoch();
-                            svc.backfill_keys(&client).await;
-                        }
-                        Err(lux::LuxError::SubscriptionClosed) => {
-                            warn!("[rtdataWatch] 订阅已关闭，watcher 退出");
-                            break;
-                        }
-                        Err(e) => {
-                            warn!("[rtdataWatch] 订阅异常，watcher 退出: {e}");
-                            break;
+                            Err(e) => match classify_failure(&e) {
+                                SubFailureAction::ContinueLagged(skipped) => {
+                                    warn!(
+                                        "[rtdataWatch] 订阅滞后丢 {skipped} 事件，epoch+1 全量重同步并重铺 KEYS"
+                                    );
+                                    svc.bump_epoch();
+                                    svc.backfill_keys(&client).await;
+                                }
+                                SubFailureAction::Exit => {
+                                    warn!("[rtdataWatch] 订阅已关闭，watcher 退出");
+                                    break 'subscribe;
+                                }
+                                SubFailureAction::Restart => {
+                                    warn!(
+                                        "[rtdataWatch] 订阅异常，退订重建（epoch+1 + 重铺 KEYS + 退避 1s）: {e}"
+                                    );
+                                    break; // 内层退出 → 外层重建
+                                }
+                            },
                         }
                     }
                 }
+                // 异常重建序：先退订（RAII drop → kunsub，先于重建新订阅），
+                // epoch+1 让持有旧 epoch 的连接全量重读（重同步窗口内的写经
+                // 全量读覆盖，不丢帧），重铺 KEYS 补注册断订期间的设备，退避
+                // 防异常风暴 tight loop，然后重建 ksubscribe 继续。
+                drop(sub);
+                svc.bump_epoch();
+                svc.backfill_keys(&client).await;
+                tokio::time::sleep(Duration::from_secs(1)).await;
             }
-            // 退出路径显式退订（RAII drop → kunsub），先于 client 离场。
-            drop(sub);
+            // 'subscribe 跳出时 sub 随作用域结束 drop（RAII kunsub），先于
+            // client 离场。
         })
+    }
+}
+
+/// 订阅 recv 失败的处置分类（P7"退订异常 → epoch+1"的裁决点）。
+#[derive(Debug, PartialEq, Eq)]
+enum SubFailureAction {
+    /// Lagged(n)：丢 n 事件，通道仍活——原地继续（warn + epoch+1 + 重铺 KEYS）。
+    ContinueLagged(u64),
+    /// Closed：lux 侧订阅已关闭（进程/服务退出）——watcher 退出，重建无意义。
+    Exit,
+    /// 其余异常：退订重建（epoch+1 + 重铺 KEYS + 退避后重建 ksubscribe）。
+    Restart,
+}
+
+/// 失败分类纯函数（单测锚定 `watch_failure_classification`）：Lagged 带丢事件
+/// 数原地继续；Closed 退出；其他一律 Restart——不得静默退出冻结版本表。
+fn classify_failure(e: &lux::LuxError) -> SubFailureAction {
+    match e {
+        lux::LuxError::SubscriptionLagged(skipped) => SubFailureAction::ContinueLagged(*skipped),
+        lux::LuxError::SubscriptionClosed => SubFailureAction::Exit,
+        _ => SubFailureAction::Restart,
     }
 }
 
@@ -280,5 +321,32 @@ mod tests {
         // 拷贝语义:快照后 mark 不影响已取快照。
         svc.mark("a");
         assert_eq!(snap["a"], 2, "快照与表后续变更隔离");
+    }
+
+    /// 订阅 recv 失败的处置分类(P7"退订异常→epoch+1"裁决点):Lagged 原地继续
+    /// (带丢事件数);Closed(lux 关闭,重启无意义)退出;**其余异常必须 Restart**
+    /// ——静默退出会让版本表停更,所有 ksub 连接冻结在旧值(审查 High#2)。
+    #[test]
+    fn watch_failure_classification() {
+        use lux::LuxError;
+        // Lagged(7) → 原地继续,丢事件数随变体带回
+        assert_eq!(
+            classify_failure(&LuxError::SubscriptionLagged(7)),
+            SubFailureAction::ContinueLagged(7)
+        );
+        // Closed → 退出(lux 侧订阅已关,重建无意义)
+        assert_eq!(
+            classify_failure(&LuxError::SubscriptionClosed),
+            SubFailureAction::Exit
+        );
+        // 其余异常 → 退订重建(epoch+1 + 重铺 KEYS + 退避)
+        assert_eq!(
+            classify_failure(&LuxError::Protocol("io".into())),
+            SubFailureAction::Restart
+        );
+        assert_eq!(
+            classify_failure(&LuxError::Command("x".into())),
+            SubFailureAction::Restart
+        );
     }
 }

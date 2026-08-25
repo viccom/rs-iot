@@ -106,3 +106,51 @@ async fn watch_service_marks_del() {
     let _ = join.await;
     common::stop_lux(handle).await;
 }
+
+/// watcher 重启恢复(P7 异常重建路径的组成):token 取消退出后可重新 spawn——
+/// 第二代的 backfill KEYS 会补注册断订窗口期间首写的设备(devGap 在两代之间
+/// 写入,无订阅者收事件,只能靠重铺 KEYS 发现),断订后新事件(devNew)靠重建的
+/// ksubscribe 正常消费。锁"重启机制在真实 lux 上可用"。
+#[tokio::test]
+async fn watch_service_respawn_recovers() {
+    let dir = fresh_dir("watch_respawn");
+    let (handle, client) = common::start_lux(dir.to_str().expect("utf8")).await;
+    let svc = std::sync::Arc::new(RtdataWatchService::new());
+
+    // 第一代:收 devA 事件后正常取消退出。
+    let t1 = CancellationToken::new();
+    let j1 = svc.spawn(client.clone(), t1.clone());
+    client
+        .execute("HSET", &["rtdata:devA", "devA.t", "1"])
+        .await
+        .expect("HSET");
+    eventually("第一代应收 devA 事件", || svc.version("devA").is_some()).await;
+    t1.cancel();
+    let _ = j1.await;
+
+    // 断订窗口:无订阅者,devGap 只能靠第二代 backfill KEYS 补注册。
+    client
+        .execute("HSET", &["rtdata:devGap", "devGap.t", "2"])
+        .await
+        .expect("HSET");
+    let t2 = CancellationToken::new();
+    let j2 = svc.spawn(client.clone(), t2.clone());
+    eventually("第二代 backfill 应补注册断订窗口设备", || {
+        svc.version("devGap").is_some()
+    })
+    .await;
+
+    // 重建后的订阅正常消费新事件。
+    client
+        .execute("HSET", &["rtdata:devNew", "devNew.t", "3"])
+        .await
+        .expect("HSET");
+    eventually("重建订阅应消费新事件", || {
+        svc.version("devNew").is_some()
+    })
+    .await;
+
+    t2.cancel();
+    let _ = j2.await;
+    common::stop_lux(handle).await;
+}
