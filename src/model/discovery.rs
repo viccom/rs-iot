@@ -266,10 +266,13 @@ pub async fn clear(c: &EmbeddedClient, dev_id: Option<&str>) -> Result<usize, Rs
         None => list(c).await?.into_keys().collect(),
         Some(d) => {
             let prefix = format!("{d}.");
+            // 谓词与 routes_discovery::list 同口径：tag_key 短路形态（tag 名含
+            // devid 子串 → key 无 `<devid>.` 前缀）按 devid 字段兜底命中。
             list(c)
                 .await?
-                .into_keys()
-                .filter(|k| k.starts_with(&prefix))
+                .into_iter()
+                .filter(|(k, disc)| k.starts_with(&prefix) || disc.devid == d)
+                .map(|(k, _)| k)
                 .collect()
         }
     };
@@ -649,6 +652,60 @@ mod tests {
             )
         };
         assert!(!x_in_pending && !y_in_pending, "内存缓冲同步清");
+    }
+
+    /// clear(dev_id) 与 list 同谓词（审查修复）：tag_key 短路形态（tag 名含
+    /// devid 子串 → key=tag 原样、无 `<devid>.` 前缀）的条目也按 devid 字段
+    /// 命中清除——此前前缀过滤漏清。
+    #[tokio::test]
+    async fn clear_by_device_matches_key_without_prefix() {
+        let _serial = serialized_and_reset().await;
+        let c = test_client("clear-key").await;
+        // 种无前缀形态：tag "discdev1x" 含 devid "discdev1" 子串 → tag_key 短路。
+        let d = Discovery {
+            devid: D.into(),
+            tag: format!("{D}x"),
+            first_ts: 1,
+            last_ts: 1,
+            count: 1,
+            sample_value: "1".into(),
+        };
+        let key = crate::types::tag_key(D, &d.tag);
+        assert!(
+            !key.starts_with(&format!("{D}.")),
+            "测试前提：tag_key 短路形态（key={key}）"
+        );
+        c.execute(
+            "HSET",
+            &[HASH, &key, &serde_json::to_string(&d).unwrap()],
+        )
+        .await
+        .unwrap();
+        // 常规前缀形态对照（不应被误清）。
+        let other = Discovery {
+            devid: D2.into(),
+            tag: "y".into(),
+            first_ts: 1,
+            last_ts: 1,
+            count: 1,
+            sample_value: "1".into(),
+        };
+        c.execute(
+            "HSET",
+            &[HASH, &format!("{D2}.y"), &serde_json::to_string(&other).unwrap()],
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            clear(&c, Some(D)).await.unwrap(),
+            1,
+            "无前缀形态按 devid 字段命中清除"
+        );
+        let m = list(&c).await.unwrap();
+        assert!(
+            !m.contains_key(&key) && m.contains_key("discdev2.y"),
+            "目标清、其余留：{m:?}"
+        );
     }
 
     #[tokio::test]
