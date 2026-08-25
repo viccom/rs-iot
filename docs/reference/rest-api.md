@@ -339,12 +339,13 @@ curl -N -H "Authorization: Bearer $JWT" \
 - **断线重连即重新 snapshot 全量重同步**（EventSource 自动重连即可恢复，无需 resync 协议）
 - 设备/点位删除 → `datachange.removed` 列出
 - 与 `GET /api/v1/rtdatas` 的 cell 输出同构（`[ts, localTime, value]` 值串），客户端复用同一解析
+- **tag 命名约束：tag 名不含点（`.`）**——field 形如 `<devid>.<tag>`，ksub 档增量路径按**最后一个**点切分归属设备段（`dev_segment`），tag 含点会误归设备域（表现为多余的删→重推抖动，不丢数据；tag 过滤本身为末段 contains 不受影响）
 - 机制为**每连接读侧 poll-diff**（非 EventBus 转发，不受其 dev 截断/丢帧特性影响；设计依据：[2026-08-23-rtdata-subscribe-plan.md](../designs/2026-08-23-rtdata-subscribe-plan.md)）
 - **读源双 impl**（`[rtdata].sub_impl`，Phase 2 订阅升级——SSE 帧/参数/diff 语义**两档完全一致**，行为等价由双档参数化 e2e 守门）：
 
 | 配置键 | 值 | 机制 |
 |---|---|---|
-| `[rtdata].sub_impl` | `ksub`（**缺省**） | 进程内常驻 `RtdataWatchService`（`src/api/rtdata_watch.rs`）`ksubscribe("rtdata:*")` 消费 key 事件维护 per-devid 单调版本表（**共享 dirty-set**）——连接每 tick 只对版本落后的设备精准 `HGETALL`（替代每连接每 tick 全量轮询）；订阅溢出（Lagged）→ epoch+1 → 连接全量重读后恢复增量，不丢帧 |
+| `[rtdata].sub_impl` | `ksub`（**缺省**） | 进程内常驻 `RtdataWatchService`（`src/api/rtdata_watch.rs`）`ksubscribe("rtdata:*")` 消费 key 事件维护 per-devid 单调版本表（**共享 dirty-set**）——连接每 tick 只对版本落后的设备精准 `HGETALL`（替代每连接每 tick 全量轮询；无变更 tick 经 marks 计数器 O(1) 早退，免全表扫描）；订阅溢出（Lagged）→ epoch+1 → 连接全量重读后恢复增量，不丢帧；**watcher 订阅异常 → 自动退订重建**（epoch+1 + 重铺 KEYS + 退避 1s），不静默冻结 |
 | | `poll`（回退开关） | 每连接每 tick 全量重读订阅范围（原 Phase 1 实现路径原样保留）；watcher 不启动，lux 无订阅者零开销承诺保持 |
 
   回退 = 改一个配置键（`sub_impl = "poll"`）重启；`[rtdata]` 节缺省整节走默认 `ksub`（键定义 `src/config.rs::RtdataConfig`）
@@ -435,7 +436,7 @@ curl -X POST -H "Authorization: Bearer $JWT" -H "Content-Type: application/json"
 | `dev_id` / `tag` | 是 | 单 series 定位（series = metric(tag) + labels{devid,hwid}） |
 | `start` / `end` | 是 | 窗口秒，**半开 [start, end)**——含 start 不含 end |
 | `agg` | 否 | `min`/`max`/`avg`/`sum`/`count`/`last` 六值；与 `interval` **成对出现**（单出其一 → 400） |
-| `interval` | 否 | 降采样桶宽（秒，>0）；仅与 `agg` 同现 |
+| `interval` | 否 | 降采样桶宽（秒，>0）；仅与 `agg` 同现；**桶数 `(end-start)/interval` 上限 100000**（超限 400——downsample 全窗聚合的读放大护栏，raw 路径有 limit 分页早停不受限） |
 | `limit` | 否 | 缺省 10000、上限 100000——**取时间升序最旧 n 个**（非最新；raw 路径分页下推免全窗物化，聚合路径取前 n 桶） |
 
 **响应**（200）——`value` **类型保真**（写路径四型直映：Float/Int → JSON number、Bool → boolean、Str → string）；空窗/不存在 series → 200 `points:[]`（tsink 语义，非错误）：
@@ -460,7 +461,7 @@ curl -X POST -H "Authorization: Bearer $JWT" -H "Content-Type: application/json"
 | L2 `[history].enabled=false` | `history_disabled` |
 | 引擎初始化失败 | `init_failed` |
 
-**400 矩阵**：① 解析层（纯文本 body）——缺 `dev_id`/`tag`/`start`/`end` 任一；`start >= end`；`agg` 无 `interval` 或 `interval` 无 `agg`；`agg` 不在六值集合；`interval=0`；`limit > 100000`；秒→ms 换算溢出。② 引擎参数类错误映射（JSON body `{"error":…}`；tsink `InvalidTimeRange`/`UnsupportedAggregation` 等）——**Bool/String series 上数值聚合（`avg`/`sum`）→ 400**。其余引擎错误 → 500（JSON `{"error":…}`）。
+**400 矩阵**：① 解析层（纯文本 body）——缺 `dev_id`/`tag`/`start`/`end` 任一；`start >= end`；`agg` 无 `interval` 或 `interval` 无 `agg`；`agg` 不在六值集合；`interval=0`；`interval` 域外/秒→ms 换算溢出；降采样桶数 `(end-start)/interval > 100000`；`limit > 100000`。② 引擎参数类错误映射（JSON body `{"error":…}`；tsink `InvalidTimeRange`/`UnsupportedAggregation` 等）——**Bool/String series 上数值聚合（`avg`/`sum`）→ 400**。其余引擎错误 → 500（JSON `{"error":…}`）。**注意两种 400 的 body 形态不同**（①纯文本 / ②JSON），客户端按 Content-Type 区分。
 
 **downsample 桶语义三要点**（tsink 基线冻结）：
 

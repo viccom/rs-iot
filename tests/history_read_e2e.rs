@@ -178,7 +178,7 @@ async fn history_400_param_matrix() {
     let (app, handle) = test_app(Some(reader.clone()), Arc::from("ok")).await;
     let token = login_token(&app).await;
 
-    let cases: [(&str, &str); 10] = [
+    let cases: [(&str, &str); 13] = [
         ("缺 dev_id", "/api/v1/history?tag=t&start=0&end=1"),
         ("缺 tag", "/api/v1/history?dev_id=d&start=0&end=1"),
         ("缺 start", "/api/v1/history?dev_id=d&tag=t&end=1"),
@@ -190,12 +190,24 @@ async fn history_400_param_matrix() {
             "/api/v1/history?dev_id=d&tag=t&start=0&end=1&agg=avg",
         ),
         (
+            "interval 无 agg",
+            "/api/v1/history?dev_id=d&tag=t&start=0&end=1&interval=5",
+        ),
+        (
             "agg 未知值",
             "/api/v1/history?dev_id=d&tag=t&start=0&end=1&agg=bogus&interval=5",
         ),
         (
             "interval=0",
             "/api/v1/history?dev_id=d&tag=t&start=0&end=1&agg=avg&interval=0",
+        ),
+        (
+            "interval 秒值溢出(u64::MAX)",
+            "/api/v1/history?dev_id=d&tag=t&start=0&end=1&agg=avg&interval=18446744073709551615",
+        ),
+        (
+            "降采样桶数超上限",
+            "/api/v1/history?dev_id=d&tag=t&start=0&end=100001&agg=avg&interval=1",
         ),
         (
             "limit 超上限",

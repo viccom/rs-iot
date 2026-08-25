@@ -525,3 +525,42 @@ async fn poll_impl_still_works() {
     token.cancel();
     common::stop_lux(handle).await;
 }
+
+/// ksub 专项：snapshot 阶段期间发生的值变更不得丢帧——游标基线（last_versions）
+/// 必须在 snapshot **之前**建立（`snapshot_versions` 文档语义："先取快照再全量读，
+/// 之后的 mark 版本 > 游标，下次 tick 报脏，不丢帧"）。若游标后置到 snapshot 之后，
+/// snapshot 半程中已推设备的 mark 会被游标吸收，该变更永不推送（静默旧值）。
+///
+/// 反压构造（确定性开窗）：20 台设备逐帧推送 > SSE channel 容量 8，producer
+/// 必然阻塞在中途 `send`——此刻对全部设备写新值，已推走旧值的 ≥9 台的丢帧窗口
+/// 被打开；随后消费使 snapshot 完成。判别：窗口拼接串须含 datachange。
+#[tokio::test]
+async fn ksub_change_during_snapshot_not_lost() {
+    let (app, handle, lux, _watch, token) = test_app_tier("ksub-snapwin", Tier::Ksub).await;
+    let devs: Vec<String> = (0..20).map(|i| format!("dev{i:02}")).collect();
+    for d in &devs {
+        seed(&lux, d, &[("t1", "1")], 1).await;
+    }
+    let tok = jwt(&app).await;
+    let mut stream = connect(&app, "?interval=200", &tok).await;
+    // 不消费制造反压：channel 满（容量 8）后 producer 阻塞在中途 send，
+    // snapshot 停在半程（≥9 台已推走旧值，其余尚未 HGETALL）。
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    // snapshot 半程中对全部设备写新值：已推设备的新值不在其 snapshot 帧。
+    for d in &devs {
+        seed(&lux, d, &[("t1", "9")], 2).await;
+    }
+    // 开始消费：排空 channel，snapshot 完成（游标建立时序视实现而定）。
+    let buf1 = collect_window(&mut stream, std::time::Duration::from_millis(800)).await;
+    assert!(buf1.contains("event: snapshot"), "{buf1}");
+    // 判别窗口（首 tick 可能落在本窗或下窗，拼接判）：snapshot 期间已推设备
+    // 的值变更必须以 datachange 补推。
+    let buf2 = collect_window(&mut stream, std::time::Duration::from_millis(1500)).await;
+    let combined = format!("{buf1}{buf2}");
+    assert!(
+        combined.contains("event: datachange"),
+        "snapshot 期间的值变更不得丢帧（游标基线须先于 snapshot 建立）: {combined}"
+    );
+    token.cancel();
+    common::stop_lux(handle).await;
+}
