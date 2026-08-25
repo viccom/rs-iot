@@ -25,6 +25,9 @@ pub struct AppConfig {
     pub bridge: BridgeConfig,
     /// pipeline 数据面配置（worker 数等）。
     pub pipeline: PipelineConfig,
+    /// [history] 历史时序存储配置（L2 部署期开关，详见 `HistoryConfig`）。
+    #[serde(default)]
+    pub history: HistoryConfig,
     /// Lua stdlib 官方源/镜像 upstream 基址（设计 §3.6 D1/D2）。
     /// `POST /api/v1/lua/stdlib/sync` body 未传 upstream 时用它；内网镜像 =
     /// 官方静态目录完整拷贝，改此键指向镜像即切换。v1 占位官方 Pages URL（T13 建置）；
@@ -96,6 +99,7 @@ impl Default for AppConfig {
             log: LogConfig::default(),
             bridge: BridgeConfig::default(),
             pipeline: PipelineConfig::default(),
+            history: HistoryConfig::default(),
             lua_stdlib_upstream: "https://rsiot.github.io/lualib/".into(),
             lua_stdlib_pin: None,
             event_bus_capacity: DEFAULT_EVENT_BUS_CAPACITY,
@@ -175,6 +179,49 @@ impl Default for BridgeConfig {
 pub struct PipelineConfig {
     /// worker 数。0 = auto(min(cpu,8))；阶段1 用 1，阶段2 起用 auto/手动。
     pub workers: usize,
+}
+
+/// [history] 历史时序存储配置(L2 部署期开关;L1=Cargo feature,L3=TagProps.history)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HistoryConfig {
+    /// L2 部署期开关:false 时不初始化引擎、不获取 .tsink.lock
+    pub enabled: bool,
+    /// tsink 数据目录(独立于 lux data_dir;.tsink.lock 进程锁所在)
+    pub data_dir: String,
+    /// 引擎内存预算(MiB),D6
+    pub memory_limit_mb: usize,
+    /// series 基数上限;0=按 effective() history=true 计数×1.2 自动校准,D6
+    pub cardinality_limit: usize,
+    /// 保留期(天),D6
+    pub retention_days: u64,
+    /// WAL 同步:0=PerAppend 严格档,>0=Periodic(ms),P9
+    pub wal_sync_ms: u64,
+    /// WAL 大小上限(MiB),D6
+    pub wal_size_limit_mb: usize,
+    /// 有界 channel 容量(try_send 满即丢+计数),D3
+    pub channel_capacity: usize,
+    /// 单写线程攒批行数上限,D3
+    pub batch_max_rows: usize,
+    /// 关停排空超时(秒;超时放弃,WAL 回放兜底),D10
+    pub close_timeout_secs: u64,
+}
+
+impl Default for HistoryConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            data_dir: "./data/history".into(),
+            memory_limit_mb: 256,
+            cardinality_limit: 0,
+            retention_days: 30,
+            wal_sync_ms: 500,
+            wal_size_limit_mb: 1024,
+            channel_capacity: 65536,
+            batch_max_rows: 8192,
+            close_timeout_secs: 15,
+        }
+    }
 }
 
 /// 日志配置。终端输出始终开启；`dir` 非空时额外写文件（daily 轮转 + 保留期清理）。
@@ -355,5 +402,83 @@ password = "s3cret""#,
             cfg.lux.port, 6390,
             "只设 password，其余 lux 字段仍走 Default"
         );
+    }
+
+    /// [history] 默认值（L2 部署期开关默认关：false 时不初始化引擎、不获取
+    /// .tsink.lock，现有部署零影响）。
+    #[test]
+    fn history_config_default_off() {
+        let h = AppConfig::default().history;
+        assert!(!h.enabled, "L2 默认关：历史写路径零影响");
+        assert_eq!(h.data_dir, "./data/history");
+        assert_eq!(h.memory_limit_mb, 256);
+        assert_eq!(
+            h.cardinality_limit, 0,
+            "0=按 effective() history=true 计数×1.2 自动校准"
+        );
+        assert_eq!(h.retention_days, 30);
+        assert_eq!(h.wal_sync_ms, 500);
+        assert_eq!(h.wal_size_limit_mb, 1024);
+        assert_eq!(h.channel_capacity, 65536);
+        assert_eq!(h.batch_max_rows, 8192);
+        assert_eq!(h.close_timeout_secs, 15);
+    }
+
+    /// [history] 完整节显式配置：每字段给非默认值，解析后逐字段覆盖默认。
+    #[test]
+    fn history_config_toml_explicit() {
+        let cfg: AppConfig = toml::from_str(
+            r#"[history]
+enabled = true
+data_dir = "/var/rs-iot/history"
+memory_limit_mb = 512
+cardinality_limit = 10000
+retention_days = 90
+wal_sync_ms = 0
+wal_size_limit_mb = 2048
+channel_capacity = 1024
+batch_max_rows = 4096
+close_timeout_secs = 30"#,
+        )
+        .unwrap();
+        let h = cfg.history;
+        assert!(h.enabled);
+        assert_eq!(h.data_dir, "/var/rs-iot/history");
+        assert_eq!(h.memory_limit_mb, 512);
+        assert_eq!(h.cardinality_limit, 10000);
+        assert_eq!(h.retention_days, 90);
+        assert_eq!(h.wal_sync_ms, 0, "0=PerAppend 严格档");
+        assert_eq!(h.wal_size_limit_mb, 2048);
+        assert_eq!(h.channel_capacity, 1024);
+        assert_eq!(h.batch_max_rows, 4096);
+        assert_eq!(h.close_timeout_secs, 30);
+    }
+
+    /// 无 [history] 节（有最小其他内容）：解析成功，history 走 Default
+    /// （缺字段容错是既有约定）。
+    #[test]
+    fn history_config_missing_section() {
+        let cfg: AppConfig = toml::from_str("[pipeline]\nworkers = 2\n").unwrap();
+        assert!(
+            !cfg.history.enabled,
+            "无 [history] 节走 Default（enabled=false）"
+        );
+    }
+
+    /// [history] partial-default 契约：只设 enabled=true，其余字段仍走 Default。
+    #[test]
+    fn history_config_partial() {
+        let cfg: AppConfig = toml::from_str("[history]\nenabled = true\n").unwrap();
+        let h = cfg.history;
+        assert!(h.enabled);
+        assert_eq!(h.data_dir, "./data/history");
+        assert_eq!(h.memory_limit_mb, 256);
+        assert_eq!(h.cardinality_limit, 0);
+        assert_eq!(h.retention_days, 30);
+        assert_eq!(h.wal_sync_ms, 500);
+        assert_eq!(h.wal_size_limit_mb, 1024);
+        assert_eq!(h.channel_capacity, 65536);
+        assert_eq!(h.batch_max_rows, 8192);
+        assert_eq!(h.close_timeout_secs, 15);
     }
 }
