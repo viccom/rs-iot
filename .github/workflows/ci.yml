@@ -19,6 +19,12 @@ jobs:
         with:
           repository: viccom/lux
           path: ../lux
+      # tsink 为 path 依赖(../tsink_fork);CI 一并 checkout(pin 基线)
+      - uses: actions/checkout@v4
+        with:
+          repository: viccom/tsink
+          ref: rs-iot-1b-baseline
+          path: ../tsink_fork
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
@@ -32,6 +38,12 @@ jobs:
         with:
           repository: viccom/lux
           path: ../lux
+      # tsink 为 path 依赖(../tsink_fork);CI 一并 checkout(pin 基线)
+      - uses: actions/checkout@v4
+        with:
+          repository: viccom/tsink
+          ref: rs-iot-1b-baseline
+          path: ../tsink_fork
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
@@ -39,7 +51,7 @@ jobs:
       - name: Install libudev-dev (Linux)
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libudev-dev
-      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo clippy --all-targets --all-features -- -D warnings
 
   test:
     strategy:
@@ -53,6 +65,12 @@ jobs:
         with:
           repository: viccom/lux
           path: ../lux
+      # tsink 为 path 依赖(../tsink_fork);CI 一并 checkout(pin 基线)
+      - uses: actions/checkout@v4
+        with:
+          repository: viccom/tsink
+          ref: rs-iot-1b-baseline
+          path: ../tsink_fork
       - uses: dtolnay/rust-toolchain@stable
       - name: Install libudev-dev (Linux)
         if: runner.os == 'Linux'
@@ -69,6 +87,12 @@ jobs:
         with:
           repository: viccom/lux
           path: ../lux
+      # tsink 为 path 依赖(../tsink_fork);CI 一并 checkout(pin 基线)
+      - uses: actions/checkout@v4
+        with:
+          repository: viccom/tsink
+          ref: rs-iot-1b-baseline
+          path: ../tsink_fork
       - uses: dtolnay/rust-toolchain@stable
       - name: Install libudev-dev (Linux)
         if: runner.os == 'Linux'
@@ -87,11 +111,17 @@ jobs:
         with:
           repository: viccom/lux
           path: ../lux
+      # tsink 为 path 依赖(../tsink_fork);CI 一并 checkout(pin 基线)
+      - uses: actions/checkout@v4
+        with:
+          repository: viccom/tsink
+          ref: rs-iot-1b-baseline
+          path: ../tsink_fork
       - uses: dtolnay/rust-toolchain@stable
       - name: Install libudev-dev (Linux)
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libudev-dev
-      - run: cargo doc --no-deps
+      - run: cargo doc --no-deps --all-features
 
   docs:
     # 文档体系校验：头部状态块/实施块字段/索引登记与状态对齐/相对链接有效性。

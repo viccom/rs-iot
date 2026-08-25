@@ -57,6 +57,13 @@ pub enum RsIotError {
     /// 设备模型/注册表校验错误（结构或引用完整性）。
     #[error("model error: {0}")]
     Model(#[from] crate::model::validate::ModelError),
+
+    /// 历史引擎初始化/关闭失败（tsink 错误串化）。
+    ///
+    /// 不用 `#[from]`：tsink 是 `history` feature 下的可选依赖，其错误类型
+    /// 不进公共错误面；调用点手工 `RsIotError::HistoryEngine(e.to_string())`。
+    #[error("history engine error: {0}")]
+    HistoryEngine(String),
 }
 
 /// 库统一 Result 别名。

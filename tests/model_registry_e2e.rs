@@ -45,6 +45,7 @@ async fn test_app(name: &str) -> (axum::Router, lux::ServerHandle) {
         metrics: metrics.clone(),
         trace_registry: trace_registry.clone(),
         event_tx: event_bus.clone(),
+        history: None,
     };
     let (hub_tx, _hub_rx) = tokio::sync::mpsc::channel::<Sample>(16);
     let mgr = Arc::new(InstanceManager::new(ctx.clone(), hub_tx));

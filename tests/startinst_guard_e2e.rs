@@ -41,6 +41,7 @@ async fn harness(
         metrics: Arc::new(rs_iot::process_metrics::ProcessMetrics::new()),
         trace_registry: rs_iot::io_trace::TraceRegistry::new(),
         event_tx: rs_iot::event_bus::EventBus::dummy(),
+        history: None,
     };
     let (hub_tx, hub_rx) = tokio::sync::mpsc::channel::<Sample>(256);
     (
@@ -148,6 +149,7 @@ async fn rest_startinst_double_returns_409() {
         metrics: Arc::new(rs_iot::process_metrics::ProcessMetrics::new()),
         trace_registry: rs_iot::io_trace::TraceRegistry::new(),
         event_tx: rs_iot::event_bus::EventBus::dummy(),
+        history: None,
     };
     let (hub_tx, _hub_rx) = tokio::sync::mpsc::channel::<Sample>(256);
     let mgr = Arc::new(InstanceManager::new(ctx, hub_tx));

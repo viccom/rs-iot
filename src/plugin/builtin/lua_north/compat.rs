@@ -298,6 +298,7 @@ mod tests {
             metrics,
             trace_registry: crate::io_trace::TraceRegistry::new(),
             event_tx: crate::event_bus::EventBus::dummy(),
+            history: None,
         };
         (ctx, ctl)
     }

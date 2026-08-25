@@ -110,6 +110,7 @@ async fn collect_pushes_sample_to_hub() {
         metrics: std::sync::Arc::new(crate::process_metrics::ProcessMetrics::new()),
         trace_registry: crate::io_trace::TraceRegistry::new(),
         event_tx: crate::event_bus::EventBus::dummy(),
+        history: None,
     };
     let inst = InstConfig {
         inst_id: "lua-it".into(),
@@ -412,6 +413,7 @@ async fn lua_host_ctx() -> HostContext {
         metrics: std::sync::Arc::new(crate::process_metrics::ProcessMetrics::new()),
         trace_registry: crate::io_trace::TraceRegistry::new(),
         event_tx: crate::event_bus::EventBus::dummy(),
+        history: None,
     }
 }
 

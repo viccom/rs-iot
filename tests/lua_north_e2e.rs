@@ -56,6 +56,7 @@ fn test_ctx(client: lux::EmbeddedClient) -> HostContext {
         metrics: Arc::new(rs_iot::process_metrics::ProcessMetrics::new()),
         trace_registry: rs_iot::io_trace::TraceRegistry::new(),
         event_tx: rs_iot::event_bus::EventBus::dummy(),
+        history: None,
     }
 }
 

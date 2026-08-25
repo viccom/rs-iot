@@ -80,6 +80,7 @@ fn test_ctx(client: lux::EmbeddedClient, event_bus: EventBus) -> HostContext {
         metrics: Arc::new(rs_iot::process_metrics::ProcessMetrics::new()),
         trace_registry: rs_iot::io_trace::TraceRegistry::new(),
         event_tx: event_bus,
+        history: None,
     }
 }
 
@@ -567,6 +568,7 @@ async fn real_chain(
         metrics: Arc::new(rs_iot::process_metrics::ProcessMetrics::new()),
         trace_registry: rs_iot::io_trace::TraceRegistry::new(),
         event_tx: event_bus.clone(),
+        history: None,
     };
     // hub → pipeline（1 worker + Passthrough：T8 只验回流链路，无数据加工）。
     let (hub_tx, hub_rx) = mpsc::channel::<Sample>(64);

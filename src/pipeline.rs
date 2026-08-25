@@ -14,6 +14,7 @@
 
 use crate::db;
 use crate::event_bus::{now_iso8601, EventPayload, RtdataSample};
+use crate::history;
 use crate::host::HostContext;
 use crate::model;
 use crate::plugin::ticker::fnv1a_64;
@@ -221,6 +222,13 @@ async fn flush_batch(
             if let Err(e) = model::discovery::note_once(lux, buf, &model::cache::effective()).await
             {
                 tracing::warn!("[discovery] note_once 失败(下批重试): {e}");
+            }
+            // 历史归档旁路（Phase 1b，P6 无条件编译）：flush 出口 fan_out 白名单
+            // 过滤 + 满即丢 try_send，写入在独立 writer 线程——handle 为 None
+            // （feature off / L2 关 / 初始化失败 fail-soft）时零开销，主链路
+            // 不受旁路影响。effective 取进程级全局快照（reload/写路径刷新）。
+            if let Some(h) = &ctx.history {
+                history::fan_out(buf, &model::cache::effective(), h);
             }
             // rtdata 变更通知（批次级聚合，模块 M2b）：一批一次 publish。
             // 50万点/秒下每点 publish 会爆 SSE——按 dev 聚合带最新值（Q6：前端直用

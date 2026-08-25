@@ -1,0 +1,22 @@
+//! 历史时序存储写路径（Phase 1b）：pipeline flush_batch 出口旁路 fan-out →
+//! 有界 channel（满即丢）→ 单写线程 → tsink 内嵌存储。
+//!
+//! 三层开关：L1 = Cargo feature `history`（engine/writer 的编译期裁剪，tsink 为
+//! 可选 path 依赖）；L2 = `[history].enabled`（部署期，`config.rs::HistoryConfig`）；
+//! L3 = `TagProps.history`（per-tag 白名单，model effective 缓存）。设计与任务
+//! 拆分见 `docs/designs/2026-08-25-history-write-path-plan.md`。
+
+/// tsink 引擎组装与生命周期：StorageBuilder 资源边界组装（D6）、init/close（D2/D10）。
+#[cfg(feature = "history")]
+pub mod engine;
+
+/// fan-out 出口类型（HistoryRow/HistoryStats/HistoryHandle）与白名单过滤——
+/// 刻意不含 tsink 类型，P6 无条件编译，热路径纯 Rust 可测。
+pub mod rows;
+
+/// 出口类型与 fan_out 的门面重导出（Task 5）：pipeline/host 调用点写
+/// `history::HistoryHandle`/`history::fan_out`，不必带 `rows::` 路径段。
+pub use rows::{fan_out, HistoryHandle};
+
+/// 单写线程：recv 攒批 + deadband/去重/防混型 → tsink insert_rows（D3/D4/D5）。
+pub mod writer;

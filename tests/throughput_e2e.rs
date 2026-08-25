@@ -68,6 +68,7 @@ async fn multi_source_persist_across_workers() {
         metrics: metrics.clone(),
         trace_registry: rs_iot::io_trace::TraceRegistry::new(),
         event_tx: rs_iot::event_bus::EventBus::dummy(),
+        history: None,
     };
     let (hub_tx, hub_rx) = tokio::sync::mpsc::channel::<Sample>(512);
     let mgr = InstanceManager::new(ctx.clone(), hub_tx);

@@ -18,6 +18,21 @@
 //! 推送方式：尽力推（send().await 背压自然限速）。producer 聚合速率 > pipeline 消费速率时，
 //! hub 填满（depth_max→512），producer 阻塞在 send，此时 pipeline_processed_count 增速
 //! 反映的是 pipeline 端到端容量（dispatcher+worker+write_batch+lux），即待测对象。
+//!
+//! 历史归档三档分解（门禁四归因，Phase 1b；env `RSIOT_BENCH_HISTORY`，缺省 `off`）：
+//! - `off`（A 档基线）：不起引擎，`ctx.history=None`，行为与本 bench 改造前完全一致；
+//! - `idle`（需 `--features history` 编译）：起引擎+注入 handle（同 on），但全部
+//!   tag 建模 `history=false`（effective 无白名单）→ fan_out 每 flush 都被调、
+//!   每 tag 查表判 skipped、零行发送（writer/tsink 空转）→ 结束照打 stats
+//!   （skipped 巨量/written=0）+ close 排空。off vs idle = 引擎固定成本 +
+//!   fan_out 判空成本；ts 互异重写仅 on 档（idle 零行发送，ts 无归档语义，
+//!   避免原子序号成本混入 off-idle 归因）；
+//! - `on`（B 档饱和，需 `--features history` 编译）：全部 tag 建模为 `history=true,
+//!   deadband=None` → `maybe_init` 起引擎（独立临时目录）→ `ctx.history=handle`
+//!   → flush 出口 fan_out 全量白名单旁路归档 → 结束打印 history stats
+//!   （written 等计数证 B 档真在归档）→ close(15s) 排空。
+//!   idle vs on = 饱和归档净增量；off vs on = 饱和端到端总劣化。
+//!   三档除 env 外参数完全一致；B 相对 A 稳态均值劣化 <5% 为门禁四通过（R8 见总方案）。
 
 use std::collections::BTreeMap;
 use std::sync::atomic::Ordering;
@@ -128,8 +143,44 @@ fn build_cfg(data_dir: String) -> ServerConfig {
     sc
 }
 
+/// 历史归档档位（门禁四三档分解，env `RSIOT_BENCH_HISTORY`）。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum HistMode {
+    /// A 档基线：不起引擎，`ctx.history=None`。
+    Off,
+    /// 引擎+handle 注入同 on，但建模全 `history=false`——fan_out 每 flush
+    /// 每 tag 判 skipped、零行发送（writer/tsink 空转）。
+    Idle,
+    /// B 档饱和：全量白名单旁路归档。
+    On,
+}
+
 #[tokio::main(flavor = "multi_thread", worker_threads = 4)]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // 历史归档档位（门禁四三档分解）：缺省 off（A 档基线，行为与改造前完全一致）。
+    let hist_mode = match std::env::var("RSIOT_BENCH_HISTORY") {
+        Ok(v) => match v.trim().to_ascii_lowercase().as_str() {
+            "" | "off" => HistMode::Off,
+            "idle" => HistMode::Idle,
+            "on" => HistMode::On,
+            other => {
+                return Err(format!("RSIOT_BENCH_HISTORY 仅接受 off/idle/on，实际: {other}").into())
+            }
+        },
+        Err(_) => HistMode::Off,
+    };
+    // 仅 on 开全白名单：tag 建模 history=true + producer ts 互异重写共用。
+    let history_on = hist_mode == HistMode::On;
+    // idle+on 起引擎：handle 注入 + 收尾 close/stats/hist 目录清理共用。
+    let engine_on = hist_mode != HistMode::Off;
+    // L1 裁剪：无 history feature 的二进制跑不了 idle/on——fail-fast 提示而非静默跑 A。
+    #[cfg(not(feature = "history"))]
+    if engine_on {
+        return Err(
+            "RSIOT_BENCH_HISTORY=idle/on 需要 --features history 编译（当前二进制未含 L1）".into(),
+        );
+    }
+
     // 唯一 temp data_dir（不引入 tempfile 依赖）。
     let pid = std::process::id();
     let ts = std::time::SystemTime::now()
@@ -153,12 +204,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         use rs_iot::model::store;
         use rs_iot::model::types::{DeviceEntry, DeviceModel, TagTemplate};
+        // on 档全部 tag 开白名单（history=true，deadband=None）——off/idle 档保持
+        // 缺省 props（history=false）：off 不起引擎；idle 靠零白名单使 fan_out
+        // 全走 skipped（判空路径照跑，writer 空转）。模型注册与改造前逐字节一致。
+        let tag_props = if history_on {
+            rs_iot::types::TagProps {
+                history: true,
+                deadband: None,
+                ..Default::default()
+            }
+        } else {
+            Default::default()
+        };
         let model = DeviceModel {
             model_id: "_bench".into(),
             tags: (0..N_POINTS)
                 .map(|p| TagTemplate {
                     name: format!("tag{p}"),
                     data_type: "f32".into(),
+                    props: tag_props.clone(),
                     ..Default::default()
                 })
                 .collect(),
@@ -182,7 +246,37 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .expect("effective reload");
     }
 
+    // idle/on 档：起历史引擎（L2 on + 独立临时目录，照本 bench 临时目录惯例）并取
+    // 发送句柄。off 档（engine_on=false）本块整体短路为 None——ctx.history=None，
+    // 与改造前完全一致。idle 档 effective 全 history=false：maybe_init 照常起引擎
+    // （auto_cardinality 空白名单下限 1），fan_out 每查表必 skipped、零行发送。
+    #[cfg(feature = "history")]
+    let hist_dir = std::env::temp_dir().join(format!("rs-iot-bench-pipeline-hist-{pid}-{ts}"));
+    #[cfg(feature = "history")]
+    let (mut history_engine, history_handle) = if engine_on {
+        let hist_cfg = rs_iot::config::HistoryConfig {
+            enabled: true,
+            data_dir: hist_dir.to_string_lossy().into_owned(),
+            ..Default::default()
+        };
+        let effective = rs_iot::model::cache::effective();
+        let engine = rs_iot::history::engine::maybe_init(&hist_cfg, &effective)
+            .expect("history=idle/on 时 maybe_init 必须返回 Some")
+            .expect("临时目录上历史引擎初始化必须成功");
+        let handle = engine
+            .handle()
+            .expect("writer 存活时 engine.handle() 必须返回 Some");
+        (Some(engine), Some(handle))
+    } else {
+        (None, None)
+    };
+
     // 组装 HostContext（照 throughput_e2e.rs：CtlRegistry/BridgeRegistry/metrics/trace/EventBus::dummy）。
+    // history 句柄：idle/on 档注入引擎 handle（flush 出口 fan_out 用）；off 档/feature off 恒 None。
+    #[cfg(feature = "history")]
+    let ctx_history = history_handle.clone();
+    #[cfg(not(feature = "history"))]
+    let ctx_history: Option<rs_iot::history::HistoryHandle> = None;
     let shutdown = CancellationToken::new();
     let metrics = Arc::new(ProcessMetrics::new());
     let ctx = HostContext {
@@ -194,6 +288,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         metrics: metrics.clone(),
         trace_registry: TraceRegistry::new(),
         event_tx: rs_iot::event_bus::EventBus::dummy(),
+        history: ctx_history,
     };
 
     // hub + pipeline（N worker，auto_workers(N>0) 直用）。
@@ -216,19 +311,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let pool = Arc::new(build_pool());
     let producer_token = CancellationToken::new();
     let pushed = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    // on 档 ts 源：时序归档要求同 series ts 互异（writer 同 ts 去重 P5），且默认
+    // 30 天保留期会拒池内固定 2023 ts（OutOfRetention 整批拒）——on 档以
+    // now + 全局单调序号生成互异秒；off/idle 档不触该分支（idle 零行发送，ts
+    // 无归档语义，且避免原子序号成本混入 off-idle 归因），池内固定 ts 原样。
+    let hist_ts_base = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|e| format!("系统时钟异常: {e}"))?
+        .as_secs() as i64;
+    let hist_seq = Arc::new(std::sync::atomic::AtomicI64::new(0));
     let mut producer_handles = Vec::with_capacity(PRODUCERS);
     for _ in 0..PRODUCERS {
         let hub_tx = hub_tx.clone();
         let pool = Arc::clone(&pool);
         let token = producer_token.clone();
         let pushed = Arc::clone(&pushed);
+        let hist_seq = Arc::clone(&hist_seq);
         producer_handles.push(tokio::spawn(async move {
             let n = pool.len();
             let mut i = 0usize;
             loop {
+                let mut sample = pool[i % n].clone();
+                if history_on {
+                    sample.timestamp = hist_ts_base + hist_seq.fetch_add(1, Ordering::Relaxed);
+                }
                 tokio::select! {
                     _ = token.cancelled() => break,
-                    res = hub_tx.send(pool[i % n].clone()) => {
+                    res = hub_tx.send(sample) => {
                         if res.is_err() {
                             // hub 关闭（pipeline 退出），停推。
                             break;
@@ -242,6 +351,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // 稳态测量：每秒采样 pipeline_processed_count 差值（Sample 数），× N_POINTS 得点/秒。
+    match hist_mode {
+        HistMode::Off => {}
+        HistMode::Idle => println!(
+            "history 档位: idle——引擎已起+handle 注入,{} tag 全 history=false(fan_out 每 flush 每 tag 判 skipped,零行发送)",
+            N_DEVID * N_POINTS
+        ),
+        HistMode::On => println!(
+            "history 档位: on(B 档)——引擎已起,{} series 全量白名单(history=true,deadband=None)",
+            N_DEVID * N_POINTS
+        ),
+    }
     println!(
         "pipeline e2e bench — {PRODUCERS} producer × {N_DEVID} devid × {N_POINTS} 点, {WORKERS} worker, hub {HUB_CAP}, 测量 {DURATION_SECS}s (去 warmup {WARMUP_SECS}s)"
     );
@@ -309,12 +429,40 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     println!("目标 {TARGET_PPS:.0} 点/秒: {verdict}");
 
+    // idle/on 档收尾：先 close 排空（D10 序：pipeline join 后、lux shutdown 前；
+    // close 后计数定格）再打印 history stats——on 档 written 等非零即证真在归档，
+    // idle 档应见 skipped 巨量/written=0（证 fan_out 判空路径真在跑且零行发送）。
+    // off 档（engine=None）本块零输出零行为，与改造前一致。
+    #[cfg(feature = "history")]
+    if let Some(engine) = history_engine.as_mut() {
+        engine.close(Duration::from_secs(15));
+    }
+    #[cfg(feature = "history")]
+    if let Some(h) = &history_handle {
+        let st = h.stats();
+        println!(
+            "history stats: sent={} written={} dropped={} deadbanded={} skipped={} lane_mismatch={} errors={}",
+            st.sent.load(Ordering::SeqCst),
+            st.written.load(Ordering::SeqCst),
+            st.dropped.load(Ordering::SeqCst),
+            st.deadbanded.load(Ordering::SeqCst),
+            st.skipped.load(Ordering::SeqCst),
+            st.lane_mismatch.load(Ordering::SeqCst),
+            st.errors.load(Ordering::SeqCst),
+        );
+    }
+
     // 优雅关闭 lux（先 SAVE 刷盘再 shutdown，对标 db::shutdown_lux）。
     let _ = client.execute("SAVE", &[]).await;
     drop(client);
     handle.shutdown_and_wait().await?;
 
-    // 清理 temp dir（best-effort，失败不掩盖 bench 结果）。
+    // 清理 temp dir（best-effort，失败不掩盖 bench 结果）。idle/on 档 hist 目录
+    // 在 engine.close 释放 .tsink.lock 后一并清理。
+    #[cfg(feature = "history")]
+    if engine_on {
+        let _ = std::fs::remove_dir_all(&hist_dir);
+    }
     if let Err(e) = std::fs::remove_dir_all(&data_dir) {
         eprintln!("warn: 清理 temp dir 失败 {data_dir:?}: {e}");
     }
