@@ -74,7 +74,7 @@ L3 的批量操作面 = 已交付的 `POST /api/v1/tag/batch`（glob）。归档
 | 1b | 历史写路径：L1/L2/L3 三层开关骨架（feature/配置/门禁 e2e）→ tsink path 依赖接线 → props+deadband 过滤 → 单写线程 → e2e（白名单外零写入/死区生效/kill 恢复零丢失/主链路劣化 <5%） | **已实施**（feat/history-write，2026-08-25；[plan](2026-08-25-history-write-path-plan.md)）——四门禁全过：白名单零写入/死区生效/kill 零丢失（Periodic 档）/A-B off-vs-on -4.2% <5%（mean -4.23%）；详见 plan §三 |
 | **M-1~M-4** | **设备模型注册表（物模型）**：devmodels/devreg/discoveries 三表 + tags 退役 + lua/sidecar v2 + 前端三页——元数据唯一来源原则落地，属业务/元数据面重构（数据面冻结） | **已实施并合并**（M-1~M-4 全并 master e8c32e2 + 审查修复 f230e5e，2026-08-25）；[决策](../decisions/2026-08-25-device-model-registry.md) + [实施计划](2026-08-25-device-model-registry-plan.md)（四期 TDD）。**与 1b 的关系**：1b 消费 `effective()`（M-1 T8 稳定后任意点可切入 1b；若 1b 先行，其 props 消费接口预留从 tags 表切换为 effective() 的单点替换） |
 | 2 | `/api/v1/history` 读路径 + KSUB dirty-set 订阅升级（双 impl 过渡，行为等价 e2e） | 待启动；可与 1b 部分并行 |
-| 3 | 治理运维：`rs_iot_history_*` metrics（archived_tags/deadband 削减率/写错误/内存水位）+ 关停序列 D10 + 前端标签管理页 | **薄切片已前置**（feat/history-ops-visibility，2026-08-25）：/sysstatus history 块 + /metrics `rs_iot_history_*` 7 family + 前端运营面（归档白名单过滤/批量覆盖/对账）；D10 关停序列已随 1b 落地——余项为完整 metrics 治理与前端标签管理页深化 |
+| 3 | 治理运维：`rs_iot_history_*` metrics（archived_tags/deadband 削减率/写错误/内存水位）+ 关停序列 D10 + 前端标签管理页 | **薄切片已前置**（master ed54a6d，2026-08-25）：/sysstatus history 块 + /metrics `rs_iot_history_*` 7 family + 前端运营面（归档白名单过滤/批量覆盖/对账）；D10 关停序列已随 1b 落地——余项为完整 metrics 治理与前端标签管理页深化 |
 | 4 | 10 万点位 PoC 大压测 + ≥24h soak：10 万 series 混合周期（1s/3s/5s）、100%/20% 两档归档、写+订阅+读三线同场 | 门禁：主链路劣化 <5%；历史写 ≥100K pts/s（100% 归档档，本机）；soak 内存无单调增长/磁盘 ≈8-9B/点±20%；kill -9 零丢失；deadband 实测削减率 ≥50%（缓变负载）；series 数 === history=true 计数 |
 | 5 | 演进：PromQL instant 端点 → range（等 fork 优化）→ rollup+北向增量 → 中心侧 tsink-server 聚合拓扑（边缘内嵌/中心独立的分场景形态，PromRW/LP 上送+断连缓存） | backlog |
 
