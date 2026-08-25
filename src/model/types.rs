@@ -59,14 +59,15 @@ pub struct TagTemplate {
     pub props: TagProps,
 }
 
-/// 标签读写语义。
+/// 标签读写语义。缺省**只读**（最小权限：观察到的数据点默认不可写；可写须
+/// 显式声明——与前端 ModelForm 新建 tag 默认 'r' 对齐）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum TagRw {
     /// 只读（采集）。
+    #[default]
     R,
     /// 可读可写（采集 + 写命令）。
-    #[default]
     Rw,
 }
 
@@ -244,5 +245,13 @@ mod tests {
         );
         let r: TagRw = serde_json::from_str("\"r\"").unwrap();
         assert_eq!(r, TagRw::R);
+    }
+
+    #[test]
+    fn tag_rw_defaults_to_read_only() {
+        // 最小权限缺省（审查修复）：JSON 缺省 rw 字段 → 只读。
+        assert_eq!(TagRw::default(), TagRw::R);
+        let t: TagTemplate = serde_json::from_str(r#"{"name":"a","data_type":"f32"}"#).unwrap();
+        assert_eq!(t.rw, TagRw::R, "wire 缺省只读");
     }
 }
