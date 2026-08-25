@@ -13,7 +13,7 @@ use crate::error::RsIotError;
 use crate::model::addr;
 use crate::model::store;
 use crate::model::types::{DeviceEntry, DeviceModel};
-use crate::types::{ChildSpec, DeviceBinding, DeviceSpec, TagProps};
+use crate::types::{ChildSpec, DeviceBinding, DeviceSpec};
 use lux::EmbeddedClient;
 use std::collections::BTreeMap;
 
@@ -132,6 +132,7 @@ mod tests {
     use super::*;
     use crate::model::store;
     use crate::model::types::{DeviceEntry, TagOverride, TagTemplate};
+    use crate::types::TagProps;
 
     async fn test_client(tag: &str) -> lux::EmbeddedClient {
         let cfg = crate::config::AppConfig {
