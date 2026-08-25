@@ -284,7 +284,6 @@ pub async fn subscribe(State(st): State<AppState>, Query(q): Query<SubQuery>) ->
 /// Phase 2 读源双 impl（P8）：ksub → `read_delta` dirty-set 精准读（P7/D8）；
 /// poll → 原 `read_scope` 轮询路径（逐字保留，回退开关）。两分支组装出同构
 /// current 喂同一 `diff_scope`（一行不动），帧逻辑等价（R3/P11）。
-#[allow(clippy::too_many_arguments)]
 async fn run(
     lux: &lux::EmbeddedClient,
     watch: &RtdataWatchService,
