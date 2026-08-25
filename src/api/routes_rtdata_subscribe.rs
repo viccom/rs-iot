@@ -296,6 +296,15 @@ async fn run(
     let tag = tag_filter.as_deref();
     let mut last_sent: HashMap<String, String> = HashMap::new();
 
+    // ---- ksub 游标基线（P7）：必须在 snapshot **之前**取（`snapshot_versions`
+    // 文档语义："先取快照再全量读"）——snapshot 期间发生的 mark 版本 > 游标，
+    // 首 tick 报脏重读，不丢帧（值与基线相同则 diff 静默无帧，无代价）。
+    // 若后置到 snapshot 之后，半程中已推设备的 mark 会被游标吸收，该变更
+    // 永不推送（ksub_change_during_snapshot_not_lost 反压构造锚定）。poll 档
+    // 不消费版本表，保持原语义。----
+    let mut last_versions = watch.snapshot_versions();
+    let mut last_epoch = watch.epoch();
+
     // ---- Phase 1: snapshot（逐设备一帧，建基线）----
     for (dev, points) in read_scope(lux, &dev_filter).await {
         let filtered = filter_by_tag(points, tag);
@@ -314,12 +323,6 @@ async fn run(
             }
         }
     }
-
-    // ---- ksub 游标基线（P7）：snapshot 阶段已全量读过、last_sent 就位——
-    // 游标取 watch 全表快照 + 当前 epoch（snapshot 期间已发生的 mark 不再触发
-    // 重读，首个 tick 只看此后新事件）。poll 档不消费版本表，保持原语义。----
-    let mut last_versions = watch.snapshot_versions();
-    let mut last_epoch = watch.epoch();
 
     // ---- Phase 2: 周期 diff（值变/删除才推）----
     let mut ticker = tokio::time::interval(interval);
