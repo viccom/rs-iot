@@ -249,7 +249,12 @@ pub async fn note_rejected(
         values: rejected,
         timestamp: chrono::Utc::now().timestamp(),
     };
-    if let Err(e) = note_once(c, std::slice::from_ref(&s), &crate::model::cache::effective()).await
+    if let Err(e) = note_once(
+        c,
+        std::slice::from_ref(&s),
+        &crate::model::cache::effective(),
+    )
+    .await
     {
         tracing::warn!("[discovery] 闸拒登记失败(忽略): {e}");
     }
@@ -693,12 +698,9 @@ mod tests {
             !key.starts_with(&format!("{D}.")),
             "测试前提：tag_key 短路形态（key={key}）"
         );
-        c.execute(
-            "HSET",
-            &[HASH, &key, &serde_json::to_string(&d).unwrap()],
-        )
-        .await
-        .unwrap();
+        c.execute("HSET", &[HASH, &key, &serde_json::to_string(&d).unwrap()])
+            .await
+            .unwrap();
         // 常规前缀形态对照（不应被误清）。
         let other = Discovery {
             devid: D2.into(),
@@ -710,7 +712,11 @@ mod tests {
         };
         c.execute(
             "HSET",
-            &[HASH, &format!("{D2}.y"), &serde_json::to_string(&other).unwrap()],
+            &[
+                HASH,
+                &format!("{D2}.y"),
+                &serde_json::to_string(&other).unwrap(),
+            ],
         )
         .await
         .unwrap();
@@ -788,13 +794,25 @@ mod tests {
         );
         // 仍在 effective 的 key 不受修剪影响（继续短路零开销）。
         let e3 = eff(&["discdev1.still"]);
-        note_with_window(&c, &[sample(D, "still", 1.0, 100)], &e3, Duration::ZERO, 100)
-            .await
-            .unwrap();
+        note_with_window(
+            &c,
+            &[sample(D, "still", 1.0, 100)],
+            &e3,
+            Duration::ZERO,
+            100,
+        )
+        .await
+        .unwrap();
         retain_modeled(&e3);
-        note_with_window(&c, &[sample(D, "still", 2.0, 200)], &e3, Duration::ZERO, 100)
-            .await
-            .unwrap();
+        note_with_window(
+            &c,
+            &[sample(D, "still", 2.0, 200)],
+            &e3,
+            Duration::ZERO,
+            100,
+        )
+        .await
+        .unwrap();
         assert!(
             !list(&c).await.unwrap().contains_key("discdev1.still"),
             "有效 key 保留短路"

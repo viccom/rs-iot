@@ -421,10 +421,7 @@ impl Source for LuaClient {
                                     gate_collect(&model_snapshot, &gate_rejected, &devid, values);
                                 if !gate_rej.is_empty() {
                                     crate::model::discovery::note_rejected(
-                                        &ctx.lux,
-                                        &ctx.hwid,
-                                        &devid,
-                                        gate_rej,
+                                        &ctx.lux, &ctx.hwid, &devid, gate_rej,
                                     )
                                     .await;
                                 }

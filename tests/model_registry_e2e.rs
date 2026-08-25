@@ -400,7 +400,11 @@ async fn devreg_list_filter_effective_and_delete() {
     )
     .await;
     assert_eq!(st, StatusCode::OK);
-    assert_eq!(v["unbound_instances"], serde_json::json!(1), "解绑计数：{v}");
+    assert_eq!(
+        v["unbound_instances"],
+        serde_json::json!(1),
+        "解绑计数：{v}"
+    );
     let (_, v) = get_json(&app, &token, "/api/v1/devreg").await;
     assert!(v.get("dA1").is_none() && v.get("dA2").is_some());
     let exists = handle

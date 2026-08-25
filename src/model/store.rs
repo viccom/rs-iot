@@ -203,10 +203,7 @@ pub async fn list_devices(c: &EmbeddedClient) -> Result<Vec<DeviceEntry>, RsIotE
 /// devreg + 清 dev2inst 归属 + 删 `rtdata:<devid>`（best-effort，对齐
 /// routes_device 删除口径；历史不级联——master plan D9）。返回解绑实例数；
 /// 不存在 → `None`。
-pub async fn delete_device(
-    c: &EmbeddedClient,
-    devid: &str,
-) -> Result<Option<usize>, RsIotError> {
+pub async fn delete_device(c: &EmbeddedClient, devid: &str) -> Result<Option<usize>, RsIotError> {
     if get_device(c, devid).await?.is_none() {
         return Ok(None);
     }
@@ -223,10 +220,7 @@ pub async fn delete_device(
 /// 从 lux `instances` 全表移除对 `devid` 的绑定（Value 级改写 devices 数组，
 /// 其余字段保留）。无 devices 字段的实例（luaNorth 等）与坏值条目不动。
 /// 返回改写的实例数。
-async fn unbind_from_instances(
-    c: &EmbeddedClient,
-    devid: &str,
-) -> Result<usize, RsIotError> {
+async fn unbind_from_instances(c: &EmbeddedClient, devid: &str) -> Result<usize, RsIotError> {
     let v = c.execute_value("HGETALL", &["instances"]).await?;
     let mut n = 0usize;
     if let lux::EmbeddedValue::Array(arr) = v {
@@ -248,7 +242,8 @@ async fn unbind_from_instances(
             devs.retain(|d| d.get("devid").and_then(|x| x.as_str()) != Some(devid));
             if devs.len() != before {
                 let rewritten = serde_json::to_string(&json)?;
-                c.execute("HSET", &["instances", &inst_id, &rewritten]).await?;
+                c.execute("HSET", &["instances", &inst_id, &rewritten])
+                    .await?;
                 n += 1;
                 tracing::info!("[model] 实例 {inst_id} 已解绑设备 {devid}（设备删除级联）");
             }
@@ -589,8 +584,7 @@ mod tests {
         assert!(delete_device(&c, "d9").await.unwrap().is_some());
         // i1：d9 条目移除、other 保留、其余字段不动。
         let v = c.execute_value("HGET", &["instances", "i1"]).await.unwrap();
-        let j: serde_json::Value =
-            serde_json::from_str(&embedded_to_string(v).unwrap()).unwrap();
+        let j: serde_json::Value = serde_json::from_str(&embedded_to_string(v).unwrap()).unwrap();
         let devs: Vec<String> = j["devices"]
             .as_array()
             .unwrap()
@@ -601,8 +595,7 @@ mod tests {
         assert_eq!(j["app_code"], "modbusClient", "其余字段不动");
         // i2：devices 清空（实例保留）。
         let v = c.execute_value("HGET", &["instances", "i2"]).await.unwrap();
-        let j: serde_json::Value =
-            serde_json::from_str(&embedded_to_string(v).unwrap()).unwrap();
+        let j: serde_json::Value = serde_json::from_str(&embedded_to_string(v).unwrap()).unwrap();
         assert!(j["devices"].as_array().unwrap().is_empty(), "清空不删实例");
         // i3：无 devices 字段原样。
         let v = c.execute_value("HGET", &["instances", "i3"]).await.unwrap();
