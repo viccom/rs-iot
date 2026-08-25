@@ -477,3 +477,227 @@ async fn history_raw_missing_series_200_empty() {
 
     teardown(&mut engine, handle, &dir).await;
 }
+
+// ---------- Task 3 红：downsample 六聚合 + 类型矩阵 + 400 映射 ----------
+// 现状：engine select 的 downsample 分支占位 Err（"downsample 待 Task 3
+// 实现"）→ routes Err 统一 500，下列各测红在 status 500；其中 Bool+avg
+// 红在 500≠400（P12 要求 UnsupportedAggregation→400，当前 REST 层未分层）。
+
+/// Task 3 红：downsample 桶语义（P10）——单 series 10 点（ts=t0..t0+9
+/// 每秒，v=1..=10 Float）→ `interval=5` 查询（start=t0&end=t0+10）→
+/// 六聚合各恰 2 桶：ts==t0 与 t0+5（桶 ts=桶起点，**origin=查询 start
+/// 即 t0**——非 epoch 对齐）；桶值为桶内点集的聚合（一测内多次 GET）。
+/// 值矩阵（Float series）：sum/last/min/max/avg → F64 number（sum 保
+/// 数值域、avg 恒 F64）；count → 整 number（Count 恒 U64）。
+#[tokio::test]
+async fn history_downsample_buckets() {
+    let (mut engine, dir) = test_engine("ds-bucket");
+    let t0 = now_secs();
+    let rows: Vec<Row> = (0..10)
+        .map(|i| {
+            Row::with_labels(
+                "ds_m",
+                labels("dev-ds"),
+                DataPoint::new((t0 + i) * 1000, Value::F64((i + 1) as f64)),
+            )
+        })
+        .collect();
+    engine
+        .storage()
+        .insert_rows(&rows)
+        .expect("铺数据 insert_rows 必须成功");
+
+    let (app, handle) = test_app(Some(engine.reader(HWID)), Arc::from("ok")).await;
+    let token = login_token(&app).await;
+
+    // (agg, [桶 t0 值, 桶 t0+5 值])：桶 t0 含 v1..v5，桶 t0+5 含 v6..v10。
+    // sum 第二桶 40.0（6+7+8+9+10）——任务原文/计划文档写 35 系算术
+    // 笔误：与本测自身 avg(8.0)×count(5)=40 及数据铺设互斥，任何实现
+    // 无法满足；按冻结语义纠正为 40.0（同 ② Bool+last 的纠正先例），
+    // 见 docs/decisions.md 与绿阶段回传报告。
+    let cases: [(&str, serde_json::Value); 6] = [
+        ("sum", serde_json::json!([15.0, 40.0])),
+        ("last", serde_json::json!([5.0, 10.0])),
+        ("min", serde_json::json!([1.0, 6.0])),
+        ("max", serde_json::json!([5.0, 10.0])),
+        ("count", serde_json::json!([5, 5])),
+        ("avg", serde_json::json!([3.0, 8.0])),
+    ];
+    for (agg, want_vals) in &cases {
+        let uri = format!(
+            "/api/v1/history?dev_id=dev-ds&tag=ds_m&start={t0}&end={}&interval=5&agg={agg}",
+            t0 + 10
+        );
+        let resp = get_history(&app, &token, &uri).await;
+        assert_eq!(resp.status(), StatusCode::OK, "{agg}: {uri}");
+        let json = body_json(resp).await;
+        assert_eq!(json["count"], 2, "{agg} interval=5 覆盖 10 点应恰 2 桶");
+        let points = json["points"].as_array().expect("points 应为数组");
+        let ts: Vec<i64> = points
+            .iter()
+            .map(|p| p["ts"].as_i64().expect("ts 应为整数"))
+            .collect();
+        // P10：桶 ts=桶起点 + origin=查询 start（t0）→ 恰 [t0, t0+5]，
+        // 且 count 的整数 JSON（U64）与其余 F64 一并由值比较锁定。
+        assert_eq!(ts, vec![t0, t0 + 5], "{agg} 桶起点应 origin=查询 start");
+        let vals: serde_json::Value = points.iter().map(|p| p["value"].clone()).collect();
+        assert_eq!(vals, *want_vals, "{agg} 桶值");
+    }
+
+    teardown(&mut engine, handle, &dir).await;
+}
+
+/// Task 3 红：聚合类型退化矩阵 + UnsupportedAggregation→400（P12）。
+/// 同 devid 三 series：i_cnt（I64 1,2,3）/ b_last（Bool true,false,true）/
+/// s_min（Str "a","b"），interval=5 单桶覆盖全点：
+/// ① i_cnt agg=count → number 且 ==3（Count 恒 U64，整型 JSON）；
+/// ② b_last agg=last → JSON boolean（Last 保原类型；ts 升序末点值
+///    true——任务原文写 false 与 tsink `Last => points.last()` 语义
+///    冲突，按冻结语义断言 true，见会话回传报告）；
+/// ③ b_last agg=avg → **400**（数值聚合作用于 Bool → tsink
+///    UnsupportedAggregation，REST 须映射 400；当前占位 Err 统一 500，
+///    本测红在 500≠400）；
+/// ④ s_min agg=min → JSON string "a"（Min 保原类型）。
+#[tokio::test]
+async fn history_agg_type_matrix() {
+    let (mut engine, dir) = test_engine("agg-matrix");
+    let t0 = now_secs();
+    let series: [(&str, Vec<Value>); 3] = [
+        ("i_cnt", vec![Value::I64(1), Value::I64(2), Value::I64(3)]),
+        (
+            "b_last",
+            vec![Value::Bool(true), Value::Bool(false), Value::Bool(true)],
+        ),
+        (
+            "s_min",
+            vec![Value::String("a".into()), Value::String("b".into())],
+        ),
+    ];
+    let rows: Vec<Row> = series
+        .into_iter()
+        .flat_map(|(m, vs)| {
+            vs.iter()
+                .enumerate()
+                .map(|(i, v)| {
+                    Row::with_labels(
+                        m,
+                        labels("dev-mx"),
+                        DataPoint::new((t0 + i as i64) * 1000, v.clone()),
+                    )
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    engine
+        .storage()
+        .insert_rows(&rows)
+        .expect("铺数据 insert_rows 必须成功");
+
+    let (app, handle) = test_app(Some(engine.reader(HWID)), Arc::from("ok")).await;
+    let token = login_token(&app).await;
+
+    // 单桶取值 helper：GET（interval=5 覆盖全点）→ 200 + 恰 1 桶 +
+    // points[0]["value"]。
+    async fn bucket_value(
+        app: &axum::Router,
+        token: &str,
+        tag: &str,
+        agg: &str,
+        start: i64,
+        end: i64,
+    ) -> serde_json::Value {
+        let uri = format!(
+            "/api/v1/history?dev_id=dev-mx&tag={tag}&start={start}&end={end}&interval=5&agg={agg}"
+        );
+        let resp = get_history(app, token, &uri).await;
+        assert_eq!(resp.status(), StatusCode::OK, "{tag} {agg}: {uri}");
+        let json = body_json(resp).await;
+        assert_eq!(json["count"], 1, "{tag} {agg} interval=5 应单桶");
+        json["points"][0]["value"].clone()
+    }
+
+    // ① I64 count → number 且 ==3（as_i64 同时锁整型 JSON 表示）
+    let v = bucket_value(&app, &token, "i_cnt", "count", t0, t0 + 3).await;
+    assert!(v.is_number(), "I64 count 应为 JSON number，实际: {v}");
+    assert_eq!(v.as_i64(), Some(3), "I64 3 点 count 应 ==3");
+
+    // ② Bool last → JSON boolean，值 true（ts 升序末点）
+    let v = bucket_value(&app, &token, "b_last", "last", t0, t0 + 3).await;
+    assert!(v.is_boolean(), "Bool last 应为 JSON boolean，实际: {v}");
+    assert_eq!(v, serde_json::json!(true), "Bool last 应取时间末点值 true");
+
+    // ③ Bool avg → 400（UnsupportedAggregation 的 P12 映射；当前 500 红）
+    let uri = format!(
+        "/api/v1/history?dev_id=dev-mx&tag=b_last&start={t0}&end={}&interval=5&agg=avg",
+        t0 + 3
+    );
+    let resp = get_history(&app, &token, &uri).await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::BAD_REQUEST,
+        "Bool 上数值聚合 UnsupportedAggregation 须 400（P12），uri: {uri}"
+    );
+
+    // ④ Str min → JSON string "a"（保原类型，字典序最小）
+    let v = bucket_value(&app, &token, "s_min", "min", t0, t0 + 2).await;
+    assert!(v.is_string(), "Str min 应为 JSON string，实际: {v}");
+    assert_eq!(v, serde_json::json!("a"), "Str min 保原串");
+
+    teardown(&mut engine, handle, &dir).await;
+}
+
+/// Task 3 红：空桶省略（P10 无 gap filling）——5 点 ts=t0,t0+1,t0+2,
+/// t0+20,t0+21（interval=5，origin=查询 start=t0）→ 仅桶 t0（3 点）与
+/// t0+20（2 点）输出，中间 t0+5/t0+10/t0+15 空桶不出现；count 聚合的
+/// 桶值 3/2 同时锚定各桶点归属。
+#[tokio::test]
+async fn history_downsample_empty_bucket_skipped() {
+    let (mut engine, dir) = test_engine("ds-gap");
+    let t0 = now_secs();
+    let offsets = [0i64, 1, 2, 20, 21];
+    let rows: Vec<Row> = offsets
+        .iter()
+        .enumerate()
+        .map(|(i, off)| {
+            Row::with_labels(
+                "gap_m",
+                labels("dev-gap"),
+                DataPoint::new((t0 + off) * 1000, Value::F64((i + 1) as f64)),
+            )
+        })
+        .collect();
+    engine
+        .storage()
+        .insert_rows(&rows)
+        .expect("铺数据 insert_rows 必须成功");
+
+    let (app, handle) = test_app(Some(engine.reader(HWID)), Arc::from("ok")).await;
+    let token = login_token(&app).await;
+
+    let uri = format!(
+        "/api/v1/history?dev_id=dev-gap&tag=gap_m&start={t0}&end={}&interval=5&agg=count",
+        t0 + 22
+    );
+    let resp = get_history(&app, &token, &uri).await;
+    assert_eq!(resp.status(), StatusCode::OK, "{uri}");
+    let json = body_json(resp).await;
+    assert_eq!(json["count"], 2, "仅两非空桶，中间空桶不输出");
+    let points = json["points"].as_array().expect("points 应为数组");
+    let ts: Vec<i64> = points
+        .iter()
+        .map(|p| p["ts"].as_i64().expect("ts 应为整数"))
+        .collect();
+    assert_eq!(
+        ts,
+        vec![t0, t0 + 20],
+        "空桶 t0+5/t0+10/t0+15 不得补点（P10 无 gap filling）"
+    );
+    let vals: serde_json::Value = points.iter().map(|p| p["value"].clone()).collect();
+    assert_eq!(
+        vals,
+        serde_json::json!([3, 2]),
+        "桶点归属：t0 桶 3 点、t0+20 桶 2 点"
+    );
+
+    teardown(&mut engine, handle, &dir).await;
+}

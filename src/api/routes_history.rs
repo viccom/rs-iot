@@ -12,8 +12,9 @@
 //! - 200：`{dev_id, tag, points:[{ts(秒), value}...], count}`（ts = ts_ms/1000）；
 //!   空窗/不存在 series 是 `Ok(vec![])` 而非错误（tsink 语义）；
 //! - select 经 `spawn_blocking` 包裹（P6：长窗 raw 扫描可能 >1ms，不占
-//!   runtime worker）；reader 的 `Err(String)` 供 400/500 分层映射（P12，
-//!   分层在 Task 2/3 细化，本 Task 统一 500）。
+//!   runtime worker）；reader 的 `Err(String)` 分层映射（P12）：串含
+//!   `bad request: ` 前缀（engine 侧对参数类 tsink 错误构造，见
+//!   engine.rs `classify_err`）→ 400 去前缀返 `{error}`，其余 → 500。
 
 use crate::api::AppState;
 use crate::history::{HistoryAgg, HistoryQuery};
@@ -187,8 +188,20 @@ pub async fn history(State(st): State<AppState>, Query(q): Query<HistoryParams>)
             }))
             .into_response()
         }
-        // P12 分层（400 参数类 / 500 引擎类）在 Task 2/3 随 raw/downsample
-        // 实现细化；本 Task 骨架统一 500。
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e}))).into_response(),
+        // P12 分层：`bad request: ` 前缀（engine 侧 classify_err 对参数类
+        // tsink 错误构造）→ 400 去前缀返 {error}；其余（`history engine: `
+        // 前缀的引擎类 / spawn_blocking 任务失败）→ 500。body 形与 500 对齐
+        // （Json {error}；解析层 400 是纯文本，二者面不同源不混同）。
+        Err(e) => {
+            if let Some(msg) = e.strip_prefix("bad request: ") {
+                (StatusCode::BAD_REQUEST, Json(json!({ "error": msg }))).into_response()
+            } else {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({ "error": e })),
+                )
+                    .into_response()
+            }
+        }
     }
 }

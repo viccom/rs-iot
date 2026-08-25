@@ -10,7 +10,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use tsink::{Label, QueryOptions, Storage, StorageBuilder, TimestampPrecision, Value, WalSyncMode};
+use tsink::{
+    Aggregation, DataPoint, Label, QueryOptions, Storage, StorageBuilder, TimestampPrecision,
+    TsinkError, Value, WalSyncMode,
+};
 
 use crate::config::HistoryConfig;
 use crate::error::{RsIotError, TResult};
@@ -112,12 +115,12 @@ impl StorageHandle {
     }
 }
 
-/// [`crate::history::HistoryReader`] 的引擎侧实现（Phase 2 Task 2）：
+/// [`crate::history::HistoryReader`] 的引擎侧实现（Phase 2 Task 2/3）：
 /// 持 StorageHandle clone 与 writer/引擎共享同一底层存储；hwid 参与系列
 /// 身份（labels=[devid,hwid]，调用点传入）。
 ///
-/// raw 分支（Task 2）经 `select_with_options` 已接线；downsample 分支待
-/// Task 3（本版诚实返回 `Err` 而非 `todo!()`，编译过且运行期可观测）。
+/// raw 与 downsample 分支均经 `select_with_options` 接线（见 [`EngineReader::
+/// select`] 的桶语义文档）。
 struct EngineReader {
     /// tsink 存储句柄（clone，共享同一 Arc）——select 经 Deref 直调
     /// `select_with_options`。
@@ -128,37 +131,91 @@ struct EngineReader {
 }
 
 impl crate::history::HistoryReader for EngineReader {
+    /// 单 series 查询（raw 或降采样）：
+    ///
+    /// - labels=`[devid,hwid]` 锚定单 series；半开窗 `[start_ms,end_ms)` 与
+    ///   limit 全下推 `select_with_options` 承载；
+    /// - downsample 桶语义（P10，tsink 基线冻结，不自作聪明补点）：桶
+    ///   origin=**查询 start**（非 epoch 对齐）；空桶省略（无 gap filling）；
+    ///   桶点 ts=桶起点毫秒；limit 在聚合后截断——取**前 n 桶**（经
+    ///   `with_pagination` 继续下推，tsink 语义：聚合物上 offset+limit）；
+    /// - Err 串分层（P12，供 REST 400/500 映射）：参数类 tsink 错误带
+    ///   `bad request: ` 前缀，其余引擎类带 `history engine: ` 前缀（见
+    ///   [`classify_err`]）。
     fn select(
         &self,
         metric: &str,
         devid: &str,
         q: &crate::history::HistoryQuery,
     ) -> Result<Vec<crate::history::HistoryPoint>, String> {
-        // downsample 分支待 Task 3（桶聚合/类型矩阵/P12 400 映射）。
-        if q.downsample.is_some() {
-            return Err("downsample 待 Task 3 实现".to_string());
-        }
-        // raw 分支（P2/P3/P4）：labels=[devid,hwid] 锚定单 series，半开窗
-        // [start_ms,end_ms) 与 limit 下推（取最旧 n，tsink 语义）全交
-        // `select_with_options` 承载（raw 路径分页下推免全窗物化）。
+        // 公共底座（P2/P3）：labels + 半开窗 + limit 下推；downsample 在其上
+        // 叠加聚合（with_downsample 同时设 interval 与 aggregation）。
         let opts = QueryOptions::new(q.start_ms, q.end_ms)
-            .with_labels(vec![
-                Label::new("devid", devid),
-                Label::new("hwid", &self.hwid),
-            ])
+            .with_labels(series_labels(devid, &self.hwid))
             .with_pagination(0, Some(q.limit));
+        let opts = match q.downsample {
+            Some((interval_ms, agg)) => opts.with_downsample(interval_ms, map_agg(agg)),
+            None => opts,
+        };
         let points = self
             .storage
             .select_with_options(metric, opts)
-            .map_err(|e| format!("history engine: {e}"))?;
-        Ok(points
-            .into_iter()
-            .map(|p| crate::history::HistoryPoint {
-                ts_ms: p.timestamp,
-                value: value_to_sample(&p.value),
-            })
-            .collect())
+            .map_err(classify_err)?;
+        Ok(map_points(points))
     }
+}
+
+/// series labels 契约 `[devid, hwid]`（字典序，写路径 Task 4 锚定）：
+/// raw 与 downsample 共用——series 身份 = metric + labels{devid, hwid}。
+fn series_labels(devid: &str, hwid: &str) -> Vec<Label> {
+    vec![Label::new("devid", devid), Label::new("hwid", hwid)]
+}
+
+/// HistoryAgg → tsink Aggregation（P3 六值同名直映）。
+///
+/// HistoryAgg 六变体恰好覆盖 tsink 的六个同名变体，穷尽 match 即可——
+/// 同 crate 内 `#[non_exhaustive]` 不生效，补 `_ =>` 反成不可达模式
+/// （`-D warnings` 下编译错）。
+fn map_agg(agg: crate::history::HistoryAgg) -> Aggregation {
+    use crate::history::HistoryAgg as HA;
+    match agg {
+        HA::Min => Aggregation::Min,
+        HA::Max => Aggregation::Max,
+        HA::Avg => Aggregation::Avg,
+        HA::Sum => Aggregation::Sum,
+        HA::Count => Aggregation::Count,
+        HA::Last => Aggregation::Last,
+    }
+}
+
+/// tsink 错误串化分层（P12）：参数类（InvalidTimeRange/InvalidConfiguration/
+/// UnsupportedAggregation/OutOfRetention——调用方可修正的输入问题）带
+/// `bad request: ` 前缀 → REST 层映射 400；其余引擎类带 `history engine: `
+/// 前缀 → 500。raw 分支同步套用（该路径现只有参数类错误可能，行为不变）。
+fn classify_err(e: TsinkError) -> String {
+    if matches!(
+        e,
+        TsinkError::InvalidTimeRange { .. }
+            | TsinkError::InvalidConfiguration(_)
+            | TsinkError::UnsupportedAggregation { .. }
+            | TsinkError::OutOfRetention { .. }
+    ) {
+        format!("bad request: {e}")
+    } else {
+        format!("history engine: {e}")
+    }
+}
+
+/// tsink 点集 → HistoryPoint（P4）：`value_to_sample` 类型映射 + ts_ms 直传
+/// （downsample 桶点 ts=桶起点毫秒）。raw 与 downsample 共用，勿复制粘贴。
+fn map_points(points: Vec<DataPoint>) -> Vec<crate::history::HistoryPoint> {
+    points
+        .into_iter()
+        .map(|p| crate::history::HistoryPoint {
+            ts_ms: p.timestamp,
+            value: value_to_sample(&p.value),
+        })
+        .collect()
 }
 
 /// tsink `Value` → `SampleValue`（P4）：写路径 lane 只落 F64/I64/Bool/String
