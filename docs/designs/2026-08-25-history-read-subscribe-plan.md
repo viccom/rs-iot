@@ -1,9 +1,9 @@
 # 历史读路径 + KSUB 订阅升级(Phase 2)实施计划
 
 > **状态**:implemented(T1-T6 全六 Task 完成)
-> **实施**:feat/history-read-sub 分支,2026-08-25:T1 eed2fab/T2 d8c50f1/T3 9d0347a/T4 86b5e67/T5 13332b6(+lint 整理 c2cf5a8、bench 档工具 d12d70d)/T6 本 Task;merge hash 待主会话合并后补
+> **实施**:feat/history-read-sub → master(66976d4,no-ff merge),2026-08-25:T1 eed2fab/T2 d8c50f1/T3 9d0347a/T4 86b5e67/T5 13332b6(+lint 整理 c2cf5a8、bench 档工具 d12d70d)/T6 1a0268c
 > **代码**:读路径——src/history/mod.rs(HistoryReader trait 族)+ engine.rs(EngineReader raw/downsample)+ src/api/routes_history.rs + AppState.history_reader;订阅——src/api/rtdata_watch.rs(RtdataWatchService:ksubscribe("rtdata:*") 消费 + per-devid 版本表 + epoch 重同步 + KEYS 铺底)+ src/api/routes_rtdata_subscribe.rs(read_delta 精准读 + poll 分支原样保留)+ src/config.rs([rtdata] sub_impl)+ AppState.rtdata_watch + examples/bench_pipeline_e2e.rs(RSIOT_BENCH_SUB 档)
-> **遗留**:无(分支待合并 master——merge hash 由主会话合并后回填总方案 §五 Phase 2 行)
+> **遗留**:无(已并 master 66976d4)
 > **日期**:2026-08-25
 > **依据(ADR 权威版)**:[2026-08-24-history-storage-master-plan.md](2026-08-24-history-storage-master-plan.md) §二读/订阅两路径 + D7(类型化 /api/v1/history)+ D8(KSUB dirty-set)+ §一 L2 off 返 503 承诺 + §六风险表"KSUB 改造回归→双 impl 过渡开关"——本文引用不复述
 > **前置已就绪**:Phase 1b 写路径(aedd1cf:engine 持 StorageHandle 留作本 Phase 读)+ 可观测性薄切片(ed54a6d:AppState 已有 history_engine_state 三态)
