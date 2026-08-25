@@ -151,7 +151,9 @@ pub struct DeleteInstanceRequest {
 pub struct SetDeviceRequest {
     #[schemars(description = "Target instance ID to bind the device to")]
     pub inst_id: String,
-    #[schemars(description = "Device ID (must already exist in devreg — the sole birthplace of device metadata; rs-iot returns 400 otherwise)")]
+    #[schemars(
+        description = "Device ID (must already exist in devreg — the sole birthplace of device metadata; rs-iot returns 400 otherwise)"
+    )]
     pub dev_id: String,
     #[schemars(
         description = "Bind params JSON, e.g. {\"slave_id\": 2}. NOT a DeviceSpec — the point table derives from the device's model in devreg"
@@ -166,7 +168,9 @@ pub struct SetDeviceRequest {
 pub struct DeleteDeviceRequest {
     #[schemars(description = "Owning instance ID to unbind from")]
     pub inst_id: String,
-    #[schemars(description = "Device ID to unbind (devreg entry is kept — device is a global entity)")]
+    #[schemars(
+        description = "Device ID to unbind (devreg entry is kept — device is a global entity)"
+    )]
     pub dev_id: String,
 }
 
