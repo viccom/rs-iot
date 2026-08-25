@@ -79,6 +79,7 @@
 | [2026-08-25-device-model-registry-plan.md](designs/2026-08-25-device-model-registry-plan.md) | 设备模型注册表实施计划（devmodels/devreg/discoveries + 四期 M-1~M-4 TDD + 现状处置清单 + 新会话执行指引） | 已实施（M-1~M-4 全并） |
 | [2026-08-24-tag-registry-plan.md](designs/2026-08-24-tag-registry-plan.md) | 标签/设备元数据统一存储实施计划（Tag Registry：lux tags 表 + 三路径登记 + REST，历史存储前置地基） | 已实施（tags 表已于 M-4 退役，演进见 [2026-08-25-device-model-registry-plan.md](designs/2026-08-25-device-model-registry-plan.md)） |
 | [2026-08-25-history-write-path-plan.md](designs/2026-08-25-history-write-path-plan.md) | 历史写路径实施计划（Phase 1b：tsink path 依赖/L1-L3 三层开关/engine D6 组装/单写线程 deadband+去重+lane/四门禁 e2e 验收记录） | **已实施**（master aedd1cf，2026-08-25；四门禁全过） |
+| [2026-08-25-history-read-subscribe-plan.md](designs/2026-08-25-history-read-subscribe-plan.md) | 历史读路径+KSUB 订阅升级实施计划（Phase 2：/api/v1/history raw+downsample/503 矩阵/RtdataWatchService dirty-set/双 impl 等价） | **部分实施**（feat/history-read-sub，读路径 T1-T3 已并，订阅 T4-T6 进行中） |
 
 ## ops/ — 部署与运维（怎么跑起来）
 

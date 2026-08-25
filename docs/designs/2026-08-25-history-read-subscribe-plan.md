@@ -1,6 +1,9 @@
 # 历史读路径 + KSUB 订阅升级(Phase 2)实施计划
 
-> **状态**:planned
+> **状态**:partially-implemented(T1-T3 读路径已并,T4-T6 订阅升级与收口进行中)
+> **实施**:feat/history-read-sub 分支(进行中):T1 eed2fab/T2 d8c50f1/T3 9d0347a,2026-08-25
+> **代码**:读路径——src/history/mod.rs(HistoryReader trait 族)+ engine.rs(EngineReader raw/downsample)+ src/api/routes_history.rs + AppState.history_reader;订阅部分(T4-T6)待实施
+> **遗留**:T4 RtdataWatchService + [rtdata] 配置;T5 subscribe 换源 + 双 impl 等价 e2e + bench 守门;T6 文档收口
 > **日期**:2026-08-25
 > **依据(ADR 权威版)**:[2026-08-24-history-storage-master-plan.md](2026-08-24-history-storage-master-plan.md) §二读/订阅两路径 + D7(类型化 /api/v1/history)+ D8(KSUB dirty-set)+ §一 L2 off 返 503 承诺 + §六风险表"KSUB 改造回归→双 impl 过渡开关"——本文引用不复述
 > **前置已就绪**:Phase 1b 写路径(aedd1cf:engine 持 StorageHandle 留作本 Phase 读)+ 可观测性薄切片(ed54a6d:AppState 已有 history_engine_state 三态)
@@ -105,7 +108,7 @@ Run: 同 T1 + `cargo test -j 2 --features history --test history_dataflow_e2e` �
 
 **Files**: `src/history/engine.rs`(downsample 分支)、`src/api/routes_history.rs`(agg 参数映射)
 **红**:
-1. `history_downsample_buckets`:已知数据(ts t0..t0+9 每 1s,v=1..10)interval=5s agg=sum → 2 桶(ts=t0 与 t0+5,值 15/35;P10 origin=start);agg=last → 桶值 5/10;agg=min/max/count 同理断言。
+1. `history_downsample_buckets`:已知数据(ts t0..t0+9 每 1s,v=1..10)interval=5s agg=sum → 2 桶(ts=t0 与 t0+5,值 15/40;P10 origin=start;原稿"15/35"系笔误,桶 t0+5 含 v6..v10=40,与 avg 8.0×count 5 交叉锁定);agg=last → 桶值 5/10;agg=min/max/count 同理断言。
 2. `history_agg_type_matrix`:F64 series avg → number;I64 series count → number(整型);Bool series last → true/false;**Bool series avg → 400**(UnsupportedAggregation 映射);Str series min → 原串。
 3. `history_downsample_empty_bucket_skipped`:数据留空洞(interval 内无点)→ 桶缺失不补点(断言输出点数)。
 **绿**:HistoryAgg→tsink Aggregation 映射(with_downsample(interval_ms, agg));Err 串分层(参数类→400,引擎类→500,P12)。
