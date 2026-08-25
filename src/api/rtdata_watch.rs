@@ -111,9 +111,7 @@ impl RtdataWatchService {
     /// **之前**初始化、Lagged 重同步后重建——调用方须**先**取快照再全量读
     /// （之后的 mark 版本 > 游标，下次 tick 报脏，不丢帧）。
     pub fn cursor(&self) -> WatchCursor {
-        let versions = self.versions
-            .lock()
-            .expect("rtdata_watch versions 锁中毒");
+        let versions = self.versions.lock().expect("rtdata_watch versions 锁中毒");
         // 锁内读 marks：versions 快照与 marks 计数对齐（同临界区不变量）。
         WatchCursor {
             versions: versions.clone(),
@@ -184,9 +182,7 @@ impl RtdataWatchService {
             if let Some(devid) = name.strip_prefix("rtdata:") {
                 // 新设备入表（游标 last 无记录即报脏）——marks 同临界区 +1，
                 // 否则 O(1) 早退会吞掉 backfill 新增；已有设备不动。
-                if let std::collections::hash_map::Entry::Vacant(e) =
-                    v.entry(devid.to_string())
-                {
+                if let std::collections::hash_map::Entry::Vacant(e) = v.entry(devid.to_string()) {
                     e.insert(0);
                     self.marks.fetch_add(1, Ordering::Relaxed);
                 }

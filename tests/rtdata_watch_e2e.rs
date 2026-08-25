@@ -124,7 +124,10 @@ async fn watch_service_respawn_recovers() {
         .execute("HSET", &["rtdata:devA", "devA.t", "1"])
         .await
         .expect("HSET");
-    eventually("第一代应收 devA 事件", || svc.version("devA").is_some()).await;
+    eventually("第一代应收 devA 事件", || {
+        svc.version("devA").is_some()
+    })
+    .await;
     t1.cancel();
     let _ = j1.await;
 
