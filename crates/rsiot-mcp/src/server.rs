@@ -144,26 +144,29 @@ pub struct DeleteInstanceRequest {
     pub inst_id: String,
 }
 
-/// `rsiot_set_device`：单点 upsert 设备到指定实例点表。对标 `routes_device::SetReq`
-/// （inst_id + dev_id + DeviceSpec object——设备挂在实例下，无实例不成设备）。
+/// `rsiot_set_device`：绑定已注册设备到指定实例。对标 `routes_device::SetReq`
+/// （inst_id + dev_id + object（bind 参数）——M-2 起设备是 devreg 全局实体，
+/// 点表由设备模型展开，本工具只做实例绑定，不再是 DeviceSpec 写入）。
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct SetDeviceRequest {
-    #[schemars(description = "Owning instance ID (device belongs to an instance)")]
+    #[schemars(description = "Target instance ID to bind the device to")]
     pub inst_id: String,
-    #[schemars(description = "Device ID (becomes DeviceSpec.value)")]
+    #[schemars(description = "Device ID (must already exist in devreg — the sole birthplace of device metadata; rs-iot returns 400 otherwise)")]
     pub dev_id: String,
     #[schemars(
-        description = "DeviceSpec JSON: label/children[{label,value(tag),type}]/slave_id(optional, modbusClient only); value is overridden by dev_id"
+        description = "Bind params JSON, e.g. {\"slave_id\": 2}. NOT a DeviceSpec — the point table derives from the device's model in devreg"
     )]
     pub object: serde_json::Value,
 }
 
-/// `rsiot_delete_device`：从指定实例点表移除设备。对标 `routes_device::DelReq`。
+/// `rsiot_delete_device`：从指定实例解绑设备。对标 `routes_device::DelReq`。
+///
+/// 设备是全局实体：只移除实例绑定（devreg 条目与模型保留）；归属清空才清 rtdata。
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct DeleteDeviceRequest {
-    #[schemars(description = "Owning instance ID")]
+    #[schemars(description = "Owning instance ID to unbind from")]
     pub inst_id: String,
-    #[schemars(description = "Device ID to remove from the instance's device list")]
+    #[schemars(description = "Device ID to unbind (devreg entry is kept — device is a global entity)")]
     pub dev_id: String,
 }
 
@@ -193,7 +196,7 @@ fn encode_query_value(s: &str) -> String {
 ///
 /// - `ReadOnly`：查询类，agent 自动放行（对标 rmcp `readOnlyHint`，但运行时判定更灵活）。
 /// - `Write`：写设备/启停实例/写脚本，工具描述声明 "requires approval"，由 reasonix Ask 模式拦。
-/// - `CriticalWrite`：建/删实例与设备点表，受 `RiskPolicy` 总开关管制（默认拦，见 `check_risk`）。
+/// - `CriticalWrite`：建/删实例与设备绑定/解绑，受 `RiskPolicy` 总开关管制（默认拦，见 `check_risk`）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolRisk {
     ReadOnly,
@@ -366,11 +369,11 @@ impl RsiotMcpServer {
 
     /// `rsiot_list_devices`：列设备。映射 `GET /api/v1/devices`。
     ///
-    /// 后端该端点已从实例配置聚合（单一数据源 = InstConfig.devices）——历史独立
-    /// 设备注册表（lux `devices` Hash）是孤立死表，建实例不同步写、REST 客户端
-    /// 读到空表（现场 bug 根因），已废弃。MCP 保持薄翻译层，不复制业务逻辑。
+    /// 后端该端点是 **devreg 派生权威视图（M-2）**：设备清单出自模型注册表
+    /// （devmodels + devreg，点表从设备模型展开）∪ dev2inst 运行时补集。
+    /// MCP 保持薄翻译层，不复制业务逻辑。
     #[tool(
-        description = "List devices aggregated from instance configs, optionally filtered by dev_id. Each device includes collection points (children). Read-only.",
+        description = "List devices from the devreg-derived authoritative aggregate (M-2): point tables expand from device models in the registry, plus runtime-only entries. Optionally filtered by dev_id; each device includes collection points (children). Read-only.",
         annotations(read_only_hint = true)
     )]
     async fn rsiot_list_devices(
@@ -723,11 +726,13 @@ impl RsiotMcpServer {
         )
     }
 
-    /// `rsiot_set_device`：建/改设备点表。映射 `POST /api/v1/device/set`。
+    /// `rsiot_set_device`：绑定设备到实例。映射 `POST /api/v1/device/set`。
     ///
-    /// **CriticalWrite**：建设备点表写入口。默认被 risk 策略拦截。
+    /// **CriticalWrite**：绑定写入口——dev_id 须已在 devreg（不在 → 400，指引先
+    /// devreg/set 或跑迁移）；实例不存在 → 404。默认放行给 serve 审批
+    /// （`RSIOT_MCP_DENY_CRITICAL_WRITES=1` 硬拦）。
     #[tool(
-        description = "Create/update a device spec (full DeviceSpec JSON: label/value/children/slave_id). HIGH RISK: CRITICAL WRITE — approval-gated (serve Ask); set RSIOT_MCP_DENY_CRITICAL_WRITES=1 to hard-block.",
+        description = "Bind a device to an instance: dev_id must already exist in devreg (400 otherwise); object is bind params JSON (e.g. {\"slave_id\": 2}), NOT a DeviceSpec — the point table derives from the device's model. HIGH RISK: CRITICAL WRITE — approval-gated (serve Ask); set RSIOT_MCP_DENY_CRITICAL_WRITES=1 to hard-block.",
         annotations(destructive_hint = true)
     )]
     async fn rsiot_set_device(
@@ -741,11 +746,11 @@ impl RsiotMcpServer {
         )
     }
 
-    /// `rsiot_delete_device`：删设备。映射 `POST /api/v1/device/delete`。
+    /// `rsiot_delete_device`：从实例解绑设备。映射 `POST /api/v1/device/delete`。
     ///
     /// **CriticalWrite**：默认被 risk 策略拦截。
     #[tool(
-        description = "Delete a device spec. HIGH RISK: CRITICAL WRITE — approval-gated (serve Ask); set RSIOT_MCP_DENY_CRITICAL_WRITES=1 to hard-block.",
+        description = "Unbind a device from an instance (devreg entry and model are kept — device is a global entity). HIGH RISK: CRITICAL WRITE — approval-gated (serve Ask); set RSIOT_MCP_DENY_CRITICAL_WRITES=1 to hard-block.",
         annotations(destructive_hint = true)
     )]
     async fn rsiot_delete_device(
@@ -964,7 +969,7 @@ mod tests {
         );
     }
 
-    // ---- list_devices（薄翻译层：后端 /api/v1/devices 已从实例配置聚合）----
+    // ---- list_devices（薄翻译层：后端 /api/v1/devices 为 devreg 派生权威聚合）----
 
     #[tokio::test]
     async fn list_devices_hits_devices_endpoint() {
@@ -980,7 +985,7 @@ mod tests {
         assert_ne!(result.is_error, Some(true));
         assert!(text_of(&result).contains("devA"));
         // 验证意图：MCP 是薄翻译层——数据源是后端 /api/v1/devices
-        // （后端已从实例配置聚合，单一数据源在主 crate，MCP 不复制业务逻辑）。
+        // （后端 devreg 派生权威聚合，单一数据源在主 crate，MCP 不复制业务逻辑）。
         assert_eq!(backend.recorded_paths()[0], "/api/v1/devices");
     }
 
@@ -1458,16 +1463,17 @@ mod tests {
             .rsiot_set_device(Parameters(SetDeviceRequest {
                 inst_id: "mb-1".into(),
                 dev_id: "devA".into(),
-                object: json!({"label": "devA", "value": "devA"}),
+                object: json!({"slave_id": 2}),
             }))
             .await
             .unwrap();
         let (path, body) = &backend.recorded_posts()[0];
         assert_eq!(path, "/api/v1/device/set");
-        // 验证意图：设备单点操作必须携带 inst_id（设备挂在实例下，无实例不成设备）。
+        // 验证意图：绑定写必须携带 inst_id + dev_id（dev_id 须已在 devreg，
+        // object 是 bind 参数——非 DeviceSpec，透传由 rs-iot 校验）。
         assert_eq!(body["inst_id"], "mb-1");
         assert_eq!(body["dev_id"], "devA");
-        assert_eq!(body["object"]["label"], "devA");
+        assert_eq!(body["object"]["slave_id"], 2);
     }
 
     #[tokio::test]
