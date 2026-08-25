@@ -33,6 +33,7 @@ async fn test_app() -> (axum::Router, lux::ServerHandle) {
         metrics: std::sync::Arc::new(rs_iot::process_metrics::ProcessMetrics::new()),
         trace_registry: rs_iot::io_trace::TraceRegistry::new(),
         event_tx: rs_iot::event_bus::EventBus::dummy(),
+        history: None,
     };
     let (hub_tx, _hub_rx) = tokio::sync::mpsc::channel(64);
     let mgr = Arc::new(InstanceManager::new(ctx, hub_tx));

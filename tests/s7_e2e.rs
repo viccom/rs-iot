@@ -491,6 +491,7 @@ async fn setup(inst_id: &str, devices: Vec<DeviceSpec>, state: Arc<ServerState>)
         metrics: std::sync::Arc::new(rs_iot::process_metrics::ProcessMetrics::new()),
         trace_registry: rs_iot::io_trace::TraceRegistry::new(),
         event_tx: rs_iot::event_bus::EventBus::dummy(),
+        history: None,
     };
     let (hub_tx, hub_rx) = tokio::sync::mpsc::channel::<Sample>(64);
     let mgr = Arc::new(InstanceManager::new(ctx.clone(), hub_tx));

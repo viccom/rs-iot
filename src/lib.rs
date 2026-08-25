@@ -238,7 +238,9 @@ pub async fn run_app_with_shutdown(
     //（TraceRegistry 内部 Arc<DashMap>，clone 共享状态——REST activate 立即影响 task dump）。
     // with_sender 注入事件总线：dump 激活时扇出 Packet 到 SSE。
     let trace_registry = crate::io_trace::TraceRegistry::with_sender(event_bus.clone());
-    let ctx = host::HostContext {
+    // history 先置 None：引擎初始化在 cache::reload 之后（effective 物化才可
+    // 校准 cardinality），init 区再统一注入 ctx.history（见下方 pipeline spawn 前）。
+    let mut ctx = host::HostContext {
         lux: client.clone(),
         hwid: hwid.clone(),
         shutdown: shutdown.clone(),
@@ -247,6 +249,7 @@ pub async fn run_app_with_shutdown(
         metrics: metrics.clone(),
         trace_registry: trace_registry.clone(),
         event_tx: event_bus.clone(),
+        history: None,
     };
 
     let (hub_tx, hub_rx) = tokio::sync::mpsc::channel::<types::Sample>(512);
@@ -308,6 +311,30 @@ pub async fn run_app_with_shutdown(
         Ok(n) => tracing::debug!("[discovery] 发现队列装载 {n} 条"),
         Err(e) => tracing::warn!("[discovery] 发现队列装载失败(计数重新累计): {e}"),
     }
+    // 历史引擎初始化（Phase 1b）：cache::reload 之后（auto cardinality 读
+    // effective）、pipeline spawn 之前（handle 注入 HostContext）。P8 fail-soft：
+    // 初始化失败（进程锁被占/磁盘错）仅 error! 并停用归档，主程序继续。
+    #[cfg(feature = "history")]
+    let mut history_engine = history::engine::maybe_init(&cfg.history, &model::cache::effective())
+        .and_then(|r| match r {
+            Ok(e) => Some(e),
+            Err(e) => {
+                tracing::error!("[history] 引擎初始化失败,归档停用: {e}");
+                None
+            }
+        });
+    #[cfg(not(feature = "history"))]
+    if cfg.history.enabled {
+        // P7：L1/L2 正交——feature off 而 enabled=true 是配置错误，告警并忽略。
+        tracing::warn!("[history] 配置 enabled=true 但编译未含 history feature,忽略");
+    }
+    // HostContext.history 注入：ctx 字面量在 reload 之前构造，此处统一补注句柄
+    // （feature off 时 hist_handle 恒 None，赋值两分支恒编译，无 unused_mut）。
+    #[cfg(feature = "history")]
+    let hist_handle = history_engine.as_ref().and_then(|e| e.handle());
+    #[cfg(not(feature = "history"))]
+    let hist_handle = None;
+    ctx.history = hist_handle;
     let pipeline_token = shutdown.child_token();
     let pipeline_handle = tokio::spawn(pipeline::run(
         ctx.clone(),
@@ -431,6 +458,15 @@ pub async fn run_app_with_shutdown(
     // 让 worker 的 best-effort flush 在 shutdown_lux 前完成(防丢最后 ≤50ms 数据)。
     // 5s timeout 兜底防 worker 卡 lux 写致 shutdown 挂死(B3 修复:原 abort() 抢占退出)。
     let _ = tokio::time::timeout(std::time::Duration::from_secs(5), pipeline_handle).await;
+    // 历史引擎关停（D10 序）：pipeline join 之后（flush 出口不再 fan_out）、
+    // shutdown_lux 之前——close 断 writer sender → 排空 + 最终 flush +
+    // storage.close（释放 .tsink.lock）；超时放弃由 WAL 回放兜底，不阻塞主序。
+    #[cfg(feature = "history")]
+    if let Some(e) = history_engine.as_mut() {
+        e.close(std::time::Duration::from_secs(
+            cfg.history.close_timeout_secs,
+        ));
+    }
     axum_handle.abort();
     if let Some(h) = bridge_handle {
         h.abort();

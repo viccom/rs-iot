@@ -14,5 +14,9 @@ pub mod engine;
 /// 刻意不含 tsink 类型，P6 无条件编译，热路径纯 Rust 可测。
 pub mod rows;
 
+/// 出口类型与 fan_out 的门面重导出（Task 5）：pipeline/host 调用点写
+/// `history::HistoryHandle`/`history::fan_out`，不必带 `rows::` 路径段。
+pub use rows::{fan_out, HistoryHandle};
+
 /// 单写线程：recv 攒批 + deadband/去重/防混型 → tsink insert_rows（D3/D4/D5）。
 pub mod writer;

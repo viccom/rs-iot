@@ -134,6 +134,16 @@ fn writer_loop(
     // 原地替换值保后写；跨批不拦截（依赖 tsink 读取端 last-value-wins）。
     let mut dedup: HashMap<(String, String), (i64, usize)> = HashMap::new();
     loop {
+        // engine.close 的退出信号（Task 5，优先于 recv 检查）：断 sender 不足以
+        // 退出——HistoryHandle clone 在 close 后仍可存活（HostContext/测试侧），
+        // 共享 AtomicBool 才是权威关停信号。与 Disconnected 同一收尾路径。
+        if writer.storage.writer_shutdown_requested() {
+            while let Ok(row) = rx.try_recv() {
+                push_dedup(&mut buf, &mut dedup, row);
+            }
+            writer.flush(&mut buf, &mut dedup);
+            break;
+        }
         // timeout 的 Sleep 在构造期即取 runtime 计时器上下文——必须包进
         // block_on 轮询的 async 块内构造，不能在外部先建再传入。
         let received = rt.block_on(async { tokio::time::timeout(BATCH_WINDOW, rx.recv()).await });

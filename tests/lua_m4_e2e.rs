@@ -57,6 +57,7 @@ async fn lua_kv_set_persists_to_lux() {
         metrics: std::sync::Arc::new(rs_iot::process_metrics::ProcessMetrics::new()),
         trace_registry: rs_iot::io_trace::TraceRegistry::new(),
         event_tx: rs_iot::event_bus::EventBus::dummy(),
+        history: None,
     };
     let (hub_tx, hub_rx) = tokio::sync::mpsc::channel::<Sample>(64);
     let mgr = Arc::new(InstanceManager::new(ctx.clone(), hub_tx));
@@ -137,6 +138,7 @@ async fn collect_gate_filters_unmodeled_tags() {
         metrics: Arc::new(rs_iot::process_metrics::ProcessMetrics::new()),
         trace_registry: rs_iot::io_trace::TraceRegistry::new(),
         event_tx: rs_iot::event_bus::EventBus::dummy(),
+        history: None,
     };
     let (hub_tx, hub_rx) = tokio::sync::mpsc::channel::<Sample>(64);
     let mgr = Arc::new(InstanceManager::new(ctx.clone(), hub_tx));

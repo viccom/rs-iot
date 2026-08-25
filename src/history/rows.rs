@@ -60,7 +60,10 @@ pub struct HistoryStats {
 /// fan-out 发送句柄：pipeline 侧持有，clone 语义与 tokio mpsc Sender 一致。
 ///
 /// `send` 是 `try_send` 直通——有界 channel 满即丢（D3），绝不阻塞采集热路径。
-#[derive(Debug)]
+///
+/// `Clone` 语义与 tokio mpsc `Sender` 一致（Task 5：engine 持原件、`handle()`
+/// clone 交给 `HostContext.history`，pipeline 侧 clone 随 worker fan-out）。
+#[derive(Debug, Clone)]
 pub struct HistoryHandle {
     /// 有界 channel 发送端（drop 即触发 writer 排空退出）。
     tx: mpsc::Sender<HistoryRow>,

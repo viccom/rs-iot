@@ -273,6 +273,7 @@ async fn send_command_routes_to_target() {
         metrics: std::sync::Arc::new(crate::process_metrics::ProcessMetrics::new()),
         trace_registry: crate::io_trace::TraceRegistry::new(),
         event_tx: crate::event_bus::EventBus::dummy(),
+        history: None,
     };
     let inst = InstConfig {
         inst_id: "src".into(),
@@ -681,6 +682,7 @@ async fn setup_ctx(tag: &str) -> (HostContext, lux::ServerHandle, String) {
         metrics: std::sync::Arc::new(crate::process_metrics::ProcessMetrics::new()),
         trace_registry: crate::io_trace::TraceRegistry::new(),
         event_tx: crate::event_bus::EventBus::dummy(),
+        history: None,
     };
     (ctx_host, handle, data_dir)
 }
@@ -1547,6 +1549,7 @@ async fn alarm_vm(
         metrics: std::sync::Arc::new(crate::process_metrics::ProcessMetrics::new()),
         trace_registry: crate::io_trace::TraceRegistry::new(),
         event_tx: crate::event_bus::EventBus::new(16),
+        history: None,
     };
     // 订阅先于任何 fire/clear（broadcast 收不到订阅前事件）。
     let rx = ctx_host.event_tx.subscribe();

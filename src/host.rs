@@ -155,6 +155,10 @@ pub struct HostContext {
     /// SSE 事件总线（阶段一）：生产者（log_ringbuffer / io_trace / instance emit_state）
     /// 投递事件，SSE endpoint 订阅。无消费者时 publish 静默零开销。
     pub event_tx: crate::event_bus::EventBus,
+    /// 历史归档旁路发送句柄（Phase 1b）：pipeline `flush_batch` 出口 fan_out 用。
+    /// P6 无条件编译——history feature 关闭（或 L2 enabled=false / 引擎初始化
+    /// 失败 fail-soft）时恒 `None`，热路径判空零开销，主链路不受旁路影响。
+    pub history: Option<crate::history::rows::HistoryHandle>,
 }
 
 #[cfg(test)]

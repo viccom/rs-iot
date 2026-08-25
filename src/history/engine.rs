@@ -6,6 +6,7 @@
 //! `docs/designs/2026-08-25-history-write-path-plan.md`「Task 3」+ 速查表。
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -13,6 +14,8 @@ use tsink::{Storage, StorageBuilder, TimestampPrecision, WalSyncMode};
 
 use crate::config::HistoryConfig;
 use crate::error::{RsIotError, TResult};
+use crate::history::rows::HistoryHandle;
+use crate::history::writer::spawn_writer;
 use crate::types::TagProps;
 
 /// tsink 存储句柄的透明包装：`dyn Storage` 未实现 `Debug`（trait 无
@@ -20,10 +23,22 @@ use crate::types::TagProps;
 /// 路径（`Result::expect_err` 要求 Ok 侧 `Debug`）都需要它。
 ///
 /// 通过 `Deref` 透传 `dyn Storage` 的全部方法（`insert_rows`/`select`/
-/// `close` 等），语义与 `Arc<dyn Storage>` 等价。
+/// `close` 等），语义与 `Arc<dyn Storage>` 等价。`Clone` 即 Arc 克隆——
+/// engine 与 writer 线程各持一份共享同一底层存储（Task 5：close 排空由
+/// writer 侧执行，engine 侧句柄在 close 后进入 StorageClosed 可观测态）。
+///
+/// 附带 writer 退出信号（Task 5）：tokio mpsc 的断开语义要求**全部** sender
+/// drop，而 `HistoryHandle` clone（HostContext/测试侧）在 `engine.close` 后
+/// 仍可存活——writer 若只认 Disconnected 会永不退出、进程锁不释放。故
+/// `close` 经共享 `AtomicBool` 通知 writer 排空退出（≤1 个攒批窗内生效），
+/// 存活 clone 的后续 send 只入无人消费的 channel，无害。无 writer 挂靠的
+/// 句柄（同目录重开/Phase 2 读路径）上该标志恒 false，惰性无害。
+#[derive(Clone)]
 pub struct StorageHandle {
     /// 被包装的 tsink 存储句柄。
     storage: Arc<dyn Storage>,
+    /// 挂靠 writer 的退出信号（所有 clone 共享同一 Arc）。
+    writer_shutdown: Arc<AtomicBool>,
 }
 
 impl std::fmt::Debug for StorageHandle {
@@ -77,23 +92,45 @@ pub fn build_storage(cfg: &HistoryConfig, cardinality: usize) -> TResult<Storage
         .with_wal_size_limit(cfg.wal_size_limit_mb * 1024 * 1024)
         .with_wal_sync_mode(wal_sync_mode)
         .build()
-        .map(|storage| StorageHandle { storage })
+        .map(|storage| StorageHandle {
+            storage,
+            writer_shutdown: Arc::new(AtomicBool::new(false)),
+        })
         .map_err(|e| RsIotError::HistoryEngine(e.to_string()))
 }
 
-/// 历史引擎：持有 tsink 存储句柄与生命周期标志（D10）。
+/// writer 退出信号访问面（仅 history 模块内 engine/writer 互用）。
+impl StorageHandle {
+    /// 置位退出信号：挂靠 writer 在 ≤1 个攒批窗内排空退出（engine.close 用）。
+    pub(crate) fn request_writer_shutdown(&self) {
+        self.writer_shutdown.store(true, Ordering::SeqCst);
+    }
+
+    /// 退出信号是否已置位（writer_loop 轮询用）。
+    pub(crate) fn writer_shutdown_requested(&self) -> bool {
+        self.writer_shutdown.load(Ordering::SeqCst)
+    }
+}
+
+/// 历史引擎：持有 tsink 存储句柄、writer 发送句柄与生命周期标志（D10）。
 ///
-/// 生命周期：`maybe_init`（启动初始化，L2 enabled 判定）→ `storage()`（Task 4
-/// 起 writer 线程与外部只读访问共享同一句柄）→ `close`（关停排空，幂等）。
-/// drop 不做隐式关闭——排空与进程锁释放必须走显式 `close`；漏调时由 tsink
-/// 最后一个 `Arc` drop 的 best-effort close 兜底。
+/// 生命周期：`maybe_init`（启动初始化，L2 enabled 判定 + 内部 spawn writer）
+/// → `handle()`（clone 发送句柄给编排层注入 `HostContext.history`）→
+/// `storage()`（Phase 2 读路径与外部只读访问共享同一句柄）→ `close`（关停
+/// 排空，幂等）。drop 不做隐式关闭——排空与进程锁释放必须走显式 `close`；
+/// 漏调时由 tsink 最后一个 `Arc` drop 的 best-effort close 兜底。
 #[derive(Debug)]
 pub struct HistoryEngine {
-    /// tsink 存储句柄（close 后 tsink 侧进入 StorageClosed，句柄本身仍可持有）。
+    /// tsink 存储句柄（与 writer 线程共享同一 Arc clone；writer 正常退出路径
+    /// 自行 close，close 后本句柄进入 StorageClosed 可观测态）。
     storage: StorageHandle,
+    /// writer 发送句柄原件：`handle()` 从此 clone；`close` 时 take 并 drop
+    /// （断 sender → writer 排空 + 最终 flush + storage.close()）。
+    handle: Option<HistoryHandle>,
+    /// writer 线程 join 句柄（`close` 时取出 join，带超时看门狗防挂死）。
+    writer_join: Option<std::thread::JoinHandle<()>>,
     /// 幂等 close 标志：置位后二次 `close` 为 no-op（tsink 的 close 本身不幂等）。
     closed: bool,
-    // Task 4：补 writer 线程 join 句柄，close 排空接 D10 超时放弃语义。
 }
 
 /// L2 判定 + 引擎初始化：`enabled=false` 返回 `None`（不 `create_dir_all`、
@@ -114,34 +151,77 @@ pub fn maybe_init(
     } else {
         auto_cardinality(effective)
     };
-    Some(
-        build_storage(cfg, cardinality).map(|storage| HistoryEngine {
+    Some(build_storage(cfg, cardinality).map(|storage| {
+        // engine 内部接线（Task 5）：storage clone 给 writer（共享同一 Arc），
+        // handle/join 存入 engine——编排层经 `handle()` 取 clone，不经返回值。
+        let (handle, writer_join) = spawn_writer(storage.clone(), cfg);
+        HistoryEngine {
             storage,
+            handle: Some(handle),
+            writer_join: Some(writer_join),
             closed: false,
-        }),
-    )
+        }
+    }))
 }
 
 impl HistoryEngine {
-    /// tsink 存储句柄引用（Task 4 起 writer 线程与其共享同一句柄 clone）。
+    /// writer 发送句柄（clone 语义与 tokio mpsc `Sender` 一致）：writer 存活时
+    /// `Some`；编排层注入 `HostContext.history`，pipeline flush 出口 fan_out 用。
+    pub fn handle(&self) -> Option<HistoryHandle> {
+        self.handle.clone()
+    }
+
+    /// tsink 存储句柄引用（Phase 2 读路径与外部只读访问共享同一句柄）。
     pub fn storage(&self) -> &StorageHandle {
         &self.storage
     }
 
-    /// 关闭引擎（幂等）：内部 `closed` 标志保证二次调用 no-op——tsink 的
+    /// 关闭引擎（幂等，D10）：`closed` 标志保证二次调用 no-op——tsink 的
     /// `close()` 本身不幂等（二次返 `StorageClosed`），本包装屏蔽该差异。
     ///
-    /// 当前直接 `storage.close()`（排空 = flush + compaction + checkpoint +
-    /// 释放进程锁）；失败仅 `warn!` 不上抛——关停路径不因归档失败中断主序，
-    /// 未落盘数据由 WAL 回放兜底。
-    // TODO(Task 4)：接 writer join 后按 timeout 排空 + 超时放弃（D10）。
-    pub fn close(&mut self, _timeout: Duration) {
+    /// 排空序：置位共享退出信号 + take 并 drop `handle`（writer 在 ≤1 个攒批
+    /// 窗内排空残余 + 最终 flush + `storage.close()`，进程锁随之释放——clone
+    /// 存活也不阻塞退出，见 [`StorageHandle`] 文档）→ join **带超时看门狗**
+    /// （std JoinHandle 无 join_timeout，以辅助线程包 join + `recv_timeout`
+    /// 实现）；超时仅 `warn!` 放弃等待（线程脱落，进程将退可接受），未落盘
+    /// 数据由 WAL 回放兜底——关停路径不因归档失败中断主序。writer 正常路径
+    /// 毫秒级完成，返回后 `storage()` 的写入即以 `StorageClosed` 被拒（排空
+    /// 已发生）。
+    pub fn close(&mut self, timeout: Duration) {
         if self.closed {
             return;
         }
         self.closed = true;
-        if let Err(e) = self.storage.close() {
-            tracing::warn!("[history] engine close 失败(排空已尽力,依赖 WAL 回放兜底): {e}");
+        // 退出信号先行：`HistoryHandle` clone 在 close 后仍可存活（HostContext/
+        // 测试侧），断 sender 不足以让 writer 退出——置位共享标志（≤1 攒批窗
+        // 生效），再断 engine 侧 sender。
+        self.storage.request_writer_shutdown();
+        self.handle = None;
+        let join = match self.writer_join.take() {
+            Some(j) => j,
+            None => return,
+        };
+        // join 看门狗：辅助线程包 join，主线程 recv_timeout 等待；超时则辅助
+        // 线程脱落（不 join 它——它还阻塞在被放弃的 join 上）。writer panic
+        // 只记日志不二次传播（关停路径 fail-soft，WAL 回放兜底）。
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+        let watcher = std::thread::spawn(move || {
+            if let Err(panic) = join.join() {
+                tracing::error!("[history] writer 线程 panic 退出(排空未完成): {panic:?}");
+            }
+            let _ = done_tx.send(());
+        });
+        match done_rx.recv_timeout(timeout) {
+            Ok(()) => {
+                // writer 已排空并 close 完毕；watcher 发信后即返回，join 它回收。
+                let _ = watcher.join();
+                tracing::info!("[history] writer 排空完成,存储已 close(进程锁已释放)");
+            }
+            Err(_) => {
+                tracing::warn!(
+                    "[history] close 超时({timeout:?})放弃,WAL 回放兜底(writer 线程脱落)"
+                );
+            }
         }
     }
 }
