@@ -5,7 +5,7 @@
 > **实施**:feat/history-write → master(aedd1cf,no-ff merge),2026-08-25
 > **代码**:src/history/{mod,rows,writer,engine}.rs + host.rs/pipeline.rs/lib.rs/config.rs/error.rs 挂点
 > **测试**:单测 11(rows 5+engine 6)+writer 6+e2e 6(dataflow 2/write 2/kill 2)+config 4;四门禁数字见 §三
-> **遗留**:①非饱和白名单查表成本(off-idle -5.15%,§四-1)②writer 高基数排空速率剖析(§四-2)③cardinality 启动时刻校准不重算(R4,§四-3)
+> **遗留**:①非饱和白名单查表成本(off-idle -5.15%,§四-1)②writer 高基数排空速率剖析(§四-2)③cardinality 启动时刻校准不重算(R4,§四-3)④可观测性薄切片已由 feat/history-ops-visibility 前置交付(原 Phase 3 项)
 > **依据(ADR 权威版)**:[2026-08-24-history-storage-master-plan.md](2026-08-24-history-storage-master-plan.md) §一三层开关/§二写路径/§三 D1-D11/§四陷阱/§五 1b 行——本文引用不复述
 > **基线**:tsink fork tag `rs-iot-1b-baseline` @ 277e744(已推 viccom/tsink,2026-08-25)
 > **执行方式**:worktree `feat/history-write`,executing-plans 编排式(主会话派发/审查,子代理 TDD 信息隔离)

@@ -47,6 +47,23 @@ pub async fn sysstatus(State(st): State<AppState>) -> Json<serde_json::Value> {
             "uptime_secs": m.started.elapsed().as_secs(),
             "cpu_pct": cpu,
             "mem_bytes": mem,
+        },
+        // 历史引擎可见性（Phase 3 前置）：feature 在 handler 内编译期求值
+        // （不进 AppState）；stats 仅 engine=="ok" 时非 null（lib.rs 接线保证
+        // Some(stats) 与 engine ok 成对出现，此处按字段原样反映）。
+        "history": {
+            "feature": cfg!(feature = "history"),
+            "enabled": st.config.history.enabled,
+            "engine": st.history_engine_state.as_ref(),
+            "stats": st.history_stats.as_ref().map(|h| serde_json::json!({
+                "sent": h.sent.load(std::sync::atomic::Ordering::Relaxed),
+                "written": h.written.load(std::sync::atomic::Ordering::Relaxed),
+                "dropped": h.dropped.load(std::sync::atomic::Ordering::Relaxed),
+                "deadbanded": h.deadbanded.load(std::sync::atomic::Ordering::Relaxed),
+                "skipped": h.skipped.load(std::sync::atomic::Ordering::Relaxed),
+                "lane_mismatch": h.lane_mismatch.load(std::sync::atomic::Ordering::Relaxed),
+                "errors": h.errors.load(std::sync::atomic::Ordering::Relaxed),
+            })),
         }
     }))
 }

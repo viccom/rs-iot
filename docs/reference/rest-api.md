@@ -66,7 +66,7 @@ curl -s -XPOST -H "Authorization: $TOKEN" -H 'Content-Type: application/json' \
 | Method | Path | Body/Query | 成功响应 |
 |---|---|---|---|
 | GET | `/api/v1/sysinfo` | — | `{"hwid":"...","version":"..."}` |
-| GET | `/api/v1/sysstatus` | — | `{"status":"ok","dbsize":<int>,"instances":{<inst>:<state>}}` |
+| GET | `/api/v1/sysstatus` | — | `{"status":"ok","dbsize":<int>,"instances":{<inst>:<state>},"history":{...}}`（history 块见下方 bullet） |
 | GET | `/api/v1/plugins` | — | `{"sources":[...],"sinks":[...]}` |
 | GET | `/api/v1/inststatus` | — | `{<inst>:<state>}` |
 | POST | `/api/v1/startinst` | `{"inst_id":"..."}` | `{"status":"ok"}`；不存在 404；配置非法 400；非南向 400 |
@@ -74,8 +74,10 @@ curl -s -XPOST -H "Authorization: $TOKEN" -H 'Content-Type: application/json' \
 | GET | `/api/v1/config` | — | 脱敏后的运行配置 JSON（`AppConfig` 全量结构） |
 
 - `<state>` ∈ `starting`/`running`/`stopping`/`stopped`/`failed`。**`failed` 由 M3 supervisor 真实写入**：实例 task 异常退出（panic/配置错误早退/非正常 return）且未被主动 stop → 标 `failed` + `error!` 落盘；运维 `startinst` 可重拉（`failed → starting → running`）。主动 `stopinst` 走 `stopping → stopped`（token cancel）不误判
+- `sysstatus` 的 `history` 块：`{"feature":<bool>,"enabled":<bool>,"engine":"ok"|"disabled"|"init_failed","stats":{sent,written,dropped,deadbanded,skipped,lane_mismatch,errors}|null}`——L1 feature 是否编入 / L2 `[history].enabled` 是否启用 / 引擎状态与七计数器快照（engine 非 `ok` 时 `stats:null`）；语义见 §4.18
 - `startinst` 仅支持**南向 Source**（拒绝北向 `app_type=north`）
 - `config` 返回**脱敏回显**：顶层 `jwt_secret`、`mqtt.username`/`mqtt.password` 与 `lux.password` 遮蔽为 `"***"`（保留键、替换值），其余字段原样——诊断需看 lux 端口/`data_dir`、bridge bind、log 级别等（供运维与 MCP `get_config` 工具读配置形态）
+- `[history]` 节（L2 部署期开关，缺省整节走默认 `enabled=false`）键清单：`enabled`/`data_dir`/`memory_limit_mb`/`cardinality_limit`/`retention_days`/`wal_sync_ms`/`wal_size_limit_mb`/`channel_capacity`/`batch_max_rows`/`close_timeout_secs`（全键定义 `src/config.rs::HistoryConfig`）；其中 `data_dir` **有意可见**（纯路径无密钥，现场诊断需要）——三层开关语义见 §4.18
 - `[lux] password`（D-LUX-1）：`bind_host` 非 loopback（非 `127.0.0.1`/`::1`/`localhost`）时**必须**设置，否则启动即拒（错误信息指路：设密码或改回 loopback 绑定）；设置后 RESP 端口强制 AUTH。loopback 部署缺省空串，维持无密码单机信任模型
 - 响应含 `hwid` 覆盖键：空串 = 启动时按硬件自动生成；非空 = 部署期指定的网关 ID（多网关接同一平台需唯一）
 
@@ -235,7 +237,7 @@ curl -s -XPOST -H "Authorization: $TOKEN" -H 'Content-Type: application/json' \
 | DELETE | `/api/v1/inst/trace` | JWT | `?inst_id=` | `{"status":"ok"}` |
 | GET | `/api/v1/logs/recent` | JWT | `?level=&target=&limit=`（均可选） | `[LogEntry]`（最近 N 条结构化日志） |
 
-**`/metrics`**（P1 #1，机器出口）：进程级 14 metric family（`rs_iot_info`/`uptime_seconds`/`process_cpu_pct`/`process_mem_bytes`/`ctl_*_total`/`pipeline_*_total`/`hub_depth[_max]`/`mqtt_*`）——注：mqtt_* 阶段 B 起恒 0（MqttPub 迁移 luaNorth，实时计数在 /api/v1/inst/stats extra：publish_ok/publish_fail/reconnect_count；字段保留为端点形状兼容，外部面板请迁移）。+ per-instance 5（`rs_iot_instance_info{inst_id,app_code,host_kind,state,health}` + `instance_tick_total`/`fail_total`/`last_activity_duration_ms`/`last_activity_ts`）。命名遵循 Prometheus 规范（counter `_total`、gauge 无后缀、耗时 `_ms`/字节 `_bytes`）。对接 Prometheus/Grafana：`job: rs-iot, /metrics`，免认证（内网信任，跨网加 IP 白名单/mTLS）。
+**`/metrics`**（P1 #1，机器出口）：进程级 14 metric family（`rs_iot_info`/`uptime_seconds`/`process_cpu_pct`/`process_mem_bytes`/`ctl_*_total`/`pipeline_*_total`/`hub_depth[_max]`/`mqtt_*`）——注：mqtt_* 阶段 B 起恒 0（MqttPub 迁移 luaNorth，实时计数在 /api/v1/inst/stats extra：publish_ok/publish_fail/reconnect_count；字段保留为端点形状兼容，外部面板请迁移）。+ per-instance 5（`rs_iot_instance_info{inst_id,app_code,host_kind,state,health}` + `instance_tick_total`/`fail_total`/`last_activity_duration_ms`/`last_activity_ts`）。+ history 7（`rs_iot_history_{sent,written,dropped,deadbanded,skipped,lane_mismatch,errors}_total`，源 `HistoryStats` atomic，**仅引擎 ok 时输出**——disabled/init_failed 省略防误导零值；运行态快照另见 `GET /api/v1/sysstatus` 的 `history` 块，语义见 §4.18）。命名遵循 Prometheus 规范（counter `_total`、gauge 无后缀、耗时 `_ms`/字节 `_bytes`）。对接 Prometheus/Grafana：`job: rs-iot, /metrics`，免认证（内网信任，跨网加 IP 白名单/mTLS）。
 
 **`/api/v1/inst/stats`**（M4）：替代废弃的 `/api/v1/lua/stats`，**全部内置插件**（dataSim/opcua/modbus/s7/lua/sidecar）+ 北向 luaNorth 统一经 `StatTracker` 写 lux `stat:<inst>` InstanceStat。核心 6 字段：`status`（running/degraded/stopped）/`tick_count`/`fail_count`/`last_activity_ts`/`last_activity_duration_ms`/`last_err`；插件扩展字段经 `extra` 透传（如 opcua `session_reconnect_count`、modbus `exception_count`、lua `vm_restart_count`/`script_version`）。
 
@@ -361,6 +363,8 @@ curl -X POST -H "Authorization: Bearer $JWT" -H "Content-Type: application/json"
 - 设备不在 devreg → 404；tag 不在设备模型 → 400
 - glob `*` 通配匹配 `<devid>.<tag>` 全键（匹配域 = 模型 tag 全集）
 
+> **deadband 三态口径警示（两端口相反，批量消费方必读）**：`/tag/set`、`/tag/batch` 的 `deadband` 三态是 **`null` = 恢复继承模板、`0.0` = 显式关死区**（本端口不暴露双层 Option，`0.0` 与无死区过滤语义等价）；而 `POST /api/v1/devreg/set` 写 `DeviceEntry.overrides` 的 `TagOverride.deadband` 是**双层 Option：字段缺省 = 继承模板、显式 `null` = 显式关死区**——两端口径**相反**，批量 UI/脚本在两端口间搬运 deadband 必须做 `0.0 ↔ null` 语义转换（口径依据：`src/api/routes_tag.rs` 头注、`src/model/types.rs` `TagOverride` serde 注释）。
+
 ### 4.16 设备模型注册表（`routes_model.rs`/`routes_devreg.rs`，M-1 起）
 
 物模型（devmodels：参数化地址模板 + 型号级默认属性）+ 全局设备注册表（devreg：模型引用 + 实例化参数 + per-tag 三态覆盖）。**元数据唯一出生地**（决策 [2026-08-25-device-model-registry.md](../decisions/2026-08-25-device-model-registry.md)）。
@@ -394,6 +398,19 @@ curl -X POST -H "Authorization: Bearer $JWT" -H "Content-Type: application/json"
 ```
 
 - 引擎行为（`src/model/discovery.rs`）：effective 缓存 O(1) 比对（已建模 once-set 纯内存）；未建模 per-entry 60s 节流聚合 count/样本；上限 5000 LRU 批量逐出；重启 count 接续
+
+### 4.18 历史时序存储行为（`src/history/`，写路径 Phase 1b）
+
+历史归档是 pipeline 出口的**旁路**（fail-soft，不阻塞主链路），受三层开关节流——现场裁剪的机制骨架（总方案 [2026-08-24-history-storage-master-plan.md](../designs/2026-08-24-history-storage-master-plan.md) §一）：
+
+| 层 | 粒度 | 开关 | 默认 |
+|---|---|---|---|
+| L1 | 编译期 | Cargo feature `history` | **off**（裁剪构建不编入 tsink 依赖，需同级 `../tsink_fork` checkout `rs-iot-1b-baseline`） |
+| L2 | 部署期 | `config.toml [history] enabled` | `false`（不初始化引擎、不获取 `.tsink.lock`） |
+| L3 | 标签期 | `TagProps.history`（effective 合并视图，过滤只认 effective） | `false`（逐标签白名单，默认零归档；批量操作面 = §4.15 `POST /api/v1/tag/batch`） |
+
+- **当前状态**：历史**写路径**已实施（Phase 1b）——pipeline 出口旁路 fan_out，运行态可观测：`GET /api/v1/sysstatus` 的 `history` 块（§4.1）+ `/metrics` 的 `rs_iot_history_*` 7 family（§4.10）。**读端点 `GET /api/v1/history` 未实施**（Phase 2）；实施后 L2 off / L1 裁剪时将返 **503**（总方案 §一承诺——显式拒绝而非静默空数据）
+- **写路径语义要点**：**满即丢**——旁路有界 channel `try_send` 满 → 丢样本 + `dropped` 计数（不阻塞主链路，A-B 门禁主链路劣化 <5%）；**deadband 绝对死区**（PI exception 风格：`|new − last_archived| ≥ deadband` 才归档，`last_archived` 仅在归档时更新；仅数值类型生效，Bool/Str 恒归档）；**类型保真**——样本按原类型入行，同 series 类型漂变剔除并计 `lane_mismatch`（防混型污染）
 
 ## 5. 数据模型（`src/types.rs`）
 

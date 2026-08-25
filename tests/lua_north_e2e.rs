@@ -81,6 +81,8 @@ async fn test_app(tag: &str) -> (axum::Router, Arc<InstanceManager>, lux::Server
         log_ringbuffer: Arc::new(rs_iot::log_ringbuffer::LogRingBuffer::new(2000)),
         event_bus: rs_iot::event_bus::EventBus::dummy(),
         config: Arc::new(rs_iot::config::AppConfig::default()),
+        history_stats: None,
+        history_engine_state: Arc::from("disabled"),
     };
     (build_router(state), mgr, handle)
 }

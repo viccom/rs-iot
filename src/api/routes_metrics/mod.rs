@@ -6,7 +6,7 @@ use axum::response::IntoResponse;
 
 pub(crate) mod render;
 
-use render::{render_instances, render_process, InstanceRow, METRICS_CONTENT_TYPE};
+use render::{render_history, render_instances, render_process, InstanceRow, METRICS_CONTENT_TYPE};
 
 /// `GET /metrics`(Prometheus 文本格式,免 JWT)。
 ///
@@ -43,6 +43,13 @@ pub async fn metrics(State(st): State<AppState>) -> axum::response::Response {
         });
     }
     body.push_str(&render_instances(&rows));
+
+    // 历史旁路七计数器（Phase 3 前置）：仅 stats 存在（引擎 ok）时输出——
+    // disabled/init_failed 不输出，避免误导性零值（rows.rs 无条件编译，
+    // feature off 构建下 AppState.history_stats 恒 None，同一判定天然成立）。
+    if let Some(history) = &st.history_stats {
+        body.push_str(&render_history(history));
+    }
 
     (
         [(axum::http::header::CONTENT_TYPE, METRICS_CONTENT_TYPE)],

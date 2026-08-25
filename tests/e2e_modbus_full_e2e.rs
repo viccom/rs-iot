@@ -714,6 +714,8 @@ async fn p1_three_subsystems_metrics_logs_trace() {
         log_ringbuffer: log_ringbuffer.clone(),
         event_bus: rs_iot::event_bus::EventBus::dummy(),
         config: std::sync::Arc::new(rs_iot::config::AppConfig::default()),
+        history_stats: None,
+        history_engine_state: std::sync::Arc::from("disabled"),
     };
     let (base_url, axum_h) = spawn_axum(state).await;
 
