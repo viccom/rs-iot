@@ -7,6 +7,7 @@ import { defineStore } from 'pinia'
 import { ref } from 'vue'
 import { useAuthStore } from './auth'
 import type { DeviceEntry, DeviceModel } from '../lib/devmeta'
+import type { EffectiveProps } from '../lib/tagops'
 
 /** 迁移结果（POST /migrate/inline-devices）。 */
 export interface MigrateResult {
@@ -46,6 +47,30 @@ export interface AdoptTagReq {
   addr?: string | null
   unit?: string | null
   desc?: string | null
+}
+
+/** `GET /api/v1/tags` effective 视图条目（TagProps 平铺 + 来源标注；
+ *  形状源 src/api/routes_tag.rs EffectiveView——serde 无 skip 四属性恒在）。 */
+export interface EffectiveTag extends EffectiveProps {
+  owner_inst?: string
+  /** "model"=纯模板派生 / "override"=含设备覆盖。 */
+  _source: 'model' | 'override'
+}
+
+/** `POST /api/v1/tag/batch` 结果。 */
+export interface TagBatchResult {
+  matched: number
+  updated: number
+}
+
+/** `POST /api/v1/tag/batch` body（pattern + 三态 props：字段缺省=不动，
+ *  `null`=恢复继承模板——⚠️ tag 端口 deadband 口径与 devreg overrides 相反）。 */
+export interface TagBatchBody {
+  pattern: string
+  history?: boolean
+  deadband?: number | null
+  desc?: string | null
+  unit?: string | null
 }
 
 export const useDevregStore = defineStore('devreg', () => {
@@ -197,6 +222,38 @@ export const useDevregStore = defineStore('devreg', () => {
     }
   }
 
+  // ---- 标签运营（D2：effective 后端对账 + glob 批量覆盖）----
+
+  /** 拉后端 effective 全量视图（GET /tags 无过滤 = 全量；对账数据源）。 */
+  async function fetchEffectiveTags(): Promise<Record<string, EffectiveTag> | null> {
+    const v = await fetchJson('/api/rsiot/api/v1/tags')
+    return v && typeof v === 'object' && !Array.isArray(v)
+      ? (v as Record<string, EffectiveTag>)
+      : null
+  }
+
+  /** glob 批量写覆盖（POST /tag/batch；单点失败后端不中断，updated ≤ matched）。
+   *  成功后刷新双表；返回 {matched, updated} 或 null（失败，error 带文案）。 */
+  async function tagBatch(body: TagBatchBody): Promise<TagBatchResult | null> {
+    const r = await postJson('/api/rsiot/api/v1/tag/batch', body)
+    if (!r || !r.ok) {
+      error.value = r
+        ? r.status === 400
+          ? await r.text()
+          : `批量覆盖失败 (${r.status})`
+        : '网络错误'
+      return null
+    }
+    try {
+      const v = (await r.json()) as Partial<TagBatchResult>
+      const out: TagBatchResult = { matched: v.matched ?? 0, updated: v.updated ?? 0 }
+      await loadAll()
+      return out
+    } catch {
+      return null
+    }
+  }
+
   // ---- 发现队列（M-4：未建模标签 → 人工确认 adopt 建模）----
 
   /** 发现队列（count 降序；空 = 全部已建模/无脏数据）。 */
@@ -256,6 +313,8 @@ export const useDevregStore = defineStore('devreg', () => {
     saveDevice,
     deleteDevice,
     migrateInline,
+    fetchEffectiveTags,
+    tagBatch,
     loadDiscoveries,
     clearDiscoveries,
     adopt,

@@ -201,3 +201,59 @@ describe('devreg store 发现队列（M-4）', () => {
     expect(s.error).toContain('nope')
   })
 })
+
+describe('devreg store 标签运营（D2：tag/batch + effective 视图）', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    const store: Record<string, string> = {}
+    ;(globalThis as { localStorage?: Storage }).localStorage = {
+      getItem: (k: string) => store[k] ?? null,
+      setItem: (k: string, v: string) => { store[k] = v },
+      removeItem: (k: string) => { delete store[k] },
+      clear: () => { for (const k of Object.keys(store)) delete store[k] },
+      key: (i: number) => Object.keys(store)[i] ?? null,
+      get length() { return Object.keys(store).length },
+    } as Storage
+    useAuthStore().setAuth('tok', 'admin')
+  })
+  afterEach(() => vi.unstubAllGlobals())
+
+  it('tagBatch 提交 glob + 三态 props（不变字段不携带；null=恢复继承）并刷新双表', async () => {
+    const calls = stubFetch({
+      '/api/rsiot/api/v1/tag/batch': { ok: true, status: 200, body: { status: 'ok', matched: 3, updated: 2 } },
+      '/api/rsiot/api/v1/devmodels': { ok: true, status: 200, body: {} },
+      '/api/rsiot/api/v1/devreg': { ok: true, status: 200, body: {} },
+    })
+    const s = useDevregStore()
+    const r = await s.tagBatch({ pattern: 'line1.*.temp*', history: true, deadband: null })
+    expect(r).toEqual({ matched: 3, updated: 2 })
+    const call = calls.find(c => c.url.includes('/tag/batch'))
+    expect(call?.init?.method).toBe('POST')
+    expect(JSON.parse(String(call?.init?.body))).toEqual({
+      pattern: 'line1.*.temp*', history: true, deadband: null,
+    })
+  })
+
+  it('tagBatch 400 带后端文案且不刷新', async () => {
+    const calls = stubFetch({
+      '/api/rsiot/api/v1/tag/batch': { ok: false, status: 400, body: 'pattern 不能为空' },
+    })
+    const s = useDevregStore()
+    expect(await s.tagBatch({ pattern: '' })).toBeNull()
+    expect(s.error).toContain('pattern 不能为空')
+    expect(calls).toHaveLength(1) // 失败不发 loadAll
+  })
+
+  it('fetchEffectiveTags 拉全量 effective 视图（_source 标注）', async () => {
+    stubFetch({
+      '/api/rsiot/api/v1/tags': {
+        ok: true, status: 200,
+        body: { 'd1.ua': { history: true, deadband: null, desc: null, unit: 'V', _source: 'model' } },
+      },
+    })
+    const s = useDevregStore()
+    const v = await s.fetchEffectiveTags()
+    expect(v?.['d1.ua']?._source).toBe('model')
+    expect(v?.['d1.ua']?.unit).toBe('V')
+  })
+})

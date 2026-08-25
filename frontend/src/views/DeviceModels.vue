@@ -3,16 +3,22 @@
 // 设备模型页（元数据唯一来源管理面，M-1）：四面板——
 // ① 模型面板（devmodels：建/改/删 + 参数化地址模板 + 模板默认 props）；
 // ② 设备注册表面板（devreg：建设备选模型 + 实例化参数 + per-tag 三态覆盖）；
-// ③ 标签总览（全设备 effective 平铺：模板∪覆盖 的最终生效视图）；
-// ④ 发现队列（M-4：未建模标签列出 + 多选 adopt 一键建模 + 按设备清除）。
+// ③ 标签总览（全设备 effective 平铺：模板∪覆盖 的最终生效视图 + D2 glob
+//    批量覆盖 + effective 后端对账）；
+// ④ 发现队列（M-4：未建模标签列出 + 多选 adopt 一键建模（D2 起逐 tag 类型）
+//    + 按设备清除）。
 import { computed, onMounted, ref } from 'vue'
 import { useDevregStore, type DiscoveryItem } from '../stores/devreg'
 import { useWorkspacePage } from '../composables/useWorkspacePage'
 import {
-  baseProps, extractParams, isValidId, mergeTagProps, triStateText,
+  baseProps, extractParams, mergeTagProps, triStateText,
   validateDevice, validateModel,
   type DeviceEntry, type DeviceModel, type TagOverride, type TagTemplate,
 } from '../lib/devmeta'
+import {
+  buildBatchProps, globMatch, reconcileTags,
+  type DeadbandChoice, type EffectiveProps, type HistoryChoice, type TagDrift,
+} from '../lib/tagops'
 import ModelForm from '../components/devmeta/ModelForm.vue'
 import DeviceForm from '../components/devmeta/DeviceForm.vue'
 
@@ -140,13 +146,115 @@ const filteredRows = computed(() => {
   return rows
 })
 
+// ---- 批量覆盖（D2-1：glob 批量写覆盖，POST /api/v1/tag/batch）----
+const showBatchForm = ref(false)
+const batchPattern = ref('')
+const batchHistory = ref<HistoryChoice>('keep')
+const batchDeadband = ref<DeadbandChoice>('keep')
+const batchDeadbandValue = ref(0.5)
+const batchBusy = ref(false)
+const batchResult = ref<{ matched: number; updated: number } | null>(null)
+/** 提交时点的预览计数快照（与后端 matched 对比提示差异）。 */
+const batchLastPreview = ref(0)
+/** 本地预览匹配计数（flatRows 按与后端同一 glob 算法匹配——仍以后端 matched 为准）。 */
+const batchPreviewCount = computed(() => {
+  const p = batchPattern.value.trim()
+  if (!p) return 0
+  return flatRows.value.filter(r => globMatch(p, r.key)).length
+})
+/** 至少携带一项变更才可提交（全"不变"提交无意义）。 */
+const batchDirty = computed(
+  () => batchHistory.value !== 'keep' || batchDeadband.value !== 'keep',
+)
+
+function onBatchToggle() {
+  showBatchForm.value = !showBatchForm.value
+  if (showBatchForm.value) batchResult.value = null
+}
+
+async function onBatchApply() {
+  if (batchBusy.value || !batchDirty.value) return
+  const p = batchPattern.value.trim()
+  if (!p) return
+  // 死区值守卫：负数非法；0.0 与无死区过滤等价（语义陷阱，rest-api.md §4.15）
+  // ——显式关本表单不提供，如需走设备覆盖编辑。
+  if (batchDeadband.value === 'set' && !(batchDeadbandValue.value > 0)) {
+    notify('死区值须为正数——0.0 与无死区过滤等价（如需清除请选「恢复继承」）')
+    return
+  }
+  batchBusy.value = true
+  batchResult.value = null
+  batchLastPreview.value = batchPreviewCount.value
+  const r = await store.tagBatch({
+    pattern: p,
+    ...buildBatchProps(batchHistory.value, batchDeadband.value, batchDeadbandValue.value),
+  })
+  batchBusy.value = false
+  if (!r) return
+  batchResult.value = r
+}
+
+// ---- 后端对账（D2-2：本地 effective 平铺 vs GET /api/v1/tags）----
+const reconcileBusy = ref(false)
+const reconcileSummary = ref('')
+const reconcileDrifts = ref<TagDrift[]>([])
+const reconcileDriftTotal = ref(0)
+
+async function onReconcile() {
+  if (reconcileBusy.value) return
+  reconcileBusy.value = true
+  reconcileSummary.value = ''
+  reconcileDrifts.value = []
+  const remote = await store.fetchEffectiveTags()
+  reconcileBusy.value = false
+  if (!remote) {
+    notify('对账失败：后端 effective 视图拉取失败')
+    return
+  }
+  const local: Record<string, EffectiveProps> = {}
+  for (const r of flatRows.value)
+    local[r.key] = { history: r.history, deadband: r.deadband, unit: r.unit, desc: r.desc }
+  const drifts = reconcileTags(local, remote)
+  reconcileDriftTotal.value = drifts.length
+  if (!drifts.length) {
+    reconcileSummary.value = `对账一致 ${flatRows.value.length} 条（后端 ${Object.keys(remote).length} 条）`
+    return
+  }
+  reconcileDrifts.value = drifts.slice(0, 10)
+  const driftedLocal = new Set(drifts.map(d => d.key))
+  const consistent = flatRows.value.length - flatRows.value.filter(r => driftedLocal.has(r.key)).length
+  reconcileSummary.value = `一致 ${consistent} 条 / 漂移 ${drifts.length} 条（以后端为准核对，可重新加载）`
+}
+
+async function onReloadDevreg() {
+  if (opBusy.value) return
+  opBusy.value = true
+  await store.loadAll()
+  opBusy.value = false
+  notify('已按 devreg 重新加载')
+}
+
 // ---- 发现队列（M-4：未建模标签 → 人工确认 adopt 一键建模）----
 /** 面板选中条目 key 集合（`<devid>.<tag>`）。 */
 const pickedDisc = ref(new Set<string>())
 const adoptModelId = ref('')
 const adoptDataType = ref('f32')
+/** adopt 合法数据类型（后端 AdoptTagReq data_type 为自由串，此为 UI 收敛清单）。 */
+const ADOPT_TYPES = ['f32', 'f64', 'i32', 'i64', 'bool', 'string'] as const
+/** 逐行类型选择（key = `<devid>.<tag>`；缺省回退全局 adoptDataType）。 */
+const adoptTypes = ref<Record<string, string>>({})
 const adoptBusy = ref(false)
 const adoptNotice = ref('')
+
+const rowTypeOf = (key: string): string => adoptTypes.value[key] ?? adoptDataType.value
+
+function onRowTypeChange(key: string, ev: Event) {
+  adoptTypes.value[key] = (ev.target as HTMLSelectElement).value
+}
+
+function applyTypeToPicked() {
+  for (const k of pickedDisc.value) adoptTypes.value[k] = adoptDataType.value
+}
 
 function togglePick(key: string) {
   const s = new Set(pickedDisc.value)
@@ -154,29 +262,31 @@ function togglePick(key: string) {
   else s.add(key)
   pickedDisc.value = s
 }
-/** 按目标模型分组的待采纳建议（同 tag 名去重——REST adopt 同名跳过）。 */
+/** 按目标模型分组的待采纳建议（同 tag 名去重——REST adopt 同名跳过；
+ *  值 = 该 tag 的逐行类型，首个选中行优先）。 */
 const pickedByModel = computed(() => {
-  const groups = new Map<string, Set<string>>()
+  const groups = new Map<string, Map<string, string>>()
   for (const item of store.discoveries) {
-    if (!pickedDisc.value.has(`${item.devid}.${item.tag}`)) continue
+    const key = `${item.devid}.${item.tag}`
+    if (!pickedDisc.value.has(key)) continue
     const dev = store.devices[item.devid]
     const target = adoptModelId.value || dev?.model || ''
     if (!target) continue
-    if (!groups.has(target)) groups.set(target, new Set())
-    groups.get(target)!.add(item.tag)
+    if (!groups.has(target)) groups.set(target, new Map())
+    const g = groups.get(target)!
+    if (!g.has(item.tag)) g.set(item.tag, rowTypeOf(key))
   }
   return groups
 })
 
 async function onAdopt() {
   if (adoptBusy.value || !pickedByModel.value.size) return
-  if (!isValidId(adoptDataType.value) && adoptDataType.value.includes(' ')) return
   adoptBusy.value = true
   adoptNotice.value = ''
   const merged = { merged: 0, swept: 0 }
   for (const [modelId, tags] of pickedByModel.value) {
-    const r = await store.adopt(modelId, [...tags].map(name => ({
-      name, data_type: adoptDataType.value.trim(),
+    const r = await store.adopt(modelId, [...tags.entries()].map(([name, dt]) => ({
+      name, data_type: dt,
     })))
     if (!r) {
       adoptBusy.value = false
@@ -187,6 +297,7 @@ async function onAdopt() {
   }
   adoptBusy.value = false
   pickedDisc.value = new Set()
+  adoptTypes.value = {}
   adoptNotice.value = `采纳完成：并入 ${merged.merged} 个 tag，队列清除 ${merged.swept} 条`
 }
 
@@ -197,11 +308,15 @@ async function onClearDisc() {
   await store.clearDiscoveries()
   opBusy.value = false
   pickedDisc.value = new Set()
+  adoptTypes.value = {}
 }
 
 async function onClearDiscDevice(devId: string) {
   if (!confirm(`清除设备 ${devId} 的发现条目？`)) return
   await store.clearDiscoveries(devId)
+  // 清理该设备行的孤儿类型选择
+  for (const k of Object.keys(adoptTypes.value))
+    if (k.startsWith(`${devId}.`)) delete adoptTypes.value[k]
 }
 
 // ---- 一次性迁移 ----
@@ -389,7 +504,78 @@ useWorkspacePage(() => ({
         <div class="head-actions">
           <label class="hist-toggle"><input type="checkbox" v-model="historyOnly" />仅看归档白名单</label>
           <input v-model="tagFilter" class="filter" placeholder="过滤 <devid>.<tag> 或模型…" >
+          <button class="btn-ghost" @click="onBatchToggle">{{ showBatchForm ? '收起批量' : '批量覆盖' }}</button>
+          <button class="btn-ghost" :disabled="reconcileBusy" @click="onReconcile">
+            {{ reconcileBusy ? '对账中…' : '后端对账' }}
+          </button>
         </div>
+      </div>
+
+      <!-- D2-1：glob 批量覆盖表单（head-actions「批量覆盖」展开）-->
+      <div v-if="showBatchForm" class="batch-zone">
+        <div class="batch-row">
+          <label class="disc-field batch-pattern">
+            <span>glob 模式（匹配 <em>&lt;devid&gt;.&lt;tag&gt;</em> 全键，<em>*</em> 通配）</span>
+            <input v-model="batchPattern" class="mono" placeholder="line1.*.temp*" />
+          </label>
+          <label class="disc-field">
+            <span>归档白名单</span>
+            <select v-model="batchHistory">
+              <option value="keep">不变</option>
+              <option value="on">开（入白名单）</option>
+              <option value="off">关</option>
+            </select>
+          </label>
+          <label class="disc-field">
+            <span>死区</span>
+            <select v-model="batchDeadband">
+              <option value="keep">不变</option>
+              <option value="set">设值…</option>
+              <option value="inherit">恢复继承</option>
+            </select>
+          </label>
+          <label v-if="batchDeadband === 'set'" class="disc-field">
+            <span>死区值（正数）</span>
+            <input v-model.number="batchDeadbandValue" type="number" min="0" step="0.1" />
+          </label>
+        </div>
+        <p class="batch-hint">
+          预览匹配 <strong>{{ batchPreviewCount }}</strong> 条（本地按同一 glob 语义计数，以后端返回为准）。
+          「恢复继承」提交 <span class="mono">deadband=null</span>；显式关死区（0.0，与无死区过滤等价）本表单不提供——如需请走设备覆盖编辑。
+        </p>
+        <div class="batch-row">
+          <button
+            class="btn-adopt" :disabled="!batchPattern.trim() || !batchDirty || batchBusy"
+            @click="onBatchApply"
+          >{{ batchBusy ? '提交中…' : '提交批量覆盖' }}</button>
+          <p v-if="batchResult" class="op-ok">
+            后端匹配 {{ batchResult.matched }} 条 / 写入 {{ batchResult.updated }} 条<template v-if="batchResult.matched !== batchLastPreview">（注意：与预览 {{ batchLastPreview }} 条不符，以后端为准）</template>
+          </p>
+        </div>
+      </div>
+
+      <!-- D2-2：effective 后端对账结果（漂移时列出前 N 条 + 重新加载入口）-->
+      <div v-if="reconcileSummary" class="reconcile-zone" :class="{ drift: reconcileDrifts.length }">
+        <p :class="reconcileDrifts.length ? 'op-error' : 'op-ok'">{{ reconcileSummary }}</p>
+        <table v-if="reconcileDrifts.length" class="mini-table">
+          <thead>
+            <tr><th>标签</th><th>属性</th><th>本地（devreg）</th><th>后端（GET /tags）</th></tr>
+          </thead>
+          <tbody>
+            <tr v-for="(d, i) in reconcileDrifts" :key="`${d.key}.${d.field}.${i}`">
+              <td class="mono">{{ d.key }}</td>
+              <td>{{ d.field }}</td>
+              <td class="mono">{{ d.local }}</td>
+              <td class="mono">{{ d.remote }}</td>
+            </tr>
+          </tbody>
+        </table>
+        <p v-if="reconcileDriftTotal > reconcileDrifts.length" class="batch-hint">
+          仅列前 {{ reconcileDrifts.length }} 条（共 {{ reconcileDriftTotal }} 条漂移）
+        </p>
+        <button v-if="reconcileDrifts.length" class="btn-ghost" :disabled="opBusy" @click="onReloadDevreg">
+          以 devreg 重新加载
+        </button>
       </div>
       <table class="mini-table flat">
         <thead>
@@ -437,8 +623,13 @@ useWorkspacePage(() => ({
             </select>
           </label>
           <label class="disc-field">
-            <span>数据类型</span>
-            <input v-model="adoptDataType" placeholder="f32 / f64 / i16 / bool / string…" />
+            <span>批量设类型（应用到所选行）</span>
+            <div class="type-apply">
+              <select v-model="adoptDataType">
+                <option v-for="t in ADOPT_TYPES" :key="t" :value="t">{{ t }}</option>
+              </select>
+              <button class="btn-ghost" :disabled="!pickedDisc.size" @click="applyTypeToPicked">应用</button>
+            </div>
           </label>
           <button
             class="btn-adopt" :disabled="!pickedDisc.size || adoptBusy"
@@ -447,7 +638,7 @@ useWorkspacePage(() => ({
         </div>
         <table class="mini-table flat">
           <thead>
-            <tr><th></th><th>标签</th><th>所属模型</th><th>计数</th><th>最近值</th><th>最近时间</th><th></th></tr>
+            <tr><th></th><th>标签</th><th>类型</th><th>所属模型</th><th>计数</th><th>最近值</th><th>最近时间</th><th></th></tr>
           </thead>
           <tbody>
             <tr v-for="d in store.discoveries" :key="`${d.devid}.${d.tag}`" :class="{ picked: pickedDisc.has(`${d.devid}.${d.tag}`) }">
@@ -457,6 +648,15 @@ useWorkspacePage(() => ({
                 @change="togglePick(`${d.devid}.${d.tag}`)"
               /></td>
               <td class="mono">{{ d.devid }}.{{ d.tag }}</td>
+              <td>
+                <select
+                  class="row-type"
+                  :value="rowTypeOf(`${d.devid}.${d.tag}`)"
+                  @change="onRowTypeChange(`${d.devid}.${d.tag}`, $event)"
+                >
+                  <option v-for="t in ADOPT_TYPES" :key="t" :value="t">{{ t }}</option>
+                </select>
+              </td>
               <td>{{ store.devices[d.devid]?.model || '（未注册设备）' }}</td>
               <td>{{ d.count }}</td>
               <td class="mono">{{ d.sample_value }}</td>
@@ -599,6 +799,22 @@ useWorkspacePage(() => ({
 }
 .hist-toggle input { cursor: pointer; accent-color: var(--color-primary); }
 
+/* 面板③批量覆盖（D2-1）与后端对账（D2-2） */
+.batch-zone, .reconcile-zone {
+  margin-bottom: 12px; padding: 12px; border-radius: 10px;
+  border: 1px dashed var(--color-primary); background: var(--card-bg);
+}
+.reconcile-zone.drift { border-color: var(--color-danger); }
+.reconcile-zone .op-error, .reconcile-zone .op-ok { margin: 0 0 8px; }
+.reconcile-zone .btn-ghost { margin-top: 8px; }
+.batch-row { display: flex; gap: 12px; align-items: end; flex-wrap: wrap; }
+.batch-pattern input { width: 240px; }
+.batch-hint {
+  margin: 8px 0 0; font-size: 12px; color: var(--color-ink-muted); line-height: 1.6;
+}
+.batch-hint em { font-style: normal; color: var(--color-ink-dim); }
+.batch-hint .mono { font-size: 11px; }
+
 /* 发现队列面板 */
 .disc-toolbar {
   display: flex; gap: 12px; align-items: end; flex-wrap: wrap; margin-bottom: 10px;
@@ -616,6 +832,12 @@ useWorkspacePage(() => ({
   color: white; cursor: pointer;
 }
 .btn-adopt:disabled { opacity: 0.4; cursor: not-allowed; }
+.type-apply { display: flex; gap: 6px; align-items: center; }
+.row-type {
+  padding: 4px 8px; border-radius: 6px; font-size: 11px; font-family: Consolas, monospace;
+  border: 1px solid var(--card-border); background: var(--card-bg); color: inherit;
+  cursor: pointer;
+}
 tr.picked td { background: color-mix(in srgb, var(--color-primary) 8%, transparent); }
 .link-del {
   background: transparent; border: none; cursor: pointer;
