@@ -2017,7 +2017,9 @@ async fn register_with_model(
 #[tokio::test]
 async fn ctx_devices_lists_bound_devices() {
     let lua = Lua::new();
-    let (_snap, _gate) = register_with_model(&lua, "m3-model-devices").await;
+    // tag 互异：setup_ctx 以 `lua-{tag}-{pid}` 建 lux 目录，三测试并行共用同名
+    // 目录会互删（flaky：WAL open os error 3）。
+    let (_snap, _gate) = register_with_model(&lua, "m3-model-ctx-devices").await;
     let t: mlua::Table = lua.load("return ctx:devices()").eval().expect("devices");
     assert_eq!(t.len().unwrap(), 1);
     let d: mlua::Table = t.get::<mlua::Table>(1).unwrap();
@@ -2029,7 +2031,7 @@ async fn ctx_devices_lists_bound_devices() {
 #[tokio::test]
 async fn ctx_tags_returns_model_points() {
     let lua = Lua::new();
-    let (_snap, _gate) = register_with_model(&lua, "m3-model-devices").await;
+    let (_snap, _gate) = register_with_model(&lua, "m3-model-ctx-tags").await;
     let t: mlua::Table = lua.load("return ctx:tags('devA')").eval().expect("tags");
     assert_eq!(t.get::<String>("ua").unwrap(), "f32");
     assert_eq!(t.get::<String>("ub").unwrap(), "f32");
@@ -2044,7 +2046,7 @@ async fn ctx_tags_returns_model_points() {
 #[tokio::test]
 async fn ctx_param_returns_device_params() {
     let lua = Lua::new();
-    let (_snap, _gate) = register_with_model(&lua, "m3-model-devices").await;
+    let (_snap, _gate) = register_with_model(&lua, "m3-model-ctx-param").await;
     let v: mlua::Value = lua
         .load("return ctx:param('devA', 'base')")
         .eval()
