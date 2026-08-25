@@ -10,5 +10,9 @@
 #[cfg(feature = "history")]
 pub mod engine;
 
+/// fan-out 出口类型（HistoryRow/HistoryStats/HistoryHandle）与白名单过滤——
+/// 刻意不含 tsink 类型，P6 无条件编译，热路径纯 Rust 可测。
+pub mod rows;
+
 /// 单写线程：recv 攒批 + deadband/去重/防混型 → tsink insert_rows（D3/D4/D5）。
 pub mod writer;
