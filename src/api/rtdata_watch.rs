@@ -73,6 +73,16 @@ impl RtdataWatchService {
             .copied()
     }
 
+    /// 版本表快照（P7 游标基线）：ksub 连接 snapshot 阶段后初始化 `last_versions`，
+    /// 或 Lagged 重同步后重建——调用方须**先**取快照再全量读（之后的 mark 版本 >
+    /// 游标，下次 tick 报脏，不丢帧）。返回拷贝，与表后续变更隔离。
+    pub fn snapshot_versions(&self) -> HashMap<String, u64> {
+        self.versions
+            .lock()
+            .expect("rtdata_watch versions 锁中毒")
+            .clone()
+    }
+
     /// 版本表设备数（设备注册表口径，P9）。
     pub fn device_count(&self) -> usize {
         self.versions
@@ -250,5 +260,25 @@ mod tests {
     fn watch_epoch_zero_when_unchanged() {
         let svc = RtdataWatchService::new();
         assert_eq!(svc.epoch(), 0, "起步 epoch=0");
+    }
+
+    /// snapshot_versions:返回版本表拷贝(ksub 连接游标基线/Resync 重建用);
+    /// 与表后续变更隔离(拷贝语义)。
+    #[test]
+    fn watch_snapshot_versions_is_table_copy() {
+        let svc = RtdataWatchService::new();
+        assert!(svc.snapshot_versions().is_empty(), "空表快照为空 map");
+        svc.mark("a");
+        svc.mark("a");
+        svc.mark("b");
+        let snap = svc.snapshot_versions();
+        assert_eq!(
+            snap,
+            HashMap::from([("a".to_string(), 2), ("b".to_string(), 1)]),
+            "快照 = 当前版本表"
+        );
+        // 拷贝语义:快照后 mark 不影响已取快照。
+        svc.mark("a");
+        assert_eq!(snap["a"], 2, "快照与表后续变更隔离");
     }
 }

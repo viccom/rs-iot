@@ -3,6 +3,12 @@
 //! 覆盖：JWT 保护、snapshot 全量+过滤、值变才推（值同不推）、设备删除 removed。
 //! 测试基建对标 tests/events_e2e.rs（同 test_app 骨架）；SSE 读流用窗口收集断言
 //! （先收 snapshot 窗口，再变更数据，再收 datachange 窗口）。
+//!
+//! Task 5（P11 双 impl 等价）：主干用例对 ksub / poll 两档各跑一遍——ksub 档 =
+//! config `[rtdata] sub_impl=ksub` 且测试侧 spawn watcher（复刻 lib.rs 编排，P8）；
+//! poll 档 = `sub_impl=poll`、服务构造但不 spawn。两档断言逐字一致，防单边漂移
+//! （R3）。另含 ksub 专项（新设备事件发现 / DEL removed / 多连接隔离）与 poll
+//! 守门。
 
 mod common;
 
@@ -21,6 +27,9 @@ use tokio_util::sync::CancellationToken;
 use tower::ServiceExt;
 
 /// 建测试 app（订阅端点读 lux，不依赖 EventBus 事件流；骨架同 events_e2e 便于对照）。
+///
+/// 仅供与 impl 档无关的骨架用例（401 / 200+content-type：鉴权与握手先于任何
+/// 读源分支，P11 参数化不增加覆盖只翻倍运行时，故不参数化）。
 async fn test_app(name: &str) -> (axum::Router, lux::ServerHandle, lux::EmbeddedClient) {
     let data_dir = common::test_data_dir(name);
     let (handle, client) = common::start_lux(data_dir.to_str().expect("utf8")).await;
@@ -62,6 +71,114 @@ async fn test_app(name: &str) -> (axum::Router, lux::ServerHandle, lux::Embedded
         rtdata_watch: std::sync::Arc::new(rs_iot::api::rtdata_watch::RtdataWatchService::new()),
     };
     (build_router(state), handle, client)
+}
+
+// ---------- P11 双 impl 档 ----------
+
+/// 主干用例的双 impl 档（P11）：同一断言 ksub / poll 各跑一遍。
+#[derive(Clone, Copy)]
+enum Tier {
+    /// config `sub_impl=ksub` 且测试侧 spawn watcher（复刻 lib.rs 编排，P8）。
+    Ksub,
+    /// config `sub_impl=poll`，watch 服务构造但不 spawn（lux 无订阅者零开销承诺）。
+    Poll,
+}
+
+impl Tier {
+    /// data_dir 后缀——两档独立 lux 数据目录互不污染。
+    fn label(self) -> &'static str {
+        match self {
+            Tier::Ksub => "ksub",
+            Tier::Poll => "poll",
+        }
+    }
+
+    fn sub_impl(self) -> rs_iot::config::SubImpl {
+        match self {
+            Tier::Ksub => rs_iot::config::SubImpl::Ksub,
+            Tier::Poll => rs_iot::config::SubImpl::Poll,
+        }
+    }
+}
+
+/// 独立临时目录并清空上一轮残留——lux data_dir 跨 run 持久化（lux.dat + WAL），
+/// 不清会让存量键漏进本轮断言造成假绿/假红（rtdata_watch_e2e fresh_dir 先例）。
+fn fresh_dir(name: &str) -> std::path::PathBuf {
+    let d = common::test_data_dir(name);
+    let _ = std::fs::remove_dir_all(&d);
+    d
+}
+
+/// 双档测试 app：config 注入 `[rtdata] sub_impl`；ksub 档测试侧 spawn watcher
+/// （等价 lib.rs `sub_impl==ksub` 才 spawn 的编排分支，P8），poll 档构造服务
+/// 但不 spawn。返回 (router, lux handle, lux client, watch 服务, watcher 取消 token)。
+async fn test_app_tier(
+    name: &str,
+    tier: Tier,
+) -> (
+    axum::Router,
+    lux::ServerHandle,
+    lux::EmbeddedClient,
+    Arc<rs_iot::api::rtdata_watch::RtdataWatchService>,
+    CancellationToken,
+) {
+    let data_dir = fresh_dir(&format!("{name}-{}", tier.label()));
+    let (handle, client) = common::start_lux(data_dir.to_str().expect("utf8")).await;
+    rs_iot::db::identity::bootstrap(&client)
+        .await
+        .expect("bootstrap");
+
+    let shutdown = CancellationToken::new();
+    let metrics = Arc::new(rs_iot::process_metrics::ProcessMetrics::new());
+    let event_bus = EventBus::new(256);
+    let trace_registry = rs_iot::io_trace::TraceRegistry::with_sender(event_bus.clone());
+    let ctx = HostContext {
+        lux: client.clone(),
+        hwid: Hwid::new("it-hwid"),
+        shutdown,
+        ctl_registry: CtlRegistry::new(metrics.clone()),
+        bridge_registry: rs_iot::host::BridgeRegistry::new(),
+        metrics: metrics.clone(),
+        trace_registry: trace_registry.clone(),
+        event_tx: event_bus.clone(),
+        history: None,
+    };
+    let (hub_tx, _hub_rx) = tokio::sync::mpsc::channel(64);
+    let mgr = Arc::new(InstanceManager::new(ctx, hub_tx));
+    let rtdata_watch = Arc::new(rs_iot::api::rtdata_watch::RtdataWatchService::new());
+    let watch_token = CancellationToken::new();
+    if matches!(tier, Tier::Ksub) {
+        // 命名绑定 `_watcher` 满足 JoinHandle must_use（lib.rs 同惯例）。
+        let _watcher = rtdata_watch.spawn(client.clone(), watch_token.clone());
+    }
+    let state = AppState {
+        lux: client.clone(),
+        mgr,
+        hwid: Hwid::new("it-hwid"),
+        jwt_secret: "test-secret-0123456789abcdef".into(),
+        version: "itest",
+        metrics: metrics.clone(),
+        trace_registry,
+        log_ringbuffer: Arc::new(LogRingBuffer::new(2000)),
+        event_bus,
+        config: Arc::new(rs_iot::config::AppConfig {
+            rtdata: rs_iot::config::RtdataConfig {
+                sub_impl: tier.sub_impl(),
+            },
+            ..Default::default()
+        }),
+        history_stats: None,
+        history_engine_state: Arc::from("disabled"),
+        history_reader: None,
+        rtdata_watch: rtdata_watch.clone(),
+    };
+    (
+        build_router(state),
+        handle,
+        client,
+        rtdata_watch,
+        watch_token,
+    )
 }
 
 /// 登录拿 JWT（admin/admin）。
@@ -136,6 +253,7 @@ async fn seed(lux: &lux::EmbeddedClient, devid: &str, pts: &[(&str, &str)], ts: 
         .unwrap();
 }
 
+// 与 impl 档无关（鉴权拒绝先于 handler 主体，任何读源下同语义），不参数化。
 #[tokio::test]
 async fn subscribe_without_jwt_401() {
     let (app, handle, _lux) = test_app("sub401").await;
@@ -154,6 +272,7 @@ async fn subscribe_without_jwt_401() {
     common::stop_lux(handle).await;
 }
 
+// 与 impl 档无关（200 + content-type 握手骨架，空流不卡死即可），不参数化。
 #[tokio::test]
 async fn subscribe_with_jwt_200_event_stream() {
     let (app, handle, _lux) = test_app("sub200").await;
@@ -167,7 +286,14 @@ async fn subscribe_with_jwt_200_event_stream() {
 
 #[tokio::test]
 async fn snapshot_pushes_all_points_on_connect() {
-    let (app, handle, lux) = test_app("subsnap").await;
+    for tier in [Tier::Ksub, Tier::Poll] {
+        snapshot_pushes_all_points_on_connect_case(tier).await;
+    }
+}
+
+/// 主体（P11 双档：两档独立 lux/服务/AppState/连接，断言逐字一致）。
+async fn snapshot_pushes_all_points_on_connect_case(tier: Tier) {
+    let (app, handle, lux, _watch, token) = test_app_tier("subsnap", tier).await;
     seed(&lux, "devA", &[("t1", "1.5"), ("t2", "2")], 1_700_000_000).await;
     seed(&lux, "devB", &[("t1", "3")], 1_700_000_000).await;
     let tok = jwt(&app).await;
@@ -181,12 +307,20 @@ async fn snapshot_pushes_all_points_on_connect() {
     );
     assert!(buf.contains("devA.t1") && buf.contains("1.5"), "{buf}");
     assert!(buf.contains("devA.t2") && buf.contains("devB.t1"), "{buf}");
+    token.cancel();
     common::stop_lux(handle).await;
 }
 
 #[tokio::test]
 async fn snapshot_respects_dev_and_tag_filter() {
-    let (app, handle, lux) = test_app("subfilter").await;
+    for tier in [Tier::Ksub, Tier::Poll] {
+        snapshot_respects_dev_and_tag_filter_case(tier).await;
+    }
+}
+
+/// 主体（P11 双档：两档独立 lux/服务/AppState/连接，断言逐字一致）。
+async fn snapshot_respects_dev_and_tag_filter_case(tier: Tier) {
+    let (app, handle, lux, _watch, token) = test_app_tier("subfilter", tier).await;
     seed(&lux, "devA", &[("temp", "1"), ("hum", "2")], 1).await;
     seed(&lux, "devB", &[("temp", "3")], 1).await;
     let tok = jwt(&app).await;
@@ -195,12 +329,20 @@ async fn snapshot_respects_dev_and_tag_filter() {
     assert!(buf.contains("devA.temp"), "{buf}");
     assert!(!buf.contains("devA.hum"), "tag 过滤应排除: {buf}");
     assert!(!buf.contains("devB"), "dev 过滤应排除 devB: {buf}");
+    token.cancel();
     common::stop_lux(handle).await;
 }
 
 #[tokio::test]
 async fn datachange_only_pushes_changed_values() {
-    let (app, handle, lux) = test_app("subdiff").await;
+    for tier in [Tier::Ksub, Tier::Poll] {
+        datachange_only_pushes_changed_values_case(tier).await;
+    }
+}
+
+/// 主体（P11 双档：两档独立 lux/服务/AppState/连接，断言逐字一致）。
+async fn datachange_only_pushes_changed_values_case(tier: Tier) {
+    let (app, handle, lux, _watch, token) = test_app_tier("subdiff", tier).await;
     seed(&lux, "devA", &[("t1", "1"), ("t2", "2")], 1_700_000_000).await;
     let tok = jwt(&app).await;
     let mut stream = connect(&app, "?dev_id=devA&interval=100", &tok).await;
@@ -219,12 +361,20 @@ async fn datachange_only_pushes_changed_values() {
     );
     assert!(buf2.contains("devA.t1") && buf2.contains("9"), "{buf2}");
     assert!(!buf2.contains("devA.t2"), "值未变不应重推: {buf2}");
+    token.cancel();
     common::stop_lux(handle).await;
 }
 
 #[tokio::test]
 async fn removed_on_device_delete() {
-    let (app, handle, lux) = test_app("subdel").await;
+    for tier in [Tier::Ksub, Tier::Poll] {
+        removed_on_device_delete_case(tier).await;
+    }
+}
+
+/// 主体（P11 双档：两档独立 lux/服务/AppState/连接，断言逐字一致）。
+async fn removed_on_device_delete_case(tier: Tier) {
+    let (app, handle, lux, _watch, token) = test_app_tier("subdel", tier).await;
     seed(&lux, "devA", &[("t1", "1")], 1).await;
     seed(&lux, "devB", &[("t1", "2")], 1).await;
     let tok = jwt(&app).await;
@@ -243,5 +393,135 @@ async fn removed_on_device_delete() {
         "{buf2}"
     );
     assert!(buf2.contains("devA.t1"), "removed 应列 devA.t1: {buf2}");
+    token.cancel();
+    common::stop_lux(handle).await;
+}
+
+// ---------- Task 5 新增专项（ksub 档为主） ----------
+
+/// ksub 专项：dev 过滤=None 的连接建立后新设备写入 → 靠 key 事件进版本表被发现
+/// （等价原 KEYS 发现，P9）——newdev 不依赖启动铺底（连接之后才出现，纯事件发现）。
+#[tokio::test]
+async fn ksub_new_device_discovered_without_keys() {
+    let (app, handle, lux, watch, token) = test_app_tier("ksub-newdev", Tier::Ksub).await;
+    seed(&lux, "devA", &[("t1", "1")], 1).await;
+    let tok = jwt(&app).await;
+    let mut stream = connect(&app, "?interval=200", &tok).await;
+    let buf1 = collect_window(&mut stream, std::time::Duration::from_millis(600)).await;
+    assert!(
+        buf1.contains("event: snapshot") && buf1.contains("devA.t1"),
+        "{buf1}"
+    );
+    assert!(!buf1.contains("newdev"), "连接时 newdev 尚不存在: {buf1}");
+    // 连接后新设备首写：watcher 收 HSET key 事件入版本表（ksub 档契约前提，
+    // 保证本档 watcher 确已 spawn 且活着——否则下方 SSE 断言无从谈起）。
+    seed(&lux, "newdev", &[("n1", "7")], 2).await;
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while watch.version("newdev").is_none() {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("ksub 档契约：watcher 应已收到 newdev 的 key 事件");
+    let buf2 = collect_window(&mut stream, std::time::Duration::from_millis(1500)).await;
+    assert!(
+        buf2.contains("event: datachange"),
+        "新设备应进 datachange: {buf2}"
+    );
+    assert!(
+        buf2.contains("newdev.n1") && buf2.contains("7"),
+        "等价原 KEYS 发现——新设备点位应推送: {buf2}"
+    );
+    token.cancel();
+    common::stop_lux(handle).await;
+}
+
+/// ksub 专项：DEL rtdata:devA 也是 key 事件 → mark → HGETALL 空 → diff_scope 出
+/// removed（P9，等价原轮询语义；版本表不删项）。用原始 DEL 命令锚定 DEL 事件路径
+/// （watch_service_marks_del 的订阅面下游）。
+#[tokio::test]
+async fn ksub_removed_via_del_event() {
+    let (app, handle, lux, _watch, token) = test_app_tier("ksub-del", Tier::Ksub).await;
+    seed(&lux, "devA", &[("t1", "1")], 1).await;
+    seed(&lux, "devB", &[("t1", "2")], 1).await;
+    let tok = jwt(&app).await;
+    let mut stream = connect(&app, "?interval=200", &tok).await;
+    let buf1 = collect_window(&mut stream, std::time::Duration::from_millis(600)).await;
+    assert!(
+        buf1.contains("devA.t1") && buf1.contains("devB.t1"),
+        "{buf1}"
+    );
+    lux.execute("DEL", &["rtdata:devA"]).await.unwrap();
+    let buf2 = collect_window(&mut stream, std::time::Duration::from_millis(1500)).await;
+    assert!(
+        buf2.contains("event: datachange") && buf2.contains("removed"),
+        "{buf2}"
+    );
+    assert!(buf2.contains("devA.t1"), "removed 应列 devA.t1: {buf2}");
+    token.cancel();
+    common::stop_lux(handle).await;
+}
+
+/// ksub 专项：两连接不同 dev 过滤 + interval → 各自独立基线/游标（per-connection
+/// last_versions/last_epoch，P7），只收各自范围；一连接断开另一连接继续收帧。
+#[tokio::test]
+async fn ksub_multi_connection_isolation() {
+    let (app, handle, lux, _watch, token) = test_app_tier("ksub-multi", Tier::Ksub).await;
+    seed(&lux, "devA", &[("t1", "1")], 1).await;
+    seed(&lux, "devB", &[("t1", "1")], 1).await;
+    let tok = jwt(&app).await;
+    let mut s1 = connect(&app, "?dev_id=devA&interval=200", &tok).await;
+    let mut s2 = connect(&app, "?dev_id=devB&interval=300", &tok).await;
+    let b1 = collect_window(&mut s1, std::time::Duration::from_millis(600)).await;
+    let b2 = collect_window(&mut s2, std::time::Duration::from_millis(600)).await;
+    assert!(
+        b1.contains("devA.t1") && !b1.contains("devB"),
+        "conn1 只含 devA: {b1}"
+    );
+    assert!(
+        b2.contains("devB.t1") && !b2.contains("devA"),
+        "conn2 只含 devB: {b2}"
+    );
+    // devA 值变：conn1 收 datachange，conn2（只订 devB）不收。
+    seed(&lux, "devA", &[("t1", "9")], 2).await;
+    let w1 = collect_window(&mut s1, std::time::Duration::from_millis(1500)).await;
+    let w2 = collect_window(&mut s2, std::time::Duration::from_millis(1500)).await;
+    assert!(
+        w1.contains("event: datachange") && w1.contains("devA.t1") && w1.contains("9"),
+        "{w1}"
+    );
+    assert!(!w2.contains("devA"), "conn2 不订 devA，不应收到: {w2}");
+    // conn1 断开（drop 流 → producer 退出）；conn2 继续独立收帧。
+    drop(s1);
+    seed(&lux, "devB", &[("t1", "8")], 3).await;
+    let w3 = collect_window(&mut s2, std::time::Duration::from_millis(1500)).await;
+    assert!(
+        w3.contains("event: datachange") && w3.contains("devB.t1") && w3.contains("8"),
+        "conn1 断开后 conn2 仍应收帧: {w3}"
+    );
+    token.cancel();
+    common::stop_lux(handle).await;
+}
+
+/// poll 守门（P8 回退开关）：显式 `sub_impl=poll` 走原 read_scope 轮询路径——
+/// snapshot + datachange 主干必须始终可用（本测试现在就应绿）。
+#[tokio::test]
+async fn poll_impl_still_works() {
+    let (app, handle, lux, _watch, token) = test_app_tier("poll-guard", Tier::Poll).await;
+    seed(&lux, "devA", &[("t1", "1")], 1_700_000_000).await;
+    let tok = jwt(&app).await;
+    let mut stream = connect(&app, "?dev_id=devA&interval=100", &tok).await;
+    let buf1 = collect_window(&mut stream, std::time::Duration::from_millis(600)).await;
+    assert!(
+        buf1.contains("event: snapshot") && buf1.contains("devA.t1"),
+        "{buf1}"
+    );
+    seed(&lux, "devA", &[("t1", "9")], 1_700_000_100).await;
+    let buf2 = collect_window(&mut stream, std::time::Duration::from_millis(1500)).await;
+    assert!(
+        buf2.contains("event: datachange") && buf2.contains("devA.t1") && buf2.contains("9"),
+        "{buf2}"
+    );
+    token.cancel();
     common::stop_lux(handle).await;
 }

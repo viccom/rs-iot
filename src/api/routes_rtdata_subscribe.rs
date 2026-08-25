@@ -12,7 +12,12 @@
 //! interval）；断线重连即重新 snapshot 全量重同步。pipeline / event_bus 零改动
 //! ——现有 `/api/v1/events` 与 lua_transform 订阅面不受影响。
 
-use crate::api::{hgetall, routes_rtdata::tag_of, AppState};
+use crate::api::{
+    hgetall,
+    routes_rtdata::tag_of,
+    rtdata_watch::{Dirty, RtdataWatchService},
+    AppState,
+};
 use axum::extract::{Query, State};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::IntoResponse;
@@ -151,6 +156,104 @@ async fn read_scope(
     out
 }
 
+// ---------- ksub 读源（Task 5，D8/P7：dirty-set 精准读） ----------
+
+/// ksub tick 读源结果（与 `read_scope` 返回同构；P7）。
+#[derive(Debug)]
+enum ReadOutcome {
+    /// epoch 变更（Lagged 重同步）：全量重读 + 重建后的新 epoch（游标已在
+    /// `read_delta` 内重建——先快照后全量读，之后的 mark 版本 > 游标不丢帧）。
+    Resync(
+        u64,
+        Vec<(String, serde_json::Map<String, serde_json::Value>)>,
+    ),
+    /// 仅脏设备（设备消失 = 空 map 保留键，`diff_scope` 自然出 removed，P9）。
+    Partial(Vec<(String, serde_json::Map<String, serde_json::Value>)>),
+}
+
+/// ksub tick 读源：`dirty_since` 增量查询 → 脏设备精准 HGETALL（替代每 tick
+/// 全量 `read_scope`；tick 节奏与 `diff_scope` 冻结不动，P7）。
+///
+/// - `Dirty::Delta` → 脏集 ∩ dev_filter（None = 全部脏设备）逐设备 HGETALL →
+///   `Partial`（设备已删时 HGETALL 得空 map，保留键让 diff_scope 出 removed）；
+/// - `Dirty::Full`（epoch 变更）→ **先**重建游标（`snapshot_versions` + 当前
+///   epoch）**再**全量重读 → `Resync`（新 epoch 随结果返回，调用方更新 last_epoch）。
+async fn read_delta(
+    lux: &lux::EmbeddedClient,
+    watch: &RtdataWatchService,
+    dev_filter: &Option<HashSet<String>>,
+    last_versions: &mut HashMap<String, u64>,
+    last_epoch: u64,
+) -> ReadOutcome {
+    match watch.dirty_since(last_versions, last_epoch) {
+        Dirty::Full => {
+            // 游标重建先于全量读：快照之后的 mark 版本 > 游标，下次 tick 报脏
+            // 重读——重同步窗口内的写不丢帧（P7）。
+            *last_versions = watch.snapshot_versions();
+            let epoch = watch.epoch();
+            ReadOutcome::Resync(epoch, read_scope(lux, dev_filter).await)
+        }
+        Dirty::Delta(devs) => {
+            let selected: Vec<String> = match dev_filter {
+                Some(set) => devs.into_iter().filter(|d| set.contains(d)).collect(),
+                None => devs,
+            };
+            let mut out = Vec::with_capacity(selected.len());
+            for dev in selected {
+                let obj = hgetall(lux, &format!("rtdata:{dev}")).await;
+                let m = match obj {
+                    serde_json::Value::Object(m) => m,
+                    // 设备消失/异常：空 map 保留键（diff_scope 出 removed，P9）。
+                    _ => serde_json::Map::new(),
+                };
+                out.push((dev, m));
+            }
+            ReadOutcome::Partial(out)
+        }
+    }
+}
+
+/// field（`<devid>.<tag>`，tag 为末段，与 `tag_of` 互补）→ devid 段。
+/// 无点 field 原样返回（`tag_key` 的 contains 分支无前缀，反解析不可得——
+/// 保守归为自身，最多漏判归属，不误报）。
+fn dev_segment(field: &str) -> &str {
+    match field.rsplit_once('.') {
+        Some((dev, _)) => dev,
+        None => field,
+    }
+}
+
+/// ksub `Partial` 基线投影：`last_sent` 限制到脏设备域（field 的 devid 段 ∈
+/// 脏集）。非脏设备数据未变，不参与本轮变更/删除判定——若直接喂全量基线，
+/// 非脏域 field 会全部误判 removed（R3 等价漂移）。
+fn project_baseline(
+    last_sent: &HashMap<String, String>,
+    scope: &[(String, serde_json::Map<String, serde_json::Value>)],
+) -> HashMap<String, String> {
+    let dirty: HashSet<&str> = scope.iter().map(|(d, _)| d.as_str()).collect();
+    last_sent
+        .iter()
+        .filter(|(f, _)| dirty.contains(dev_segment(f)))
+        .map(|(f, v)| (f.clone(), v.clone()))
+        .collect()
+}
+
+/// 组装喂 `diff_scope` 的 current：(dev, points) 列表 → tag 过滤 →
+/// field → (值串, cell)。poll / ksub 两读源共用（R3：diff 输入同构）。
+fn collect_current(
+    scope: Vec<(String, serde_json::Map<String, serde_json::Value>)>,
+    tag: Option<&str>,
+) -> HashMap<String, (String, serde_json::Value)> {
+    let mut current: HashMap<String, (String, serde_json::Value)> = HashMap::new();
+    for (_dev, points) in scope {
+        for (field, cell) in filter_by_tag(points, tag) {
+            let v = value_str(&cell);
+            current.insert(field, (v, cell));
+        }
+    }
+    current
+}
+
 /// `GET /api/v1/rtdatas/subscribe`：OPC UA 式实时数据订阅（SSE）。
 ///
 /// 连接建立：snapshot 逐设备全量推送 + 建基线；之后每 interval 读侧 diff，
@@ -167,16 +270,25 @@ pub async fn subscribe(State(st): State<AppState>, Query(q): Query<SubQuery>) ->
     );
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(8);
     let lux = st.lux.clone();
+    let watch = st.rtdata_watch.clone();
+    let sub_impl = st.config.rtdata.sub_impl;
     tokio::spawn(async move {
-        run(&lux, dev_filter, tag_filter, interval, tx).await;
+        run(&lux, &watch, sub_impl, dev_filter, tag_filter, interval, tx).await;
         tracing::debug!("[rtdata-subscribe] client disconnected");
     });
     Sse::new(ReceiverStream::new(rx)).keep_alive(KeepAlive::default())
 }
 
 /// producer 主体：snapshot（Phase 1）+ 周期 diff（Phase 2）。tx 断（客户端断开）即返回。
+///
+/// Phase 2 读源双 impl（P8）：ksub → `read_delta` dirty-set 精准读（P7/D8）；
+/// poll → 原 `read_scope` 轮询路径（逐字保留，回退开关）。两分支组装出同构
+/// current 喂同一 `diff_scope`（一行不动），帧逻辑等价（R3/P11）。
+#[allow(clippy::too_many_arguments)]
 async fn run(
     lux: &lux::EmbeddedClient,
+    watch: &RtdataWatchService,
+    sub_impl: crate::config::SubImpl,
     dev_filter: Option<HashSet<String>>,
     tag_filter: Option<String>,
     interval: Duration,
@@ -204,20 +316,43 @@ async fn run(
         }
     }
 
+    // ---- ksub 游标基线（P7）：snapshot 阶段已全量读过、last_sent 就位——
+    // 游标取 watch 全表快照 + 当前 epoch（snapshot 期间已发生的 mark 不再触发
+    // 重读，首个 tick 只看此后新事件）。poll 档不消费版本表，保持原语义。----
+    let mut last_versions = watch.snapshot_versions();
+    let mut last_epoch = watch.epoch();
+
     // ---- Phase 2: 周期 diff（值变/删除才推）----
     let mut ticker = tokio::time::interval(interval);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     ticker.tick().await; // interval 首拍立即完成——快照刚读，消费掉跳过
     loop {
         ticker.tick().await;
-        let mut current: HashMap<String, (String, serde_json::Value)> = HashMap::new();
-        for (_dev, points) in read_scope(lux, &dev_filter).await {
-            for (field, cell) in filter_by_tag(points, tag) {
-                let v = value_str(&cell);
-                current.insert(field, (v, cell));
+        let (changes, removed) = match sub_impl {
+            // poll：原轮询路径逐字保留（P8 回退开关）。
+            crate::config::SubImpl::Poll => {
+                let current = collect_current(read_scope(lux, &dev_filter).await, tag);
+                diff_scope(current, &last_sent)
             }
-        }
-        let (changes, removed) = diff_scope(current, &last_sent);
+            // ksub：dirty-set 精准读（D8/P7）——只 HGETALL 落后设备。
+            crate::config::SubImpl::Ksub => {
+                match read_delta(lux, watch, &dev_filter, &mut last_versions, last_epoch).await {
+                    ReadOutcome::Resync(epoch, scope) => {
+                        // Lagged 重同步：全量重读 + 游标已重建，收下新 epoch。
+                        last_epoch = epoch;
+                        let current = collect_current(scope, tag);
+                        diff_scope(current, &last_sent)
+                    }
+                    ReadOutcome::Partial(scope) => {
+                        // current 只含脏设备 field：基线投影到脏设备域（非脏设备
+                        // 数据未变不参与判定；直接喂全量基线会整域误报 removed）。
+                        let proj = project_baseline(&last_sent, &scope);
+                        let current = collect_current(scope, tag);
+                        diff_scope(current, &proj)
+                    }
+                }
+            }
+        };
         // 基线更新（变更覆盖 + 删除移除），与推帧解耦——推帧失败即退出无需回滚。
         for (field, cell) in &changes {
             last_sent.insert(field.clone(), value_str(cell));
@@ -363,5 +498,108 @@ mod tests {
         let m2: serde_json::Map<String, serde_json::Value> =
             [("a.b".to_string(), json!(1))].into_iter().collect();
         assert_eq!(filter_by_tag(m2, None).len(), 1);
+    }
+
+    // ---------- ksub 读源 read_delta（Task 5 单元层红门，真 lux） ----------
+
+    use crate::api::rtdata_watch::RtdataWatchService;
+
+    /// 单测 lux 基建（照 src/db/rtdata.rs tests 的 start_lux 形态：独立临时
+    /// 目录 + 端口 0，handle RAII 退出）。
+    async fn start_lux(name: &str) -> (lux::ServerHandle, lux::EmbeddedClient) {
+        let dir =
+            std::env::temp_dir().join(format!("sub-delta-test-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut sc = lux::ServerConfig::default();
+        sc.port = 0; // OS 分配空闲端口，避免与运行中 rs-iot/redis 冲突
+        sc.data_dir = dir.to_str().unwrap().to_string();
+        sc.storage = lux::StorageConfig {
+            mode: lux::StorageMode::Tiered,
+            dir: sc.data_dir.clone(),
+        };
+        sc.save_interval = std::time::Duration::from_secs(60);
+        let h = lux::run_with_config(sc).await.unwrap();
+        let c = h.client();
+        (h, c)
+    }
+
+    /// 铺一设备点位：HSET rtdata:<dev>，field 形如 <dev>.<tag>，cell 为
+    /// `[ts, localTime, value]` JSON 串（与 db::rtdata::write_batch 同构）。
+    async fn seed_rtdata(lux: &lux::EmbeddedClient, dev: &str, pts: &[(&str, &str)]) {
+        let key = format!("rtdata:{dev}");
+        let mut args: Vec<String> = vec![key];
+        for (t, v) in pts {
+            args.push(format!("{dev}.{t}"));
+            args.push(json!([1, "lt", v]).to_string());
+        }
+        let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        lux.execute("HSET", &refs).await.unwrap();
+    }
+
+    /// Partial 只读脏设备：3 设备铺数 → mark 仅 devA → read_delta 返回只含
+    /// devA；再 mark devB → 只含 devB（devA 游标已被上次查询推进，P7）。
+    #[tokio::test]
+    async fn read_delta_only_reads_dirty_devices() {
+        let (_handle, lux) = start_lux("dirty").await;
+        let watch = RtdataWatchService::new();
+        for dev in ["devA", "devB", "devC"] {
+            seed_rtdata(&lux, dev, &[("t1", "1")]).await;
+        }
+
+        watch.mark("devA");
+        let mut last: HashMap<String, u64> = HashMap::new();
+        match read_delta(&lux, &watch, &None, &mut last, watch.epoch()).await {
+            ReadOutcome::Partial(scope) => {
+                assert_eq!(scope.len(), 1, "只读脏设备 devA: {scope:?}");
+                assert_eq!(scope[0].0, "devA");
+                assert!(scope[0].1.contains_key("devA.t1"), "{scope:?}");
+            }
+            other => panic!("无 epoch 变更应为 Partial: {other:?}"),
+        }
+
+        // devA 游标已推进：mark devB 后本轮只读 devB。
+        watch.mark("devB");
+        match read_delta(&lux, &watch, &None, &mut last, watch.epoch()).await {
+            ReadOutcome::Partial(scope) => {
+                assert_eq!(scope.len(), 1, "devA 已追平，只读新脏 devB: {scope:?}");
+                assert_eq!(scope[0].0, "devB");
+            }
+            other => panic!("无 epoch 变更应为 Partial: {other:?}"),
+        }
+    }
+
+    /// epoch 变更（Lagged 重同步，P7）→ 全量重读 Resync：含全部设备 + 新 epoch；
+    /// 游标已重建——同 epoch 再查无脏。
+    #[tokio::test]
+    async fn read_delta_epoch_bump_resync() {
+        let (_handle, lux) = start_lux("resync").await;
+        let watch = RtdataWatchService::new();
+        for dev in ["devA", "devB", "devC"] {
+            seed_rtdata(&lux, dev, &[("t1", "1")]).await;
+        }
+
+        watch.bump_epoch();
+        let mut last: HashMap<String, u64> = HashMap::new();
+        let new_epoch = match read_delta(&lux, &watch, &None, &mut last, 0).await {
+            ReadOutcome::Resync(epoch, scope) => {
+                assert!(epoch >= 1, "新 epoch 随 Resync 返回: {epoch}");
+                let devs: Vec<&str> = scope.iter().map(|(d, _)| d.as_str()).collect();
+                assert_eq!(devs.len(), 3, "全量重读含全部设备: {devs:?}");
+                for dev in ["devA", "devB", "devC"] {
+                    assert!(devs.contains(&dev), "Resync 应含 {dev}: {devs:?}");
+                }
+                epoch
+            }
+            other => panic!("epoch 变更应为 Resync: {other:?}"),
+        };
+
+        // 游标已重建为当前快照：同 epoch 再查 → Partial 空集。
+        match read_delta(&lux, &watch, &None, &mut last, new_epoch).await {
+            ReadOutcome::Partial(scope) => {
+                assert!(scope.is_empty(), "游标已重建应无脏: {scope:?}")
+            }
+            other => panic!("epoch 一致应为 Partial: {other:?}"),
+        }
     }
 }
