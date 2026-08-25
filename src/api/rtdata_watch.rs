@@ -31,6 +31,25 @@ pub enum Dirty {
     Full,
 }
 
+/// ksub 连接游标（P7）：版本表基线 + epoch + marks 三元组。经 [`RtdataWatchService::
+/// cursor`] 建立与重建（`dirty_since` 消费推进）。
+#[derive(Debug, Clone)]
+pub struct WatchCursor {
+    /// 版本表基线（per-devid 已见版本）。
+    versions: HashMap<String, u64>,
+    /// 建立时的全局 epoch。
+    epoch: u64,
+    /// 建立时的 marks 计数（O(1) 早退判据）。
+    marks: u64,
+}
+
+impl WatchCursor {
+    /// 建立时的全局 epoch（Resync 返回值/日志用）。
+    pub fn epoch(&self) -> u64 {
+        self.epoch
+    }
+}
+
 /// key 事件消费与版本表状态（内部 `Mutex` 只做短临界区，锁内无 await）。
 #[derive(Debug, Default)]
 pub struct RtdataWatchService {
@@ -38,6 +57,10 @@ pub struct RtdataWatchService {
     versions: Mutex<HashMap<String, u64>>,
     /// 全局重同步代际：Lagged → +1（P7）。
     epoch: AtomicU64,
+    /// 版本表内容代号：每次 mark 与 backfill 新增设备 +1（**与表变更同一
+    /// 锁临界区内递增**——marks 与表状态对齐是 `dirty_since` O(1) 早退
+    /// 正确性的前提：marks 相等 ⇔ 表自游标建立后无任何变更）。
+    marks: AtomicU64,
 }
 
 impl RtdataWatchService {
@@ -53,6 +76,8 @@ impl RtdataWatchService {
     pub fn mark(&self, devid: &str) {
         let mut v = self.versions.lock().expect("rtdata_watch versions 锁中毒");
         *v.entry(devid.to_string()).or_insert(0) += 1;
+        // 与表变更同临界区递增（见字段注释的对齐不变量）。
+        self.marks.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Lagged 重同步信号：全局 epoch +1。持有旧 epoch 的连接据此转全量重读（P7）。
@@ -74,14 +99,27 @@ impl RtdataWatchService {
             .copied()
     }
 
-    /// 版本表快照（P7 游标基线）：ksub 连接 snapshot 阶段后初始化 `last_versions`，
-    /// 或 Lagged 重同步后重建——调用方须**先**取快照再全量读（之后的 mark 版本 >
-    /// 游标，下次 tick 报脏，不丢帧）。返回拷贝，与表后续变更隔离。
+    /// 版本表快照（P7 游标基线）：返回拷贝，与表后续变更隔离。
     pub fn snapshot_versions(&self) -> HashMap<String, u64> {
         self.versions
             .lock()
             .expect("rtdata_watch versions 锁中毒")
             .clone()
+    }
+
+    /// 游标快照（P7）：版本表 + epoch + marks 三元组，ksub 连接 snapshot 阶段
+    /// **之前**初始化、Lagged 重同步后重建——调用方须**先**取快照再全量读
+    /// （之后的 mark 版本 > 游标，下次 tick 报脏，不丢帧）。
+    pub fn cursor(&self) -> WatchCursor {
+        let versions = self.versions
+            .lock()
+            .expect("rtdata_watch versions 锁中毒");
+        // 锁内读 marks：versions 快照与 marks 计数对齐（同临界区不变量）。
+        WatchCursor {
+            versions: versions.clone(),
+            epoch: self.epoch(),
+            marks: self.marks.load(Ordering::Relaxed),
+        }
     }
 
     /// 版本表设备数（设备注册表口径，P9）。
@@ -93,21 +131,32 @@ impl RtdataWatchService {
     }
 
     /// 脏集增量查询（P7）：epoch 不等 → `Dirty::Full`（**不动游标**——调用方
-    /// 全量重读后自行重建）；相等 → 收集版本表中"新出现或版本 > last"的设备，
-    /// 并把其版本写回 `last_versions`（游标副作用：无新事件则下次查询为空集）。
-    pub fn dirty_since(&self, last_versions: &mut HashMap<String, u64>, last_epoch: u64) -> Dirty {
-        if self.epoch() != last_epoch {
+    /// 全量重读后 `cursor()` 重建）；相等且 marks 相等 → **O(1) 早退**空 Delta
+    /// （表自游标建立后无任何 mark/backfill 变更，免全表扫描——每连接每 tick
+    /// 从 O(N) 降到 O(1)，N×M 并发订阅下显著）；否则锁内收集"新出现或版本 >
+    /// 游标"的设备并推进游标（游标副作用：无新事件则下次查询为空集）。
+    pub fn dirty_since(&self, cur: &mut WatchCursor) -> Dirty {
+        if self.epoch() != cur.epoch {
             return Dirty::Full;
         }
+        // O(1) 早退：marks 与表状态锁内对齐（mark/backfill 同临界区递增），
+        // 相等即无任何变更——不进锁不全扫。
+        if self.marks.load(Ordering::Relaxed) == cur.marks {
+            return Dirty::Delta(Vec::new());
+        }
         let versions = self.versions.lock().expect("rtdata_watch versions 锁中毒");
+        // 锁内定格 marks：精确对应本次扫描到的表状态（锁释放后的新 mark 会
+        // 使 marks 再次超前，下轮报脏，不丢帧）。
+        let current_marks = self.marks.load(Ordering::Relaxed);
         let mut dirty = Vec::new();
         for (devid, ver) in versions.iter() {
-            if last_versions.get(devid).is_some_and(|last| *last >= *ver) {
+            if cur.versions.get(devid).is_some_and(|last| *last >= *ver) {
                 continue; // 版本已追平，不脏
             }
             dirty.push(devid.clone());
-            last_versions.insert(devid.clone(), *ver);
+            cur.versions.insert(devid.clone(), *ver);
         }
+        cur.marks = current_marks;
         Dirty::Delta(dirty)
     }
 
@@ -133,7 +182,14 @@ impl RtdataWatchService {
                 _ => continue,
             };
             if let Some(devid) = name.strip_prefix("rtdata:") {
-                v.entry(devid.to_string()).or_insert(0);
+                // 新设备入表（游标 last 无记录即报脏）——marks 同临界区 +1，
+                // 否则 O(1) 早退会吞掉 backfill 新增；已有设备不动。
+                if let std::collections::hash_map::Entry::Vacant(e) =
+                    v.entry(devid.to_string())
+                {
+                    e.insert(0);
+                    self.marks.fetch_add(1, Ordering::Relaxed);
+                }
             }
         }
     }
@@ -252,29 +308,30 @@ mod tests {
         assert_eq!(svc.version("b"), None);
     }
 
-    /// dirty_since 增量语义:落后才报脏;查询推进 last_versions(下次无新事件
-    /// 则无脏);新设备(last 无记录)报脏。
+    /// dirty_since 增量语义:落后才报脏;查询推进游标(下次无新事件
+    /// 则无脏);新设备(游标无记录)报脏。
     #[test]
     fn watch_dirty_delta() {
         let svc = RtdataWatchService::new();
+        // 游标先于事件建立(真实序:连接建游标在前,事件在后)。
+        let mut cur = svc.cursor();
         svc.mark("a");
         svc.mark("a"); // 同设备两次事件,仍只报一个脏设备(集合语义)
-        let mut last = HashMap::new();
 
-        match svc.dirty_since(&mut last, svc.epoch()) {
+        match svc.dirty_since(&mut cur) {
             Dirty::Delta(v) => assert_eq!(v, vec!["a".to_string()]),
             Dirty::Full => panic!("epoch 未变应为 Delta"),
         }
 
-        // last 已被 dirty_since 推进 → 无新事件时再查无脏
-        match svc.dirty_since(&mut last, svc.epoch()) {
+        // 游标已被 dirty_since 推进 → 无新事件时再查无脏
+        match svc.dirty_since(&mut cur) {
             Dirty::Delta(v) => assert!(v.is_empty(), "无新脏设备,却报了 {v:?}"),
             Dirty::Full => panic!("epoch 未变应为 Delta"),
         }
 
-        // 新设备(last 无记录且版本表有)→ Delta 含之
+        // 新设备(游标无记录且版本表有)→ Delta 含之
         svc.mark("b");
-        match svc.dirty_since(&mut last, svc.epoch()) {
+        match svc.dirty_since(&mut cur) {
             Dirty::Delta(v) => assert!(v.contains(&"b".to_string()), "新设备应报脏: {v:?}"),
             Dirty::Full => panic!("epoch 未变应为 Delta"),
         }
@@ -290,10 +347,39 @@ mod tests {
         svc.bump_epoch();
         assert!(svc.epoch() > e0, "bump_epoch 后全局 epoch 递增");
 
-        let mut last = HashMap::new();
-        last.insert("a".to_string(), svc.version("a").unwrap());
-        let d = svc.dirty_since(&mut last, e0);
+        let mut cur = WatchCursor {
+            versions: HashMap::from([("a".to_string(), svc.version("a").unwrap())]),
+            epoch: e0,
+            marks: 0,
+        };
+        let d = svc.dirty_since(&mut cur);
         assert!(matches!(d, Dirty::Full), "epoch 变更强制 Full");
+    }
+
+    /// WatchCursor 游标族(P7 + marks O(1) 早退):cursor() 三元组快照;
+    /// dirty_since 快路径(marks 相等)后新 mark 不得被早退吞掉——marks 与表
+    /// 状态在锁内对齐是早退正确性的前提。
+    #[test]
+    fn watch_cursor_marks_alignment() {
+        let svc = RtdataWatchService::new();
+        // 游标先建立(空表),事件在后——游标建立后的变更才在报脏范围内。
+        let mut cur = svc.cursor();
+        svc.mark("a");
+        match svc.dirty_since(&mut cur) {
+            Dirty::Delta(v) => assert_eq!(v, vec!["a".to_string()]),
+            Dirty::Full => panic!("epoch 未变应为 Delta"),
+        }
+        // 无新事件:空 Delta(marks 相等 O(1) 早退路径)。
+        match svc.dirty_since(&mut cur) {
+            Dirty::Delta(v) => assert!(v.is_empty(), "无新事件应无脏: {v:?}"),
+            Dirty::Full => panic!("epoch 未变应为 Delta"),
+        }
+        // 快路径空查询之后的新 mark:marks 已推进,不得被早退吞掉。
+        svc.mark("a");
+        match svc.dirty_since(&mut cur) {
+            Dirty::Delta(v) => assert_eq!(v, vec!["a".to_string()], "新事件须报脏: {v:?}"),
+            Dirty::Full => panic!("epoch 未变应为 Delta"),
+        }
     }
 
     /// 新服务 epoch 从 0 起步(未发生 Lagged/重同步时恒 0)。

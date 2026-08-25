@@ -15,7 +15,7 @@
 use crate::api::{
     hgetall,
     routes_rtdata::tag_of,
-    rtdata_watch::{Dirty, RtdataWatchService},
+    rtdata_watch::{Dirty, RtdataWatchService, WatchCursor},
     AppState,
 };
 use axum::extract::{Query, State};
@@ -176,21 +176,20 @@ enum ReadOutcome {
 ///
 /// - `Dirty::Delta` → 脏集 ∩ dev_filter（None = 全部脏设备）逐设备 HGETALL →
 ///   `Partial`（设备已删时 HGETALL 得空 map，保留键让 diff_scope 出 removed）；
-/// - `Dirty::Full`（epoch 变更）→ **先**重建游标（`snapshot_versions` + 当前
-///   epoch）**再**全量重读 → `Resync`（新 epoch 随结果返回，调用方更新 last_epoch）。
+/// - `Dirty::Full`（epoch 变更）→ **先**重建游标（`cursor()` 三元组快照）**再**
+///   全量重读 → `Resync`（新 epoch 随结果返回，调用方更新游标）。
 async fn read_delta(
     lux: &lux::EmbeddedClient,
     watch: &RtdataWatchService,
     dev_filter: &Option<HashSet<String>>,
-    last_versions: &mut HashMap<String, u64>,
-    last_epoch: u64,
+    cursor: &mut WatchCursor,
 ) -> ReadOutcome {
-    match watch.dirty_since(last_versions, last_epoch) {
+    match watch.dirty_since(cursor) {
         Dirty::Full => {
             // 游标重建先于全量读：快照之后的 mark 版本 > 游标，下次 tick 报脏
             // 重读——重同步窗口内的写不丢帧（P7）。
-            *last_versions = watch.snapshot_versions();
-            let epoch = watch.epoch();
+            *cursor = watch.cursor();
+            let epoch = cursor.epoch();
             ReadOutcome::Resync(epoch, read_scope(lux, dev_filter).await)
         }
         Dirty::Delta(devs) => {
@@ -296,14 +295,13 @@ async fn run(
     let tag = tag_filter.as_deref();
     let mut last_sent: HashMap<String, String> = HashMap::new();
 
-    // ---- ksub 游标基线（P7）：必须在 snapshot **之前**取（`snapshot_versions`
-    // 文档语义："先取快照再全量读"）——snapshot 期间发生的 mark 版本 > 游标，
-    // 首 tick 报脏重读，不丢帧（值与基线相同则 diff 静默无帧，无代价）。
-    // 若后置到 snapshot 之后，半程中已推设备的 mark 会被游标吸收，该变更
-    // 永不推送（ksub_change_during_snapshot_not_lost 反压构造锚定）。poll 档
-    // 不消费版本表，保持原语义。----
-    let mut last_versions = watch.snapshot_versions();
-    let mut last_epoch = watch.epoch();
+    // ---- ksub 游标基线（P7）：必须在 snapshot **之前**取（`cursor` 文档语义：
+    // "先取快照再全量读"）——snapshot 期间发生的 mark 版本 > 游标，首 tick 报
+    // 脏重读，不丢帧（值与基线相同则 diff 静默无帧，无代价）。若后置到
+    // snapshot 之后，半程中已推设备的 mark 会被游标吸收，该变更永不推送
+    // （ksub_change_during_snapshot_not_lost 反压构造锚定）。poll 档不消费
+    // 版本表，保持原语义。----
+    let mut cursor = watch.cursor();
 
     // ---- Phase 1: snapshot（逐设备一帧，建基线）----
     for (dev, points) in read_scope(lux, &dev_filter).await {
@@ -338,10 +336,10 @@ async fn run(
             }
             // ksub：dirty-set 精准读（D8/P7）——只 HGETALL 落后设备。
             crate::config::SubImpl::Ksub => {
-                match read_delta(lux, watch, &dev_filter, &mut last_versions, last_epoch).await {
-                    ReadOutcome::Resync(epoch, scope) => {
-                        // Lagged 重同步：全量重读 + 游标已重建，收下新 epoch。
-                        last_epoch = epoch;
+                match read_delta(lux, watch, &dev_filter, &mut cursor).await {
+                    ReadOutcome::Resync(_epoch, scope) => {
+                        // Lagged 重同步：全量重读；游标已在 read_delta 内重建
+                        // （新 epoch 含于游标，返回值仅供日志/测试观察）。
                         let current = collect_current(scope, tag);
                         diff_scope(current, &last_sent)
                     }
@@ -549,9 +547,11 @@ mod tests {
             seed_rtdata(&lux, dev, &[("t1", "1")]).await;
         }
 
+        // 游标先于事件建立(真实序:连接建游标在前,事件在后)——mark 后游标
+        // 即落后,首查报脏。
+        let mut cur = watch.cursor();
         watch.mark("devA");
-        let mut last: HashMap<String, u64> = HashMap::new();
-        match read_delta(&lux, &watch, &None, &mut last, watch.epoch()).await {
+        match read_delta(&lux, &watch, &None, &mut cur).await {
             ReadOutcome::Partial(scope) => {
                 assert_eq!(scope.len(), 1, "只读脏设备 devA: {scope:?}");
                 assert_eq!(scope[0].0, "devA");
@@ -562,7 +562,7 @@ mod tests {
 
         // devA 游标已推进：mark devB 后本轮只读 devB。
         watch.mark("devB");
-        match read_delta(&lux, &watch, &None, &mut last, watch.epoch()).await {
+        match read_delta(&lux, &watch, &None, &mut cur).await {
             ReadOutcome::Partial(scope) => {
                 assert_eq!(scope.len(), 1, "devA 已追平，只读新脏 devB: {scope:?}");
                 assert_eq!(scope[0].0, "devB");
@@ -581,9 +581,10 @@ mod tests {
             seed_rtdata(&lux, dev, &[("t1", "1")]).await;
         }
 
+        // 游标先建(epoch=0),再 bump——持有旧 epoch 的游标转 Full(真实序)。
+        let mut cur = watch.cursor();
         watch.bump_epoch();
-        let mut last: HashMap<String, u64> = HashMap::new();
-        let new_epoch = match read_delta(&lux, &watch, &None, &mut last, 0).await {
+        let new_epoch = match read_delta(&lux, &watch, &None, &mut cur).await {
             ReadOutcome::Resync(epoch, scope) => {
                 assert!(epoch >= 1, "新 epoch 随 Resync 返回: {epoch}");
                 let devs: Vec<&str> = scope.iter().map(|(d, _)| d.as_str()).collect();
@@ -597,7 +598,8 @@ mod tests {
         };
 
         // 游标已重建为当前快照：同 epoch 再查 → Partial 空集。
-        match read_delta(&lux, &watch, &None, &mut last, new_epoch).await {
+        assert_eq!(cur.epoch(), new_epoch, "游标含新 epoch");
+        match read_delta(&lux, &watch, &None, &mut cur).await {
             ReadOutcome::Partial(scope) => {
                 assert!(scope.is_empty(), "游标已重建应无脏: {scope:?}")
             }
