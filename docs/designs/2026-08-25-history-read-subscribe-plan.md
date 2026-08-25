@@ -174,9 +174,13 @@ cd frontend && npm run build && npm run test -- --run   # 零前端改动也应�
 | R3 | 等价漂移 | 双 impl 参数化全套 e2e(P11);diff_scope 纯函数一行不动——**裁决兑现**:4 主干 e2e 双档逐字一致全绿 + read_delta 单元红门 2 测锁"只读脏设备/epoch 重同步";poll 分支原路径保留,漂移可随时暴露 |
 | R4 | 桶 origin=查询 start 的怪语义 | 文档化(P10);fork 修正是 backlog |
 | R5 | AppState 16 测试点 × 2 字段机械改动 | 一次性机械补 None,编译器兜底 |
-| R6 | spawn_blocking 读在 SSE/高并发下的线程池占用 | raw 有 limit 上限 100000 兜底;Phase 4 三线同场再验 |
+| R6 | spawn_blocking 读在 SSE/高并发下的线程池占用;downsample 大窗全窗聚合读放大 | raw 有 limit 上限 100000 + `select_raw_series_page` 分页早停兜底;**审查修复补桶数护栏** `(end-start)/interval > 100000` → 400(2026-08-26);Phase 4 三线同场再验 |
 | R7 | /events(EventBus)路径 50 dev 截断/丢帧问题 | 明确不在本 Phase(独立机制,前端在用);登记 Phase 4 评估反哺 |
 | R8 | U64 Count 值 > i64::MAX | 饱和转换,文档登记(现实中不可达) |
+| R9 | ts 出秒 `ts_ms / 1000` 对负时间戳(1970 前)向零截断,方向与正数不一致 | 理论边界(REST 秒基线场景不可达),登记不处理(审查 Low,2026-08-26) |
+| R10 | 版本表不删项(设计声明"表即注册表")——脏键/历史键可致无界增长 | IoT 网关设备量级可控,登记;恶化时加 TTL/容量逐出(审查 Low,2026-08-26) |
+| R11 | ksub Partial 分支逐设备串行 HGETALL,脏集大时单 tick 耗时长 | embedded lux 进程内延迟低 + MissedTickBehavior::Skip 兜底;backlog:脏集大时 join_all 并行(审查 Low,2026-08-26 登记) |
+| R12 | tag 名含点使 `dev_segment` 按最后点切分误归设备域(ksub 增量投影路径) | 表现为删→重推抖动,不丢数据;rest-api.md §4.14 声明 tag 不含点约束(审查 Low,2026-08-26) |
 
 ## 三、验收记录(2026-08-25 收口回填,均为真实运行输出)
 
@@ -187,3 +191,15 @@ cd frontend && npm run build && npm run test -- --run   # 零前端改动也应�
 - **bench A/B(watcher 常驻成本,R1/D8 守门)**:`RSIOT_BENCH_HISTORY=on` 下 `RSIOT_BENCH_SUB=poll` vs `ksub`(release,交替):poll 2,049,604 vs ksub 2,080,990 pts/s(mean)——**-1.5%**(<5% 门禁过;ksub 反而略快系噪声内,单轮方差大于该差值,结论以"无劣化"计,不声称 ksub 更快)。
 - **watcher 事件消费佐证**:bench ksub 档收尾输出 `watcher device_count=100 / 100`(= N_DEVID 100)——版本表即设备注册表,全量设备入表即证 watcher 真在收 HSET key 事件(非空转常驻)。
 - **全量门禁**(T6,2026-08-25,worktree feat/history-read-sub 全部真实输出):`cargo fmt --all --check` 通过;clippy 双档(`-D warnings`,默认 + `--features history`)均 Finished 零警告;`cargo test -j 2 --all-targets --all-features` exit 0(27 个测试目标全绿,含上述三文件);`cargo test -j 2 --no-default-features --features lua` exit 0(裁剪档+Doc-tests);前端 `npm ci && npm run build` 产 dist(gateway rust-embed 依赖)+ `npm run test -- --run` 14 文件 168 测全过(基线无回归);`python scripts/check_docs.py` OK(51 md)。
+
+## 四、审查修复记录(2026-08-26,worktree fix/phase2-review,Phase 2 深度审查后修复包)
+
+审查发现 2 High + 3 Medium + 6 Low,逐一处置(红→绿证据均为真实输出):
+
+- **High#1 连接建立期丢帧窗口**:`run()` 游标基线后置到 snapshot 之后,snapshot 半程中已推设备的 mark 被游标吸收,变更永不推送。修复:游标初始化前移到 snapshot 之前(`cursor()` 文档语义"先取快照再全量读")。红门 e2e `ksub_change_during_snapshot_not_lost`(反压构造:20 设备 > SSE channel 容量 8,producer 阻塞在中途 send 时全量写新值,已推旧值的 ≥9 台丢帧窗口确定性打开)——修复前红(无 datachange),修复后绿;全套 subscribe e2e 11/11。
+- **High#2 watcher 异常退出静默冻结(违背 P7"退订异常→epoch+1")**:`Err(e)` 直接 break 后版本表停更,所有 ksub 连接 dirty_since 永空,静默冻结在旧值。修复:`classify_failure` 纯函数三分类(单测 `watch_failure_classification` 红→绿)——Lagged 原地继续/Closed 退出/其余 Restart:退订→bump_epoch→重铺 KEYS→退避 1s→重建 ksubscribe。e2e `watch_service_respawn_recovers` 锁重启机制在真 lux 可用(backfill 补断订窗口设备+重建订阅消费新事件)。
+- **Med#3 interval `as i64` 负值绕过溢出校验**:u64::MAX→-1→-1000ms 负桶宽下推(原靠 tsink InvalidConfiguration 兜底改文案)。修复 `i64::try_from` 拒域外值;400 矩阵补 case 先红(200 打到 FakeReader)后绿。
+- **Med#4 downsample 大窗读放大无护栏**:R6 补桶数护栏 `(end-start)/interval > 100000` → 400(rest-api.md §4.18.1 参数表同步)。
+- **Med#5 dirty_since 每连接每 tick O(N×M) 全表扫描**:marks 计数器与表变更同一锁临界区递增(mark/backfill 新增),`WatchCursor` 三元组(versions+epoch+marks)`cursor()` 锁内对齐快照;`dirty_since` O(1) 早退免锁免全扫,慢路径锁内定格 marks 精确对应扫描态不丢帧。单测 `watch_cursor_marks_alignment` 锚定快路径后新 mark 不被吞(红→绿;含一次测试自身时序修正——游标须先于事件建立,同真实序)。
+- **Low 处置**:400 矩阵补"interval 无 agg"case(既有校验缺覆盖);R9-R12 登记(ts 负截断/版本表不删项/串行 HGETALL backlog/tag 含点约束——rest-api.md §4.14 已声明);400 双形态(纯文本/JSON)文档已有,补客户端区分提示。
+- 门禁:lib 617/617、rtdata_subscribe_e2e 11/11、rtdata_watch_e2e 4/4、history_read_e2e 10/10;fmt/clippy 双档/minimal 见 merge commit。
