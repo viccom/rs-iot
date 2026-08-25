@@ -2,7 +2,7 @@
 
 > **状态**:implemented
 > **日期**:2026-08-25
-> **实施**:feat/history-write 分支,2026-08-25(merge commit 待主会话合并后补)
+> **实施**:feat/history-write → master(aedd1cf,no-ff merge),2026-08-25
 > **代码**:src/history/{mod,rows,writer,engine}.rs + host.rs/pipeline.rs/lib.rs/config.rs/error.rs 挂点
 > **测试**:单测 11(rows 5+engine 6)+writer 6+e2e 6(dataflow 2/write 2/kill 2)+config 4;四门禁数字见 §三
 > **遗留**:①非饱和白名单查表成本(off-idle -5.15%,§四-1)②writer 高基数排空速率剖析(§四-2)③cardinality 启动时刻校准不重算(R4,§四-3)

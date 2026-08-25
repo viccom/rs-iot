@@ -18,7 +18,7 @@
 | 可观测性（M4+P1） | — | [packet-trace](designs/2026-08-10-packet-trace-design.md)（部分实施）· [log-ringbuffer](designs/2026-08-10-log-ringbuffer-design.md)（已实施） | `src/io_trace.rs`、`src/log_ringbuffer.rs`、`src/api/routes_{metrics,trace,logs}.rs` | `tests/{trace,log,metrics}_e2e.rs` | [埋点规范](conventions/instrumentation-conventions.md)、[rest-api](reference/rest-api.md) §4.10+ |
 | AI 网关集成 | [技术选型](decisions/2026-08-12-gateway-tech-selection.md)（已实施） | [v3 设计](designs/2026-08-11-ai-agent-integration-v3-design.md)（已实施）→ [分层演进](designs/2026-08-18-multi-system-gateway-design.md)（**待实施**） | `crates/rsiot-gateway/`、`crates/rsiot-mcp/` | gateway/mcp crate 内单测 | [部署指南](ops/deploy-gateway-and-mcp.md) |
 | 设备模型注册表（物模型） | [元数据唯一来源决策](decisions/2026-08-25-device-model-registry.md)（已实施） | [四期实施计划](designs/2026-08-25-device-model-registry-plan.md)（**已实施**·M-1~M-4 全并） | M-1~M-4 全并入（`src/model/` 九模块 + 六插件模型驱动 + lua/sidecar v2 + 发现引擎 + tags 退役 + 前端四面板） | `tests/model_registry_e2e.rs` + `tests/tag_effective_e2e.rs` | 决策文档 §3 业界对标 |
-| 历史时序存储（tsink） | [tsink 选型决策](decisions/2026-08-24-history-storage-tsink-selection.md)（待实施·含实测对比） | [总设计与路线图](designs/2026-08-24-history-storage-master-plan.md)（待实施·ADR 权威版）→ [Tag Registry](designs/2026-08-24-tag-registry-plan.md)（已实施·Phase 1a 地基；tags 表于 M-4 退役被 devreg.overrides 吸收）→ [写路径 Phase 1b](designs/2026-08-25-history-write-path-plan.md)（已实施·四门禁全过，feat/history-write 待合并） | Phase 1b 写路径已实施：`src/history/`（读侧 effective() 缓存 = `src/model/cache.rs`）；读 API/订阅 Phase 2 待启动 | `tests/history_{dataflow,write,kill_recovery}_e2e.rs` + `tests/tag_effective_e2e.rs` | 决策文档附录（实测基线/工件位置） |
+| 历史时序存储（tsink） | [tsink 选型决策](decisions/2026-08-24-history-storage-tsink-selection.md)（待实施·含实测对比） | [总设计与路线图](designs/2026-08-24-history-storage-master-plan.md)（待实施·ADR 权威版）→ [Tag Registry](designs/2026-08-24-tag-registry-plan.md)（已实施·Phase 1a 地基；tags 表于 M-4 退役被 devreg.overrides 吸收）→ [写路径 Phase 1b](designs/2026-08-25-history-write-path-plan.md)（已实施·四门禁全过·已并 master aedd1cf） | Phase 1b 写路径已实施：`src/history/`（读侧 effective() 缓存 = `src/model/cache.rs`）；读 API/订阅 Phase 2 待启动 | `tests/history_{dataflow,write,kill_recovery}_e2e.rs` + `tests/tag_effective_e2e.rs` | 决策文档附录（实测基线/工件位置） |
 | 现场部署与测试 | — | — | `field-kit/` | `field-kit` e2e 脚本 | [field-e2e-windows](ops/field-e2e-windows.md) |
 
 ## guides/ — 开发与使用指南（怎么用/怎么开发）
@@ -78,7 +78,7 @@
 | [2026-08-24-history-storage-master-plan.md](designs/2026-08-24-history-storage-master-plan.md) | 历史时序存储总设计：三层开关/ADR 全表 D1-D10/Phase 1b-5 路线/tsink 语义陷阱/fork backlog/实测基线附录 | 待实施 |
 | [2026-08-25-device-model-registry-plan.md](designs/2026-08-25-device-model-registry-plan.md) | 设备模型注册表实施计划（devmodels/devreg/discoveries + 四期 M-1~M-4 TDD + 现状处置清单 + 新会话执行指引） | 已实施（M-1~M-4 全并） |
 | [2026-08-24-tag-registry-plan.md](designs/2026-08-24-tag-registry-plan.md) | 标签/设备元数据统一存储实施计划（Tag Registry：lux tags 表 + 三路径登记 + REST，历史存储前置地基） | 已实施（tags 表已于 M-4 退役，演进见 [2026-08-25-device-model-registry-plan.md](designs/2026-08-25-device-model-registry-plan.md)） |
-| [2026-08-25-history-write-path-plan.md](designs/2026-08-25-history-write-path-plan.md) | 历史写路径实施计划（Phase 1b：tsink path 依赖/L1-L3 三层开关/engine D6 组装/单写线程 deadband+去重+lane/四门禁 e2e 验收记录） | **已实施**（feat/history-write，2026-08-25，待合并 master；四门禁全过） |
+| [2026-08-25-history-write-path-plan.md](designs/2026-08-25-history-write-path-plan.md) | 历史写路径实施计划（Phase 1b：tsink path 依赖/L1-L3 三层开关/engine D6 组装/单写线程 deadband+去重+lane/四门禁 e2e 验收记录） | **已实施**（master aedd1cf，2026-08-25；四门禁全过） |
 
 ## ops/ — 部署与运维（怎么跑起来）
 
