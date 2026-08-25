@@ -112,6 +112,30 @@ impl StorageHandle {
     }
 }
 
+/// [`crate::history::HistoryReader`] 的引擎侧实现（Phase 2 Task 1 骨架）：
+/// 持 StorageHandle clone 与 writer/引擎共享同一底层存储。
+///
+/// Task 1 只落接口面（503/400 矩阵 + 响应形的 e2e 锚定），select 的 raw
+/// 分支在 Task 2 实现——本占位诚实返回 `Err` 而非 `todo!()`（编译过且
+/// 运行期可观测），Task 2 替换。
+struct EngineReader {
+    /// tsink 存储句柄（clone，共享同一 Arc）。占位 select 暂不读取，Task 2
+    /// raw 分支接线后移除 expect。
+    #[expect(dead_code)]
+    storage: StorageHandle,
+}
+
+impl crate::history::HistoryReader for EngineReader {
+    fn select(
+        &self,
+        _metric: &str,
+        _devid: &str,
+        _q: &crate::history::HistoryQuery,
+    ) -> Result<Vec<crate::history::HistoryPoint>, String> {
+        Err("raw select 待 Task 2 实现".to_string())
+    }
+}
+
 /// 历史引擎：持有 tsink 存储句柄、writer 发送句柄与生命周期标志（D10）。
 ///
 /// 生命周期：`maybe_init`（启动初始化，L2 enabled 判定 + 内部 spawn writer）
@@ -169,6 +193,15 @@ impl HistoryEngine {
     /// `Some`；编排层注入 `HostContext.history`，pipeline flush 出口 fan_out 用。
     pub fn handle(&self) -> Option<HistoryHandle> {
         self.handle.clone()
+    }
+
+    /// 历史读句柄（Phase 2 Task 1，P1）：clone 存储句柄包成
+    /// `Arc<dyn HistoryReader>` 交 REST 层（AppState.history_reader），与
+    /// writer/引擎共享同一底层存储 Arc。
+    pub fn reader(&self) -> Arc<dyn crate::history::HistoryReader> {
+        Arc::new(EngineReader {
+            storage: self.storage.clone(),
+        })
     }
 
     /// tsink 存储句柄引用（Phase 2 读路径与外部只读访问共享同一句柄）。

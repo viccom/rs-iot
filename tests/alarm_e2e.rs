@@ -77,6 +77,7 @@ async fn test_app() -> (axum::Router, lux::EmbeddedClient, lux::ServerHandle) {
         config: std::sync::Arc::new(rs_iot::config::AppConfig::default()),
         history_stats: None,
         history_engine_state: std::sync::Arc::from("disabled"),
+        history_reader: None,
     };
     (build_router(state), client, handle)
 }

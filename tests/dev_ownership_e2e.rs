@@ -59,6 +59,7 @@ async fn test_app(
         config: Arc::new(rs_iot::config::AppConfig::default()),
         history_stats: None,
         history_engine_state: Arc::from("disabled"),
+        history_reader: None,
     };
     (build_router(state), handle, mgr, client)
 }
