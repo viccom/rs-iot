@@ -20,6 +20,8 @@ pub mod db;
 pub mod error;
 /// 事件总线（SSE 实时推送 · 阶段一）：进程内 broadcast 扇出。
 pub mod event_bus;
+/// 历史时序存储写路径（Phase 1b）：旁路 fan-out → 有界 channel → 单写线程 → tsink。
+pub mod history;
 pub mod host;
 /// 硬件 ID 生成。
 pub mod hwid;

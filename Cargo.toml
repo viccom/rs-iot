@@ -25,6 +25,9 @@ repository = { workspace = true }
 [dependencies]
 # 嵌入式内存数据库：对外 RESP + Tiered 持久化
 lux = { path = "../lux" }
+# 历史时序存储引擎（Phase 1b 写路径终态存储；path 依赖同级 fork，基线 tag
+# rs-iot-1b-baseline）。仅 feature `history` 引入，默认构建依赖面零变化。
+tsink = { path = "../tsink_fork", optional = true }
 
 # 异步运行时
 tokio = { version = "1", features = ["full"] }
@@ -163,6 +166,10 @@ opcua = ["dep:async-opcua"]
 modbus = ["dep:tokio-modbus"]
 s7 = ["dep:tokio-s7"]
 eip = ["dep:rust-ethernet-ip"]
+# 历史时序存储写路径（Phase 1b）：旁路 fan-out → 有界 channel → 单写线程 → tsink。
+# L1 编译期开关（L2=[history].enabled、L3=TagProps.history）；不进 default，
+# 默认/裁剪构建不拉 tsink。见 docs/designs/2026-08-25-history-write-path-plan.md。
+history = ["dep:tsink"]
 # 预留（后续里程碑）：
 # local-broker = ["dep:rumqttd"]
 # analytics = ["dep:datafusion"]
