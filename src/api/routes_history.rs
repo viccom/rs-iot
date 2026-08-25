@@ -4,7 +4,9 @@
 //!   半开 [start,end)（P2：REST 出入秒，内部 ×1000 ms）；`agg` ∈
 //!   min/max/avg/sum/count/last 六值；`interval` 秒，与 agg 联动（有 agg 必有
 //!   interval、有 interval 必有 agg，否则 400）；`limit` 缺省 10000、上限
-//!   100000（取最旧 n，tsink 语义）；
+//!   100000（取最旧 n，tsink 语义）；降采样桶数 `(end-start)/interval` 上限
+//!   100000（超限 400——downsample 全窗聚合的读放大护栏，raw 有 limit 早停
+//!   不受限）；
 //! - 503 矩阵（P5）：reader 未注入（`AppState.history_reader == None`）时按
 //!   engine_state 映射 reason（feature_not_compiled / history_disabled /
 //!   init_failed / history_unavailable 兜底），body
@@ -48,6 +50,9 @@ pub struct HistoryParams {
 const DEFAULT_LIMIT: usize = 10_000;
 /// `limit` 上限（P3）。
 const MAX_LIMIT: usize = 100_000;
+/// 降采样桶数上限（R6 读放大护栏）：`(end-start)/interval` 超过即 400——
+/// downsample 聚合输出规模与引擎扫描粒度的上界，与 `MAX_LIMIT` 同量级。
+const MAX_BUCKETS: u64 = 100_000;
 
 /// agg 参数解析：六值（P3，对齐 tsink 聚合推荐面），未知值 `None` → 400。
 fn parse_agg(s: &str) -> Option<HistoryAgg> {
@@ -123,7 +128,17 @@ pub async fn history(State(st): State<AppState>, Query(q): Query<HistoryParams>)
     if q.interval == Some(0) {
         return bad_request("interval must > 0");
     }
-    // 6) limit ≤ 100000（缺省 10000）
+    // 6) 降采样桶数上限（R6 读放大护栏）：桶数 = (end-start)/interval 是聚合
+    //    输出规模与引擎扫描粒度的上界——downsample 路径 tsink 侧全窗读入后
+    //    聚合（rollup 物化仅部分加速），无护栏时大窗+窄桶构成重查询 DoS 面。
+    //    raw 路径有 limit 分页早停（select_raw_series_page），不受此限。
+    if let Some(iv) = q.interval {
+        // start < end 已证（差为正），i64 正数 as u64 无损。
+        if (end - start) as u64 / iv > MAX_BUCKETS {
+            return bad_request("降采样桶数 (end-start)/interval 不得超过 100000");
+        }
+    }
+    // 7) limit ≤ 100000（缺省 10000）
     let limit = match q.limit {
         Some(l) if l > MAX_LIMIT => {
             return bad_request("limit 不得超过 100000");
@@ -149,11 +164,17 @@ pub async fn history(State(st): State<AppState>, Query(q): Query<HistoryParams>)
     let (Some(start_ms), Some(end_ms)) = (secs_to_ms(start), secs_to_ms(end)) else {
         return bad_request("start/end 秒值换算毫秒溢出");
     };
-    // 联动校验后 agg 与 interval 同有无：agg 有则 interval 必在，一并换算 ms；
+    // 联动校验后 agg 与 interval 同有无：agg 有则 interval 必在，一并换算 ms
+    // （u64→i64 用 try_from——`as` 截断位模式会让 ≥2^63 的值变负绕过溢出检查，
+    // 如 u64::MAX → -1 → -1000ms 负桶宽下推，只能靠引擎层兜底改文案）；
     // raw 查询（agg=None）downsample 直接 None。
     let downsample = match agg {
         Some(a) => {
-            let Some(ms) = q.interval.and_then(|s| secs_to_ms(s as i64)) else {
+            let Some(ms) = q
+                .interval
+                .and_then(|s| i64::try_from(s).ok())
+                .and_then(secs_to_ms)
+            else {
                 return bad_request("interval 秒值换算毫秒溢出");
             };
             Some((ms, a))
