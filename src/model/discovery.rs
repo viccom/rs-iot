@@ -278,6 +278,14 @@ pub async fn load(c: &EmbeddedClient) -> Result<usize, RsIotError> {
     Ok(n)
 }
 
+/// effective 快照变更后修剪 seen_modeled（cache::reload 尾部调用）：不在新
+/// 快照中的 key（模型删 tag / 设备删除）不再被短路——同 tag 数据重新走发现
+/// 路径。仍在快照中的 key 保留（稳态短路零开销不变）。
+pub(crate) fn retain_modeled(effective: &HashMap<String, TagProps>) {
+    let mut g = engine().lock().unwrap();
+    g.seen_modeled.retain(|k| effective.contains_key(k));
+}
+
 /// 对账清除：队列中已进 effective 缓存的条目删除（adopt 建模成功后调用；
 /// 同步逐出内存缓冲）。返回清除条数。
 pub async fn sweep_modeled(
@@ -638,5 +646,56 @@ mod tests {
             g.pending.contains_key("discdev1.adopted")
         };
         assert!(!still_pending);
+    }
+
+    /// seen_modeled 修剪：模型删 tag / 设备删除后，effective 快照不再含的
+    /// key 不再被短路——同 tag 数据重新进发现队列（此前需进程重启才自愈）。
+    #[tokio::test]
+    async fn retain_modeled_prunes_stale_seen_keys() {
+        let _serial = serialized_and_reset().await;
+        let c = test_client("retain").await;
+        // 曾建模：首见进 seen_modeled（纯内存跳过，不进队列）。
+        let e1 = eff(&["discdev1.was_modeled"]);
+        note_with_window(
+            &c,
+            &[sample(D, "was_modeled", 1.0, 100)],
+            &e1,
+            Duration::from_secs(3600),
+            100,
+        )
+        .await
+        .unwrap();
+        assert!(list(&c).await.unwrap().is_empty());
+        // 模型编辑删除该 tag：新 effective 快照修剪 seen_modeled。
+        let e2 = eff(&[]);
+        retain_modeled(&e2);
+        // 同 tag 再出数：不被短路，重新可发现（首见立即落盘）。
+        note_with_window(
+            &c,
+            &[sample(D, "was_modeled", 2.0, 200)],
+            &e2,
+            Duration::from_secs(3600),
+            100,
+        )
+        .await
+        .unwrap();
+        let m = list(&c).await.unwrap();
+        assert!(
+            m.contains_key("discdev1.was_modeled"),
+            "修剪后重新可发现：{m:?}"
+        );
+        // 仍在 effective 的 key 不受修剪影响（继续短路零开销）。
+        let e3 = eff(&["discdev1.still"]);
+        note_with_window(&c, &[sample(D, "still", 1.0, 100)], &e3, Duration::ZERO, 100)
+            .await
+            .unwrap();
+        retain_modeled(&e3);
+        note_with_window(&c, &[sample(D, "still", 2.0, 200)], &e3, Duration::ZERO, 100)
+            .await
+            .unwrap();
+        assert!(
+            !list(&c).await.unwrap().contains_key("discdev1.still"),
+            "有效 key 保留短路"
+        );
     }
 }
