@@ -118,8 +118,10 @@ luaClient 是 rs-iot 的南向 `Source`（与 modbus/opcua/s7 同构，`inventor
 
 **M-3 校验闸**（`set_value/set_values`/`collect` 返回值）：devid 必须 ∈ 本实例绑定 ∧
 tag 必须 ∈ 该设备模型点表——**未建模上报被拒**（`set_value` 抛错脚本 `pcall` 可捕获，
-`collect` 未建模 tag 被过滤；宿主 warn + stat `gate_rejected` 计数）。空点表模型
-（迁移的空点表设备）放行；`luaTransform`/`luaNorth` 无闸（非采集源）。
+`collect` 未建模 tag 被过滤；宿主 warn + stat `gate_rejected` 计数）。被拒 tag 进
+`discoveries` 发现队列（D-M4：数据不放行，元数据可见——`GET /api/v1/discoveries`
+查看并 adopt 一键建模）。空点表模型（迁移的空点表设备）放行；
+`luaTransform`/`luaNorth` 无闸（非采集源）。
 
 ### L3 控制（联动）
 

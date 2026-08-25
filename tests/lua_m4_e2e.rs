@@ -206,6 +206,26 @@ async fn collect_gate_filters_unmodeled_tags() {
 
     // 闸拒绝计数可见：stop 触发退出 flush（无条件落盘，免周期 flush 的 select
     // 竞争时序）后读 stat——gate_rejected 应 ≥1（ghost 每轮被拒）。
+    // 审查修复（决策 D-M4）：闸拒 tag 同步进发现队列（元数据可见供 adopt）。
+    let disc = client
+        .execute_value("HGET", &["discoveries", "devG.ghost"])
+        .await
+        .unwrap();
+    let raw = match disc {
+        lux::EmbeddedValue::Bulk(b) => String::from_utf8_lossy(&b).to_string(),
+        lux::EmbeddedValue::Simple(s) => s,
+        _ => String::new(),
+    };
+    assert!(!raw.is_empty(), "闸拒 tag ghost 应进发现队列：{raw}");
+    let modeled = client
+        .execute_value("HGET", &["discoveries", "devG.x"])
+        .await
+        .unwrap();
+    assert!(
+        matches!(modeled, lux::EmbeddedValue::Nil),
+        "建模 tag x 不进发现队列"
+    );
+
     shutdown.cancel();
     mgr.stop_all().await;
     let rejected = match rs_iot::db::stat::read(&client, "lua-gate").await {

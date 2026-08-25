@@ -62,7 +62,7 @@ rs-iot 通过 **sidecarClient bridge** 接入任意语言（C/C++/Go/Rust/Java/P
 - **批量**：一帧可带多 sample（不同 ts 也行），bridge 拆成多个 Sample 逐个入库
 - **value**：JSON 数字 / 布尔 / 字符串（bridge 按 `SampleValue` 解析：整数→Int、浮点→Float、布尔→Bool、字符串→Str）
 - **ts**：Unix 秒，用**采集时刻**（非发送时刻）——补传时保留原 ts
-- **校验闸（M-3）**：devid 必须 ∈ 本实例绑定设备 ∧ tag 必须 ∈ 该设备模型点表（ConfigPush v2 的 `tags[].name`）——未建模 sample 被 bridge 拒收（warn + `gate_rejected` 计数），合法 sample 正常入库
+- **校验闸（M-3）**：devid 必须 ∈ 本实例绑定设备 ∧ tag 必须 ∈ 该设备模型点表（ConfigPush v2 的 `tags[].name`）——未建模 sample 被 bridge 拒收（warn + `gate_rejected` 计数，被拒 tag 进 `discoveries` 发现队列供 rs-iot 侧人工 adopt 建模——数据本身不入库），合法 sample 正常入库
 
 ## 6. 写命令 Command
 

@@ -109,6 +109,8 @@ pub async fn adopt(State(st): State<AppState>, Json(req): Json<AdoptReq>) -> Res
             desc: t.desc.clone(),
             unit: t.unit.clone(),
             addr: t.addr.clone(),
+            // 发现的数据点是观察所得——缺省只读（最小权限），可写须人工显式改模板。
+            rw: crate::model::types::TagRw::R,
             ..Default::default()
         });
         merged += 1;

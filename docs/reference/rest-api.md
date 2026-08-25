@@ -373,12 +373,12 @@ curl -X POST -H "Authorization: Bearer $JWT" -H "Content-Type: application/json"
 | POST | `/api/v1/devmodel/delete` | JWT | `{"model_id"}`（被 devreg 引用 → 409 带引用列表） | `{"status":"ok"}` |
 | GET | `/api/v1/devreg` | JWT | `?devid=` `?model=` | `{devid: {…DeviceEntry, effective}}` |
 | POST | `/api/v1/devreg/set` | JWT | DeviceEntry JSON（upsert；写前三级校验：模型存在/params 齐/覆盖 tag ∈ 模型） | `{"status":"ok","devid"}` |
-| POST | `/api/v1/devreg/delete` | JWT | `{"devid"}`（级联 dev2inst + rtdata；历史不动） | `{"status":"ok"}` |
+| POST | `/api/v1/devreg/delete` | JWT | `{"devid"}`（级联：**解绑实例引用** + dev2inst + rtdata；历史不动） | `{"status":"ok","unbound_instances":n}` |
 | POST | `/api/v1/migrate/inline-devices` | JWT | —（幂等；M-2 起**升级必经**——旧内联形态无法反序列化） | `{converted_models, converted_devices, converted_instances, failures}` |
 
 ### 4.17 发现队列（`routes_discovery.rs`，M-4）
 
-数据流中未建模标签进 `discoveries` 队列（发现引擎出口接线 pipeline flush；不自动入正式册）——**发现是建模工作流的入口**（人工确认后 adopt 一键建模），D-M3。
+未建模标签进 `discoveries` 队列（不自动入正式册）——**发现是建模工作流的入口**（人工确认后 adopt 一键建模），D-M3。馈入两路：① pipeline flush 出口（luaTransform 等 hub 旁路数据）；② **lua/sidecar 校验闸拒收点**（D-M4：闸拒的 (devid,tag,样本值) 进队——数据本身不放行，元数据可见供 adopt）。
 
 | Method | Path | 鉴权 | Body/Query | 响应 |
 |---|---|---|---|---|

@@ -26,11 +26,15 @@ pub fn effective() -> Arc<HashMap<String, TagProps>> {
 }
 
 /// 全量重建（启动装载 + 写路径失效）。返回物化表（`tag_key → TagProps`）。
+///
+/// 重建后同步修剪发现引擎 seen_modeled（快照中消失的 key 不再被短路——
+/// 模型删 tag/设备删除后同 tag 数据重新进发现队列，无需重启自愈）。
 pub async fn reload(c: &EmbeddedClient) -> Result<HashMap<String, TagProps>, RsIotError> {
     let models = crate::model::store::list_models(c).await?;
     let devs = crate::model::store::list_devices(c).await?;
     let map = crate::model::effective::effective_all(&models, &devs);
     *cell().write().unwrap() = Arc::new(map.clone());
+    crate::model::discovery::retain_modeled(&map);
     Ok(map)
 }
 

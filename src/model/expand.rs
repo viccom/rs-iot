@@ -13,7 +13,7 @@ use crate::error::RsIotError;
 use crate::model::addr;
 use crate::model::store;
 use crate::model::types::{DeviceEntry, DeviceModel};
-use crate::types::{ChildSpec, DeviceBinding, DeviceSpec, TagProps};
+use crate::types::{ChildSpec, DeviceBinding, DeviceSpec};
 use lux::EmbeddedClient;
 use std::collections::BTreeMap;
 
@@ -31,16 +31,6 @@ pub struct ExpandedDevice {
 }
 
 impl ExpandedDevice {
-    /// tag 的 effective props（模板默认 ∪ 覆盖三态合并）。
-    pub fn effective_props(&self, tag: &str) -> Option<TagProps> {
-        let t = self.model.tags.iter().find(|t| t.name == tag)?;
-        let props = match self.entry.overrides.get(tag) {
-            Some(ov) => crate::model::effective::merge_tag_props(&t.props, ov),
-            None => t.props.clone(),
-        };
-        Some(props)
-    }
-
     /// 合成插件装配视图（旧 DeviceSpec 形态）：label = tag 名（= 采集 tag key），
     /// value = 已解析绝对地址（纯软模型 addr=None 时 = tag 名），type = data_type，
     /// slave_id ← bind。**不含 props**（props 权威在 effective，不再走内联声明）。
@@ -142,6 +132,7 @@ mod tests {
     use super::*;
     use crate::model::store;
     use crate::model::types::{DeviceEntry, TagOverride, TagTemplate};
+    use crate::types::TagProps;
 
     async fn test_client(tag: &str) -> lux::EmbeddedClient {
         let cfg = crate::config::AppConfig {
@@ -297,32 +288,6 @@ mod tests {
             .is_err(),
             "params 不齐拒绝展开"
         );
-    }
-
-    #[tokio::test]
-    async fn effective_props_merge_via_expanded() {
-        let c = test_client("eff").await;
-        seed(&c).await;
-        let ex = expand_binding(
-            &c,
-            &DeviceBinding {
-                devid: "ex1".into(),
-                bind: BTreeMap::new(),
-            },
-        )
-        .await
-        .unwrap();
-        assert_eq!(
-            ex.effective_props("va").unwrap().deadband,
-            Some(0.5),
-            "模板默认"
-        );
-        assert_eq!(
-            ex.effective_props("vb").unwrap().deadband,
-            Some(9.0),
-            "覆盖生效"
-        );
-        assert!(ex.effective_props("nope").is_none());
     }
 
     #[tokio::test]

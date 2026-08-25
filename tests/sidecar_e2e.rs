@@ -271,6 +271,89 @@ async fn sidecar_dataup_and_command_roundtrip() {
     teardown(env).await;
 }
 
+/// DataUp 校验闸（M-3）+ 闸拒进发现队列（审查修复，决策 D-M4"不过闸进
+/// discoveries"）：未建模 tag 不落库但进 discoveries（元数据可见供 adopt
+/// 建模）；建模 tag 正常落库且不进队列。
+#[tokio::test]
+async fn sidecar_dataup_gate_rejects_unmodeled_to_discovery() {
+    let env = setup("sc-gate", 60).await;
+
+    let stream = tokio::net::TcpStream::connect(("127.0.0.1", env.port))
+        .await
+        .expect("connect");
+    let (r, w) = tokio::io::split(stream);
+    let mut reader = tokio_util::codec::FramedRead::new(r, LengthDelimitedCodec::new());
+    let mut writer = tokio_util::codec::FramedWrite::new(w, LengthDelimitedCodec::new());
+
+    writer
+        .send(enc(
+            T_HELLO,
+            &json!({"inst_id":"sc-gate","token":env.token,"ver":"2"}),
+        ))
+        .await
+        .expect("send hello");
+    let (t, _) = read_frame(&mut reader).await.expect("helloack");
+    assert_eq!(t, T_HELLO_ACK);
+    let (t, _) = read_frame(&mut reader).await.expect("configpush");
+    assert_eq!(t, T_CONFIG_PUSH);
+
+    // DataUp：temp（建模）+ ghost（未建模）同帧。
+    writer
+        .send(enc(
+            T_DATA_UP,
+            &json!({"devid":"devS","samples":[
+                {"tag":"temp","value":25.5,"ts":1000},
+                {"tag":"ghost","value":9.9,"ts":1000}]}),
+        ))
+        .await
+        .expect("send dataup");
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let cell = hget_cell(&env.client, "rtdata:devS", "devS.temp").await;
+    assert!(cell.contains("25.5"), "建模 tag 落库：'{cell}'");
+    let ghost = env
+        .client
+        .execute_value("HGET", &["rtdata:devS", "devS.ghost"])
+        .await
+        .unwrap();
+    assert!(
+        matches!(ghost, lux::EmbeddedValue::Nil),
+        "未建模 tag 不落库"
+    );
+
+    // 闸拒 tag 进发现队列（含样本值供建模参考）。
+    let disc = env
+        .client
+        .execute_value("HGET", &["discoveries", "devS.ghost"])
+        .await
+        .unwrap();
+    let raw = match disc {
+        lux::EmbeddedValue::Bulk(b) => String::from_utf8_lossy(&b).to_string(),
+        lux::EmbeddedValue::Simple(s) => s,
+        _ => String::new(),
+    };
+    assert!(!raw.is_empty(), "ghost 应进发现队列");
+    let d: serde_json::Value = serde_json::from_str(&raw).expect("discovery json");
+    assert_eq!(d["devid"], "devS");
+    assert_eq!(d["tag"], "ghost");
+    assert!(
+        d["sample_value"].as_str().unwrap().contains("9.9"),
+        "样本值供建模参考：{d}"
+    );
+    // 建模 tag 不进队列。
+    let temp = env
+        .client
+        .execute_value("HGET", &["discoveries", "devS.temp"])
+        .await
+        .unwrap();
+    assert!(
+        matches!(temp, lux::EmbeddedValue::Nil),
+        "建模 tag 不进发现队列"
+    );
+
+    teardown(env).await;
+}
+
 #[tokio::test]
 async fn sidecar_wrong_token_rejected() {
     let env = setup("sc2", 60).await;

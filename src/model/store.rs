@@ -198,19 +198,58 @@ pub async fn list_devices(c: &EmbeddedClient) -> Result<Vec<DeviceEntry>, RsIotE
     Ok(out)
 }
 
-/// 删除设备 + 级联：HDEL devreg + 清 dev2inst 归属 + 删 `rtdata:<devid>`（best-effort，
-/// 对齐 routes_device 删除口径；历史不级联——master plan D9）。不存在 → `None`。
-pub async fn delete_device(c: &EmbeddedClient, devid: &str) -> Result<Option<()>, RsIotError> {
+/// 删除设备 + 级联（计划 §四完整语义）：**解绑实例引用**（instances JSON 的
+/// devices 数组移除该 devid 条目，其余字段原样——同 migrate 改写口径）+ HDEL
+/// devreg + 清 dev2inst 归属 + 删 `rtdata:<devid>`（best-effort，对齐
+/// routes_device 删除口径；历史不级联——master plan D9）。返回解绑实例数；
+/// 不存在 → `None`。
+pub async fn delete_device(c: &EmbeddedClient, devid: &str) -> Result<Option<usize>, RsIotError> {
     if get_device(c, devid).await?.is_none() {
         return Ok(None);
     }
+    let unbound = unbind_from_instances(c, devid).await?;
     c.execute("HDEL", &[DEVICES, devid]).await?;
     c.execute("HDEL", &["dev2inst", devid]).await?;
     if let Err(e) = crate::db::rtdata::delete_device(c, devid).await {
         tracing::warn!("[model] delete rtdata:{devid} failed: {e}");
     }
     crate::model::cache::refresh_after_write(c).await;
-    Ok(Some(()))
+    Ok(Some(unbound))
+}
+
+/// 从 lux `instances` 全表移除对 `devid` 的绑定（Value 级改写 devices 数组，
+/// 其余字段保留）。无 devices 字段的实例（luaNorth 等）与坏值条目不动。
+/// 返回改写的实例数。
+async fn unbind_from_instances(c: &EmbeddedClient, devid: &str) -> Result<usize, RsIotError> {
+    let v = c.execute_value("HGETALL", &["instances"]).await?;
+    let mut n = 0usize;
+    if let lux::EmbeddedValue::Array(arr) = v {
+        let mut i = 0;
+        while i + 1 < arr.len() {
+            let inst_id = embedded_to_string(arr[i].clone()).unwrap_or_default();
+            let raw = embedded_to_string(arr[i + 1].clone()).unwrap_or_default();
+            i += 2;
+            if inst_id.is_empty() {
+                continue;
+            }
+            let Ok(mut json) = serde_json::from_str::<serde_json::Value>(&raw) else {
+                continue; // 坏值容错（同 migrate 口径）
+            };
+            let Some(devs) = json.get_mut("devices").and_then(|d| d.as_array_mut()) else {
+                continue;
+            };
+            let before = devs.len();
+            devs.retain(|d| d.get("devid").and_then(|x| x.as_str()) != Some(devid));
+            if devs.len() != before {
+                let rewritten = serde_json::to_string(&json)?;
+                c.execute("HSET", &["instances", &inst_id, &rewritten])
+                    .await?;
+                n += 1;
+                tracing::info!("[model] 实例 {inst_id} 已解绑设备 {devid}（设备删除级联）");
+            }
+        }
+    }
+    Ok(n)
 }
 
 /// lux EmbeddedValue → String（Bulk/Simple；同 dev_registry 口径）。
@@ -492,7 +531,7 @@ mod tests {
         c.execute("HSET", &["rtdata:d1", "d1.temp", "[1,1,42]"])
             .await
             .unwrap();
-        assert_eq!(delete_device(&c, "d1").await.unwrap(), Some(()));
+        assert_eq!(delete_device(&c, "d1").await.unwrap(), Some(0));
         assert!(get_device(&c, "d1").await.unwrap().is_none());
         let v = c.execute_value("HGET", &["dev2inst", "d1"]).await.unwrap();
         assert!(matches!(v, lux::EmbeddedValue::Nil), "归属清理");
@@ -507,5 +546,59 @@ mod tests {
     async fn delete_device_missing_returns_none() {
         let c = test_client("dev-del-miss").await;
         assert!(delete_device(&c, "nope").await.unwrap().is_none());
+    }
+
+    /// 计划 §四删除级联完整语义：解绑实例引用（instances JSON 的 devices
+    /// 数组移除该 devid 条目，其余字段/实例原样保留）。
+    #[tokio::test]
+    async fn delete_device_unbinds_instance_references() {
+        let c = test_client("dev-unbind").await;
+        set_model(&c, &sample_model()).await.unwrap();
+        set_device(&c, &device_entry("d9")).await.unwrap();
+        // i1 绑定 d9 + other（部分解绑）；i2 仅绑 d9（清空数组）；i3 无 devices（不动）。
+        c.execute(
+            "HSET",
+            &[
+                "instances",
+                "i1",
+                r#"{"inst_id":"i1","app_code":"modbusClient","app_config":{"endpoint":"x"},"devices":[{"devid":"d9","bind":{"slave_id":"3"}},{"devid":"other"}]}"#,
+            ],
+        )
+        .await
+        .unwrap();
+        c.execute(
+            "HSET",
+            &[
+                "instances",
+                "i2",
+                r#"{"inst_id":"i2","app_code":"dataSim","devices":[{"devid":"d9"}]}"#,
+            ],
+        )
+        .await
+        .unwrap();
+        let i3_raw = r#"{"inst_id":"i3","app_code":"luaNorth"}"#;
+        c.execute("HSET", &["instances", "i3", i3_raw])
+            .await
+            .unwrap();
+
+        assert!(delete_device(&c, "d9").await.unwrap().is_some());
+        // i1：d9 条目移除、other 保留、其余字段不动。
+        let v = c.execute_value("HGET", &["instances", "i1"]).await.unwrap();
+        let j: serde_json::Value = serde_json::from_str(&embedded_to_string(v).unwrap()).unwrap();
+        let devs: Vec<String> = j["devices"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|d| d["devid"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(devs, vec!["other"], "d9 解绑、other 保留");
+        assert_eq!(j["app_code"], "modbusClient", "其余字段不动");
+        // i2：devices 清空（实例保留）。
+        let v = c.execute_value("HGET", &["instances", "i2"]).await.unwrap();
+        let j: serde_json::Value = serde_json::from_str(&embedded_to_string(v).unwrap()).unwrap();
+        assert!(j["devices"].as_array().unwrap().is_empty(), "清空不删实例");
+        // i3：无 devices 字段原样。
+        let v = c.execute_value("HGET", &["instances", "i3"]).await.unwrap();
+        assert_eq!(embedded_to_string(v).unwrap(), i3_raw, "无绑定实例不动");
     }
 }

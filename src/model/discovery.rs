@@ -205,9 +205,59 @@ pub async fn note_with_window(
         }
     }
     for (k, raw) in &to_flush {
-        c.execute("HSET", &[HASH, k, raw]).await?;
+        if let Err(e) = c.execute("HSET", &[HASH, k, raw]).await {
+            // 落盘失败回滚本批落盘标记（审查修复）：last_flush 已在锁内置位，
+            // 不回滚则 60s 窗口内不重试——回滚后下一批立即重新到期落盘。
+            tracing::warn!("[discovery] 落盘失败（回滚标记，下批重试）: {e}");
+            let keys: Vec<String> = to_flush.iter().map(|(k, _)| k.clone()).collect();
+            unmark_flushed(&keys);
+            return Err(e.into());
+        }
     }
     Ok(())
+}
+
+/// 落盘失败回滚：把 keys 的 `last_flush` 重置为 None（下一批重新视为到期，
+/// 立即重试落盘）。幂等——不在缓冲的键跳过；并发批次已重置/推进则维持其值。
+fn unmark_flushed(keys: &[String]) {
+    let mut g = engine().lock().unwrap();
+    for k in keys {
+        if let Some(p) = g.pending.get_mut(k) {
+            p.last_flush = None;
+        }
+    }
+}
+
+/// 闸拒登记（决策 D-M4"不过闸进 discoveries"）：lua `set_value/set_values/collect`
+/// 与 sidecar DataUp 被校验闸拒绝的未建模 (devid, tag, 值) 进发现队列——**数据
+/// 本身不放行**（严格闸语义不变），元数据可见供人工 adopt 建模。fail-soft。
+///
+/// 内部走 [`note_once`]（已建模 key 跳过 + 60s 节流 + LRU 上限同口径）；
+/// 空集零开销直接返回。
+pub async fn note_rejected(
+    c: &EmbeddedClient,
+    hwid: &crate::types::Hwid,
+    devid: &str,
+    rejected: std::collections::BTreeMap<String, crate::types::SampleValue>,
+) {
+    if rejected.is_empty() {
+        return;
+    }
+    let s = Sample {
+        hwid: hwid.clone(),
+        devid: devid.to_string(),
+        values: rejected,
+        timestamp: chrono::Utc::now().timestamp(),
+    };
+    if let Err(e) = note_once(
+        c,
+        std::slice::from_ref(&s),
+        &crate::model::cache::effective(),
+    )
+    .await
+    {
+        tracing::warn!("[discovery] 闸拒登记失败(忽略): {e}");
+    }
 }
 
 /// 队列全表（HGETALL；坏值跳过）。
@@ -239,10 +289,13 @@ pub async fn clear(c: &EmbeddedClient, dev_id: Option<&str>) -> Result<usize, Rs
         None => list(c).await?.into_keys().collect(),
         Some(d) => {
             let prefix = format!("{d}.");
+            // 谓词与 routes_discovery::list 同口径：tag_key 短路形态（tag 名含
+            // devid 子串 → key 无 `<devid>.` 前缀）按 devid 字段兜底命中。
             list(c)
                 .await?
-                .into_keys()
-                .filter(|k| k.starts_with(&prefix))
+                .into_iter()
+                .filter(|(k, disc)| k.starts_with(&prefix) || disc.devid == d)
+                .map(|(k, _)| k)
                 .collect()
         }
     };
@@ -276,6 +329,14 @@ pub async fn load(c: &EmbeddedClient) -> Result<usize, RsIotError> {
         });
     }
     Ok(n)
+}
+
+/// effective 快照变更后修剪 seen_modeled（cache::reload 尾部调用）：不在新
+/// 快照中的 key（模型删 tag / 设备删除）不再被短路——同 tag 数据重新走发现
+/// 路径。仍在快照中的 key 保留（稳态短路零开销不变）。
+pub(crate) fn retain_modeled(effective: &HashMap<String, TagProps>) {
+    let mut g = engine().lock().unwrap();
+    g.seen_modeled.retain(|k| effective.contains_key(k));
 }
 
 /// 对账清除：队列中已进 effective 缓存的条目删除（adopt 建模成功后调用；
@@ -616,6 +677,61 @@ mod tests {
         assert!(!x_in_pending && !y_in_pending, "内存缓冲同步清");
     }
 
+    /// clear(dev_id) 与 list 同谓词（审查修复）：tag_key 短路形态（tag 名含
+    /// devid 子串 → key=tag 原样、无 `<devid>.` 前缀）的条目也按 devid 字段
+    /// 命中清除——此前前缀过滤漏清。
+    #[tokio::test]
+    async fn clear_by_device_matches_key_without_prefix() {
+        let _serial = serialized_and_reset().await;
+        let c = test_client("clear-key").await;
+        // 种无前缀形态：tag "discdev1x" 含 devid "discdev1" 子串 → tag_key 短路。
+        let d = Discovery {
+            devid: D.into(),
+            tag: format!("{D}x"),
+            first_ts: 1,
+            last_ts: 1,
+            count: 1,
+            sample_value: "1".into(),
+        };
+        let key = crate::types::tag_key(D, &d.tag);
+        assert!(
+            !key.starts_with(&format!("{D}.")),
+            "测试前提：tag_key 短路形态（key={key}）"
+        );
+        c.execute("HSET", &[HASH, &key, &serde_json::to_string(&d).unwrap()])
+            .await
+            .unwrap();
+        // 常规前缀形态对照（不应被误清）。
+        let other = Discovery {
+            devid: D2.into(),
+            tag: "y".into(),
+            first_ts: 1,
+            last_ts: 1,
+            count: 1,
+            sample_value: "1".into(),
+        };
+        c.execute(
+            "HSET",
+            &[
+                HASH,
+                &format!("{D2}.y"),
+                &serde_json::to_string(&other).unwrap(),
+            ],
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            clear(&c, Some(D)).await.unwrap(),
+            1,
+            "无前缀形态按 devid 字段命中清除"
+        );
+        let m = list(&c).await.unwrap();
+        assert!(
+            !m.contains_key(&key) && m.contains_key("discdev2.y"),
+            "目标清、其余留：{m:?}"
+        );
+    }
+
     #[tokio::test]
     async fn sweep_modeled_removes_adopted_entries() {
         let _serial = serialized_and_reset().await;
@@ -638,5 +754,117 @@ mod tests {
             g.pending.contains_key("discdev1.adopted")
         };
         assert!(!still_pending);
+    }
+
+    /// seen_modeled 修剪：模型删 tag / 设备删除后，effective 快照不再含的
+    /// key 不再被短路——同 tag 数据重新进发现队列（此前需进程重启才自愈）。
+    #[tokio::test]
+    async fn retain_modeled_prunes_stale_seen_keys() {
+        let _serial = serialized_and_reset().await;
+        let c = test_client("retain").await;
+        // 曾建模：首见进 seen_modeled（纯内存跳过，不进队列）。
+        let e1 = eff(&["discdev1.was_modeled"]);
+        note_with_window(
+            &c,
+            &[sample(D, "was_modeled", 1.0, 100)],
+            &e1,
+            Duration::from_secs(3600),
+            100,
+        )
+        .await
+        .unwrap();
+        assert!(list(&c).await.unwrap().is_empty());
+        // 模型编辑删除该 tag：新 effective 快照修剪 seen_modeled。
+        let e2 = eff(&[]);
+        retain_modeled(&e2);
+        // 同 tag 再出数：不被短路，重新可发现（首见立即落盘）。
+        note_with_window(
+            &c,
+            &[sample(D, "was_modeled", 2.0, 200)],
+            &e2,
+            Duration::from_secs(3600),
+            100,
+        )
+        .await
+        .unwrap();
+        let m = list(&c).await.unwrap();
+        assert!(
+            m.contains_key("discdev1.was_modeled"),
+            "修剪后重新可发现：{m:?}"
+        );
+        // 仍在 effective 的 key 不受修剪影响（继续短路零开销）。
+        let e3 = eff(&["discdev1.still"]);
+        note_with_window(
+            &c,
+            &[sample(D, "still", 1.0, 100)],
+            &e3,
+            Duration::ZERO,
+            100,
+        )
+        .await
+        .unwrap();
+        retain_modeled(&e3);
+        note_with_window(
+            &c,
+            &[sample(D, "still", 2.0, 200)],
+            &e3,
+            Duration::ZERO,
+            100,
+        )
+        .await
+        .unwrap();
+        assert!(
+            !list(&c).await.unwrap().contains_key("discdev1.still"),
+            "有效 key 保留短路"
+        );
+    }
+
+    /// 闸拒登记（决策 D-M4"不过闸进 discoveries"）：lua/sidecar 校验闸拒绝的
+    /// 未建模 (devid, tag, 值) 进队列——数据本身不放行，元数据可见供 adopt。
+    #[tokio::test]
+    async fn note_rejected_records_unmodeled_with_sample() {
+        let _serial = serialized_and_reset().await;
+        let c = test_client("rejected").await;
+        let mut vals = std::collections::BTreeMap::new();
+        vals.insert("ghost".to_string(), SampleValue::Float(9.9));
+        note_rejected(&c, &Hwid::new("it-hwid"), D, vals).await;
+        let m = list(&c).await.unwrap();
+        let d = m.get("discdev1.ghost").expect("闸拒进队列");
+        assert_eq!((d.devid.as_str(), d.tag.as_str()), (D, "ghost"));
+        assert_eq!(d.sample_value, "9.9", "样本值供建模参考");
+        assert_eq!(d.count, 1);
+        // 空集零开销跳过（不产生条目、不触 lux）。
+        note_rejected(&c, &Hwid::new("it-hwid"), D, Default::default()).await;
+        assert_eq!(list(&c).await.unwrap().len(), 1);
+    }
+
+    /// 落盘失败回滚（审查修复）：unmark_flushed 重置 last_flush 后，同节流窗口
+    /// 内下一批重新视为到期落盘（HSET 失败不再吞掉整窗口的队列更新）。
+    #[tokio::test]
+    async fn unmark_flushed_retries_within_window() {
+        let _serial = serialized_and_reset().await;
+        let c = test_client("unmark").await;
+        let w = Duration::from_secs(3600);
+        // 首见立即落盘 count=1；窗口内第二笔只内存累计不落盘。
+        note_with_window(&c, &[sample(D, "fl", 1.0, 100)], &eff(&[]), w, 100)
+            .await
+            .unwrap();
+        note_with_window(&c, &[sample(D, "fl", 2.0, 200)], &eff(&[]), w, 100)
+            .await
+            .unwrap();
+        assert_eq!(
+            list(&c).await.unwrap()["discdev1.fl"].count,
+            1,
+            "窗口内不落盘"
+        );
+        // 模拟 HSET 失败后的标记回滚。
+        unmark_flushed(&["discdev1.fl".to_string()]);
+        // 同窗口下一批：重新到期，聚合值落盘。
+        note_with_window(&c, &[sample(D, "fl", 3.0, 300)], &eff(&[]), w, 100)
+            .await
+            .unwrap();
+        let d = &list(&c).await.unwrap()["discdev1.fl"];
+        assert_eq!(d.count, 3, "回滚后窗口内重试落盘");
+        assert_eq!(d.last_ts, 300);
     }
 }

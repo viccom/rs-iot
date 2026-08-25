@@ -57,26 +57,31 @@ fn sync_dropped_samples(
 
 /// M-3 collect 校验闸：devid ∈ 快照 ∧ tags ⊆ 模型点表（非空模型时）。
 ///
-/// 未绑定 → None（整设备拒，warn+计数）；未建模 tag → 过滤（合法 tag 保留，
-/// warn+计数）；空模型（迁移空点表）→ 原样放行。
+/// 未绑定 → `(None, 全量)`（整设备拒收，warn+计数）；未建模 tag → 过滤
+/// （合法保留，被拒集返回——调用方登记发现队列，D-M4）；空模型（迁移空点表）
+/// → 原样放行。
 fn gate_collect(
     snapshot: &core_::api::ModelSnapshot,
     gate_rejected: &std::sync::Arc<std::sync::atomic::AtomicU64>,
     devid: &str,
     values: BTreeMap<String, crate::types::SampleValue>,
-) -> Option<BTreeMap<String, crate::types::SampleValue>> {
+) -> (
+    Option<BTreeMap<String, crate::types::SampleValue>>,
+    BTreeMap<String, crate::types::SampleValue>,
+) {
     let snap = snapshot.lock().unwrap();
     let Some(dev) = snap.get(devid) else {
         gate_rejected.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         tracing::warn!(
             "[luaClient] collect 设备 {devid} 未绑定到本实例，整设备拒收（gate_rejected）"
         );
-        return None;
+        return (None, values);
     };
     if dev.tags.is_empty() {
-        return Some(values); // 空模型（迁移空点表）：兼容放行
+        return (Some(values), BTreeMap::new()); // 空模型（迁移空点表）：兼容放行
     }
     let mut kept = BTreeMap::new();
+    let mut rejected = BTreeMap::new();
     for (tag, v) in values {
         if dev.tags.iter().any(|t| t.name == tag) {
             kept.insert(tag, v);
@@ -86,12 +91,13 @@ fn gate_collect(
                 "[luaClient] collect 标签 {devid}.{tag} 未在模型 {} 点表，拒收（gate_rejected）",
                 dev.model_id
             );
+            rejected.insert(tag, v);
         }
     }
     if kept.is_empty() {
-        None
+        (None, rejected)
     } else {
-        Some(kept)
+        (Some(kept), rejected)
     }
 }
 
@@ -410,8 +416,15 @@ impl Source for LuaClient {
                                 // M-3 校验闸：devid ∈ 绑定 ∧ tags ⊆ 模型点表（非空模型
                                 // 时）。未绑定 → 拒整设备；未建模 tag → 过滤（合法 tag
                                 // 保留上报）+ warn + 计数。空模型（迁移空点表）放行。
-                                let filtered =
+                                // D-M4（审查修复）：被拒 tag 登记发现队列供 adopt。
+                                let (filtered, gate_rej) =
                                     gate_collect(&model_snapshot, &gate_rejected, &devid, values);
+                                if !gate_rej.is_empty() {
+                                    crate::model::discovery::note_rejected(
+                                        &ctx.lux, &ctx.hwid, &devid, gate_rej,
+                                    )
+                                    .await;
+                                }
                                 let Some(values) = filtered else { continue };
                                 if let Ok(mut set) = runtime_devs.lock() {
                                     set.insert(devid.clone());

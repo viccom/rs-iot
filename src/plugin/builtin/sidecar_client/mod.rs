@@ -389,9 +389,26 @@ impl Source for SidecarClient {
                                             "[sidecarClient] inst {inst_id} DataUp 设备 {} 未绑定，整帧拒收",
                                             d.devid
                                         );
+                                        // D-M4（审查修复）：闸拒 tag 登记发现队列供 adopt。
+                                        let mut rej = BTreeMap::new();
+                                        for samp in &d.samples {
+                                            rej.insert(
+                                                samp.tag.clone(),
+                                                json_to_sample_value(&samp.value),
+                                            );
+                                        }
+                                        crate::model::discovery::note_rejected(
+                                            &ctx.lux,
+                                            &ctx.hwid,
+                                            &d.devid,
+                                            rej,
+                                        )
+                                        .await;
                                         continue;
                                     };
                                     let mut kept: Vec<&DataUpSample> = Vec::new();
+                                    let mut gate_rej: BTreeMap<String, SampleValue> =
+                                        BTreeMap::new();
                                     for samp in &d.samples {
                                         if dev_snap.model.tags.is_empty()
                                             || dev_snap
@@ -410,7 +427,21 @@ impl Source for SidecarClient {
                                                 "[sidecarClient] inst {inst_id} DataUp 标签 {}.{} 未在模型点表，拒收",
                                                 d.devid, samp.tag
                                             );
+                                            gate_rej.insert(
+                                                samp.tag.clone(),
+                                                json_to_sample_value(&samp.value),
+                                            );
                                         }
+                                    }
+                                    // D-M4（审查修复）：被拒 tag 进发现队列（数据不放行）。
+                                    if !gate_rej.is_empty() {
+                                        crate::model::discovery::note_rejected(
+                                            &ctx.lux,
+                                            &ctx.hwid,
+                                            &d.devid,
+                                            gate_rej,
+                                        )
+                                        .await;
                                     }
                                     // 按 ts 合并同 devid 同时刻的多 tag 到一个 Sample
                                     //（Sample.values 语义=一设备一时刻多变量）。避免逐 tag 拆分成

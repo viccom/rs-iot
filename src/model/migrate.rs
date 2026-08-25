@@ -198,16 +198,12 @@ pub async fn run(c: &EmbeddedClient) -> Result<MigrationSummary, RsIotError> {
             continue;
         };
         let outcome = convert(&legacy);
-        let mut any = false;
         for m in &outcome.models {
             if store::get_model(c, &m.model_id).await?.is_some() {
                 continue;
             }
             match store::set_model(c, m).await {
-                Ok(()) => {
-                    sum.converted_models += 1;
-                    any = true;
-                }
+                Ok(()) => sum.converted_models += 1,
                 Err(e) => sum.failures.push(format!("model {}: {e}", m.model_id)),
             }
         }
@@ -216,10 +212,7 @@ pub async fn run(c: &EmbeddedClient) -> Result<MigrationSummary, RsIotError> {
                 continue;
             }
             match store::set_device(c, d).await {
-                Ok(()) => {
-                    sum.converted_devices += 1;
-                    any = true;
-                }
+                Ok(()) => sum.converted_devices += 1,
                 Err(e) => sum.failures.push(format!("device {}: {e}", d.devid)),
             }
         }
@@ -232,7 +225,6 @@ pub async fn run(c: &EmbeddedClient) -> Result<MigrationSummary, RsIotError> {
             .is_ok()
         {
             sum.converted_instances += 1;
-            let _ = any;
         } else {
             sum.failures.push(format!("{inst_id}: 实例改写失败"));
         }

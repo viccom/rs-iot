@@ -374,13 +374,25 @@ async fn devreg_list_filter_effective_and_delete() {
     let (_, v) = get_json(&app, &token, "/api/v1/devreg?devid=dA2").await;
     assert_eq!(v.as_object().unwrap().len(), 1);
 
-    // 删除级联：rtdata 一并清理。
+    // 删除级联：rtdata 一并清理 + 实例绑定解绑（计划 §四完整级联）。
     handle
         .client()
         .execute("HSET", &["rtdata:dA1", "dA1.ua", "[1,1,42]"])
         .await
         .unwrap();
-    let (st, _) = post_json(
+    handle
+        .client()
+        .execute(
+            "HSET",
+            &[
+                "instances",
+                "inst-x",
+                r#"{"inst_id":"inst-x","app_code":"dataSim","devices":[{"devid":"dA1"},{"devid":"dA2"}]}"#,
+            ],
+        )
+        .await
+        .unwrap();
+    let (st, v) = post_json(
         &app,
         &token,
         "/api/v1/devreg/delete",
@@ -388,6 +400,11 @@ async fn devreg_list_filter_effective_and_delete() {
     )
     .await;
     assert_eq!(st, StatusCode::OK);
+    assert_eq!(
+        v["unbound_instances"],
+        serde_json::json!(1),
+        "解绑计数：{v}"
+    );
     let (_, v) = get_json(&app, &token, "/api/v1/devreg").await;
     assert!(v.get("dA1").is_none() && v.get("dA2").is_some());
     let exists = handle
@@ -399,6 +416,21 @@ async fn devreg_list_filter_effective_and_delete() {
         !matches!(exists, lux::EmbeddedValue::Int(n) if n != 0),
         "rtdata 级联清理"
     );
+    // 实例配置不再残留悬空绑定；dA2 绑定保留。
+    let inst = handle
+        .client()
+        .execute_value("HGET", &["instances", "inst-x"])
+        .await
+        .unwrap();
+    let raw = rs_iot::api::str_from_value(&inst);
+    let j: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    let devs: Vec<&str> = j["devices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| d["devid"].as_str().unwrap())
+        .collect();
+    assert_eq!(devs, vec!["dA2"], "悬空绑定解绑、其余保留：{j}");
 
     // 再删 → 404。
     let (st, _) = post_json(
