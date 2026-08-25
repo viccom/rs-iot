@@ -167,6 +167,54 @@ export interface InstConfig {
 /** 实例配置表（GET /insts 返回：inst_id → InstConfig）。 */
 export type InstanceConfigs = Record<string, InstConfig>
 
+/** sysstatus.process 子结构（进程级现采，process_metrics）。 */
+export interface SysProcessInfo {
+  uptime_secs?: number
+  cpu_pct?: number
+  mem_bytes?: number
+}
+
+/** sysstatus.metrics 子结构（前端消费子集——后端另有 ctl、mqtt 等字段，索引签名兜底）。 */
+export interface SysMetricsInfo {
+  pipeline_processed_count?: number
+  hub?: { depth_last?: number; depth_max?: number }
+  [k: string]: unknown
+}
+
+/** 历史引擎七计数器（sysstatus.history.stats；与 /metrics rs_iot_history_* family 同源）。 */
+export interface HistoryStats {
+  sent: number
+  written: number
+  dropped: number
+  deadbanded: number
+  skipped: number
+  lane_mismatch: number
+  errors: number
+}
+
+/**
+ * sysstatus.history 子结构（历史引擎可见性，routes_sys.rs）。
+ * engine 三态：feature off 或 enabled=false → "disabled"；init 失败 →
+ * "init_failed"；成功 → "ok"。stats 与 "ok" 成对出现（非 ok 恒 null）。
+ */
+export interface SysStatusHistory {
+  feature: boolean
+  enabled: boolean
+  engine: 'ok' | 'disabled' | 'init_failed'
+  stats: HistoryStats | null
+}
+
+/** GET /sysstatus 响应（前端消费子集；索引签名容忍后端增字段与旧后端缺块）。 */
+export interface SysStatus {
+  status?: string
+  dbsize?: number
+  process?: SysProcessInfo
+  metrics?: SysMetricsInfo
+  /** 旧后端（HEAD 7b9aef0 之前）无此块 → undefined，前端按 "—" 降级。 */
+  history?: SysStatusHistory
+  [k: string]: unknown
+}
+
 /** lua 资产内容回读（GET /lua/script?name=&kind=；kind=lib 为站点共享库）。 */
 export interface LuaScript {
   name: string

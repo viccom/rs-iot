@@ -128,11 +128,16 @@ const flatRows = computed<FlatRow[]>(() => {
   return rows
 })
 const tagFilter = ref('')
+/** 归档白名单过滤开关（仅看 effective history==true 的行；纯前端 filter，数据源不变）。 */
+const historyOnly = ref(false)
+/** 任一过滤激活（文本或白名单）——面板计数显示 "n / 总数"。 */
+const tagFilterActive = computed(() => historyOnly.value || !!tagFilter.value.trim())
 const filteredRows = computed(() => {
+  let rows = historyOnly.value ? flatRows.value.filter(r => r.history) : flatRows.value
   const q = tagFilter.value.trim().toLowerCase()
-  if (!q) return flatRows.value
-  return flatRows.value.filter(r =>
+  if (q) rows = rows.filter(r =>
     r.key.toLowerCase().includes(q) || r.model.toLowerCase().includes(q))
+  return rows
 })
 
 // ---- 发现队列（M-4：未建模标签 → 人工确认 adopt 一键建模）----
@@ -242,6 +247,7 @@ useWorkspacePage(() => ({
     `模型 ${modelList.value.length} 个`,
     `设备 ${deviceList.value.length} 台`,
     `标签（effective）${flatRows.value.length} 个`,
+    `归档白名单 ${flatRows.value.filter(r => r.history).length} 个`,
     `待建模发现 ${store.discoveries.length} 条`,
   ],
 }))
@@ -378,9 +384,12 @@ useWorkspacePage(() => ({
       <div class="panel-head">
         <div>
           <p class="panel-label">effective 视图</p>
-          <h3>标签总览（{{ filteredRows.length }}）</h3>
+          <h3>标签总览（{{ filteredRows.length }}{{ tagFilterActive ? ` / ${flatRows.length}` : '' }}）</h3>
         </div>
-        <input v-model="tagFilter" class="filter" placeholder="过滤 <devid>.<tag> 或模型…" >
+        <div class="head-actions">
+          <label class="hist-toggle"><input type="checkbox" v-model="historyOnly" />仅看归档白名单</label>
+          <input v-model="tagFilter" class="filter" placeholder="过滤 <devid>.<tag> 或模型…" >
+        </div>
       </div>
       <table class="mini-table flat">
         <thead>
@@ -399,7 +408,9 @@ useWorkspacePage(() => ({
           </tr>
         </tbody>
       </table>
-      <p v-if="!filteredRows.length" class="empty">无标签（先建模 + 建设备，或执行迁移）。</p>
+      <p v-if="!filteredRows.length" class="empty">
+        {{ flatRows.length && tagFilterActive ? '无匹配标签（调整过滤条件或关闭「仅看归档白名单」）。' : '无标签（先建模 + 建设备，或执行迁移）。' }}
+      </p>
     </article>
 
     <!-- 面板④：发现队列（M-4：未建模标签 → adopt 一键建模）-->
@@ -580,6 +591,13 @@ useWorkspacePage(() => ({
   border: 1px solid var(--card-border); background: var(--card-bg);
   color: inherit; min-width: 220px;
 }
+
+/* 面板③归档白名单过滤开关 */
+.hist-toggle {
+  display: inline-flex; align-items: center; gap: 6px; white-space: nowrap;
+  font-size: 12px; color: var(--color-ink-secondary); cursor: pointer; user-select: none;
+}
+.hist-toggle input { cursor: pointer; accent-color: var(--color-primary); }
 
 /* 发现队列面板 */
 .disc-toolbar {

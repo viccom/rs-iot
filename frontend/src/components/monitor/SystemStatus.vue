@@ -1,31 +1,62 @@
 <!-- frontend/src/components/monitor/SystemStatus.vue -->
 <script setup lang="ts">
+import { computed } from 'vue'
 import { useMonitorStore } from '../../stores/monitor'
 
-/** sysstatus.process 子结构（rs-iot `GET /api/v1/sysstatus`）。 */
-interface ProcessInfo {
-  uptime_secs?: number
-  cpu_pct?: number
-  mem_bytes?: number
-}
-/** sysstatus.metrics 子结构。 */
-interface MetricsInfo {
-  pipeline_processed_count?: number
-  hub?: { depth_last?: number }
-}
-
 const monitor = useMonitorStore()
-const process = (): ProcessInfo => (monitor.sysstatus.process as ProcessInfo) || {}
-const metrics = (): MetricsInfo => (monitor.sysstatus.metrics as MetricsInfo) || {}
+
+// ---- 历史归档行（sysstatus.history 块；旧后端无块 → "—" 降级）----
+
+/** engine 态 → 着色分类（ok 绿 / off 灰 / fail 红 / none 默认）。 */
+const histClass = computed(() => {
+  switch (monitor.sysstatus.history?.engine) {
+    case 'ok': return 'hist-ok'
+    case 'disabled': return 'hist-off'
+    case 'init_failed': return 'hist-fail'
+    default: return 'hist-none'
+  }
+})
+
+/** 行文案：ok 时带 written/dropped 两个关键计数（其余五计数器收进 title 悬浮）。 */
+const histText = computed(() => {
+  const h = monitor.sysstatus.history
+  if (!h) return '—'
+  switch (h.engine) {
+    case 'ok': {
+      const s = h.stats
+      return s ? `正常 · 写 ${s.written} / 弃 ${s.dropped}` : '正常'
+    }
+    case 'disabled': return '未启用'
+    case 'init_failed': return '初始化失败'
+    default: return h.engine
+  }
+})
+
+/** 悬浮全量：feature/enabled + 七计数器（不撑爆小面板）。 */
+const histTitle = computed(() => {
+  const h = monitor.sysstatus.history
+  if (!h) return '旧后端无 history 块'
+  const s = h.stats
+  return [
+    `feature: ${h.feature} · enabled: ${h.enabled} · engine: ${h.engine}`,
+    s
+      ? `sent ${s.sent} · written ${s.written} · dropped ${s.dropped} · deadbanded ${s.deadbanded} · skipped ${s.skipped} · lane_mismatch ${s.lane_mismatch} · errors ${s.errors}`
+      : 'stats: null',
+  ].join('\n')
+})
 </script>
 <template>
   <div class="sys">
     <div class="row"><span>dbsize</span><b>{{ monitor.sysstatus.dbsize }}</b></div>
-    <div class="row"><span>uptime</span><b>{{ process().uptime_secs }}s</b></div>
-    <div class="row"><span>cpu</span><b>{{ process().cpu_pct?.toFixed(1) }}%</b></div>
-    <div class="row"><span>mem</span><b>{{ ((process().mem_bytes || 0) / 1048576).toFixed(1) }}MB</b></div>
-    <div class="row"><span>pipeline processed</span><b>{{ metrics().pipeline_processed_count }}</b></div>
-    <div class="row"><span>hub depth</span><b>{{ metrics().hub?.depth_last }}</b></div>
+    <div class="row"><span>uptime</span><b>{{ monitor.sysstatus.process?.uptime_secs }}s</b></div>
+    <div class="row"><span>cpu</span><b>{{ monitor.sysstatus.process?.cpu_pct?.toFixed(1) }}%</b></div>
+    <div class="row"><span>mem</span><b>{{ ((monitor.sysstatus.process?.mem_bytes || 0) / 1048576).toFixed(1) }}MB</b></div>
+    <div class="row"><span>pipeline processed</span><b>{{ monitor.sysstatus.metrics?.pipeline_processed_count }}</b></div>
+    <div class="row"><span>hub depth</span><b>{{ monitor.sysstatus.metrics?.hub?.depth_last }}</b></div>
+    <div class="row">
+      <span>历史归档</span>
+      <b :class="histClass" :title="histTitle">{{ histText }}</b>
+    </div>
   </div>
 </template>
 <style scoped>
@@ -59,4 +90,9 @@ const metrics = (): MetricsInfo => (monitor.sysstatus.metrics as MetricsInfo) ||
   font-family: Consolas, monospace;
   color: var(--chip-ink);
 }
+
+/* 历史引擎态着色（engine ok/disabled/init_failed）。 */
+.row b.hist-ok { color: var(--color-success); }
+.row b.hist-off { color: var(--color-ink-dim); }
+.row b.hist-fail { color: var(--color-danger); }
 </style>

@@ -136,6 +136,21 @@ export function createPreviewSnapshot(): PreviewSnapshot {
           depth_last: 4,
         },
       },
+      // 历史引擎块演示数据（engine ok + 七计数器样例，形态对齐 routes_sys.rs）。
+      history: {
+        feature: true,
+        enabled: true,
+        engine: 'ok',
+        stats: {
+          sent: 982341,
+          written: 971204,
+          dropped: 3,
+          deadbanded: 8120,
+          skipped: 2103,
+          lane_mismatch: 0,
+          errors: 2,
+        },
+      },
     },
     selectedInstance: 'mb-power',
     selectedDevice: 'devA',

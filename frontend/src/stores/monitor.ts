@@ -14,6 +14,7 @@ import type {
   InstConfig,
   InstanceConfigs,
   DeviceSpec,
+  SysStatus,
 } from '../types'
 import { useAuthStore } from './auth'
 import { createPreviewSnapshot, isPreviewAuthToken } from '../lib/previewSession'
@@ -84,8 +85,8 @@ export const useMonitorStore = defineStore('monitor', () => {
   const deviceOwners = ref<Record<string, string>>({})
   /** 设备聚合视图全量（GET /devices；M-2 起点表来自设备模型——类型映射/预览用）。 */
   const deviceCatalog = ref<Record<string, DeviceSpec>>({})
-  /** sysstatus 快照（dbsize / metrics / process 等）。 */
-  const sysstatus = ref<Record<string, unknown>>({})
+  /** sysstatus 快照（dbsize / metrics / process / history 等，类型见 types.ts SysStatus）。 */
+  const sysstatus = ref<SysStatus>({})
   /** 活跃告警清单（最新在前；来源 GET /alarms 拉取 + SSE alarm 帧收敛，Q12 T5）。 */
   const alarms = ref<AlarmItem[]>([])
   /** 当前选中实例 ID（组件联动）。 */

@@ -1,11 +1,30 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, onMounted } from 'vue'
 import { RouterLink } from 'vue-router'
 import CollectorList from '../components/monitor/CollectorList.vue'
 import { useWorkspacePage } from '../composables/useWorkspacePage'
 import { useMonitorStore } from '../stores/monitor'
+import { useDevregStore } from '../stores/devreg'
+import { useAuthStore } from '../stores/auth'
+import { isPreviewAuthToken } from '../lib/previewSession'
 
 const monitor = useMonitorStore()
+/** 发现队列数据复用 devreg store（与设备模型页同缓存——最小侵入路径，不再建第二份状态）。 */
+const devreg = useDevregStore()
+
+/** 发现队列条数（0 = 出口数据全部已建模/暂无脏数据）。 */
+const discoveryCount = computed(() => devreg.discoveries.length)
+/** 队列态势：有待建模标签时提醒优先处理；空队列弱化显示。 */
+const discoveryNote = computed(() =>
+  discoveryCount.value > 0
+    ? `${discoveryCount.value} 条未建模标签待采纳`
+    : '队列为空——出口数据全部已建模',
+)
+// 进页拉一次队列（设备模型页会自行刷新同份缓存）。preview 模式不发真实请求
+// （devreg 无 preview 分支，401 会清 token 踢出演示）。
+onMounted(() => {
+  if (!isPreviewAuthToken(useAuthStore().token)) void devreg.loadDiscoveries()
+})
 
 /** 计数统一取 roster（配置全集 ∪ 运行态）——与分母同源，避免分子 instances/分母 roster 的脆弱混算。 */
 const runningCount = computed(() =>
@@ -39,6 +58,7 @@ useWorkspacePage(() => ({
     `实例总数 ${monitor.roster.length}`,
     `运行中实例 ${runningCount.value}`,
     `降级实例 ${degradedCount.value}`,
+    `发现队列 ${discoveryCount.value} 条`,
     `最近日志 ${monitor.logs[0]?.message ?? '暂无'}`,
   ],
 }))
@@ -65,6 +85,12 @@ useWorkspacePage(() => ({
         <p>当前缓存报文帧数量，可用于快速判断链路是否静默。</p>
         <span class="hero-note">{{ linkNote }}</span>
       </article>
+      <RouterLink to="/models" class="hero-card link-card" :class="{ quiet: discoveryCount === 0 }">
+        <p class="card-label">建模工作流</p>
+        <h3>{{ discoveryCount }}</h3>
+        <p>发现队列中的未建模标签数量，点击进入设备模型页采纳处理。</p>
+        <span class="hero-note" :class="{ warn: discoveryCount > 0 }">{{ discoveryNote }}</span>
+      </RouterLink>
     </div>
 
     <div class="content-grid">
@@ -132,7 +158,7 @@ useWorkspacePage(() => ({
 .hero-grid {
   display: grid;
   gap: 18px;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
 }
 
 .hero-card,
@@ -168,6 +194,23 @@ useWorkspacePage(() => ({
 
 .hero-card.accent {
   background: linear-gradient(135deg, color-mix(in srgb, var(--color-primary) 24%, white), var(--panel-bg));
+}
+
+/* 发现队列入口卡（RouterLink 渲染 <a>，对齐 article 卡视觉）。 */
+.hero-card.link-card {
+  display: block;
+  color: inherit;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.hero-card.link-card:hover {
+  border-color: var(--color-primary);
+}
+
+/* 空队列弱化显示（0 条时数字降透明度，提示文案不带 warn）。 */
+.hero-card.quiet h3 {
+  opacity: 0.45;
 }
 
 .card-label {
@@ -276,6 +319,12 @@ useWorkspacePage(() => ({
 
 .empty-link:hover {
   text-decoration: underline;
+}
+
+@media (max-width: 1200px) {
+  .hero-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 
 @media (max-width: 960px) {
