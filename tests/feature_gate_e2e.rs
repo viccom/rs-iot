@@ -13,9 +13,7 @@ mod common;
 
 use rs_iot::host::{CtlRegistry, HostContext};
 use rs_iot::plugin::instance::InstanceManager;
-use rs_iot::types::{
-    AppType, DeviceBinding, HostKind, Hwid, InstConfig, PluginName, Sample,
-};
+use rs_iot::types::{AppType, DeviceBinding, HostKind, Hwid, InstConfig, PluginName, Sample};
 use tokio_util::sync::CancellationToken;
 
 /// 关闭 `modbus` feature 时，`modbusClient` 实例应返回 Config 错误（优雅降级），

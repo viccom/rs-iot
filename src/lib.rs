@@ -334,7 +334,26 @@ pub async fn run_app_with_shutdown(
     let hist_handle = history_engine.as_ref().and_then(|e| e.handle());
     #[cfg(not(feature = "history"))]
     let hist_handle = None;
+    // Phase 3 前置（可见性）：stats/运行态快照注入 AppState。AppState 在引擎
+    // init **之后**构造，直接取值即可（无需共享可变槽）——engine_state 取值：
+    // feature off 恒 "disabled"；on 时 enabled=false → "disabled"、init 失败
+    // （上方 P8 error! 分支已把 Err 折叠为 None）→ "init_failed"、成功 → "ok"。
+    // Some(stats) 与 "ok" 由同一来源（ctx.history/engine）成对产出，非 ok 态
+    // stats 恒 None（/metrics 据此省略 history family，/sysstatus stats 为 null）。
+    // stats 从注入后的 ctx.history 取（字段已定型，feature off 的 None 字面量
+    // 不产生类型歧义）。
+    #[cfg(feature = "history")]
+    let history_engine_state: Arc<str> = if !cfg.history.enabled {
+        Arc::from("disabled")
+    } else if history_engine.is_some() {
+        Arc::from("ok")
+    } else {
+        Arc::from("init_failed")
+    };
+    #[cfg(not(feature = "history"))]
+    let history_engine_state: Arc<str> = Arc::from("disabled");
     ctx.history = hist_handle;
+    let history_stats = ctx.history.as_ref().map(|h| h.stats.clone());
     let pipeline_token = shutdown.child_token();
     let pipeline_handle = tokio::spawn(pipeline::run(
         ctx.clone(),
@@ -388,6 +407,8 @@ pub async fn run_app_with_shutdown(
         log_ringbuffer,
         event_bus,
         config: std::sync::Arc::new(cfg.clone()),
+        history_stats,
+        history_engine_state,
     };
     let app = api::build_router(state);
     let api_port = cfg.api_port;

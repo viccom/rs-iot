@@ -1,6 +1,7 @@
 //! `/metrics` 端点 render 层(Prometheus 文本格式化的纯函数)。spec §3-§6。
 
 use crate::db::stat::InstanceStat;
+use crate::history::rows::HistoryStats;
 use crate::plugin::instance::InstState;
 use crate::process_metrics::ProcessMetrics;
 use std::sync::atomic::Ordering;
@@ -322,6 +323,57 @@ pub(crate) fn render_instances(rows: &[InstanceRow]) -> String {
     s
 }
 
+/// 历史旁路七计数器 → Prometheus 文本（Phase 3 前置，spec §3/§6 同规）。
+///
+/// **仅引擎 ok（stats 存在）时被 handler 调用**：disabled/init_failed 态不输出
+/// ——零值 counter 会误导抓取方以为归档在跑而数据为零。计数语义与
+/// `HistoryStats` 字段一一对应（`sent+dropped+skipped == fan_out 遍历总数`）。
+pub(crate) fn render_history(h: &HistoryStats) -> String {
+    let mut s = String::new();
+    let rel = Ordering::Relaxed;
+    for (name, help, val) in [
+        (
+            "rs_iot_history_sent_total",
+            "历史旁路 fan_out 发送成功行数",
+            h.sent.load(rel),
+        ),
+        (
+            "rs_iot_history_written_total",
+            "历史 writer insert_rows 成功行数",
+            h.written.load(rel),
+        ),
+        (
+            "rs_iot_history_dropped_total",
+            "历史旁路 channel 满丢弃行数(满即丢)",
+            h.dropped.load(rel),
+        ),
+        (
+            "rs_iot_history_deadbanded_total",
+            "历史死区抑制行数",
+            h.deadbanded.load(rel),
+        ),
+        (
+            "rs_iot_history_skipped_total",
+            "历史白名单外跳过行数(L3)",
+            h.skipped.load(rel),
+        ),
+        (
+            "rs_iot_history_lane_mismatch_total",
+            "历史 lane 型变剔除行数(P3)",
+            h.lane_mismatch.load(rel),
+        ),
+        (
+            "rs_iot_history_errors_total",
+            "历史 insert_rows 失败行数(fail-soft 整批丢弃)",
+            h.errors.load(rel),
+        ),
+    ] {
+        family_header(&mut s, name, help, "counter");
+        metric_line(&mut s, name, "", &val.to_string());
+    }
+    s
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -515,5 +567,63 @@ mod tests {
             out.contains(r#"inst_id="a\nb""#),
             "换行应 escape 为 \\n,实际: {out}"
         );
+    }
+
+    /// 历史七计数器预置(每计数器互异值,防串位)。
+    fn history_stats() -> crate::history::rows::HistoryStats {
+        let h = crate::history::rows::HistoryStats::default();
+        h.sent.store(11, Ordering::Relaxed);
+        h.written.store(7, Ordering::Relaxed);
+        h.dropped.store(3, Ordering::Relaxed);
+        h.deadbanded.store(5, Ordering::Relaxed);
+        h.skipped.store(2, Ordering::Relaxed);
+        h.lane_mismatch.store(1, Ordering::Relaxed);
+        h.errors.store(9, Ordering::Relaxed);
+        h
+    }
+
+    #[test]
+    fn render_history_seven_counter_families_with_values() {
+        let out = render_history(&history_stats());
+        // 恰好 7 个 family,全部 counter
+        assert_eq!(
+            out.lines().filter(|l| l.starts_with("# TYPE ")).count(),
+            7,
+            "history 应输出 7 个 metric family"
+        );
+        // 每个 family:HELP/TYPE 头 + 数值行
+        for (name, val) in [
+            ("rs_iot_history_sent_total", "11"),
+            ("rs_iot_history_written_total", "7"),
+            ("rs_iot_history_dropped_total", "3"),
+            ("rs_iot_history_deadbanded_total", "5"),
+            ("rs_iot_history_skipped_total", "2"),
+            ("rs_iot_history_lane_mismatch_total", "1"),
+            ("rs_iot_history_errors_total", "9"),
+        ] {
+            assert!(
+                out.contains(&format!("# HELP {name} ")),
+                "{name} 缺 HELP 头"
+            );
+            assert!(
+                out.contains(&format!("# TYPE {name} counter")),
+                "{name} 缺 TYPE counter 头"
+            );
+            assert!(out.contains(&format!("{name} {val}")), "{name} 缺数值行");
+        }
+    }
+
+    #[test]
+    fn render_history_counters_all_end_with_total() {
+        // 命名规范锁定:history counter 名以 _total 结尾(与 render_process 同规)。
+        let out = render_history(&crate::history::rows::HistoryStats::default());
+        for line in out.lines() {
+            if line.starts_with("# TYPE ") && line.ends_with(" counter") {
+                let name = line
+                    .trim_start_matches("# TYPE ")
+                    .trim_end_matches(" counter");
+                assert!(name.ends_with("_total"), "counter {name} 应以 _total 结尾");
+            }
+        }
     }
 }

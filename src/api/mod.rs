@@ -52,6 +52,14 @@ pub struct AppState {
     pub event_bus: crate::event_bus::EventBus,
     /// 应用配置快照（GET /api/v1/config 脱敏读；只读 Arc 共享零成本）。
     pub config: std::sync::Arc<crate::config::AppConfig>,
+    /// 历史引擎旁路计数（Phase 3 前置可见性）：None = 引擎未运行
+    /// （disabled/init_failed），/metrics 据此省略 history family。
+    /// `rows.rs` 无条件编译（P6），本字段随之一致无条件编译。
+    pub history_stats: Option<Arc<crate::history::rows::HistoryStats>>,
+    /// 历史引擎运行态（init 后不变）："ok" / "disabled" / "init_failed"；
+    /// feature off 构建恒 "disabled"（feature 布尔在 handler 内 `cfg!` 求值，
+    /// 不进 AppState）。
+    pub history_engine_state: std::sync::Arc<str>,
 }
 
 /// 白名单路径（无需 JWT）。

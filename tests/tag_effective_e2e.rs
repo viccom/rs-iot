@@ -84,6 +84,8 @@ async fn test_app(
         log_ringbuffer: Arc::new(LogRingBuffer::new(2000)),
         event_bus,
         config: Arc::new(rs_iot::config::AppConfig::default()),
+        history_stats: None,
+        history_engine_state: Arc::from("disabled"),
     };
     (build_router(state), handle, hub_tx, mgr_ret)
 }
