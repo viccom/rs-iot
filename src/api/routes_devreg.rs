@@ -93,9 +93,13 @@ pub struct DeleteReq {
     pub devid: String,
 }
 
+/// `POST /api/v1/devreg/delete`：删除 + 级联（**解绑实例引用** + dev2inst 归属 +
+/// rtdata；历史不动——master plan D9）。返回解绑实例数（悬空绑定不再残留）。
 pub async fn delete(State(st): State<AppState>, Json(req): Json<DeleteReq>) -> Response {
     match store::delete_device(&st.lux, &req.devid).await {
-        Ok(Some(())) => Json(json!({"status": "ok"})).into_response(),
+        Ok(Some(unbound)) => {
+            Json(json!({"status": "ok", "unbound_instances": unbound})).into_response()
+        }
         Ok(None) => err(StatusCode::NOT_FOUND, "device not found"),
         Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
     }
