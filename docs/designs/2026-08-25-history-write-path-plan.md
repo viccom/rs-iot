@@ -1,7 +1,11 @@
 # 历史写路径(Phase 1b)实施计划
 
-> **状态**:planned
+> **状态**:implemented
 > **日期**:2026-08-25
+> **实施**:feat/history-write 分支,2026-08-25(merge commit 待主会话合并后补)
+> **代码**:src/history/{mod,rows,writer,engine}.rs + host.rs/pipeline.rs/lib.rs/config.rs/error.rs 挂点
+> **测试**:单测 11(rows 5+engine 6)+writer 6+e2e 6(dataflow 2/write 2/kill 2)+config 4;四门禁数字见 §三
+> **遗留**:①非饱和白名单查表成本(off-idle -5.15%,§四-1)②writer 高基数排空速率剖析(§四-2)③cardinality 启动时刻校准不重算(R4,§四-3)
 > **依据(ADR 权威版)**:[2026-08-24-history-storage-master-plan.md](2026-08-24-history-storage-master-plan.md) §一三层开关/§二写路径/§三 D1-D11/§四陷阱/§五 1b 行——本文引用不复述
 > **基线**:tsink fork tag `rs-iot-1b-baseline` @ 277e744(已推 viccom/tsink,2026-08-25)
 > **执行方式**:worktree `feat/history-write`,executing-plans 编排式(主会话派发/审查,子代理 TDD 信息隔离)
@@ -189,7 +193,7 @@ A(fan_out 纯函数):
 4. `fan_out_empty_tag_skipped`:tag 名为空串 → 跳过(P1,计 skipped)。
 B(writer 线程,`--features history`):
 5. `writer_flushes_all`:spawn writer(真 tsink 临时目录)→ 发 100 行 → poll stats.written==100(轮询超时 5s)→ close → select 按唯一 ts 计数==100。
-6. `writer_deadband_suppresses`:同 series 连发 v=1.0,1.1,1.15…(deadband=1.0)→ written 严格小于发出数且 ≥1(首点必档);且 last_archived 只在归档更新(v 涨 0.4→0.8→1.2,db=1.0:档 0.4,剔 0.8,档 1.2)。
+6. `writer_deadband_suppresses`:同 series 连发 v=1.0,1.1,1.15…(deadband=1.0)→ written 严格小于发出数且 ≥1(首点必档);且 last_archived 只在归档更新(0.4→0.8→1.5,db=1.0:档 0.4,剔 0.8(Δ0.4),档 1.5(Δ1.1))。
 7. `writer_deadband_non_numeric_archives`:Bool/Str series 带 deadband → 全档(P4)。
 8. `writer_batch_dedup_same_ts`:同 series 同 ts 两行不同值 → written 计 1(批内保后写,P2);select 该 ts 唯一。
 9. `writer_lane_change_drops`:同 series 先 Float 后 Str → Str 行被剔+lane_mismatch 计数,Float 行正常写入(P3)。
@@ -301,12 +305,19 @@ cargo test -j 2 --no-default-features --features lua   # minimal 裁剪回归
 | R5 | deadband/last_archived 状态进程内存态,重启清零 | 首点必档,可能产生一个重复 ts 点(读取端折叠);记录 |
 | R6 | tsink MSRV ≥1.89(File::try_lock) | 本项目 MSRV 已 ≥1.96(eip),无碍 |
 | R7 | CI checkout viccom/tsink 为公共仓库无凭据问题 | fork 是 public;若实际私有,CI 加 token 后再议 |
-| R8 | 主链路劣化 ≥5% | 先查 fan_out 热路径(effective Arc clone 无拷贝,理论 O(1));仍超 → 优化项登记总方案 §五 1a 先例(本地 seen/代际失效),不阻塞合并若 <8% 且登记;>8% 停下修 |
+| R8 | 主链路劣化 ≥5% | **已修复(P11)+门禁通过**:初测 23.96% → P11 饱和快速路径(d465ed5)→ ~10% 噪声带 → 三档分解定位;off-vs-on(生产口径)mean -4.23%/median -4.28% <5% 过;idle-on 饱和净增量 +0.96%(P11 快速路径 99.3% 行零分配);残留 off-idle -5.15%(非饱和白名单查表)登记 §四-1 优化项 |
+| R9 | tsink 的 rayon 是死依赖(零调用),lux 才是进程内 rayon 消费者 | 任何"包界 tsink CPU"的 env 方案(如 RAYON_NUM_THREADS)都会误伤 lux SELECT 扇出——P12 因此前提证伪弃用;未来 CPU 包界须走线程优先级或 fork 移除死依赖 |
 
-## 三、验收记录(执行后回填)
+## 三、验收记录(2026-08-25 回填,Ryzen 9 5900HX)
 
-- 门禁一(白名单外零写入):待填
-- 门禁二(死区生效):待填
-- 门禁三(kill 恢复零丢失):待填(含 WAL 档位与子进程终止方式)
-- 门禁四(A/B 劣化 %):待填(A/B 均值、机器、日期)
-- 全量门禁输出:待填
+- **门禁一(白名单外零写入)——过**:`gate1_whitelist_exact_set`——2 设备×3 tag 白名单矩阵 3/6,select_series 集合精确相等,written==90/skipped==90。
+- **门禁二(死区生效)——过**:`gate2_deadband_effective`——deadband=5.0 值序列 0..=19 归档点恰 {0,5,10,15}(4 点),无死区对照 20 点全档,deadbanded==16。
+- **门禁三(kill 恢复零丢失)——过**:`gate3_kill_recovery_zero_loss`——子进程 abort() 崩溃(未触发 WER 超时),Periodic(500ms) 默认档重放唯一 ts 总数 5000/5000 零丢失。机理:tsink WAL append 每次必 flush 到 OS 仅 fsync 延迟(logical.rs),进程级 kill 页缓存存活,丢失窗口仅覆盖断电——P10 的 PerAppend 退路不需要。
+- **门禁四(主链路 A/B 劣化 <5%)——过**:三档分解(off/idle/on ×6 交替,Ryzen 9 5900HX,2026-08-25):**off vs on(生产口径)mean -4.23%/median -4.28% <5%**;idle-on 饱和净增量 +0.96%(P11 快速路径 99.3% 行零分配);off-idle 诊断口径 -5.15%(非饱和白名单查表成本)登记 §四-1 优化项。历程:初测 23.96% → P11 饱和快速路径(d465ed5)→ ~10% 噪声带 → 三档分解定位;P12(rayon 包界)前提证伪弃用:tsink 零 rayon(死依赖),lux 才是 rayon 消费者,RAYON_NUM_THREADS 会伤主链路查询(见 R9)。
+- **全量门禁输出**(2026-08-25):①`cargo fmt --all --check` ✓( EXIT=0);②clippy 默认 ✓(12.90s 零警告);③clippy `--features history` ✓(13.42s 零警告);④`cargo test --all-targets --all-features` ✓(EXIT=0;lib 616 passed+9 ignored,history 三 e2e 2+2+2 全过);⑤**minimal(`--no-default-features --features lua`) ✗——pre-existing master 破坏,非本分支引入**:`tests/feature_gate_e2e.rs:54` E0308(expected `DeviceBinding`, found `DeviceSpec`)——M-2(55950a5,并入 e8c32e2)将 `InstConfig.devices` 切 `Vec<DeviceBinding>` 时,该测试仅 `#![cfg(not(feature = "modbus"))]` 下编译,全量门禁不覆盖故漏网;本分支对该文件仅加 `history: None`(与本错误无关);minimal `--lib` 521 passed 0 failed 证破坏孤立于该测试文件,须单独修复(CI minimal job 同命令必红);⑥`check_docs.py` ✓(50 个 md 全过)。**门禁⑤未过,docs 收口 commit 按"全部通过后"约定暂缓,待主会话裁决**。
+
+## 四、遗留与优化项登记
+
+1. **非饱和白名单查表成本**(off-idle 诊断口径 -5.15%):fan_out 每行查 effective HashMap;优化方向 flush 级 key 复用/每 worker 代际失效 memo(对标总方案 §五 1a 登记项),Phase 2/4 前视情实施。
+2. **writer 高基数排空速率**:25K series 场景排空 ~8K pts/s(远低于 tsink 单写 182K 基线),Phase 4 PoC 范围内剖析(攒批参数/insert 批次切分)。
+3. **cardinality 自动校准仅启动时刻**:运行期开白名单不重算(R4 已有边界,保留;超限=CardinalityLimitExceeded 拒新 series 错误计数可见,重算留 Phase 3)。

@@ -177,8 +177,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(not(feature = "history"))]
     if engine_on {
         return Err(
-            "RSIOT_BENCH_HISTORY=idle/on 需要 --features history 编译（当前二进制未含 L1）"
-                .into(),
+            "RSIOT_BENCH_HISTORY=idle/on 需要 --features history 编译（当前二进制未含 L1）".into(),
         );
     }
 
