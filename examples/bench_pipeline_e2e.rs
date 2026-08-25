@@ -33,6 +33,13 @@
 //!   （written 等计数证 B 档真在归档）→ close(15s) 排空。
 //!   idle vs on = 饱和归档净增量；off vs on = 饱和端到端总劣化。
 //!   三档除 env 外参数完全一致；B 相对 A 稳态均值劣化 <5% 为门禁四通过（R8 见总方案）。
+//!
+//! 订阅档位（D8/R1 watcher 常驻成本 A/B；env `RSIOT_BENCH_SUB`，缺省 `ksub`
+//! =生产缺省）：ksub=构造 `RtdataWatchService` + spawn 消费循环（照 src/lib.rs
+//! 接线：lux 每 HSET enqueue ksubscribe 事件、watcher 消费 mark 版本表——常驻
+//! 成本全量进测量窗）；poll=不构造不 spawn（lux 零订阅者，HSET 零 enqueue）。
+//! 与 `RSIOT_BENCH_HISTORY` 正交（on+ksub=最重组合档）。门禁：同 history 档下
+//! ksub 相对 poll 稳态均值劣化 <5%（R1）。
 
 use std::collections::BTreeMap;
 use std::sync::atomic::Ordering;
@@ -155,6 +162,15 @@ enum HistMode {
     On,
 }
 
+/// 订阅档位（D8/R1 watcher 常驻成本 A/B，env `RSIOT_BENCH_SUB`）。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum SubMode {
+    /// 生产缺省：watcher 常驻（ksubscribe rtdata:* 事件消费 + mark 版本表）。
+    Ksub,
+    /// 不构造不 spawn（lux 零订阅者，HSET 零 enqueue，P8 承诺面）。
+    Poll,
+}
+
 #[tokio::main(flavor = "multi_thread", worker_threads = 4)]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 历史归档档位（门禁四三档分解）：缺省 off（A 档基线，行为与改造前完全一致）。
@@ -168,6 +184,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         },
         Err(_) => HistMode::Off,
+    };
+    // 订阅档位（D8/R1 watcher 常驻成本 A/B）：缺省 ksub（生产缺省，P8）；与
+    // RSIOT_BENCH_HISTORY 正交（仅决定 watcher 构造/spawn，不碰归档路径）。
+    let sub_mode = match std::env::var("RSIOT_BENCH_SUB") {
+        Ok(v) => match v.trim().to_ascii_lowercase().as_str() {
+            "" | "ksub" => SubMode::Ksub,
+            "poll" => SubMode::Poll,
+            other => return Err(format!("RSIOT_BENCH_SUB 仅接受 ksub/poll，实际: {other}").into()),
+        },
+        Err(_) => SubMode::Ksub,
     };
     // 仅 on 开全白名单：tag 建模 history=true + producer ts 互异重写共用。
     let history_on = hist_mode == HistMode::On;
@@ -303,6 +329,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         pipeline_token,
     ));
 
+    // ksub 档：watcher 常驻（照 src/lib.rs 接线：Arc::new + spawn(client.clone(),
+    // token)）——lux 每 HSET enqueue ksubscribe 事件、watcher 消费 mark 版本表，
+    // 常驻成本全量进测量窗。token 自建独立 token（不挂 shutdown 子树），结尾
+    // 自行 cancel。poll 档不构造不 spawn（lux 零订阅者零 enqueue）。
+    // JoinHandle 分离运行（token 取消即退，无需 join）；命名绑定 `_watcher`
+    // 满足 must_use 且避开 clippy::let_underscore_future（同 lib.rs）。
+    let watcher_token = CancellationToken::new();
+    let rtdata_watch = if sub_mode == SubMode::Ksub {
+        let watch = Arc::new(rs_iot::api::rtdata_watch::RtdataWatchService::new());
+        let _watcher = watch.spawn(client.clone(), watcher_token.clone());
+        Some(watch)
+    } else {
+        None
+    };
+
     // 等 pipeline worker 就位（set_workers_active 在 pipeline::run 开头同步设）。
     // 200ms 足够 runtime 调度 run 的首次 poll（spawn worker 前），warmup 也会吸收残余 lag。
     tokio::time::sleep(Duration::from_millis(200)).await;
@@ -360,6 +401,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         HistMode::On => println!(
             "history 档位: on(B 档)——引擎已起,{} series 全量白名单(history=true,deadband=None)",
             N_DEVID * N_POINTS
+        ),
+    }
+    match sub_mode {
+        SubMode::Ksub => println!(
+            "subscribe 档位: ksub(生产缺省)——RtdataWatchService 常驻 spawn,每 HSET enqueue+消费 ksubscribe 事件"
+        ),
+        SubMode::Poll => println!(
+            "subscribe 档位: poll——不构造不 spawn watcher(lux 零订阅者,零 enqueue)"
         ),
     }
     println!(
@@ -428,6 +477,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     );
     println!("目标 {TARGET_PPS:.0} 点/秒: {verdict}");
+
+    // ksub 档收尾：独立 cancel watcher（分离退出不 join，同生产 token 级联取消
+    // 语义），并以 device_count 佐证 watcher 真在收事件——版本表即设备注册表，
+    // N_DEVID 台全程被 HSET，收过事件即应全部入表。100ms 退避给分离 task 一个
+    // 调度片观察 cancel+退订，再进 SAVE/shutdown（避免 kunsub 与 lux 关闭竞态；
+    // 此时测量窗已结束，不进数据）。poll 档无 watcher，本块零输出零等待。
+    watcher_token.cancel();
+    if let Some(w) = &rtdata_watch {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        println!(
+            "watcher device_count={} / {N_DEVID} (版本表即设备注册表,={N_DEVID} 即真收 HSET 事件)",
+            w.device_count()
+        );
+    }
 
     // idle/on 档收尾：先 close 排空（D10 序：pipeline join 后、lux shutdown 前；
     // close 后计数定格）再打印 history stats——on 档 written 等非零即证真在归档，
