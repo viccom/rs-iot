@@ -14,7 +14,7 @@ mod common;
 use rs_iot::host::{CtlRegistry, HostContext};
 use rs_iot::plugin::instance::InstanceManager;
 use rs_iot::types::{
-    AppType, ChildSpec, DeviceSpec, HostKind, Hwid, InstConfig, PluginName, Sample,
+    AppType, DeviceBinding, HostKind, Hwid, InstConfig, PluginName, Sample,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -51,16 +51,11 @@ async fn gated_plugin_returns_config_error_when_feature_off() {
         app_type: AppType::South,
         auto_start: true,
         app_config: serde_json::json!({}),
-        devices: vec![DeviceSpec {
-            label: "d".into(),
-            value: "devG".into(),
-            children: vec![ChildSpec {
-                label: "x".into(),
-                value: "holding:0:f32".into(),
-                r#type: "float".into(),
-                props: None,
-            }],
-            slave_id: None,
+        // 设备构造仅占形：find_source 在设备解析前即失败。M-2 起 devices 为
+        // Vec<DeviceBinding>（DeviceSpec 旧形态已随内联点表退役）。
+        devices: vec![DeviceBinding {
+            devid: "devG".into(),
+            bind: Default::default(),
         }],
         host_kind: HostKind::Builtin,
     };
