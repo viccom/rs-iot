@@ -192,7 +192,7 @@ cd frontend && npm run build && npm run test -- --run   # 零前端改动也应�
 - **watcher 事件消费佐证**:bench ksub 档收尾输出 `watcher device_count=100 / 100`(= N_DEVID 100)——版本表即设备注册表,全量设备入表即证 watcher 真在收 HSET key 事件(非空转常驻)。
 - **全量门禁**(T6,2026-08-25,worktree feat/history-read-sub 全部真实输出):`cargo fmt --all --check` 通过;clippy 双档(`-D warnings`,默认 + `--features history`)均 Finished 零警告;`cargo test -j 2 --all-targets --all-features` exit 0(27 个测试目标全绿,含上述三文件);`cargo test -j 2 --no-default-features --features lua` exit 0(裁剪档+Doc-tests);前端 `npm ci && npm run build` 产 dist(gateway rust-embed 依赖)+ `npm run test -- --run` 14 文件 168 测全过(基线无回归);`python scripts/check_docs.py` OK(51 md)。
 
-## 四、审查修复记录(2026-08-26,worktree fix/phase2-review,Phase 2 深度审查后修复包)
+## 四、审查修复记录(2026-08-26,worktree fix/phase2-review,merge 43bb895,Phase 2 深度审查后修复包)
 
 审查发现 2 High + 3 Medium + 6 Low,逐一处置(红→绿证据均为真实输出):
 
