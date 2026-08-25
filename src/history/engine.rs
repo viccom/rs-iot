@@ -10,13 +10,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use tsink::{Storage, StorageBuilder, TimestampPrecision, WalSyncMode};
+use tsink::{Label, QueryOptions, Storage, StorageBuilder, TimestampPrecision, Value, WalSyncMode};
 
 use crate::config::HistoryConfig;
 use crate::error::{RsIotError, TResult};
 use crate::history::rows::HistoryHandle;
 use crate::history::writer::spawn_writer;
-use crate::types::TagProps;
+use crate::types::{SampleValue, TagProps};
 
 /// tsink 存储句柄的透明包装：`dyn Storage` 未实现 `Debug`（trait 无
 /// `Debug` supertrait，孤儿规则下也无法在外部补），而引擎句柄与错误断言
@@ -112,27 +112,70 @@ impl StorageHandle {
     }
 }
 
-/// [`crate::history::HistoryReader`] 的引擎侧实现（Phase 2 Task 1 骨架）：
-/// 持 StorageHandle clone 与 writer/引擎共享同一底层存储。
+/// [`crate::history::HistoryReader`] 的引擎侧实现（Phase 2 Task 2）：
+/// 持 StorageHandle clone 与 writer/引擎共享同一底层存储；hwid 参与系列
+/// 身份（labels=[devid,hwid]，调用点传入）。
 ///
-/// Task 1 只落接口面（503/400 矩阵 + 响应形的 e2e 锚定），select 的 raw
-/// 分支在 Task 2 实现——本占位诚实返回 `Err` 而非 `todo!()`（编译过且
-/// 运行期可观测），Task 2 替换。
+/// raw 分支（Task 2）经 `select_with_options` 已接线；downsample 分支待
+/// Task 3（本版诚实返回 `Err` 而非 `todo!()`，编译过且运行期可观测）。
 struct EngineReader {
-    /// tsink 存储句柄（clone，共享同一 Arc）。占位 select 暂不读取，Task 2
-    /// raw 分支接线后移除 expect。
-    #[expect(dead_code)]
+    /// tsink 存储句柄（clone，共享同一 Arc）——select 经 Deref 直调
+    /// `select_with_options`。
     storage: StorageHandle,
+    /// 进程 hwid：series 身份 = metric + labels{devid, hwid}，engine 不存
+    /// hwid、调用点传入（lib.rs 传进程 hwid，测试传铺数据同值 hwid）。
+    hwid: String,
 }
 
 impl crate::history::HistoryReader for EngineReader {
     fn select(
         &self,
-        _metric: &str,
-        _devid: &str,
-        _q: &crate::history::HistoryQuery,
+        metric: &str,
+        devid: &str,
+        q: &crate::history::HistoryQuery,
     ) -> Result<Vec<crate::history::HistoryPoint>, String> {
-        Err("raw select 待 Task 2 实现".to_string())
+        // downsample 分支待 Task 3（桶聚合/类型矩阵/P12 400 映射）。
+        if q.downsample.is_some() {
+            return Err("downsample 待 Task 3 实现".to_string());
+        }
+        // raw 分支（P2/P3/P4）：labels=[devid,hwid] 锚定单 series，半开窗
+        // [start_ms,end_ms) 与 limit 下推（取最旧 n，tsink 语义）全交
+        // `select_with_options` 承载（raw 路径分页下推免全窗物化）。
+        let opts = QueryOptions::new(q.start_ms, q.end_ms)
+            .with_labels(vec![
+                Label::new("devid", devid),
+                Label::new("hwid", &self.hwid),
+            ])
+            .with_pagination(0, Some(q.limit));
+        let points = self
+            .storage
+            .select_with_options(metric, opts)
+            .map_err(|e| format!("history engine: {e}"))?;
+        Ok(points
+            .into_iter()
+            .map(|p| crate::history::HistoryPoint {
+                ts_ms: p.timestamp,
+                value: value_to_sample(&p.value),
+            })
+            .collect())
+    }
+}
+
+/// tsink `Value` → `SampleValue`（P4）：写路径 lane 只落 F64/I64/Bool/String
+/// 四型，前四型直映（类型保真）；U64 经 i64 饱和转 `Int`——`u64 > i64::MAX`
+/// 时取 `i64::MAX`（R8：现实不可达，计划风险表登记）。Bytes/Histogram 对
+/// 1b 写路径不可达，防御性串化为 `Str`（不静默丢点）。
+fn value_to_sample(v: &Value) -> SampleValue {
+    match v {
+        Value::F64(f) => SampleValue::Float(*f),
+        Value::I64(i) => SampleValue::Int(*i),
+        // R8：SampleValue 无 U64 变体，i64 域外饱和取 i64::MAX
+        Value::U64(u) => SampleValue::Int(i64::try_from(*u).unwrap_or(i64::MAX)),
+        Value::Bool(b) => SampleValue::Bool(*b),
+        Value::String(s) => SampleValue::Str(s.clone()),
+        // 不可达：1b lane 只写四型；防御性串化
+        Value::Bytes(b) => SampleValue::Str(format!("{b:?}")),
+        Value::Histogram(h) => SampleValue::Str(format!("{h:?}")),
     }
 }
 
@@ -195,12 +238,17 @@ impl HistoryEngine {
         self.handle.clone()
     }
 
-    /// 历史读句柄（Phase 2 Task 1，P1）：clone 存储句柄包成
+    /// 历史读句柄（Phase 2 Task 2，P1）：clone 存储句柄包成
     /// `Arc<dyn HistoryReader>` 交 REST 层（AppState.history_reader），与
     /// writer/引擎共享同一底层存储 Arc。
-    pub fn reader(&self) -> Arc<dyn crate::history::HistoryReader> {
+    ///
+    /// `hwid` 由调用点传入（engine 不存）：series 身份 = metric +
+    /// labels{devid, hwid}，reader 需知道 hwid 才能构造精确 labels——lib.rs
+    /// 传进程 hwid，测试传铺数据同值 hwid。
+    pub fn reader(&self, hwid: &str) -> Arc<dyn crate::history::HistoryReader> {
         Arc::new(EngineReader {
             storage: self.storage.clone(),
+            hwid: hwid.to_string(),
         })
     }
 

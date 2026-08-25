@@ -352,12 +352,13 @@ pub async fn run_app_with_shutdown(
     };
     #[cfg(not(feature = "history"))]
     let history_engine_state: Arc<str> = Arc::from("disabled");
-    // 历史读句柄注入 AppState（Phase 2 P1）：engine 就绪（Some）→ reader()
-    // （clone storage 包 Arc<dyn HistoryReader>）；fail-soft None 时 503 矩阵
-    // 按 engine_state 三态可判。feature off 分支恒 None（类型由 AppState 字段
-    // 统一推断，同 hist_handle 两 cfg 块模式）。
+    // 历史读句柄注入 AppState（Phase 2 P1）：engine 就绪（Some）→ reader(进程
+    // hwid)（clone storage 包 Arc<dyn HistoryReader>；series 身份含 hwid，由
+    // 调用点传入）；fail-soft None 时 503 矩阵按 engine_state 三态可判。
+    // feature off 分支恒 None（类型由 AppState 字段统一推断，同 hist_handle
+    // 两 cfg 块模式）。
     #[cfg(feature = "history")]
-    let history_reader = history_engine.as_ref().map(|e| e.reader());
+    let history_reader = history_engine.as_ref().map(|e| e.reader(hwid.as_str()));
     #[cfg(not(feature = "history"))]
     let history_reader = None;
     ctx.history = hist_handle;
