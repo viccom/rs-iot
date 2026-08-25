@@ -10,13 +10,16 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use tsink::{Storage, StorageBuilder, TimestampPrecision, WalSyncMode};
+use tsink::{
+    Aggregation, DataPoint, Label, QueryOptions, Storage, StorageBuilder, TimestampPrecision,
+    TsinkError, Value, WalSyncMode,
+};
 
 use crate::config::HistoryConfig;
 use crate::error::{RsIotError, TResult};
 use crate::history::rows::HistoryHandle;
 use crate::history::writer::spawn_writer;
-use crate::types::TagProps;
+use crate::types::{SampleValue, TagProps};
 
 /// tsink 存储句柄的透明包装：`dyn Storage` 未实现 `Debug`（trait 无
 /// `Debug` supertrait，孤儿规则下也无法在外部补），而引擎句柄与错误断言
@@ -112,6 +115,127 @@ impl StorageHandle {
     }
 }
 
+/// [`crate::history::HistoryReader`] 的引擎侧实现（Phase 2 Task 2/3）：
+/// 持 StorageHandle clone 与 writer/引擎共享同一底层存储；hwid 参与系列
+/// 身份（labels=[devid,hwid]，调用点传入）。
+///
+/// raw 与 downsample 分支均经 `select_with_options` 接线（见 [`EngineReader::
+/// select`] 的桶语义文档）。
+struct EngineReader {
+    /// tsink 存储句柄（clone，共享同一 Arc）——select 经 Deref 直调
+    /// `select_with_options`。
+    storage: StorageHandle,
+    /// 进程 hwid：series 身份 = metric + labels{devid, hwid}，engine 不存
+    /// hwid、调用点传入（lib.rs 传进程 hwid，测试传铺数据同值 hwid）。
+    hwid: String,
+}
+
+impl crate::history::HistoryReader for EngineReader {
+    /// 单 series 查询（raw 或降采样）：
+    ///
+    /// - labels=`[devid,hwid]` 锚定单 series；半开窗 `[start_ms,end_ms)` 与
+    ///   limit 全下推 `select_with_options` 承载；
+    /// - downsample 桶语义（P10，tsink 基线冻结，不自作聪明补点）：桶
+    ///   origin=**查询 start**（非 epoch 对齐）；空桶省略（无 gap filling）；
+    ///   桶点 ts=桶起点毫秒；limit 在聚合后截断——取**前 n 桶**（经
+    ///   `with_pagination` 继续下推，tsink 语义：聚合物上 offset+limit）；
+    /// - Err 串分层（P12，供 REST 400/500 映射）：参数类 tsink 错误带
+    ///   `bad request: ` 前缀，其余引擎类带 `history engine: ` 前缀（见
+    ///   [`classify_err`]）。
+    fn select(
+        &self,
+        metric: &str,
+        devid: &str,
+        q: &crate::history::HistoryQuery,
+    ) -> Result<Vec<crate::history::HistoryPoint>, String> {
+        // 公共底座（P2/P3）：labels + 半开窗 + limit 下推；downsample 在其上
+        // 叠加聚合（with_downsample 同时设 interval 与 aggregation）。
+        let opts = QueryOptions::new(q.start_ms, q.end_ms)
+            .with_labels(series_labels(devid, &self.hwid))
+            .with_pagination(0, Some(q.limit));
+        let opts = match q.downsample {
+            Some((interval_ms, agg)) => opts.with_downsample(interval_ms, map_agg(agg)),
+            None => opts,
+        };
+        let points = self
+            .storage
+            .select_with_options(metric, opts)
+            .map_err(classify_err)?;
+        Ok(map_points(points))
+    }
+}
+
+/// series labels 契约 `[devid, hwid]`（字典序，写路径 Task 4 锚定）：
+/// raw 与 downsample 共用——series 身份 = metric + labels{devid, hwid}。
+fn series_labels(devid: &str, hwid: &str) -> Vec<Label> {
+    vec![Label::new("devid", devid), Label::new("hwid", hwid)]
+}
+
+/// HistoryAgg → tsink Aggregation（P3 六值同名直映）。
+///
+/// HistoryAgg 六变体恰好覆盖 tsink 的六个同名变体，穷尽 match 即可——
+/// 同 crate 内 `#[non_exhaustive]` 不生效，补 `_ =>` 反成不可达模式
+/// （`-D warnings` 下编译错）。
+fn map_agg(agg: crate::history::HistoryAgg) -> Aggregation {
+    use crate::history::HistoryAgg as HA;
+    match agg {
+        HA::Min => Aggregation::Min,
+        HA::Max => Aggregation::Max,
+        HA::Avg => Aggregation::Avg,
+        HA::Sum => Aggregation::Sum,
+        HA::Count => Aggregation::Count,
+        HA::Last => Aggregation::Last,
+    }
+}
+
+/// tsink 错误串化分层（P12）：参数类（InvalidTimeRange/InvalidConfiguration/
+/// UnsupportedAggregation/OutOfRetention——调用方可修正的输入问题）带
+/// `bad request: ` 前缀 → REST 层映射 400；其余引擎类带 `history engine: `
+/// 前缀 → 500。raw 分支同步套用（该路径现只有参数类错误可能，行为不变）。
+fn classify_err(e: TsinkError) -> String {
+    if matches!(
+        e,
+        TsinkError::InvalidTimeRange { .. }
+            | TsinkError::InvalidConfiguration(_)
+            | TsinkError::UnsupportedAggregation { .. }
+            | TsinkError::OutOfRetention { .. }
+    ) {
+        format!("bad request: {e}")
+    } else {
+        format!("history engine: {e}")
+    }
+}
+
+/// tsink 点集 → HistoryPoint（P4）：`value_to_sample` 类型映射 + ts_ms 直传
+/// （downsample 桶点 ts=桶起点毫秒）。raw 与 downsample 共用，勿复制粘贴。
+fn map_points(points: Vec<DataPoint>) -> Vec<crate::history::HistoryPoint> {
+    points
+        .into_iter()
+        .map(|p| crate::history::HistoryPoint {
+            ts_ms: p.timestamp,
+            value: value_to_sample(&p.value),
+        })
+        .collect()
+}
+
+/// tsink `Value` → `SampleValue`（P4）：写路径 lane 只落 F64/I64/Bool/String
+/// 四型，前四型直映（类型保真）；U64 经 i64 饱和转 `Int`——`u64 > i64::MAX`
+/// 时取 `i64::MAX`（R8：现实不可达，计划风险表登记）。Bytes/Histogram 对
+/// 1b 写路径不可达，防御性串化为 `Str`（不静默丢点）。
+fn value_to_sample(v: &Value) -> SampleValue {
+    match v {
+        Value::F64(f) => SampleValue::Float(*f),
+        Value::I64(i) => SampleValue::Int(*i),
+        // R8：SampleValue 无 U64 变体，i64 域外饱和取 i64::MAX
+        Value::U64(u) => SampleValue::Int(i64::try_from(*u).unwrap_or(i64::MAX)),
+        Value::Bool(b) => SampleValue::Bool(*b),
+        Value::String(s) => SampleValue::Str(s.clone()),
+        // 不可达：1b lane 只写四型；防御性串化
+        Value::Bytes(b) => SampleValue::Str(format!("{b:?}")),
+        Value::Histogram(h) => SampleValue::Str(format!("{h:?}")),
+    }
+}
+
 /// 历史引擎：持有 tsink 存储句柄、writer 发送句柄与生命周期标志（D10）。
 ///
 /// 生命周期：`maybe_init`（启动初始化，L2 enabled 判定 + 内部 spawn writer）
@@ -169,6 +293,20 @@ impl HistoryEngine {
     /// `Some`；编排层注入 `HostContext.history`，pipeline flush 出口 fan_out 用。
     pub fn handle(&self) -> Option<HistoryHandle> {
         self.handle.clone()
+    }
+
+    /// 历史读句柄（Phase 2 Task 2，P1）：clone 存储句柄包成
+    /// `Arc<dyn HistoryReader>` 交 REST 层（AppState.history_reader），与
+    /// writer/引擎共享同一底层存储 Arc。
+    ///
+    /// `hwid` 由调用点传入（engine 不存）：series 身份 = metric +
+    /// labels{devid, hwid}，reader 需知道 hwid 才能构造精确 labels——lib.rs
+    /// 传进程 hwid，测试传铺数据同值 hwid。
+    pub fn reader(&self, hwid: &str) -> Arc<dyn crate::history::HistoryReader> {
+        Arc::new(EngineReader {
+            storage: self.storage.clone(),
+            hwid: hwid.to_string(),
+        })
     }
 
     /// tsink 存储句柄引用（Phase 2 读路径与外部只读访问共享同一句柄）。

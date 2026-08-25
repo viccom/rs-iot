@@ -215,7 +215,7 @@ curl -s -XPOST -H "Authorization: $TOKEN" -H 'Content-Type: application/json' \
 | GET | `/api/v1/rtdatas/subscribe` | `?dev_id=`（逗号分隔，可选）`&tag=`（可选）`&interval=`（ms，可选，默认 1000，clamp [100,60000]） | SSE：`snapshot`（连接即推，逐设备全量）+ `datachange`（周期，仅值变化/删除）；cell 与 `/rtdatas` 同构（§4.14） |
 
 - 每个 field 值尝试 JSON 解析（失败保留原始字符串）
-- **只读最新快照**，无历史/时间范围/分页/聚合（见完备性评估）
+- **只读最新快照**，无时间范围/分页/聚合——历史查询走 §4.18 `GET /api/v1/history`
 
 ### 4.9 静态前端（`frontend.rs`，rust-embed）
 
@@ -340,6 +340,14 @@ curl -N -H "Authorization: Bearer $JWT" \
 - 设备/点位删除 → `datachange.removed` 列出
 - 与 `GET /api/v1/rtdatas` 的 cell 输出同构（`[ts, localTime, value]` 值串），客户端复用同一解析
 - 机制为**每连接读侧 poll-diff**（非 EventBus 转发，不受其 dev 截断/丢帧特性影响；设计依据：[2026-08-23-rtdata-subscribe-plan.md](../designs/2026-08-23-rtdata-subscribe-plan.md)）
+- **读源双 impl**（`[rtdata].sub_impl`，Phase 2 订阅升级——SSE 帧/参数/diff 语义**两档完全一致**，行为等价由双档参数化 e2e 守门）：
+
+| 配置键 | 值 | 机制 |
+|---|---|---|
+| `[rtdata].sub_impl` | `ksub`（**缺省**） | 进程内常驻 `RtdataWatchService`（`src/api/rtdata_watch.rs`）`ksubscribe("rtdata:*")` 消费 key 事件维护 per-devid 单调版本表（**共享 dirty-set**）——连接每 tick 只对版本落后的设备精准 `HGETALL`（替代每连接每 tick 全量轮询）；订阅溢出（Lagged）→ epoch+1 → 连接全量重读后恢复增量，不丢帧 |
+| | `poll`（回退开关） | 每连接每 tick 全量重读订阅范围（原 Phase 1 实现路径原样保留）；watcher 不启动，lux 无订阅者零开销承诺保持 |
+
+  回退 = 改一个配置键（`sub_impl = "poll"`）重启；`[rtdata]` 节缺省整节走默认 `ksub`（键定义 `src/config.rs::RtdataConfig`）
 
 ### 4.15 标签元数据 effective 视图（`routes_tag.rs`，M-4 T3 改造）
 
@@ -399,7 +407,7 @@ curl -X POST -H "Authorization: Bearer $JWT" -H "Content-Type: application/json"
 
 - 引擎行为（`src/model/discovery.rs`）：effective 缓存 O(1) 比对（已建模 once-set 纯内存）；未建模 per-entry 60s 节流聚合 count/样本；上限 5000 LRU 批量逐出；重启 count 接续
 
-### 4.18 历史时序存储行为（`src/history/`，写路径 Phase 1b）
+### 4.18 历史时序存储行为（`src/history/`，Phase 1b 写 + Phase 2 读）
 
 历史归档是 pipeline 出口的**旁路**（fail-soft，不阻塞主链路），受三层开关节流——现场裁剪的机制骨架（总方案 [2026-08-24-history-storage-master-plan.md](../designs/2026-08-24-history-storage-master-plan.md) §一）：
 
@@ -409,8 +417,75 @@ curl -X POST -H "Authorization: Bearer $JWT" -H "Content-Type: application/json"
 | L2 | 部署期 | `config.toml [history] enabled` | `false`（不初始化引擎、不获取 `.tsink.lock`） |
 | L3 | 标签期 | `TagProps.history`（effective 合并视图，过滤只认 effective） | `false`（逐标签白名单，默认零归档；批量操作面 = §4.15 `POST /api/v1/tag/batch`） |
 
-- **当前状态**：历史**写路径**已实施（Phase 1b）——pipeline 出口旁路 fan_out，运行态可观测：`GET /api/v1/sysstatus` 的 `history` 块（§4.1）+ `/metrics` 的 `rs_iot_history_*` 7 family（§4.10）。**读端点 `GET /api/v1/history` 未实施**（Phase 2）；实施后 L2 off / L1 裁剪时将返 **503**（总方案 §一承诺——显式拒绝而非静默空数据）
+- **当前状态**：历史**写路径**（Phase 1b）与**读路径**（Phase 2）均已实施——pipeline 出口旁路 fan_out + `GET /api/v1/history` 类型化读端点（全契约见下方）；运行态可观测：`GET /api/v1/sysstatus` 的 `history` 块（§4.1）+ `/metrics` 的 `rs_iot_history_*` 7 family（§4.10）。L2 off / L1 裁剪时读端点返 **503**（总方案 §一承诺——显式拒绝而非静默空数据，矩阵见下）
 - **写路径语义要点**：**满即丢**——旁路有界 channel `try_send` 满 → 丢样本 + `dropped` 计数（不阻塞主链路，A-B 门禁主链路劣化 <5%）；**deadband 绝对死区**（PI exception 风格：`|new − last_archived| ≥ deadband` 才归档，`last_archived` 仅在归档时更新；仅数值类型生效，Bool/Str 恒归档）；**类型保真**——样本按原类型入行，同 series 类型漂变剔除并计 `lane_mismatch`（防混型污染）
+
+#### 4.18.1 历史读端点 `GET /api/v1/history`（`routes_history.rs`，Phase 2）
+
+单 series 类型化读（raw 或降采样聚合；select 经 `spawn_blocking` 包裹，长窗扫描不占 runtime worker）：
+
+| Method | Path | 鉴权 | Query | 成功响应 |
+|---|---|---|---|---|
+| GET | `/api/v1/history` | JWT | 见下 | `{dev_id, tag, points, count}`（200） |
+
+**Query 参数**（时间一律**秒**，REST 出入秒/内部 ms）：
+
+| 参数 | 必填 | 语义 |
+|---|---|---|
+| `dev_id` / `tag` | 是 | 单 series 定位（series = metric(tag) + labels{devid,hwid}） |
+| `start` / `end` | 是 | 窗口秒，**半开 [start, end)**——含 start 不含 end |
+| `agg` | 否 | `min`/`max`/`avg`/`sum`/`count`/`last` 六值；与 `interval` **成对出现**（单出其一 → 400） |
+| `interval` | 否 | 降采样桶宽（秒，>0）；仅与 `agg` 同现 |
+| `limit` | 否 | 缺省 10000、上限 100000——**取时间升序最旧 n 个**（非最新；raw 路径分页下推免全窗物化，聚合路径取前 n 桶） |
+
+**响应**（200）——`value` **类型保真**（写路径四型直映：Float/Int → JSON number、Bool → boolean、Str → string）；空窗/不存在 series → 200 `points:[]`（tsink 语义，非错误）：
+
+```json
+{
+  "dev_id": "devA",
+  "tag": "temp",
+  "points": [
+    {"ts": 1756080000, "value": 23.5},
+    {"ts": 1756080001, "value": true}
+  ],
+  "count": 2
+}
+```
+
+**503 矩阵**（reader 未就绪；body JSON `{"error":"history unavailable","reason":…}`）：
+
+| 场景 | `reason` |
+|---|---|
+| L1 feature 未编译进二进制 | `feature_not_compiled` |
+| L2 `[history].enabled=false` | `history_disabled` |
+| 引擎初始化失败 | `init_failed` |
+
+**400 矩阵**：① 解析层（纯文本 body）——缺 `dev_id`/`tag`/`start`/`end` 任一；`start >= end`；`agg` 无 `interval` 或 `interval` 无 `agg`；`agg` 不在六值集合；`interval=0`；`limit > 100000`；秒→ms 换算溢出。② 引擎参数类错误映射（JSON body `{"error":…}`；tsink `InvalidTimeRange`/`UnsupportedAggregation` 等）——**Bool/String series 上数值聚合（`avg`/`sum`）→ 400**。其余引擎错误 → 500（JSON `{"error":…}`）。
+
+**downsample 桶语义三要点**（tsink 基线冻结）：
+
+1. **桶 origin = 查询 `start`**（非 epoch 对齐）——首桶从 start 起算
+2. **空桶省略**（无 gap filling）——interval 内无点的桶不出现在 points
+3. **桶点 `ts` = 桶起点**（秒）
+
+**聚合类型退化矩阵**：
+
+| agg | 输出类型 |
+|---|---|
+| `avg` | float64（JSON number） |
+| `count` | uint64（**JSON 整数**） |
+| `sum` | 保数值域（F64/I64 原域，混型 → F64） |
+| `min` / `max` / `last` | **保原类型**（含 bool/string） |
+
+```bash
+# raw：最近 1 小时，最旧 10000 点升序
+curl -s -H "Authorization: $TOKEN" \
+  "http://localhost:8790/api/v1/history?dev_id=devA&tag=temp&start=$(( $(date +%s) - 3600 ))&end=$(date +%s)"
+# downsample：5 分钟桶平均
+curl -s -H "Authorization: $TOKEN" \
+  "http://localhost:8790/api/v1/history?dev_id=devA&tag=temp&start=1756080000&end=1756166400&agg=avg&interval=300"
+# → {"dev_id":"devA","tag":"temp","points":[{"ts":1756080000,"value":23.4},{"ts":1756080300,"value":23.6}...],"count":288}
+```
 
 ## 5. 数据模型（`src/types.rs`）
 
@@ -441,4 +516,4 @@ CtlMessage   { instance:InstId, devid, cmd, data:<JSON 文本> }
 
 ## 6. 已知限制与完备性
 
-当前 API 定位为**单管理员调试/运维**（对标 Lite_IOT）。要支撑「管理员 + 多用户前端系统」尚有缺口（无授权层、无用户自服务、无批量/分页/历史、命令无回执、无 `/healthz`、错误格式不统一等），详见 API 完备性评估（`api-completeness-assessment.md`，已归档，git 历史 66945dd 可溯）。**可观测性已具备**：`/metrics`（Prometheus）+ `/api/v1/inst/stats`（per-instance JSON）+ `/api/v1/inst/trace`（报文 trace）+ `/api/v1/logs/recent`（日志快照）+ `/api/v1/alarms`（告警清单，§4.12）+ `/api/v1/events`（SSE 实时事件流，§4.13）六端点覆盖指标/诊断/日志/告警/实时推送。
+当前 API 定位为**单管理员调试/运维**（对标 Lite_IOT）。要支撑「管理员 + 多用户前端系统」尚有缺口（无授权层、无用户自服务、无批量/分页、命令无回执、无 `/healthz`、错误格式不统一等；历史查询已由 §4.18 提供 raw+downsample 单 series 面，多 series 批量/分页仍缺），详见 API 完备性评估（`api-completeness-assessment.md`，已归档，git 历史 66945dd 可溯）。**可观测性已具备**：`/metrics`（Prometheus）+ `/api/v1/inst/stats`（per-instance JSON）+ `/api/v1/inst/trace`（报文 trace）+ `/api/v1/logs/recent`（日志快照）+ `/api/v1/alarms`（告警清单，§4.12）+ `/api/v1/events`（SSE 实时事件流，§4.13）六端点覆盖指标/诊断/日志/告警/实时推送。

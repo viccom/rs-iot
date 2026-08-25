@@ -71,6 +71,8 @@ async fn test_app(
         config: std::sync::Arc::new(rs_iot::config::AppConfig::default()),
         history_stats,
         history_engine_state,
+        history_reader: None,
+        rtdata_watch: std::sync::Arc::new(rs_iot::api::rtdata_watch::RtdataWatchService::new()),
     };
     (build_router(state), handle)
 }

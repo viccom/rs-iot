@@ -1,6 +1,9 @@
 # 历史读路径 + KSUB 订阅升级(Phase 2)实施计划
 
-> **状态**:planned
+> **状态**:implemented(T1-T6 全六 Task 完成)
+> **实施**:feat/history-read-sub 分支,2026-08-25:T1 eed2fab/T2 d8c50f1/T3 9d0347a/T4 86b5e67/T5 13332b6(+lint 整理 c2cf5a8、bench 档工具 d12d70d)/T6 本 Task;merge hash 待主会话合并后补
+> **代码**:读路径——src/history/mod.rs(HistoryReader trait 族)+ engine.rs(EngineReader raw/downsample)+ src/api/routes_history.rs + AppState.history_reader;订阅——src/api/rtdata_watch.rs(RtdataWatchService:ksubscribe("rtdata:*") 消费 + per-devid 版本表 + epoch 重同步 + KEYS 铺底)+ src/api/routes_rtdata_subscribe.rs(read_delta 精准读 + poll 分支原样保留)+ src/config.rs([rtdata] sub_impl)+ AppState.rtdata_watch + examples/bench_pipeline_e2e.rs(RSIOT_BENCH_SUB 档)
+> **遗留**:无(分支待合并 master——merge hash 由主会话合并后回填总方案 §五 Phase 2 行)
 > **日期**:2026-08-25
 > **依据(ADR 权威版)**:[2026-08-24-history-storage-master-plan.md](2026-08-24-history-storage-master-plan.md) §二读/订阅两路径 + D7(类型化 /api/v1/history)+ D8(KSUB dirty-set)+ §一 L2 off 返 503 承诺 + §六风险表"KSUB 改造回归→双 impl 过渡开关"——本文引用不复述
 > **前置已就绪**:Phase 1b 写路径(aedd1cf:engine 持 StorageHandle 留作本 Phase 读)+ 可观测性薄切片(ed54a6d:AppState 已有 history_engine_state 三态)
@@ -105,7 +108,7 @@ Run: 同 T1 + `cargo test -j 2 --features history --test history_dataflow_e2e` �
 
 **Files**: `src/history/engine.rs`(downsample 分支)、`src/api/routes_history.rs`(agg 参数映射)
 **红**:
-1. `history_downsample_buckets`:已知数据(ts t0..t0+9 每 1s,v=1..10)interval=5s agg=sum → 2 桶(ts=t0 与 t0+5,值 15/35;P10 origin=start);agg=last → 桶值 5/10;agg=min/max/count 同理断言。
+1. `history_downsample_buckets`:已知数据(ts t0..t0+9 每 1s,v=1..10)interval=5s agg=sum → 2 桶(ts=t0 与 t0+5,值 15/40;P10 origin=start;原稿"15/35"系笔误,桶 t0+5 含 v6..v10=40,与 avg 8.0×count 5 交叉锁定);agg=last → 桶值 5/10;agg=min/max/count 同理断言。
 2. `history_agg_type_matrix`:F64 series avg → number;I64 series count → number(整型);Bool series last → true/false;**Bool series avg → 400**(UnsupportedAggregation 映射);Str series min → 原串。
 3. `history_downsample_empty_bucket_skipped`:数据留空洞(interval 内无点)→ 桶缺失不补点(断言输出点数)。
 **绿**:HistoryAgg→tsink Aggregation 映射(with_downsample(interval_ms, agg));Err 串分层(参数类→400,引擎类→500,P12)。
@@ -168,18 +171,19 @@ cd frontend && npm run build && npm run test -- --run   # 零前端改动也应�
 |---|---|---|
 | R1 | watcher 常驻使 lux 每次 HSET 付 enqueue 成本(broadcast 容量 1024) | T5 bench A/B(poll vs ksub)<5% 守门;超→停下修,不静默放宽 |
 | R2 | Lagged(突发写)重同步正确性 | epoch 全量重读兜底(P7);单测锁 epoch 逻辑,自然触发不可测(登记) |
-| R3 | 等价漂移 | 双 impl 参数化全套 e2e(P11);diff_scope 纯函数一行不动 |
+| R3 | 等价漂移 | 双 impl 参数化全套 e2e(P11);diff_scope 纯函数一行不动——**裁决兑现**:4 主干 e2e 双档逐字一致全绿 + read_delta 单元红门 2 测锁"只读脏设备/epoch 重同步";poll 分支原路径保留,漂移可随时暴露 |
 | R4 | 桶 origin=查询 start 的怪语义 | 文档化(P10);fork 修正是 backlog |
 | R5 | AppState 16 测试点 × 2 字段机械改动 | 一次性机械补 None,编译器兜底 |
 | R6 | spawn_blocking 读在 SSE/高并发下的线程池占用 | raw 有 limit 上限 100000 兜底;Phase 4 三线同场再验 |
 | R7 | /events(EventBus)路径 50 dev 截断/丢帧问题 | 明确不在本 Phase(独立机制,前端在用);登记 Phase 4 评估反哺 |
 | R8 | U64 Count 值 > i64::MAX | 饱和转换,文档登记(现实中不可达) |
 
-## 三、验收记录(执行后回填)
+## 三、验收记录(2026-08-25 收口回填,均为真实运行输出)
 
-- 503/400 矩阵:待填
-- raw 类型保真/半开窗/limit:待填
-- downsample 桶语义/类型矩阵:待填
-- 订阅双 impl 等价(6 e2e × 2)+ 专项 4 项:待填
-- bench A/B(sub poll vs ksub,含 history on):待填
-- 全量门禁:待填
+- **503/400 矩阵**(3 测,全文件 10 passed / 0 failed,`cargo test -j 2 --features history --test history_read_e2e`):`history_503_matrix`——reader=None + engine_state 三态映射(disabled→`history_disabled`/init_failed→`init_failed`;`feature_not_compiled` 是编译期 `cfg!` 分支,feature on 构建下不可达,按矩阵逻辑测前两态)+ `history_400_param_matrix`(缺 dev_id/tag/start/end/start>=end/agg 无 interval/interval 无 agg/未知 agg/interval=0/limit>100000 全档)+ `history_ok_shape_empty`(不存在 series → 200 `{points:[],count:0}`)。
+- **raw 类型保真/半开窗/limit**(4 测):`history_raw_roundtrip_typed`(Float/Int/Bool/Str 四型各 5 点回读,JSON 类型精确——number/number/boolean/string,count==20)、`history_raw_window_half_open`([t1,t3) 含 t1 不含 t3)、`history_raw_limit_oldest_first`(10 点 limit=3 → 最旧 3 点升序)、`history_raw_missing_series_200_empty`。
+- **downsample 桶语义/类型矩阵/400**(3 测):`history_downsample_buckets`(六 agg × interval=5s 两桶,桶 ts==[t0,t0+5] 锁 origin=查询 start;**sum 第二桶 40.0——计划原稿"15/35"系算术笔误,与同测 avg 8.0×count 5=40 及数据铺设互斥,任何实现无法满足原稿值,按冻结语义纠正为 40 并于此记录**);`history_agg_type_matrix`(I64 count→JSON 整数 3(Count 恒 U64)/Bool last→boolean(保原类型)/Bool avg→**400**(UnsupportedAggregation 的 P12 映射)/Str min→"a"(保原串));`history_downsample_empty_bucket_skipped`(空洞桶 t0+5/t0+10/t0+15 不补点,count 桶值 3/2 锚定点归属)。
+- **订阅双 impl 等价**(`rtdata_subscribe_e2e` 10 passed + `rtdata_watch_e2e` 3 passed):4 主干 e2e(snapshot 全量逐设备帧/dev+tag 过滤/值变才推·同值新 ts 不推/removed)单测内循环 ksub/poll 双档——两档独立 lux data_dir/AppState/连接,**断言逐字一致**;2 鉴权(无 JWT 401/200+content-type,与档无关不参数化);4 专项(ksub_new_device_discovered_without_keys/ksub_removed_via_del_event/ksub_multi_connection_isolation/poll_impl_still_works);watcher 3 e2e(HSET 标脏/启动 KEYS 铺底/DEL 标脏)。**e2e 层红不可达裁决记录**:绿阶段 SSE 输出是黑盒——帧内容无法区分"只读了脏设备"还是"读了全部"(两行为同输出),等价红门落单元层:`read_delta` 2 测(`read_delta_only_reads_dirty_devices`:3 设备铺数仅 mark devA → 只 HGETALL devA;`read_delta_epoch_bump_resync`:epoch 变更先重建游标再全量重读),真 lux 起服务验证;`diff_scope` 纯函数一行未动。
+- **bench A/B(watcher 常驻成本,R1/D8 守门)**:`RSIOT_BENCH_HISTORY=on` 下 `RSIOT_BENCH_SUB=poll` vs `ksub`(release,交替):poll 2,049,604 vs ksub 2,080,990 pts/s(mean)——**-1.5%**(<5% 门禁过;ksub 反而略快系噪声内,单轮方差大于该差值,结论以"无劣化"计,不声称 ksub 更快)。
+- **watcher 事件消费佐证**:bench ksub 档收尾输出 `watcher device_count=100 / 100`(= N_DEVID 100)——版本表即设备注册表,全量设备入表即证 watcher 真在收 HSET key 事件(非空转常驻)。
+- **全量门禁**(T6,2026-08-25,worktree feat/history-read-sub 全部真实输出):`cargo fmt --all --check` 通过;clippy 双档(`-D warnings`,默认 + `--features history`)均 Finished 零警告;`cargo test -j 2 --all-targets --all-features` exit 0(27 个测试目标全绿,含上述三文件);`cargo test -j 2 --no-default-features --features lua` exit 0(裁剪档+Doc-tests);前端 `npm ci && npm run build` 产 dist(gateway rust-embed 依赖)+ `npm run test -- --run` 14 文件 168 测全过(基线无回归);`python scripts/check_docs.py` OK(51 md)。

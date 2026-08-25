@@ -352,6 +352,15 @@ pub async fn run_app_with_shutdown(
     };
     #[cfg(not(feature = "history"))]
     let history_engine_state: Arc<str> = Arc::from("disabled");
+    // 历史读句柄注入 AppState（Phase 2 P1）：engine 就绪（Some）→ reader(进程
+    // hwid)（clone storage 包 Arc<dyn HistoryReader>；series 身份含 hwid，由
+    // 调用点传入）；fail-soft None 时 503 矩阵按 engine_state 三态可判。
+    // feature off 分支恒 None（类型由 AppState 字段统一推断，同 hist_handle
+    // 两 cfg 块模式）。
+    #[cfg(feature = "history")]
+    let history_reader = history_engine.as_ref().map(|e| e.reader(hwid.as_str()));
+    #[cfg(not(feature = "history"))]
+    let history_reader = None;
     ctx.history = hist_handle;
     let history_stats = ctx.history.as_ref().map(|h| h.stats.clone());
     let pipeline_token = shutdown.child_token();
@@ -362,6 +371,18 @@ pub async fn run_app_with_shutdown(
         cfg.pipeline.workers,
         pipeline_token,
     ));
+
+    // RtdataWatchService（订阅升级 Phase 2，P7/P9）：常驻构造注入 AppState；
+    // 仅 ksub 模式 spawn 消费循环（poll 时 lux 无订阅者零开销承诺保持，P8）。
+    // token 用 shutdown.child_token()——进程退出即退。T5 将接 subscribe
+    // producer 消费本服务做精准 HGETALL。
+    let rtdata_watch = Arc::new(api::rtdata_watch::RtdataWatchService::new());
+    if cfg.rtdata.sub_impl == config::SubImpl::Ksub {
+        // JoinHandle 分离运行（token 级联取消即退，无需 join）；命名绑定
+        // `_watcher` 满足 must_use 且避开 clippy::let_underscore_future。
+        let _watcher = rtdata_watch.spawn(client.clone(), shutdown.child_token());
+        tracing::info!("[rtdataWatch] watcher started (sub_impl=ksub)");
+    }
 
     // lux autoStart 实例（南向 Source / 北向 Sink）
     let started = try_start_from_lux(&mgr, &client).await;
@@ -409,6 +430,8 @@ pub async fn run_app_with_shutdown(
         config: std::sync::Arc::new(cfg.clone()),
         history_stats,
         history_engine_state,
+        history_reader,
+        rtdata_watch,
     };
     let app = api::build_router(state);
     let api_port = cfg.api_port;

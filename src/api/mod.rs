@@ -21,6 +21,7 @@ pub mod routes_devreg;
 pub mod routes_discovery;
 pub mod routes_events;
 pub mod routes_group;
+pub mod routes_history;
 pub mod routes_inst;
 pub mod routes_logs;
 pub mod routes_lua;
@@ -34,6 +35,7 @@ pub mod routes_sys;
 pub mod routes_tag;
 pub mod routes_trace;
 pub mod routes_user;
+pub mod rtdata_watch;
 
 /// axum 共享状态。
 #[derive(Clone)]
@@ -60,6 +62,16 @@ pub struct AppState {
     /// feature off 构建恒 "disabled"（feature 布尔在 handler 内 `cfg!` 求值，
     /// 不进 AppState）。
     pub history_engine_state: std::sync::Arc<str>,
+    /// 历史读句柄（Phase 2 P1 无条件编译）：None = 读路径不可用，/api/v1/history
+    /// 据 503 矩阵按 `history_engine_state` 映射 reason。`HistoryReader` trait
+    /// 无条件编译（`history/mod.rs`），本字段零 cfg 散布；feature off 构建
+    /// 恒 None。
+    pub history_reader: Option<std::sync::Arc<dyn crate::history::HistoryReader>>,
+    /// 实时数据订阅 watcher（订阅升级 Phase 2，P7/P9）：ksub 模式下消费
+    /// `ksubscribe("rtdata:*")` 维护 per-devid 版本表；poll 模式常驻构造但不
+    /// 启动消费循环（零开销承诺，P8）。无条件编译（T5 将接 subscribe producer
+    /// 消费本服务做精准 HGETALL）。
+    pub rtdata_watch: Arc<rtdata_watch::RtdataWatchService>,
 }
 
 /// 白名单路径（无需 JWT）。
@@ -144,6 +156,9 @@ pub fn build_router(state: AppState) -> axum::Router {
         .route("/api/v1/tag/set", post(routes_tag::set))
         .route("/api/v1/tag/batch", post(routes_tag::batch))
         .route("/api/v1/tag/delete", post(routes_tag::delete))
+        // 历史时序读（Phase 2：单 series raw/降采样查询；默认 JWT 保护，
+        // 503/400 矩阵见 routes_history）
+        .route("/api/v1/history", get(routes_history::history))
         // 设备模型注册表（M-1；devreg 为过渡路径，M-2 接管 /api/v1/devices 系）
         .route("/api/v1/devmodels", get(routes_model::list))
         .route("/api/v1/devmodel/set", post(routes_model::set))
