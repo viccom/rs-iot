@@ -210,6 +210,33 @@ pub async fn note_with_window(
     Ok(())
 }
 
+/// 闸拒登记（决策 D-M4"不过闸进 discoveries"）：lua `set_value/set_values/collect`
+/// 与 sidecar DataUp 被校验闸拒绝的未建模 (devid, tag, 值) 进发现队列——**数据
+/// 本身不放行**（严格闸语义不变），元数据可见供人工 adopt 建模。fail-soft。
+///
+/// 内部走 [`note_once`]（已建模 key 跳过 + 60s 节流 + LRU 上限同口径）；
+/// 空集零开销直接返回。
+pub async fn note_rejected(
+    c: &EmbeddedClient,
+    hwid: &crate::types::Hwid,
+    devid: &str,
+    rejected: std::collections::BTreeMap<String, crate::types::SampleValue>,
+) {
+    if rejected.is_empty() {
+        return;
+    }
+    let s = Sample {
+        hwid: hwid.clone(),
+        devid: devid.to_string(),
+        values: rejected,
+        timestamp: chrono::Utc::now().timestamp(),
+    };
+    if let Err(e) = note_once(c, std::slice::from_ref(&s), &crate::model::cache::effective()).await
+    {
+        tracing::warn!("[discovery] 闸拒登记失败(忽略): {e}");
+    }
+}
+
 /// 队列全表（HGETALL；坏值跳过）。
 pub async fn list(c: &EmbeddedClient) -> Result<HashMap<String, Discovery>, RsIotError> {
     let v = c.execute_value("HGETALL", &[HASH]).await?;
@@ -697,5 +724,24 @@ mod tests {
             !list(&c).await.unwrap().contains_key("discdev1.still"),
             "有效 key 保留短路"
         );
+    }
+
+    /// 闸拒登记（决策 D-M4"不过闸进 discoveries"）：lua/sidecar 校验闸拒绝的
+    /// 未建模 (devid, tag, 值) 进队列——数据本身不放行，元数据可见供 adopt。
+    #[tokio::test]
+    async fn note_rejected_records_unmodeled_with_sample() {
+        let _serial = serialized_and_reset().await;
+        let c = test_client("rejected").await;
+        let mut vals = std::collections::BTreeMap::new();
+        vals.insert("ghost".to_string(), SampleValue::Float(9.9));
+        note_rejected(&c, &Hwid::new("it-hwid"), D, vals).await;
+        let m = list(&c).await.unwrap();
+        let d = m.get("discdev1.ghost").expect("闸拒进队列");
+        assert_eq!((d.devid.as_str(), d.tag.as_str()), (D, "ghost"));
+        assert_eq!(d.sample_value, "9.9", "样本值供建模参考");
+        assert_eq!(d.count, 1);
+        // 空集零开销跳过（不产生条目、不触 lux）。
+        note_rejected(&c, &Hwid::new("it-hwid"), D, Default::default()).await;
+        assert_eq!(list(&c).await.unwrap().len(), 1);
     }
 }

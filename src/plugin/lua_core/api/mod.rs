@@ -199,6 +199,33 @@ pub(crate) fn gate_check(
     Ok(())
 }
 
+/// 闸拒 tag 的发现队列登记（决策 D-M4"不过闸进 discoveries"，审查修复）：
+/// 按模型快照筛出真正未建模的 tag（设备未绑定 → 全部登记），带值 fail-soft
+/// 进队——数据本身不放行（严格闸语义不变），元数据可见供 adopt 建模。
+async fn note_gate_rejected(
+    lux: &lux::EmbeddedClient,
+    hwid: &crate::types::Hwid,
+    model: &Option<ModelSnapshot>,
+    devid: &str,
+    values: &std::collections::BTreeMap<String, crate::types::SampleValue>,
+) {
+    let Some(snapshot) = model else {
+        return; // 非 Collector 无闸（gate_check 不会 Err，防御）
+    };
+    let rejected = {
+        let snap = snapshot.lock().unwrap();
+        match snap.get(devid) {
+            None => values.clone(),
+            Some(dev) => values
+                .iter()
+                .filter(|(t, _)| !dev.tags.iter().any(|s| s.name == **t))
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
+        }
+    };
+    crate::model::discovery::note_rejected(lux, hwid, devid, rejected).await;
+}
+
 /// 组 `Sample` 推 hub（`set_value`/`set_values` 共用，DRY）。
 ///
 /// `values` 空 → 直接返回（无点不上报）。send 经 [`send_with_deadline`]（2s 背压
@@ -573,6 +600,7 @@ pub(crate) fn register(lua: &Lua, ac: &ApiCtx<'_>) -> mlua::Result<()> {
     //（脚本 pcall 可捕获）+ 宿主 warn + gate_rejected 计数。
     let tx_set = ac.tx.clone();
     let hwid_set = ac.ctx_host.hwid.clone();
+    let lux_set = ac.ctx_host.lux.clone();
     let rt_set = ac.runtime_devs.clone();
     let drop_set = ac.dropped.clone();
     let sw_set = ac.self_writes.clone();
@@ -582,6 +610,7 @@ pub(crate) fn register(lua: &Lua, ac: &ApiCtx<'_>) -> mlua::Result<()> {
         move |_lua, (_self, devid, tag, v): (Value, LuaString, LuaString, Value)| {
             let tx = tx_set.clone();
             let hwid = hwid_set.clone();
+            let lux_d = lux_set.clone();
             let rt = rt_set.clone();
             let dropped = drop_set.clone();
             let self_writes = sw_set.clone();
@@ -591,6 +620,12 @@ pub(crate) fn register(lua: &Lua, ac: &ApiCtx<'_>) -> mlua::Result<()> {
                 let devid = devid.to_string_lossy().to_string();
                 let tag = tag.to_string_lossy().to_string();
                 if let Err(msg) = gate_check(&model, &devid, std::slice::from_ref(&tag), &gate) {
+                    // D-M4：未建模 tag 进发现队列（数据不放行），供 adopt 建模。
+                    let sv = lua_value_to_sample(&v)
+                        .unwrap_or_else(|| crate::types::SampleValue::Str(format!("{v:?}")));
+                    let mut vals = std::collections::BTreeMap::new();
+                    vals.insert(tag, sv);
+                    note_gate_rejected(&lux_d, &hwid, &model, &devid, &vals).await;
                     return Err(mlua::Error::RuntimeError(msg));
                 }
                 let sv = lua_value_to_sample(&v)
@@ -609,6 +644,7 @@ pub(crate) fn register(lua: &Lua, ac: &ApiCtx<'_>) -> mlua::Result<()> {
     // table 经 pairs 遍历 → BTreeMap；空 table 不上报。M-3 校验闸同 set_value。
     let tx_sv = ac.tx.clone();
     let hwid_sv = ac.ctx_host.hwid.clone();
+    let lux_sv = ac.ctx_host.lux.clone();
     let rt_sv = ac.runtime_devs.clone();
     let drop_sv = ac.dropped.clone();
     let sw_sv = ac.self_writes.clone();
@@ -618,6 +654,7 @@ pub(crate) fn register(lua: &Lua, ac: &ApiCtx<'_>) -> mlua::Result<()> {
         move |_lua, (_self, devid, table): (Value, LuaString, mlua::Table)| {
             let tx = tx_sv.clone();
             let hwid = hwid_sv.clone();
+            let lux_d = lux_sv.clone();
             let rt = rt_sv.clone();
             let dropped = drop_sv.clone();
             let self_writes = sw_sv.clone();
@@ -634,6 +671,7 @@ pub(crate) fn register(lua: &Lua, ac: &ApiCtx<'_>) -> mlua::Result<()> {
                 }
                 let tags: Vec<String> = values.keys().cloned().collect();
                 if let Err(msg) = gate_check(&model, &devid, &tags, &gate) {
+                    note_gate_rejected(&lux_d, &hwid, &model, &devid, &values).await;
                     return Err(mlua::Error::RuntimeError(msg));
                 }
                 push_sample(&tx, &hwid, &rt, &dropped, &self_writes, devid, values).await;
