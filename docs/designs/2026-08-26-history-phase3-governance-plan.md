@@ -1,7 +1,11 @@
 # 历史存储 Phase 3 余项(治理运维收尾)实施计划
 
-> **状态**:planned
+> **状态**:implemented(T1-T6 全部完成;T7 门禁由主会话实跑后补记,见 §三末)
 > **日期**:2026-08-26
+> **实施**:worktree `feat/history-phase3`,2026-08-26:T1 `1c6aa96`(写错误五型分桶+死区评估计数)/T2 `474ddc3`(HistoryTelemetry trait)/T3 `0684013`(治理 metrics 全量)/T4 `28ad4ce`(init_failed e2e)/T5 `89a11fb`(前端查询面板)/栈溢出修复 `b946e6a`(实测发现,见 §三)/前端 null 误判修复 `a509606`(实测发现,见 §三)
+> **代码**:数据源 `src/history/rows.rs`(WriteErrorKind+分型计数)+ `writer.rs`(evaluated++/classify_err);telemetry `src/history/mod.rs`(trait)+ `engine.rs`(impl)+ `src/api/mod.rs`(AppState.history_telemetry)+ `src/lib.rs`(注入+init 8MiB 专线);渲染 `src/api/routes_metrics/{render.rs,mod.rs}` + `routes_sys.rs`;测试 `tests/history_init_failed_e2e.rs`+`tests/history_init_stack_e2e.rs`+visibility e2e 扩展;前端 `lib/historyQuery.ts`(+test)+ `components/devmeta/HistoryQuery.vue` + `views/DeviceModels.vue` + `components/monitor/SystemStatus.vue` + `lib/devmeta.ts`(null 语义修正)
+> **测试**:lib 单测(history 档 `history::` 23 passed,T1 时点 21——详见 §三 T1);visibility e2e 6;init_failed e2e 1(固化);init_stack e2e 2;前端 188 测(基线 168+20);浏览器嵌入实测七项全过+实测发现并修复 2 个真 bug
+> **遗留**:四项,见 §四遗留登记
 > **依据(ADR 权威版)**:[2026-08-24-history-storage-master-plan.md](2026-08-24-history-storage-master-plan.md) §五 Phase 3 行——薄切片已前置(master ed54a6d:/sysstatus history 块 + /metrics 7 family + 前端四件;D10 关停序列已随 1b 落地),本计划收口余项
 > **余项范围**(用户指令,2026-08-26):①完整 metrics 治理(archived_tags/deadband 削减率/内存水位/写错误分型)②前端标签管理页深化(历史数据查询 UI,消费 Phase 2 读端点)③小项:init_failed 态独立 e2e + 四件新 UI 浏览器嵌入实测
 > **执行方式**:worktree `feat/history-phase3`,executing-plans 编排式(主会话派发/审查,子代理 TDD 信息隔离;浏览器实测为 main-agent-only 任务)
@@ -257,7 +261,78 @@ cd frontend && npm run build && npm run test -- --run
 | R6 | raw limit 10000 点全量渲染卡顿 | decimate ≤800 桶(P7);表格仅首 N 行+总数展示 |
 | R7 | tsink `CardinalityLimitExceeded` 构造字段名与计划笔误 | 以 tsink `src/error.rs` 实际字段为准(速查已给行号) |
 | R8 | ratio 语义误读(削减率 vs 保留率) | HELP 文本明写 "suppressed/evaluated";sysstatus 字段名 deadbands.ratio 同口径 |
+| R9 | 浏览器实测环境残留端口/陈旧 dist(实测前未重建即连到旧 UI——ed54a6d 时已有 dist 陈旧先例) | 已按 R5 处置:实测前 `npm run build` 重建 dist + 重编 gateway;实测过程两次发现 dist 未嵌入即旧 UI,均重建后复测(§三 T6) |
 
-## 三、验收记录(收口回填)
+## 三、验收记录(收口回填,2026-08-26)
 
-(待 Task 1-7 完成后回填:各测真实输出、门禁结果、浏览器实测证据路径)
+### T1:HistoryStats 分型+评估计数(`1c6aa96`)
+
+- 红→绿 4 新测全绿:rows `error_kind_invariant`(Σkind==errors 不变量+`WriteErrorKind::ALL` 五串)/writer `classify_err_covers_variants`(七 tsink 变体→五桶)/`writer_deadband_evaluated_counted`(0.4/0.8/1.5,db=1.0 → evaluated==3 && deadbanded==1;无 deadband series 不计)/`writer_error_kind_cardinality`(cardinality=1 双 series)。
+- **cardinality 测试口径修正记录**:计划红 4 预设确定性结果("单 series 批先成功 1 行 written==1,errors_by_kind(Cardinality)==2");实测 tsink 批语义为**逐行独立 insert(批无关)**——哪行先落不确定,断言修正为守恒式:`written+errors==2 && errors>=1 && cardinality==errors`(行守恒+错误全落 Cardinality 槽,join 后冻结复断)。属口径修正,非断言弱化。
+- 测试计数:T1 时点 `--lib history::` 21 passed;T2 加入 telemetry 2 测后终态 23 passed(收口时实测复跑 `cargo test -j 2 --features history --lib history::` → 23 passed/0 failed,621 filtered out;默认档同前缀 6 passed——rows 无条件部分)。
+- clippy 双档零警告。**口径说明**:本 worktree 无 `frontend/dist`(不入库),gateway 的 rust-embed 构建需 dist 存在,故本阶段 clippy 以 `--workspace --exclude rsiot-gateway` 跑;dist 重建后 T7 恢复全口径。
+
+### T2:HistoryTelemetry trait(`474ddc3`)
+
+- `telemetry_memory_and_series`(memory_limit_mb=64 → budget==64MiB、used>0、双 series 各 1 行 → series_count==2;close 后仍可调不 panic)与 `telemetry_trait_object_safe`(`Arc<dyn HistoryTelemetry>` 装箱)绿。
+- AppState 加 `history_telemetry` 字段:**17 文件 18 处**测试构造点机械补 `history_telemetry: None`(编译器兜底清点)。
+- T2 时点 `cargo test -j 2 --lib`(默认档)618 passed 零回归。
+
+### T3:治理 metrics+sysstatus(`0684013`)
+
+- visibility e2e **6/6**(既有 3+新增 3):`metrics_history_governance_families`/`metrics_history_governance_omitted_when_not_ok`/`sysstatus_history_governance_fields`。
+- FakeTelemetry{used=111,budget=268435456,series=7};经 devmodels 注册含 1 个 history=true tag 的模型并 cache::reload → `rs_iot_history_archived_tags 1` 断言过。
+- preset 扩展兼容既有断言:Σkind==9 == errors_total。
+- **基建变更登记**(超出机械扩展):e2e 基建改为唯一 lux 目录(`start_lux` 端口 0/独立 data_dir)防快照污染——既有用例共享 lux 时 devmodels 注册会互串。
+
+### T4:init_failed 真实锁占用 e2e(`28ad4ce`)
+
+- `init_failed_real_lock_503_and_failsoft` **首跑即绿——P9 预期成立,定性固化测试**(非红→绿;红不可达时不造假红)。四断言全过:503 reason==init_failed / sysstatus engine==init_failed 且 stats 缺省 / 主链路 200(fail-soft) / shutdown 正常退出。
+- 以 `run_app_with_shutdown` 全量 app 进程内起法走真实 init 折叠路径,为 history 测试首例(该起法沿 tests/dataflow.rs 既有先例,history 侧首次使用;此前 visibility e2e 均为 test_app 注入态)。
+
+### T5:前端历史查询 UI(`89a11fb`)
+
+- 前端 **168→188 测全绿**(+20 historyQuery:buildHistoryUrl/decimate/buildSparklinePath/historyErrorMessage/windowToRange 五组纯函数);`npm run build` vue-tsc 零错。
+- HistoryQuery.vue 组件本身无自动测试(表单/挂载逻辑),归 T6 浏览器实测覆盖——登记遗留③。
+
+### T6:浏览器嵌入实测(main-agent-only,七项全过)
+
+环境:gateway :18080(重建 dist 后重编嵌入+反代 /api/rsiot)+ rs-iot :18790(`[history] enabled=true` 独立 data_dir,内存预算 256MiB)+ datasim p3dev1 1s 周期三标签活体。实测前按 R9 重建 dist+重编 gateway(过程两次发现 dist 未嵌入即连到旧 UI,均重建后复测)。
+
+| # | 项 | 结果 |
+|---|---|---|
+| 1 | 白名单过滤 checkbox | 空态 0/22 → 非空 3/22 |
+| 2 | Overview 发现入口 | 空态 → 删设备后"3 条未建模标签待采纳" → 重注册+sweep 归零 |
+| 3 | SystemStatus 历史引擎行 | ok 着色+写 143/弃 0;悬浮扩展:内存 0.1/256MiB·series 3·archived_tags 3·削减率 86.6%(evaluated 67) |
+| 4 | glob 批量覆盖+对账+adopt | 两遍:`p3dev1.*` 归档开 matched 3/updated 3;vib 死区 0.5;对账(Bug B 修复后)22 条全一致;adopt 并入模型+sweep 3 条清队;设备未注册时"0 模型"提示与幂等路径走通 |
+| 5 | 对账按钮 | 同④(漂移空态+一致态) |
+| 6 | 引擎行 | 同③ |
+| 7 | 历史查询面板(新) | raw 121 点 SVG 曲线+表格+min/max 标注;agg=avg interval=60 → 3 桶,桶 origin=查询起点(§4.18.1 桶语义实证);截图存证 |
+
+### 实测抓出并修复的两个真 bug
+
+- **A) 引擎 init 栈溢出(`b946e6a`)**:Windows debug 主线程带 `[history].enabled=true` 启动即栈溢出(0xC00000FD)——**总方案 §四陷阱 4 本机复现成功**(既有 e2e 均在测试线程大栈跑 init,故从未暴露)。修复路径:红门 e2e `tests/history_init_stack_e2e.rs::init_on_1mib_thread_survives`(1MiB 线程内跑 maybe_init 的子进程退出码)先红(0xC00000FD)→ 修复:`lib.rs` maybe_init 全程移入 8MiB `spawn_scoped` 专线(enabled=false 早退保持零成本)→ 该文件 2/2 绿+全部 history e2e 零回归。
+- **B) 前端 mergeTagProps null 误判(`a509606`)**:devreg 覆盖 desc/unit 的 JSON null(后端 `None`=继承)被误判为显式清除 → 对账永远假漂移 3 条+单位列丢失。修正语义:null==继承,仅空串==清除(devmeta.test.ts 先改断言红 → 修 devmeta.ts 绿,188/188);修复后活体对账 22 条全一致。
+
+### R4 边界活体命中(运行期 cardinality 不重算)
+
+- 运行期开白名单**不重算 cardinality**:启动白名单 0 → 引擎按空校准 1 → 运行期开 3 标签全拒,`errors_by_kind.cardinality=1113` 精确暴露——**治理指标达成设计目的**(分型计数让该边界可见)。
+- tsink 无运行期 cardinality setter(Storage trait 探查已证);**重启后**按校准 4 正常归档(written 增长/series 3)。
+- 处置:登记 fork backlog 项(总方案 §七:"运行期 cardinality setter 或引擎重启重校准");部署注意:**运行期扩白名单须重启**。
+
+### T7:全量门禁记录(2026-08-26,worktree feat/history-phase3,均为真实输出;dist 已重建故 clippy 恢复全 workspace 口径)
+
+- `cargo fmt --all --check` → FMT_OK。
+- `cargo clippy -j 2 --workspace --all-targets -- -D warnings` → Finished 34.00s 零警告(含 rsiot-gateway,前端 dist 在场)。
+- `cargo clippy -j 2 --workspace --all-targets --features history -- -D warnings` → Finished 27.63s 零警告。
+- `cargo test -j 2 --all-targets --all-features` → **0 failed**:lib **635 passed**+9 ignored;history 档各 e2e 全绿(含新增 visibility 6/init_failed 1/init_stack 2);T1-T3 期间 clippy 曾以 `--exclude rsiot-gateway` 跑(worktree 无 dist 时 rust-embed 基线即编不过,Task 1 已实证非本分支引入),本档已恢复全口径复验。
+- `cargo test -j 2 --no-default-features --features lua`(minimal)→ **0 failed**:lib 535 passed+5 ignored(独立复跑核对,tail 截断不采信)。
+- `python scripts/check_docs.py` → OK(52 个 md)。
+- `cd frontend && npm run build` → ✓ built in 4.01s(vue-tsc 零错);`npm run test -- --run` → **15 文件 188/188 全过**(基线 168 + historyQuery 20)。
+
+## 四、遗留登记
+
+1. **R4 运行期 cardinality 重算**:tsink 无运行期 setter,扩白名单须重启才重校准——已登记总方案 §七 fork backlog。
+2. **对账 omitted 测弱于计划版**:`metrics_history_governance_omitted_when_not_ok` 实现为 telemetry=None(计划红 2 写 telemetry=Some+state=disabled)——Some+disabled 组合未测,服从指令记录于此。
+3. **HistoryQuery.vue 无自动测试**:纯函数 20 测+浏览器实测七项之⑦覆盖;组件级表单逻辑无 vitest。
+4. **Tsdb 类型落点**:`TsdbHistoryPoint/TsdbHistoryResponse` 落 `frontend/src/lib/historyQuery.ts`(计划 Files 写 types.ts)——就近消费方,未按计划落 types.ts(`SysStatusHistory` 扩展仍在 types.ts)。
