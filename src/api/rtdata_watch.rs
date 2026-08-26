@@ -209,8 +209,21 @@ impl RtdataWatchService {
         let svc = Arc::clone(self);
         tokio::spawn(async move {
             svc.backfill_keys(&client).await;
+            // H3 双 bump 第二跳标志：Restart 重建完成后在**新订阅建立后**再
+            // bump 一次——初代迭代不 bump（启动铺底在前，无丢事件窗口）。
+            let mut need_rebump = false;
             'subscribe: loop {
                 let mut sub = client.ksubscribe("rtdata:*");
+                // H3 bump2：护"重建窗口新建连接"——bump1 只护退订前的存量
+                // 连接；窗口内（bump1 后、新订阅生效前）建立的游标 epoch 与
+                // bump1 后相等且版本未被（无订阅而丢失的）事件推进，
+                // dirty_since 恒空 Delta → 窗口内写永不推送。bump2 使其
+                // epoch stale → Full 全量重读。守门单测
+                // `watch_restart_double_bump_covers_midwindow_cursors`。
+                if need_rebump {
+                    svc.bump_epoch();
+                    need_rebump = false;
+                }
                 loop {
                     tokio::select! {
                         _ = token.cancelled() => break 'subscribe,
@@ -246,14 +259,16 @@ impl RtdataWatchService {
                         }
                     }
                 }
-                // 异常重建序：先退订（RAII drop → kunsub，先于重建新订阅），
-                // epoch+1 让持有旧 epoch 的连接全量重读（重同步窗口内的写经
-                // 全量读覆盖，不丢帧），重铺 KEYS 补注册断订期间的设备，退避
-                // 防异常风暴 tight loop，然后重建 ksubscribe 继续。
+                // 异常重建序（H3 双 bump）：先退订（RAII drop → kunsub，先于
+                // 重建新订阅），bump1 让持有旧 epoch 的存量连接全量重读，重铺
+                // KEYS 补注册断订期间的设备，退避防异常风暴 tight loop，然后
+                // 外层重建 ksubscribe 并 **再 bump 一次**（need_rebump——护
+                // 重建窗口内新建的连接，见循环顶部注释）。
                 drop(sub);
                 svc.bump_epoch();
                 svc.backfill_keys(&client).await;
                 tokio::time::sleep(Duration::from_secs(1)).await;
+                need_rebump = true;
             }
             // 'subscribe 跳出时 sub 随作用域结束 drop（RAII kunsub），先于
             // client 离场。
@@ -429,6 +444,50 @@ mod tests {
         assert_eq!(
             classify_failure(&LuxError::Command("x".into())),
             SubFailureAction::Restart
+        );
+    }
+
+    /// H3 双 bump 不变量（守门测试；重启编排 e2e 红不可达——循 Phase 2
+    /// 裁决落单元层）：Restart 重建序 = bump1（护退订窗口存量连接）→
+    /// [重建窗口：退避/重铺，无订阅，事件丢失且版本不动] → 重建 ksubscribe →
+    /// bump2（护窗口内新建连接）。本测锁死：**窗口内建立的游标在 bump2 后
+    /// 必须判 Full**——单 bump 下其 epoch 与当前相等、版本未推进，
+    /// dirty_since 恒空 Delta，窗口内的写永不推送（静默旧值）。
+    #[test]
+    fn watch_restart_double_bump_covers_midwindow_cursors() {
+        let svc = RtdataWatchService::new();
+        svc.mark("devA");
+        // bump1：Restart 路径退订后立即执行
+        svc.bump_epoch();
+        // 重建窗口内新建连接取游标（模拟 SSE 连接在 1s 退避期间接入）
+        let mut mid = svc.cursor();
+        assert_eq!(
+            mid.epoch(),
+            svc.epoch(),
+            "窗口内游标 epoch 与 bump1 后当前值相等——单 bump 的盲区所在"
+        );
+        // 对照（论证双 bump 必要性）：若到此为止（单 bump），无新事件的
+        // 窗口内游标查询为空 Delta——窗口内的写被静默吞掉。
+        match svc.dirty_since(&mut mid) {
+            Dirty::Delta(v) => assert!(v.is_empty(), "单 bump 下窗口游标本就追平: {v:?}"),
+            Dirty::Full => panic!("epoch 相等不应 Full"),
+        }
+        // 重建订阅完成后 bump2：窗口内游标必须被强制 Full 全量重读
+        let mut mid2 = svc.cursor();
+        svc.bump_epoch();
+        assert!(
+            matches!(svc.dirty_since(&mut mid2), Dirty::Full),
+            "双 bump 后窗口内游标必须 Full（否则重建窗口丢帧，审查 H3）"
+        );
+        // bump 前存量连接同样被覆盖（bump1/bump2 均使其 stale）
+        let mut old = WatchCursor {
+            versions: HashMap::from([("devA".to_string(), svc.version("devA").unwrap())]),
+            epoch: 0,
+            marks: 0,
+        };
+        assert!(
+            matches!(svc.dirty_since(&mut old), Dirty::Full),
+            "bump 前存量连接游标必须 Full"
         );
     }
 }
