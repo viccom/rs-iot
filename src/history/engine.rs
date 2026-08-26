@@ -59,13 +59,14 @@ impl std::ops::Deref for StorageHandle {
 }
 
 /// series 基数自动校准：effective 快照中 `history=true` 计数 ×1.2 向上取整，
-/// 空表/全 false 兜底 `≥1`（D6）。
+/// 空表/全 false 兜底 `≥1`（D6）。整数运算 saturating（H4 双保险：校验后
+/// 输入域理论不可达溢出）。
 ///
 /// 仅在启动时刻校准一次，运行期开白名单不重算——超限行为是 tsink 侧
 /// `CardinalityLimitExceeded` 拒新 series（计划已知边界 R4，重算留 Phase 3）。
 pub fn auto_cardinality(effective: &HashMap<String, TagProps>) -> usize {
     let whitelisted = effective.values().filter(|props| props.history).count();
-    (((whitelisted as f64) * 1.2).ceil() as usize).max(1)
+    whitelisted.saturating_mul(12).div_ceil(10).max(1)
 }
 
 /// 按配置组装 tsink 内嵌存储（D6 资源边界，组装项与顺序照计划速查表）。
@@ -73,6 +74,8 @@ pub fn auto_cardinality(effective: &HashMap<String, TagProps>) -> usize {
 /// - `create_dir_all` 先行：父目录不存在时 tsink 不会代建（IO 错误经既有
 ///   `Io(#[from])` 变体上抛）；
 /// - 时间戳精度**显式毫秒**：builder 默认纳秒，是本写路径的头号陷阱；
+/// - 资源边界换算 saturating（H4 双保险：`HistoryConfig::validate` 拒绝后
+///   理论不可达，防御绕过校验的直接调用点）；
 /// - `wal_sync_ms==0` 映射 `PerAppend` 严格档，`>0` 映射 `Periodic(ms)`（P9）；
 ///   `wal_enabled` 保持 builder 默认 `true` 不动；
 /// - build 失败（含同目录进程锁互斥——tsink 以
@@ -89,10 +92,12 @@ pub fn build_storage(cfg: &HistoryConfig, cardinality: usize) -> TResult<Storage
         .with_data_path(&cfg.data_dir)
         // builder 默认纳秒精度，必须显式毫秒（Sample.timestamp 秒 ×1000 的锚点）
         .with_timestamp_precision(TimestampPrecision::Milliseconds)
-        .with_memory_limit(cfg.memory_limit_mb * 1024 * 1024)
+        .with_memory_limit(cfg.memory_limit_mb.saturating_mul(1024 * 1024))
         .with_cardinality_limit(cardinality)
-        .with_retention(Duration::from_secs(cfg.retention_days * 86400))
-        .with_wal_size_limit(cfg.wal_size_limit_mb * 1024 * 1024)
+        .with_retention(Duration::from_secs(
+            cfg.retention_days.saturating_mul(86400),
+        ))
+        .with_wal_size_limit(cfg.wal_size_limit_mb.saturating_mul(1024 * 1024))
         .with_wal_sync_mode(wal_sync_mode)
         .build()
         .map(|storage| StorageHandle {
@@ -293,12 +298,20 @@ pub struct HistoryEngine {
 /// `cardinality_limit>0` 用配置显式值，否则按 [`auto_cardinality`] 从 effective
 /// 快照自动校准。初始化失败以 `Err` 交还调用方（P8：由编排层记 `error!` 日志
 /// 并停用归档，主程序继续——旁路 fail-soft），本函数不吞错。
+///
+/// H4：配置边界校验在 spawn_scoped **之前**——非法配置（零值/超上限）走既有
+/// init_failed Err 通道（`RsIotError::Config`），不进入乘法换算/组装路径。
 pub fn maybe_init(
     cfg: &HistoryConfig,
     effective: &HashMap<String, TagProps>,
 ) -> Option<TResult<HistoryEngine>> {
     if !cfg.enabled {
         return None;
+    }
+    if let Err(msg) = cfg.validate() {
+        return Some(Err(RsIotError::Config(format!(
+            "[history] 配置校验失败: {msg}"
+        ))));
     }
     // 陷阱 4（2026-08-26 本机复现）：tsink StorageBuilder build 深链在 1MiB
     // 线程（Windows debug 主线程）栈溢出（0xC00000FD）——与 D3 writer 线程
@@ -751,6 +764,28 @@ mod tests {
         assert_eq!(budget, 64 * 1024 * 1024, "无写入时预算也必须等于配置 64MiB");
 
         engine.close(Duration::from_secs(cfg.close_timeout_secs));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 9. 配置校验前置（H4）：非法配置（memory_limit_mb=1<<40 超上限）→
+    ///    maybe_init 返回 Err 而非组装引擎返回 Ok——init_failed fail-soft
+    ///    通道（编排层 error! + 引擎 None + /history 503 + 主程序继续）。
+    ///    当前实现无校验直接以巨值组装（红：Ok）。
+    #[test]
+    fn engine_invalid_config_err_not_panic() {
+        let dir = unique_dir("invalid-cfg");
+        let cfg = HistoryConfig {
+            enabled: true,
+            memory_limit_mb: 1 << 40,
+            ..cfg_with_dir(&dir)
+        };
+
+        let res = maybe_init(&cfg, &HashMap::new());
+
+        assert!(
+            matches!(res, Some(Err(_))),
+            "非法配置必须经 Err 通道返回（init_failed fail-soft），实际: {res:?}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

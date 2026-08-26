@@ -228,6 +228,62 @@ impl Default for HistoryConfig {
     }
 }
 
+impl HistoryConfig {
+    /// 边界校验（H4）：enabled=true 时引擎组装前置检查，非法配置在
+    /// `maybe_init` 入口走既有 init_failed Err 通道（error! + 引擎 None +
+    /// /history 503 + 主程序继续），不以巨值乘法路径硬闯组装。上限取值的
+    /// 依据：MiB→字节/天→秒换算在上限内不可能溢出（`build_storage` 的
+    /// saturating 乘法是校验之外的双保险）。`wal_sync_ms`/`close_timeout_secs`
+    /// 不设限——0 有合法语义（PerAppend 严格档 / 立即放弃等待）。
+    pub fn validate(&self) -> Result<(), String> {
+        if self.memory_limit_mb < 1 || self.memory_limit_mb > 1 << 20 {
+            return Err(format!(
+                "memory_limit_mb 必须在 1..={} MiB，实际 {}",
+                1 << 20,
+                self.memory_limit_mb
+            ));
+        }
+        if self.wal_size_limit_mb < 1 || self.wal_size_limit_mb > 1 << 20 {
+            return Err(format!(
+                "wal_size_limit_mb 必须在 1..={} MiB，实际 {}",
+                1 << 20,
+                self.wal_size_limit_mb
+            ));
+        }
+        if self.retention_days < 1 || self.retention_days > 36_500 {
+            return Err(format!(
+                "retention_days 必须在 1..=36500 天，实际 {}",
+                self.retention_days
+            ));
+        }
+        if self.channel_capacity < 1 || self.channel_capacity > 1 << 24 {
+            return Err(format!(
+                "channel_capacity 必须在 1..={}，实际 {}",
+                1 << 24,
+                self.channel_capacity
+            ));
+        }
+        if self.batch_max_rows < 1 || self.batch_max_rows > 1 << 20 {
+            return Err(format!(
+                "batch_max_rows 必须在 1..={}，实际 {}",
+                1 << 20,
+                self.batch_max_rows
+            ));
+        }
+        if self.cardinality_limit > 1 << 24 {
+            return Err(format!(
+                "cardinality_limit 必须在 0..={}（0=自动校准），实际 {}",
+                1 << 24,
+                self.cardinality_limit
+            ));
+        }
+        if self.data_dir.is_empty() {
+            return Err("data_dir 不能为空".to_string());
+        }
+        Ok(())
+    }
+}
+
 /// [rtdata] 实时数据订阅读源实现选型（P8）。
 ///
 /// serde 线上名小写：`sub_impl = "ksub" | "poll"`。
@@ -510,6 +566,60 @@ close_timeout_secs = 30"#,
         assert_eq!(h.channel_capacity, 65536);
         assert_eq!(h.batch_max_rows, 8192);
         assert_eq!(h.close_timeout_secs, 15);
+    }
+
+    /// [history] 边界校验拒绝（H4）：≥4 类非法值逐一 Err——零值破坏语义
+    /// （channel 无法构造/攒批永不 flush/保留期吞全量数据）、超上限值使
+    /// MiB→字节换算逼近溢出域。当前无 validate 实现（编译红起）。
+    #[test]
+    fn history_config_validate_rejects_out_of_bounds() {
+        let base = HistoryConfig::default();
+
+        let mut c = base.clone();
+        c.channel_capacity = 0;
+        assert!(c.validate().is_err(), "channel_capacity=0 必须拒绝");
+
+        let mut c = base.clone();
+        c.batch_max_rows = 0;
+        assert!(c.validate().is_err(), "batch_max_rows=0 必须拒绝");
+
+        let mut c = base.clone();
+        c.memory_limit_mb = 1 << 40;
+        assert!(c.validate().is_err(), "memory_limit_mb=1<<40 必须拒绝");
+
+        let mut c = base.clone();
+        c.retention_days = 0;
+        assert!(c.validate().is_err(), "retention_days=0 必须拒绝");
+
+        let mut c = base.clone();
+        c.data_dir = String::new();
+        assert!(c.validate().is_err(), "data_dir 空串必须拒绝");
+    }
+
+    /// [history] 边界校验接受（H4）：默认值、各字段上下确界与 0 哨兵语义
+    /// 全部 Ok——wal_sync_ms/close_timeout_secs 不设限（0 有合法语义：
+    /// PerAppend 严格档 / 立即放弃等待）。
+    #[test]
+    fn history_config_validate_accepts_default_and_bounds() {
+        assert_eq!(HistoryConfig::default().validate(), Ok(()));
+
+        // 各字段上下确界同时取到仍合法
+        let mut c = HistoryConfig::default();
+        c.memory_limit_mb = 1 << 20;
+        c.wal_size_limit_mb = 1;
+        c.retention_days = 36_500;
+        c.channel_capacity = 1 << 24;
+        c.batch_max_rows = 1 << 20;
+        c.cardinality_limit = 1 << 24;
+        assert_eq!(c.validate(), Ok(()), "上下确界组合必须合法");
+
+        // 0 哨兵语义合法：cardinality_limit=0 自动校准；wal_sync_ms=0 =
+        // PerAppend；close_timeout_secs=0 = 立即放弃（均不设限字段）
+        let mut c = HistoryConfig::default();
+        c.cardinality_limit = 0;
+        c.wal_sync_ms = 0;
+        c.close_timeout_secs = 0;
+        assert_eq!(c.validate(), Ok(()));
     }
 
     /// [rtdata] 默认值（P8 裁定）：订阅读源缺省 ksub——默认开，否则功能成暗线；
