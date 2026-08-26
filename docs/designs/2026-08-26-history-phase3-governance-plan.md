@@ -2,7 +2,7 @@
 
 > **状态**:implemented(T1-T6 全部完成;T7 门禁由主会话实跑后补记,见 §三末)
 > **日期**:2026-08-26
-> **实施**:worktree `feat/history-phase3`,2026-08-26:T1 `1c6aa96`(写错误五型分桶+死区评估计数)/T2 `474ddc3`(HistoryTelemetry trait)/T3 `0684013`(治理 metrics 全量)/T4 `28ad4ce`(init_failed e2e)/T5 `89a11fb`(前端查询面板)/栈溢出修复 `b946e6a`(实测发现,见 §三)/前端 null 误判修复 `a509606`(实测发现,见 §三)
+> **实施**:worktree `feat/history-phase3` → master(6e2559d,no-ff merge),2026-08-26:T1 `1c6aa96`(写错误五型分桶+死区评估计数)/T2 `474ddc3`(HistoryTelemetry trait)/T3 `0684013`(治理 metrics 全量)/T4 `28ad4ce`(init_failed e2e)/T5 `89a11fb`(前端查询面板)/栈溢出修复 `b946e6a`(实测发现,见 §三)/前端 null 误判修复 `a509606`(实测发现,见 §三)
 > **代码**:数据源 `src/history/rows.rs`(WriteErrorKind+分型计数)+ `writer.rs`(evaluated++/classify_err);telemetry `src/history/mod.rs`(trait)+ `engine.rs`(impl)+ `src/api/mod.rs`(AppState.history_telemetry)+ `src/lib.rs`(注入+init 8MiB 专线);渲染 `src/api/routes_metrics/{render.rs,mod.rs}` + `routes_sys.rs`;测试 `tests/history_init_failed_e2e.rs`+`tests/history_init_stack_e2e.rs`+visibility e2e 扩展;前端 `lib/historyQuery.ts`(+test)+ `components/devmeta/HistoryQuery.vue` + `views/DeviceModels.vue` + `components/monitor/SystemStatus.vue` + `lib/devmeta.ts`(null 语义修正)
 > **测试**:lib 单测(history 档 `history::` 23 passed,T1 时点 21——详见 §三 T1);visibility e2e 6;init_failed e2e 1(固化);init_stack e2e 2;前端 188 测(基线 168+20);浏览器嵌入实测七项全过+实测发现并修复 2 个真 bug
 > **遗留**:四项,见 §四遗留登记
