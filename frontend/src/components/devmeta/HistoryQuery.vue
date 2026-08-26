@@ -15,10 +15,14 @@ import {
 } from '../../lib/historyQuery'
 
 const props = defineProps<{
-  /** 预填 dev_id（面板③行「查」入口点击时更新，watch 跟进）。 */
+  /** 预填 dev_id（遥测页随当前选中设备更新，watch 跟进）。 */
   devId?: string
   /** 预填 tag。 */
   tag?: string
+  /** dev_id 输入建议（datalist；遥测页传可见设备清单）。 */
+  devOptions?: string[]
+  /** tag 输入建议（datalist；遥测页传当前设备实时点位名）。 */
+  tagOptions?: string[]
 }>()
 
 const auth = useAuthStore()
@@ -167,10 +171,16 @@ const fmtValue = (v: number | boolean | string): string =>
 
     <div class="hq-form">
       <label class="f"><span>dev_id</span>
-        <input v-model="devIdInput" class="mono" placeholder="line1.base1" />
+        <input v-model="devIdInput" class="mono" placeholder="line1.base1" list="hq-dev-opts" />
+        <datalist v-if="devOptions?.length" id="hq-dev-opts">
+          <option v-for="d in devOptions" :key="d" :value="d" />
+        </datalist>
       </label>
       <label class="f"><span>tag</span>
-        <input v-model="tagInput" class="mono" placeholder="temp" />
+        <input v-model="tagInput" class="mono" placeholder="temp" list="hq-tag-opts" />
+        <datalist v-if="tagOptions?.length" id="hq-tag-opts">
+          <option v-for="t in tagOptions" :key="t" :value="t" />
+        </datalist>
       </label>
       <label class="f"><span>窗口</span>
         <select v-model="windowChoice">

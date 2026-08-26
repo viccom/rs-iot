@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { computed, watch } from 'vue'
+import { computed, ref, watch } from 'vue'
 import RtdataPanel from '../components/monitor/RtdataPanel.vue'
 import AlarmPanel from '../components/monitor/AlarmPanel.vue'
+import HistoryQuery from '../components/devmeta/HistoryQuery.vue'
 import { useWorkspacePage } from '../composables/useWorkspacePage'
 import { useMonitorStore } from '../stores/monitor'
 import { buildDeviceOwnership, unclaimedDevices } from '../lib/instRelations'
@@ -75,6 +76,30 @@ const selectedDeviceTags = computed(() => {
     return Object.values(monitor.rtdata).flatMap(tags => Object.keys(tags))
   }
   return Object.keys(monitor.rtdata[monitor.selectedDevice] || {})
+})
+
+// ---- 历史趋势（2026-08-26 迁入：历史查询属监控关注点，与实时遥测同页；
+// 模型页回归纯元数据管理。dev_id 跟随当前选中设备 chip，tag 挂当前设备
+// 实时点位名 datalist——点哪台设备看哪台曲线（SCADA 实时/趋势惯例）。）
+const showHistory = ref(true)
+/** 面板预填 dev_id（随设备 chip 选中联动）。 */
+const hqDevId = ref('')
+watch(
+  () => monitor.selectedDevice,
+  d => {
+    hqDevId.value = d ?? ''
+  },
+  { immediate: true },
+)
+/** tag 建议：当前设备实时点位键去掉 `<devid>.` 前缀（REST tag 参数用短名）。 */
+const hqTagOptions = computed(() => {
+  const dev = hqDevId.value
+  if (!dev) return []
+  const prefix = `${dev}.`
+  return selectedDeviceTags.value
+    .filter(k => k.startsWith(prefix))
+    .map(k => k.slice(prefix.length))
+    .sort()
 })
 
 useWorkspacePage(() => ({
@@ -182,8 +207,25 @@ useWorkspacePage(() => ({
               ? `设备 ${monitor.selectedDevice} 范围内`
               : '全部设备范围'
         }}</span>
+        <button class="ghost-btn" @click="showHistory = !showHistory">
+          {{ showHistory ? '收起趋势' : '历史趋势' }}
+        </button>
       </div>
       <RtdataPanel />
+    </article>
+
+    <!-- 历史趋势：实时遥测同页（2026-08-26 自模型页迁入）——归档白名单内的
+         点位可查 raw/六聚合曲线；503 三态/400 双形态错误归一横幅。开关在
+         「实时点位列表」头部（本面板 v-if 挂载，自身不带按钮）。 -->
+    <article v-if="showHistory" class="page-panel">
+      <div class="panel-head">
+        <div>
+          <p class="panel-label">历史趋势</p>
+          <h3>历史数据查询</h3>
+        </div>
+        <span>{{ hqDevId ? `设备 ${hqDevId} 预填（点设备 chip 切换）` : '未选设备（点左侧设备 chip 预填）' }}</span>
+      </div>
+      <HistoryQuery :dev-id="hqDevId" :dev-options="visibleDevices" :tag-options="hqTagOptions" />
     </article>
 
     <!-- 活跃告警（Q12 最小闭环）：rtdata 面板近旁——数据异常（点位越限）时告警就近可见。 -->
@@ -205,6 +247,19 @@ useWorkspacePage(() => ({
   display: grid;
   gap: 18px;
 }
+
+.ghost-btn {
+  padding: 7px 13px;
+  border-radius: var(--radius-chip, 8px);
+  border: 1px solid var(--chip-border);
+  background: var(--card-bg);
+  color: var(--color-ink);
+  font-size: 12px;
+  cursor: pointer;
+  position: relative;
+  z-index: 1;
+}
+.ghost-btn:hover { border-color: var(--color-primary); }
 
 .page-panel {
   border-radius: var(--radius-panel);

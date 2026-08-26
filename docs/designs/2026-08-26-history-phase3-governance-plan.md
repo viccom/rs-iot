@@ -332,6 +332,8 @@ cd frontend && npm run build && npm run test -- --run
 
 ## 四、遗留登记
 
+- **历史查询面板迁址（2026-08-26，用户评审裁决）**：Task 5 落在 DeviceModels 面板③（原任务书"标签管理页深化"字面）经评审判定错置——历史查询属**监控关注点**，模型页回归纯元数据管理；已迁至 **Telemetry 遥测页**（实时点位列表后），dev_id 随选中设备 chip 预填 + tag datalist（当前设备实时点位名），面板开关在点位面板头。组件 HistoryQuery.vue 未动（新增 devOptions/tagOptions 可选 props），纯函数 20 测不变。
+
 1. **R4 运行期 cardinality 重算**:tsink 无运行期 setter,扩白名单须重启才重校准——已登记总方案 §七 fork backlog。
 2. **对账 omitted 测弱于计划版**:`metrics_history_governance_omitted_when_not_ok` 实现为 telemetry=None(计划红 2 写 telemetry=Some+state=disabled)——Some+disabled 组合未测,服从指令记录于此。
 3. **HistoryQuery.vue 无自动测试**:纯函数 20 测+浏览器实测七项之⑦覆盖;组件级表单逻辑无 vitest。

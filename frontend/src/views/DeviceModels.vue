@@ -7,7 +7,7 @@
 //    批量覆盖 + effective 后端对账）；
 // ④ 发现队列（M-4：未建模标签列出 + 多选 adopt 一键建模（D2 起逐 tag 类型）
 //    + 按设备清除）。
-import { computed, nextTick, onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { useDevregStore, type DiscoveryItem } from '../stores/devreg'
 import { useWorkspacePage } from '../composables/useWorkspacePage'
 import {
@@ -21,7 +21,6 @@ import {
 } from '../lib/tagops'
 import ModelForm from '../components/devmeta/ModelForm.vue'
 import DeviceForm from '../components/devmeta/DeviceForm.vue'
-import HistoryQuery from '../components/devmeta/HistoryQuery.vue'
 
 const store = useDevregStore()
 
@@ -193,24 +192,6 @@ async function onBatchApply() {
   batchBusy.value = false
   if (!r) return
   batchResult.value = r
-}
-
-// ---- 历史查询（Task 5，P7/P8：head 切换按钮 + 行「查」入口预填展开）----
-const showHistoryQuery = ref(false)
-const hqDevId = ref('')
-const hqTag = ref('')
-const histZone = ref<HTMLElement | null>(null)
-
-function onHistoryToggle() {
-  showHistoryQuery.value = !showHistoryQuery.value
-}
-
-/** 行「查」入口：预填 dev/tag 并展开面板滚动到位（仅 history==true 行提供）。 */
-function onHistoryRow(r: FlatRow) {
-  hqDevId.value = r.devid
-  hqTag.value = r.tag
-  showHistoryQuery.value = true
-  void nextTick(() => histZone.value?.scrollIntoView({ behavior: 'smooth', block: 'nearest' }))
 }
 
 // ---- 后端对账（D2-2：本地 effective 平铺 vs GET /api/v1/tags）----
@@ -527,9 +508,6 @@ useWorkspacePage(() => ({
           <button class="btn-ghost" :disabled="reconcileBusy" @click="onReconcile">
             {{ reconcileBusy ? '对账中…' : '后端对账' }}
           </button>
-          <button class="btn-ghost" @click="onHistoryToggle">
-            {{ showHistoryQuery ? '收起查询' : '历史查询' }}
-          </button>
         </div>
       </div>
 
@@ -601,7 +579,7 @@ useWorkspacePage(() => ({
       </div>
       <table class="mini-table flat">
         <thead>
-          <tr><th>标签</th><th>模型</th><th>类型</th><th>地址模板</th><th>归档</th><th>死区</th><th>单位</th><th>来源</th><th>查询</th></tr>
+          <tr><th>标签</th><th>模型</th><th>类型</th><th>地址模板</th><th>归档</th><th>死区</th><th>单位</th><th>来源</th></tr>
         </thead>
         <tbody>
           <tr v-for="r in filteredRows" :key="r.key">
@@ -613,21 +591,12 @@ useWorkspacePage(() => ({
             <td>{{ r.deadband ?? '—' }}</td>
             <td>{{ r.unit || '—' }}</td>
             <td><span class="src" :class="{ ov: r.overridden }">{{ r.overridden ? '覆盖' : '模板' }}</span></td>
-            <td>
-              <button v-if="r.history" class="link-query" @click="onHistoryRow(r)">查</button>
-              <span v-else class="src">—</span>
-            </td>
           </tr>
         </tbody>
       </table>
       <p v-if="!filteredRows.length" class="empty">
         {{ flatRows.length && tagFilterActive ? '无匹配标签（调整过滤条件或关闭「仅看归档白名单」）。' : '无标签（先建模 + 建设备，或执行迁移）。' }}
       </p>
-
-      <!-- 历史查询面板（Task 5）：head 按钮展开；行「查」预填直达 -->
-      <div v-if="showHistoryQuery" ref="histZone" class="hist-query-zone">
-        <HistoryQuery :dev-id="hqDevId" :tag="hqTag" />
-      </div>
     </article>
 
     <!-- 面板④：发现队列（M-4：未建模标签 → adopt 一键建模）-->
@@ -875,14 +844,6 @@ tr.picked td { background: color-mix(in srgb, var(--color-primary) 8%, transpare
   color: var(--color-ink-dim); font-size: 11px; text-decoration: underline;
 }
 .link-del:hover { color: var(--color-danger); }
-
-/* 面板③历史查询（Task 5）：行「查」入口 + 查询面板挂载位 */
-.link-query {
-  background: transparent; border: none; cursor: pointer;
-  color: var(--color-primary); font-size: 11px; text-decoration: underline;
-}
-.link-query:hover { text-decoration: none; opacity: 0.8; }
-.hist-query-zone { margin-top: 12px; }
 
 .ops { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
 .op {
