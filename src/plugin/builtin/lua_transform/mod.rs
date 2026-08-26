@@ -335,8 +335,9 @@ impl Source for LuaTransform {
                             // "自身输出不触发自身"，跨源可见性不受保证。
                             let self_written = self_writes
                                 .lock()
-                                .ok()
-                                .and_then(|m| m.get(&(s.devid.clone(), tag.to_string())).copied())
+                                .unwrap_or_else(|p| p.into_inner())
+                                .get(&(s.devid.clone(), tag.to_string()))
+                                .copied()
                                 .is_some_and(|t| t.elapsed() < core_::api::SELF_LOOP_GUARD_WINDOW);
                             if self_written {
                                 rtdata_skipped += 1;
