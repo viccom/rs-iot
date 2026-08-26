@@ -152,7 +152,10 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 rumqttd = { version = "0.20", default-features = false }
 
 [features]
-default = ["transform", "lua", "lua-http", "opcua", "modbus", "s7", "eip"]
+# 默认编译面（2026-08-26 用户裁决）：datasim(无条件)+lua/lua-http+modbus+opcua。
+# s7/eip 出默认——显式 `--features s7,eip` 启用（find_source 优雅降级不变）；
+# transform（Q7 冻结不接线）同样出默认，留 feature 供未来解冻。
+default = ["lua", "lua-http", "opcua", "modbus"]
 # L2 数据转换（rhai 脚本——已冻结 deprecated：Q7 定案不接线不投入，数据加工走 luaTransform）
 transform = ["dep:rhai"]
 # Lua 动态脚本采集（luaClient，默认开启）；ed25519-dalek = stdlib sync index 验签（T9）

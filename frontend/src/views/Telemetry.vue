@@ -102,15 +102,24 @@ function onRowHistory(p: { dev: string; tag: string }) {
   showHistory.value = true
   void nextTick(() => histZone.value?.scrollIntoView({ behavior: 'smooth', block: 'nearest' }))
 }
-/** tag 建议：当前设备实时点位键去掉 `<devid>.` 前缀（REST tag 参数用短名）。 */
+/** tag 建议：当前设备实时点位键剥离 `<devid>.` 前缀（REST tag 参数用短名）。
+ *  审计 C3：原 startsWith 盲切在设备名含点时误纳他设备点位（"line1" 会纳
+ *  "line1.base1.x"）——改为对已知设备目录（rtdata 顶层键）做最长前缀精确
+ *  剥离：field 必须无歧义地归属当前设备才产出建议。 */
 const hqTagOptions = computed(() => {
   const dev = hqDevId.value
   if (!dev) return []
-  const prefix = `${dev}.`
-  return selectedDeviceTags.value
-    .filter(k => k.startsWith(prefix))
-    .map(k => k.slice(prefix.length))
-    .sort()
+  const knownDevs = Object.keys(monitor.rtdata)
+  const out: string[] = []
+  for (const k of selectedDeviceTags.value) {
+    // 候选 = 所有能精确剥离的已知设备名；取最长（嵌套命名下唯一确定归属）
+    const owners = knownDevs
+      .filter(d => k.length > d.length + 1 && k.startsWith(`${d}.`))
+      .sort((a, b) => b.length - a.length)
+    const owner = owners[0]
+    if (owner === dev) out.push(k.slice(owner.length + 1))
+  }
+  return out.sort()
 })
 
 useWorkspacePage(() => ({

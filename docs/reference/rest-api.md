@@ -339,7 +339,7 @@ curl -N -H "Authorization: Bearer $JWT" \
 - **断线重连即重新 snapshot 全量重同步**（EventSource 自动重连即可恢复，无需 resync 协议）
 - 设备/点位删除 → `datachange.removed` 列出
 - 与 `GET /api/v1/rtdatas` 的 cell 输出同构（`[ts, localTime, value]` 值串），客户端复用同一解析
-- **tag 命名约束：tag 名不含点（`.`）**——field 形如 `<devid>.<tag>`，ksub 档增量路径按**最后一个**点切分归属设备段（`dev_segment`），tag 含点会误归设备域（表现为多余的删→重推抖动，不丢数据；tag 过滤本身为末段 contains 不受影响）
+- **tag 命名约束：tag 名不含点（`.`）**——field 形如 `<devid>.<tag>`，ksub 档增量路径按**最后一个**点切分归属设备段（`dev_segment`），tag 含点会误归设备域（表现为多余的删→重推抖动，不丢数据；tag 过滤本身为末段 contains 不受影响）。**碰撞 fail-closed（2026-08-26 审计 C3）**：devid/tag 含点使不同 (devid,tag) 对可映射同一 tag_key（如 (a,b.c) 与 (a.b,c) 同键）——effective 构建时碰撞 key 整体剔除并 warn 列出冲突源（不授权任何一方，防未授权方蹭白名单归档）；现场按日志改不含点命名即恢复
 - 机制为**每连接读侧 poll-diff**（非 EventBus 转发，不受其 dev 截断/丢帧特性影响；设计依据：[2026-08-23-rtdata-subscribe-plan.md](../designs/2026-08-23-rtdata-subscribe-plan.md)）
 - **读源双 impl**（`[rtdata].sub_impl`，Phase 2 订阅升级——SSE 帧/参数/diff 语义**两档完全一致**，行为等价由双档参数化 e2e 守门）：
 

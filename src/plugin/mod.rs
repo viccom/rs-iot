@@ -5,5 +5,4 @@ pub mod lua_core;
 pub mod registry;
 pub mod sample_sender;
 pub mod stat_tracker;
-pub mod ticker;
 pub mod traits;

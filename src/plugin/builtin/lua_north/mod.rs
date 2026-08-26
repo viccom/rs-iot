@@ -210,7 +210,7 @@ impl Sink for LuaNorth {
         let batch_period = std::time::Duration::from_secs(cfg.batch_max_secs.max(1));
         // batch ticker 错峰（同 stat ticker 理由：多实例/与 stat 同 5s 周期时散开首拍
         // 与整点栅格；period 本身不变，只平移相位）。
-        let batch_phase = std::time::Duration::from_millis(crate::plugin::ticker::phase_ms(
+        let batch_phase = std::time::Duration::from_millis(crate::ticker::phase_ms(
             inst.inst_id.as_str(),
             batch_period,
         ));

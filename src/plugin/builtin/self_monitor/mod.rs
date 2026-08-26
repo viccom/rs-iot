@@ -201,7 +201,7 @@ impl Source for SelfMonitor {
         let mut report_period = p;
 
         // jitter 相位（同 dataSim）：首 tick 散布，削整点脉冲。
-        let phase = Duration::from_millis(crate::plugin::ticker::phase_ms(
+        let phase = Duration::from_millis(crate::ticker::phase_ms(
             inst.inst_id.as_str(),
             Duration::from_secs(report_period),
         ));

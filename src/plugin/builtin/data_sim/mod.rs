@@ -57,7 +57,7 @@ impl Source for DataSim {
 
         let period = std::time::Duration::from_secs(period_secs);
         // jitter 相位：FNV-1a(inst_id) % period，多实例首次 tick 散布，削整点脉冲。
-        let phase = std::time::Duration::from_millis(crate::plugin::ticker::phase_ms(
+        let phase = std::time::Duration::from_millis(crate::ticker::phase_ms(
             inst.inst_id.as_str(),
             period,
         ));

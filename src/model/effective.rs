@@ -66,13 +66,37 @@ pub fn effective_all(
     models: &HashMap<String, DeviceModel>,
     devs: &[DeviceEntry],
 ) -> HashMap<String, TagProps> {
-    let mut out = HashMap::new();
+    // tag_key 碰撞 fail-closed（审计 C3）：点号歧义使不同 (devid,tag) 对可撞出
+    // 同 key（("a","b.c") ≡ ("a.b","c")；contains 直通分支同族）——后写胜会
+    // 让未授权方蹭到授权方的白名单/死区（越权归档）。碰撞 key 整体剔除
+    // （宁可不授权，不误授权——与 L3 默认零归档的安全姿态一致）+ warn 列出
+    // 冲突源，现场按日志改命名即可恢复。rest-api.md §4.14 声明 tag/devid
+    // 不含点的约束不变，本防线只兜病态命名的漏网。
+    let mut out: HashMap<String, TagProps> = HashMap::new();
+    let mut sources: HashMap<String, String> = HashMap::new();
+    let mut collisions: Vec<(String, String, String)> = Vec::new();
     for dev in devs {
         if let Some(model) = models.get(&dev.model) {
             for (tag, props) in effective_tags(model, dev) {
-                out.insert(tag_key(&dev.devid, &tag), props);
+                let key = tag_key(&dev.devid, &tag);
+                let src = format!("{}/{}", dev.devid, tag);
+                match sources.get(&key) {
+                    Some(prev) if prev != &src => {
+                        collisions.push((key.clone(), prev.clone(), src.clone()));
+                        out.remove(&key);
+                    }
+                    _ => {
+                        sources.insert(key.clone(), src);
+                        out.insert(key, props);
+                    }
+                }
             }
         }
+    }
+    for (key, a, b) in &collisions {
+        tracing::warn!(
+            "[model] tag_key 碰撞剔除（fail-closed）：key '{key}' 同时来自 {a} 与 {b}——含点命名歧义，请改用不含点的 tag/devid 命名"
+        );
     }
     out
 }
@@ -335,5 +359,64 @@ mod tests {
         assert_eq!(all.len(), 4, "两设备 × 两 tag；悬空设备零条目");
         assert!(all.contains_key("devA.ua"));
         assert!(all.contains_key("devB.ub"));
+    }
+}
+#[cfg(test)]
+mod collision_tests {
+    use super::*;
+    use crate::model::types::{DeviceEntry, DeviceModel, TagTemplate};
+
+    fn model(tag_name: &str) -> DeviceModel {
+        DeviceModel {
+            model_id: "m".into(),
+            tags: vec![TagTemplate {
+                name: tag_name.into(),
+                data_type: "f32".into(),
+                props: TagProps {
+                    history: true,
+                    ..Default::default()
+                },
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
+    fn dev(devid: &str, model_id: &str) -> DeviceEntry {
+        DeviceEntry {
+            devid: devid.into(),
+            model: model_id.into(),
+            ..Default::default()
+        }
+    }
+
+    /// C3 红测①（join 碰撞）：("a","b.c") 与 ("a.b","c") 撞出同 key
+    /// "a.b.c"——碰撞 key 必须整体剔除（fail-closed，不授权任何一方）。
+    #[test]
+    fn collision_join_fail_closed() {
+        let models = HashMap::from([
+            ("m2".to_string(), model("b.c")),
+            ("m1".to_string(), model("c")),
+        ]);
+        let devs = [dev("a", "m2"), dev("a.b", "m1")];
+        let out = effective_all(&models, &devs);
+        assert!(
+            !out.contains_key("a.b.c"),
+            "碰撞 key 必须剔除（fail-closed）: {:?}",
+            out.keys().collect::<Vec<_>>()
+        );
+    }
+
+    /// C3 红测②（无碰撞零影响）。
+    #[test]
+    fn no_collision_passthrough() {
+        let models = HashMap::from([("m1".to_string(), model("c"))]);
+        let devs = [dev("devA", "m1")];
+        let out = effective_all(&models, &devs);
+        assert!(
+            out.contains_key("devA.c"),
+            "正常命名不受影响: {:?}",
+            out.keys().collect::<Vec<_>>()
+        );
     }
 }

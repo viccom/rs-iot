@@ -17,8 +17,8 @@ use crate::event_bus::{now_iso8601, EventPayload, RtdataSample};
 use crate::history;
 use crate::host::HostContext;
 use crate::model;
-use crate::plugin::ticker::fnv1a_64;
 use crate::plugin::traits::Processor;
+use crate::ticker::fnv1a_64;
 use crate::types::{Sample, SampleValue};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
@@ -26,7 +26,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-/// devid → worker idx（FNV-1a 64bit，复用 `plugin::ticker::fnv1a_64`）。
+/// devid → worker idx（FNV-1a 64bit，复用 `ticker::fnv1a_64`）。
 ///
 /// 同 devid 恒映射同 worker（同设备数据落同一 lux field，无并发写竞争）；
 /// 不同 devid 散布到 [0, n) 多 worker（负载分摊）。`n.max(1)` 防 0 除。
