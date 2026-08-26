@@ -218,8 +218,9 @@ impl Writer {
     ///    last_val 均不动（H1/D-A：坏质量位非有效测量值——NaN 落盘会毒化
     ///    last_val 使死区永久失效，读侧 NaN→null 还会让整条曲线消失）；
     /// 1. lane 型变（Float↔Int 互变也拒）→ `lane_mismatch++` 剔除（P3）；
-    /// 2. `last_ts == ts_ms` → `dup_ts_skipped++` 跳过，不更新任何状态（P5，
-    ///    M11 计数消除对账黑洞）；
+    /// 2. `ts_ms < last_ts` → `stale_ts_dropped++` 丢弃（D-T3 跨批回卷闭合，
+    ///    语义变更：迟到样本不落盘）；`== last_ts` → `dup_ts_skipped++` 跳过，
+    ///    均不更新任何状态（P5，M11 计数消除对账黑洞）；
     /// 3. deadband=Some 且数值 → `deadband_evaluated++`（P2 分母，与分子
     ///    同点计数）；last_val 有值且 `|new − last| < db` → `deadbanded++`
     ///    跳过，last_val 不更新（PI exception，P4）；
@@ -250,7 +251,16 @@ impl Writer {
                 self.stats.lane_mismatch.fetch_add(1, Ordering::SeqCst);
                 continue;
             }
-            // 2. 同 ts 跨批双点跳过（M11：计数对账）
+            // 2. 乱序/重复 ts 防线（P5 + D-T3，跨批回卷闭合）：
+            //    严格更旧 = 跨批回卷迟到样本，丢弃计数（语义变更：迟到样本
+            //    不落盘——max 方案推演不闭合"回卷后再卷"，复核测试
+            //    writer_cross_batch_wraparound_dup_ts 实证 t3 双点；回退=revert）；
+            //    等值 = 跨批重复，跳过计数（M11 对账）。last_ts 起步 i64::MIN，
+            //    首见点恒不触发更旧判定。
+            if row.ts_ms < st.last_ts {
+                self.stats.stale_ts_dropped.fetch_add(1, Ordering::SeqCst);
+                continue;
+            }
             if st.last_ts == row.ts_ms {
                 self.stats.dup_ts_skipped.fetch_add(1, Ordering::SeqCst);
                 continue;
@@ -1134,5 +1144,129 @@ mod tests {
         );
         reopened.close().expect("重开实例 close");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 16. 跨批回卷双点复核（审查 L-1 复核驱动，T3）：同 series 依序跨批发
+    ///     t5→t3→t6→t3——等值判定（last_ts==ts）挡不住"回卷后再卷"，第 4 笔
+    ///     t3 相对 last_ts=t6 是旧 ts 但不等值。判读：重开 select 若 t3 双点
+    ///     则危害证实（Count/Avg 双计）→ 修 D-T3；若 tsink 读侧折叠为单点
+    ///     则读侧兜底成立 → 登记不修。本测初始断言写"证实"形态（红），
+    ///     证伪路径则按计划改登记。
+    #[test]
+    fn writer_cross_batch_wraparound_dup_ts_recheck() {
+        let dir = unique_dir("wrap-dup");
+        let cfg = cfg_with_dir(&dir);
+        let storage = build_storage(&cfg, 8).expect("build_storage 必须成功");
+        let (handle, join) =
+            spawn_writer(storage, &cfg).expect("测试环境 spawn history writer 线程必须成功");
+        let stats = handle.stats.clone();
+
+        let base = now_ms();
+        let (t3, t5, t6) = (base + 3000, base + 5000, base + 6000);
+        // 四笔分四批，逐笔 poll 各自出口（新批/落盘/新批/丢弃）确保攒批边界。
+        // 序列（is_fresh, ts, 期望 written, 期望 stale）：
+        //   t5 新批落盘 (1,0)；t3 更旧丢弃 (1,1)；t6 落盘 (2,1)；t3 回卷再丢弃 (2,2)。
+        for (i, (ts, want_written, want_stale)) in
+            [(t5, 1u64, 0u64), (t3, 1, 1), (t6, 2, 1), (t3, 2, 2)]
+                .into_iter()
+                .enumerate()
+        {
+            handle
+                .send(row("m", ts, SampleValue::Float(i as f64), None))
+                .expect("send 必须成功");
+            let st = stats.clone();
+            assert!(
+                poll_until(Duration::from_secs(5), move || {
+                    st.written.load(Ordering::SeqCst) == want_written
+                        && st.stale_ts_dropped.load(Ordering::SeqCst) == want_stale
+                }),
+                "第 {} 笔后应 written={} stale={}，实际 written={} stale={}",
+                i + 1,
+                want_written,
+                want_stale,
+                stats.written.load(Ordering::SeqCst),
+                stats.stale_ts_dropped.load(Ordering::SeqCst)
+            );
+            thread::sleep(Duration::from_millis(60)); // 跨攒批窗口
+        }
+
+        drop(handle);
+        join_with_timeout(
+            join,
+            Duration::from_secs(10),
+            "writer_cross_batch_wraparound_dup_ts_recheck",
+        );
+        let reopened = build_storage(&cfg, 8).expect("close 后同目录重开必须成功");
+        let pts = reopened
+            .select("m", &series_labels(), 0, i64::MAX)
+            .expect("重开 select 必须成功");
+        let t3_count = pts.iter().filter(|p| p.timestamp == t3).count();
+        let total = pts.len();
+        reopened.close().expect("重开实例 close");
+        let _ = std::fs::remove_dir_all(&dir);
+        // D-T3 实施后行为断言：两笔 t3（乱序首笔+回卷）均严格更旧于当前
+        // last_ts（t5 后的 t3、t6 后的 t3）→ 全部丢弃，盘上仅 t5/t6。
+        // 复核期断言 t3_count==2 已实证双点危害（commit 历史留痕），随修复更新。
+        assert_eq!(
+            t3_count, 0,
+            "更旧 t3（含回卷）必须全部丢弃——实际 t3_count={t3_count} total={total}"
+        );
+        assert_eq!(total, 2, "仅 t5/t6 落盘");
+        assert_eq!(
+            stats.stale_ts_dropped.load(Ordering::SeqCst),
+            2,
+            "两笔更旧 t3 均必须计 stale_ts_dropped"
+        );
+    }
+
+    /// 17. 乱序迟到样本语义锁定（D-T3 语义变更明示）：t5 已档后跨批到达的
+    ///     更旧 t3 **不落盘**（stale_ts_dropped 计数可观测）——知情取舍：
+    ///     Source 端乱序/重传的窗内迟到样本换双点闭合；>7d 更旧在 fan_out
+    ///     时界已另计 ts_rejected。本测即该语义的回归锚（revert 本项则红）。
+    #[test]
+    fn writer_stale_older_ts_dropped_semantics() {
+        let dir = unique_dir("stale-ts");
+        let cfg = cfg_with_dir(&dir);
+        let storage = build_storage(&cfg, 8).expect("build_storage 必须成功");
+        let (handle, join) =
+            spawn_writer(storage, &cfg).expect("测试环境 spawn history writer 线程必须成功");
+        let stats = handle.stats.clone();
+
+        let base = now_ms();
+        handle
+            .send(row("m", base + 5000, SampleValue::Float(5.0), None))
+            .expect("send 必须成功");
+        assert!(
+            poll_until(Duration::from_secs(5), || {
+                stats.written.load(Ordering::SeqCst) == 1
+            }),
+            "t5 首笔落盘"
+        );
+        thread::sleep(Duration::from_millis(60));
+        handle
+            .send(row("m", base + 3000, SampleValue::Float(3.0), None))
+            .expect("send 必须成功");
+        assert!(
+            poll_until(Duration::from_secs(5), || {
+                stats.stale_ts_dropped.load(Ordering::SeqCst) == 1
+            }),
+            "更旧 t3 必须计 stale_ts_dropped"
+        );
+        thread::sleep(Duration::from_millis(200));
+
+        drop(handle);
+        join_with_timeout(
+            join,
+            Duration::from_secs(10),
+            "writer_stale_older_ts_dropped_semantics",
+        );
+        assert_eq!(stats.written.load(Ordering::SeqCst), 1, "仅 t5 落盘");
+        let reopened = build_storage(&cfg, 8).expect("close 后重开必须成功");
+        let pts = reopened
+            .select("m", &series_labels(), 0, i64::MAX)
+            .expect("重开 select 必须成功");
+        reopened.close().expect("重开实例 close");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(pts.len(), 1, "盘上仅 t5——迟到 t3 不落盘（D-T3 语义）");
     }
 }

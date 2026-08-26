@@ -80,6 +80,9 @@ pub struct HistoryStats {
     pub nonfinite_skipped: AtomicU64,
     /// 跨批同 series 同 ts 跳过行数（P5 防双点；M11：计数消除对账黑洞）。
     pub dup_ts_skipped: AtomicU64,
+    /// 跨批回卷严格更旧 ts 丢弃行数（D-T3：迟到样本不落盘，语义变更回退
+    /// revert；闭合"回卷后再卷"双点——max 方案不成立，复核测试实证）。
+    pub stale_ts_dropped: AtomicU64,
     /// 时间戳域坏行数（M1/D-C：`ts×1000` 溢出或超出 `[now−7d, now+1h]`
     /// 时界窗——坏 ts 单行拒收，不再连坐整批）。
     pub ts_rejected: AtomicU64,
@@ -322,6 +325,7 @@ mod tests {
             errors: AtomicU64::new(0),
             nonfinite_skipped: AtomicU64::new(0),
             dup_ts_skipped: AtomicU64::new(0),
+            stale_ts_dropped: AtomicU64::new(0),
             ts_rejected: AtomicU64::new(0),
             len_rejected: AtomicU64::new(0),
             error_rows: std::array::from_fn(|_| AtomicU64::new(0)),
