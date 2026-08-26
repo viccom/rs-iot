@@ -37,8 +37,13 @@ pub struct HistoryRow {
 /// 历史旁路计数：e2e 确定性与 Phase 3 metrics 的数据源。
 ///
 /// 计数不变量：`sent + dropped + skipped` == fan_out 遍历的 (tag,value) 总数
-/// ——每个出口恰好落入其一。`written/deadbanded/lane_mismatch/errors` 由
-/// writer 线程在 flush 状态机中递增。
+/// ——每个出口恰好落入其一。`written/deadbanded/deadband_evaluated/
+/// lane_mismatch/errors` 由 writer 线程在 flush 状态机中递增。
+///
+/// Phase 3 治理口径（P2/P3）：死区削减率分母 `deadband_evaluated` 与分子
+/// `deadbanded` 同源同点计数；写错误按行分桶（[`WriteErrorKind`]），
+/// 不变量 `Σ(kind 槽) == errors`——由 [`HistoryStats::record_error_rows`]
+/// 单入口保证（writer 不再直接 fetch_add `errors`）。
 #[derive(Debug, Default)]
 pub struct HistoryStats {
     /// fan_out try_send 成功行数。
@@ -49,12 +54,78 @@ pub struct HistoryStats {
     pub dropped: AtomicU64,
     /// 死区抑制行数（P4 仅数值；last_val 不更新）。
     pub deadbanded: AtomicU64,
+    /// 死区评估行数（P2：deadband=Some 标签的数值点，与 deadbanded 分子同源）。
+    pub deadband_evaluated: AtomicU64,
     /// 白名单外（tag 空/effective 缺卡/history!=true）行数（L3）。
     pub skipped: AtomicU64,
     /// lane 型变剔除行数（P3）。
     pub lane_mismatch: AtomicU64,
     /// insert_rows 失败行数（fail-soft 整批丢弃）。
     pub errors: AtomicU64,
+    /// 写错误分桶行数（P3 按 kind 计数，Σ == errors；顺序同 [`WriteErrorKind::ALL`]）。
+    pub error_rows: [AtomicU64; 5],
+}
+
+/// 写失败分型桶（writer.rs `classify_err` 产出；计数按行，Σkind == errors）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WriteErrorKind {
+    /// tsink 内存预算超限（`MemoryBudgetExceeded`）。
+    MemoryBudget,
+    /// series 基数超限（`CardinalityLimitExceeded`）。
+    Cardinality,
+    /// WAL 大小/磁盘空间不足（`WalSizeLimitExceeded` ∪ `InsufficientDiskSpace`）。
+    WalDisk,
+    /// 存储关闭/关停中（`StorageClosed` ∪ `StorageShuttingDown`）。
+    Closed,
+    /// 其余错误（Io、损坏等）。
+    Other,
+}
+
+impl WriteErrorKind {
+    /// 全部五桶（顺序即 [`HistoryStats::error_rows`] 下标序，metrics 渲染遍历用）。
+    pub const ALL: [WriteErrorKind; 5] = [
+        Self::MemoryBudget,
+        Self::Cardinality,
+        Self::WalDisk,
+        Self::Closed,
+        Self::Other,
+    ];
+
+    /// 桶名（metrics label 口径：小写下划线，P1/P3）。
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::MemoryBudget => "memory_budget",
+            Self::Cardinality => "cardinality",
+            Self::WalDisk => "wal_disk",
+            Self::Closed => "closed",
+            Self::Other => "other",
+        }
+    }
+
+    /// [`HistoryStats::error_rows`] 桽数组下标（`ALL` 顺序即下标序）。
+    fn index(self) -> usize {
+        match self {
+            Self::MemoryBudget => 0,
+            Self::Cardinality => 1,
+            Self::WalDisk => 2,
+            Self::Closed => 3,
+            Self::Other => 4,
+        }
+    }
+}
+
+impl HistoryStats {
+    /// 记 n 行写失败（P3 单入口：`errors` 与 kind 槽同增，Σkind == errors
+    /// 不变量由此保证——writer 失败路径不直接 fetch_add `errors`）。
+    pub fn record_error_rows(&self, kind: WriteErrorKind, n: u64) {
+        self.errors.fetch_add(n, Ordering::SeqCst);
+        self.error_rows[kind.index()].fetch_add(n, Ordering::SeqCst);
+    }
+
+    /// 读 kind 桶累计行数（渲染/测试对账用）。
+    pub fn error_rows_of(&self, kind: WriteErrorKind) -> u64 {
+        self.error_rows[kind.index()].load(Ordering::SeqCst)
+    }
 }
 
 /// fan-out 发送句柄：pipeline 侧持有，clone 语义与 tokio mpsc Sender 一致。
@@ -179,15 +250,18 @@ mod tests {
     use crate::types::{tag_key, Hwid, Sample, SampleValue, TagProps};
 
     /// 零值计数器：字段名与全 pub 即 HistoryStats 的公共契约（无 Default 假设）。
+    /// 绿阶段仅扩构造补新字段（deadband_evaluated/error_rows），断言零改动。
     fn fresh_stats() -> Arc<HistoryStats> {
         Arc::new(HistoryStats {
             sent: AtomicU64::new(0),
             written: AtomicU64::new(0),
             dropped: AtomicU64::new(0),
             deadbanded: AtomicU64::new(0),
+            deadband_evaluated: AtomicU64::new(0),
             skipped: AtomicU64::new(0),
             lane_mismatch: AtomicU64::new(0),
             errors: AtomicU64::new(0),
+            error_rows: std::array::from_fn(|_| AtomicU64::new(0)),
         })
     }
 
@@ -457,5 +531,61 @@ mod tests {
         let rows = drain(&mut rx);
         assert_eq!(rows.len(), 1, "接收端只剩预填行");
         assert_eq!(rows[0].tag, "prefill");
+    }
+
+    /// 6. 写错误分型不变量（P3）：`record_error_rows(kind, n)` 同时增 `errors`
+    ///    与对应 kind 槽——任意调用序列后 Σ(kind 槽) == errors 总数（按行计数
+    ///    可对账）；`WriteErrorKind::ALL` 恰五桶且 `as_str()` 与 P1/P3 的
+    ///    metrics label 口径一致。
+    #[test]
+    fn error_kind_invariant() {
+        let stats = fresh_stats();
+
+        stats.record_error_rows(WriteErrorKind::MemoryBudget, 3);
+        stats.record_error_rows(WriteErrorKind::Other, 2);
+
+        assert_eq!(
+            stats.errors.load(Ordering::SeqCst),
+            5,
+            "record_error_rows 必须同时增 errors 总数（3+2）"
+        );
+        assert_eq!(
+            stats.error_rows_of(WriteErrorKind::MemoryBudget),
+            3,
+            "kind 槽必须记入 MemoryBudget 行数"
+        );
+        assert_eq!(
+            stats.error_rows_of(WriteErrorKind::Other),
+            2,
+            "kind 槽必须记入 Other 行数"
+        );
+        assert_eq!(
+            stats.error_rows_of(WriteErrorKind::Cardinality),
+            0,
+            "未记入的 kind 槽保持零"
+        );
+
+        // 不变量：Σ(kind 槽) == errors（P3 分型和可对账）
+        let per_kind = WriteErrorKind::ALL.map(|k| stats.error_rows_of(k));
+        let sum: u64 = per_kind.iter().sum();
+        assert_eq!(
+            sum,
+            stats.errors.load(Ordering::SeqCst),
+            "不变量：Σkind 槽 == errors 总数"
+        );
+
+        // 五桶 as_str 精确锁定（与 /metrics 的 kind label 口径一致）
+        let strs: Vec<&str> = WriteErrorKind::ALL.iter().map(|k| k.as_str()).collect();
+        assert_eq!(
+            strs,
+            [
+                "memory_budget",
+                "cardinality",
+                "wal_disk",
+                "closed",
+                "other"
+            ],
+            "ALL 五桶顺序与 as_str 字符串必须精确"
+        );
     }
 }

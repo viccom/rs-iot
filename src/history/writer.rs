@@ -18,14 +18,14 @@ use std::time::{Duration, Instant};
 #[cfg(feature = "history")]
 use tokio::sync::mpsc;
 #[cfg(feature = "history")]
-use tsink::{DataPoint, Label, Row as TsinkRow, Value as TsinkValue};
+use tsink::{DataPoint, Label, Row as TsinkRow, TsinkError, Value as TsinkValue};
 
 #[cfg(feature = "history")]
 use crate::config::HistoryConfig;
 #[cfg(feature = "history")]
 use crate::history::engine::StorageHandle;
 #[cfg(feature = "history")]
-use crate::history::rows::{HistoryHandle, HistoryRow, HistoryStats};
+use crate::history::rows::{HistoryHandle, HistoryRow, HistoryStats, WriteErrorKind};
 #[cfg(feature = "history")]
 use crate::types::SampleValue;
 
@@ -212,8 +212,9 @@ impl Writer {
     /// flush 状态机（逐行，顺序即后写胜出序）：
     /// 1. lane 型变（Float↔Int 互变也拒）→ `lane_mismatch++` 剔除（P3）；
     /// 2. `last_ts == ts_ms` → 静默跳过，不更新任何状态（P5）；
-    /// 3. deadband=Some 且数值且 last_val 有值且 `|new − last| < db` →
-    ///    `deadbanded++` 跳过，last_val 不更新（PI exception，P4）；
+    /// 3. deadband=Some 且数值 → `deadband_evaluated++`（P2 分母，与分子
+    ///    同点计数）；last_val 有值且 `|new − last| < db` → `deadbanded++`
+    ///    跳过，last_val 不更新（PI exception，P4）；
     /// 4. 通过 → 进 insert 批，更新 lane/last_val（数值）/last_ts。
     ///    Bool/Str 无死区恒档（P4）。
     fn flush(
@@ -238,11 +239,12 @@ impl Writer {
             if st.last_ts == row.ts_ms {
                 continue;
             }
-            // 3. 绝对死区（仅数值；剔行者 last_val 不更新）
-            if let (Some(db), Some(new), Some(last)) =
-                (row.deadband, numeric(&row.value), st.last_val)
-            {
-                if (new - last).abs() < db {
+            // 3. 绝对死区（仅数值；剔行者 last_val 不更新）：P2 口径——
+            //    deadband=Some 的数值点逐点计入 evaluated（首见点无 last 也计，
+            //    分母与 deadbanded 分子同源同点）。
+            if let (Some(db), Some(new)) = (row.deadband, numeric(&row.value)) {
+                self.stats.deadband_evaluated.fetch_add(1, Ordering::SeqCst);
+                if st.last_val.is_some_and(|last| (new - last).abs() < db) {
                     self.stats.deadbanded.fetch_add(1, Ordering::SeqCst);
                     continue;
                 }
@@ -270,7 +272,8 @@ impl Writer {
         }
     }
 
-    /// insert_rows + 计数 + fail-soft：Ok→written+=n；Err→errors+=n 并 warn
+    /// insert_rows + 计数 + fail-soft：Ok→written+=n；Err→按行分型计数
+    /// （`record_error_rows`：errors 与 kind 槽同增，P3）并 warn
     /// （整批丢弃不上抛不重试，1 秒节流防日志风暴）。
     fn insert(&mut self, rows: Vec<TsinkRow>) {
         let n = rows.len() as u64;
@@ -279,7 +282,8 @@ impl Writer {
                 self.stats.written.fetch_add(n, Ordering::SeqCst);
             }
             Err(e) => {
-                self.stats.errors.fetch_add(n, Ordering::SeqCst);
+                let kind = classify_err(&e);
+                self.stats.record_error_rows(kind, n);
                 let now = Instant::now();
                 let throttled = self
                     .last_err_warn
@@ -299,6 +303,22 @@ impl Writer {
         if let Err(e) = self.storage.close() {
             tracing::warn!("[history] writer close 失败(排空已尽力,依赖 WAL 回放兜底): {e}");
         }
+    }
+}
+
+/// 写失败分型（P3）：tsink 错误变体 → 五桶。WalSizeLimitExceeded ∪
+/// InsufficientDiskSpace → `WalDisk`；StorageClosed ∪ StorageShuttingDown →
+/// `Closed`；其余（Io、损坏、配置等）→ `Other`。
+#[cfg(feature = "history")]
+fn classify_err(e: &TsinkError) -> WriteErrorKind {
+    match e {
+        TsinkError::MemoryBudgetExceeded { .. } => WriteErrorKind::MemoryBudget,
+        TsinkError::CardinalityLimitExceeded { .. } => WriteErrorKind::Cardinality,
+        TsinkError::WalSizeLimitExceeded { .. } | TsinkError::InsufficientDiskSpace { .. } => {
+            WriteErrorKind::WalDisk
+        }
+        TsinkError::StorageClosed | TsinkError::StorageShuttingDown => WriteErrorKind::Closed,
+        _ => WriteErrorKind::Other,
     }
 }
 
@@ -341,12 +361,12 @@ mod tests {
     use std::thread;
     use std::time::{Duration, Instant};
 
-    use tsink::{Label, Value};
+    use tsink::{Label, TsinkError, Value};
 
-    use super::spawn_writer;
+    use super::{classify_err, spawn_writer};
     use crate::config::HistoryConfig;
     use crate::history::engine::build_storage;
-    use crate::history::rows::HistoryRow;
+    use crate::history::rows::{HistoryRow, WriteErrorKind};
     use crate::types::SampleValue;
 
     /// 与生产 writer 约定一致的 series labels：devid/hwid（P1/Task 4 契约）。
@@ -767,6 +787,187 @@ mod tests {
             );
         }
         reopened.close().expect("重开实例 close");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 11. 写错误分型映射（P3）：真实 tsink 错误变体 → `classify_err` 五桶——
+    ///     MemoryBudgetExceeded→MemoryBudget；CardinalityLimitExceeded→Cardinality；
+    ///     WalSizeLimitExceeded/InsufficientDiskSpace→WalDisk；StorageClosed/
+    ///     StorageShuttingDown→Closed；其余（Io 等）→Other。
+    #[test]
+    fn classify_err_covers_variants() {
+        let cases: Vec<(TsinkError, WriteErrorKind)> = vec![
+            (
+                TsinkError::MemoryBudgetExceeded {
+                    budget: 1,
+                    required: 2,
+                },
+                WriteErrorKind::MemoryBudget,
+            ),
+            (
+                TsinkError::CardinalityLimitExceeded {
+                    limit: 1,
+                    current: 1,
+                    requested: 1,
+                },
+                WriteErrorKind::Cardinality,
+            ),
+            (
+                TsinkError::WalSizeLimitExceeded {
+                    limit: 1,
+                    required: 2,
+                },
+                WriteErrorKind::WalDisk,
+            ),
+            (
+                TsinkError::InsufficientDiskSpace {
+                    required: 2,
+                    available: 1,
+                },
+                WriteErrorKind::WalDisk,
+            ),
+            (TsinkError::StorageClosed, WriteErrorKind::Closed),
+            (TsinkError::StorageShuttingDown, WriteErrorKind::Closed),
+            // 绿阶段构造修正(非断言,显式报告):io::Error::new(ErrorKind::Other,..)
+            // 触发 clippy::io_other_error(-D warnings 拒绝);io::Error::other(x)
+            // 与之完全等值,分类对象不变。断言零改动。
+            (
+                TsinkError::Io(std::io::Error::other("io failure")),
+                WriteErrorKind::Other,
+            ),
+        ];
+        for (err, want) in cases {
+            assert_eq!(
+                classify_err(&err),
+                want,
+                "TsinkError 变体 {err:?} 应分入 {want:?} 桶"
+            );
+        }
+    }
+
+    /// 12. 死区评估计数（P2 口径）：evaluated =「deadband=Some 标签的数值点」
+    ///     ——temp 序列 0.4/0.8/1.5（db=1.0）三点全计入 evaluated==3，其中
+    ///     0.8 被抑制（deadbanded==1）、0.4/1.5 落盘；plain 序列无 deadband，
+    ///     两数值点正常写入但**不计入** evaluated（若误计将得 5）。
+    #[test]
+    fn writer_deadband_evaluated_counted() {
+        let dir = unique_dir("deadband-eval");
+        let cfg = cfg_with_dir(&dir);
+        let storage = build_storage(&cfg, 8).expect("build_storage 必须成功");
+        let (handle, join) = spawn_writer(storage, &cfg);
+        let stats = handle.stats.clone();
+
+        let base = now_ms();
+        for (i, v) in [0.4f64, 0.8, 1.5].into_iter().enumerate() {
+            handle
+                .send(row(
+                    "temp",
+                    base + i as i64,
+                    SampleValue::Float(v),
+                    Some(1.0),
+                ))
+                .expect("send 必须成功");
+        }
+        for (i, v) in [10.0f64, 10.1].into_iter().enumerate() {
+            handle
+                .send(row(
+                    "plain",
+                    base + 10 + i as i64,
+                    SampleValue::Float(v),
+                    None,
+                ))
+                .expect("send 必须成功");
+        }
+
+        assert!(
+            poll_until(Duration::from_secs(5), || {
+                stats.written.load(Ordering::SeqCst) == 4
+            }),
+            "written 应达 4（temp 2 + plain 2），实际 written={} deadbanded={}",
+            stats.written.load(Ordering::SeqCst),
+            stats.deadbanded.load(Ordering::SeqCst)
+        );
+        thread::sleep(Duration::from_millis(200));
+
+        drop(handle);
+        join_with_timeout(
+            join,
+            Duration::from_secs(10),
+            "writer_deadband_evaluated_counted",
+        );
+        assert_eq!(
+            stats.deadband_evaluated.load(Ordering::SeqCst),
+            3,
+            "P2：deadband=Some 的数值点逐点计入 evaluated（0.4/0.8/1.5 共 3）"
+        );
+        assert_eq!(
+            stats.deadbanded.load(Ordering::SeqCst),
+            1,
+            "仅 0.8 被死区抑制"
+        );
+        assert_eq!(
+            stats.written.load(Ordering::SeqCst),
+            4,
+            "join 后计数冻结：temp 2 点 + plain 2 点"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 13. 写错误按行分桶（P3）：cardinality=1 的 storage 上发 2 个不同 series
+    ///     各 1 行——同批（正常路径）整批 2 行计入 errors 且全部落 Cardinality
+    ///     槽（Σkind == errors）；若两行恰被拆批（时序边界），首批单 series 先
+    ///     成功 written==1、次批 1 行计入错误——故断言取批无关口径：行守恒
+    ///     written+errors==2，且全部错误落 Cardinality 槽（轮询 5s 超时）。
+    #[test]
+    fn writer_error_kind_cardinality() {
+        let dir = unique_dir("err-kind-card");
+        let cfg = cfg_with_dir(&dir);
+        let storage = build_storage(&cfg, 1).expect("build_storage 必须成功");
+        let (handle, join) = spawn_writer(storage, &cfg);
+        let stats = handle.stats.clone();
+
+        let ts = now_ms();
+        handle
+            .send(row("s1", ts, SampleValue::Float(1.0), None))
+            .expect("send 必须成功");
+        handle
+            .send(row("s2", ts, SampleValue::Float(2.0), None))
+            .expect("send 必须成功");
+
+        assert!(
+            poll_until(Duration::from_secs(5), || {
+                let written = stats.written.load(Ordering::SeqCst);
+                let errors = stats.errors.load(Ordering::SeqCst);
+                let cardinality = stats.error_rows_of(WriteErrorKind::Cardinality);
+                written + errors == 2 && errors >= 1 && cardinality == errors
+            }),
+            "2 行应全部收口(written+errors==2)且错误全落 Cardinality 槽,实际 errors={} cardinality={} written={}",
+            stats.errors.load(Ordering::SeqCst),
+            stats.error_rows_of(WriteErrorKind::Cardinality),
+            stats.written.load(Ordering::SeqCst)
+        );
+
+        drop(handle);
+        join_with_timeout(
+            join,
+            Duration::from_secs(10),
+            "writer_error_kind_cardinality",
+        );
+        assert_eq!(
+            stats.written.load(Ordering::SeqCst) + stats.errors.load(Ordering::SeqCst),
+            2,
+            "join 后行守恒冻结在 2"
+        );
+        assert!(
+            stats.errors.load(Ordering::SeqCst) >= 1
+                && stats.error_rows_of(WriteErrorKind::Cardinality)
+                    == stats.errors.load(Ordering::SeqCst),
+            "全部错误行必须落 Cardinality 槽（按行计数，P3）"
+        );
+        assert!(
+            stats.written.load(Ordering::SeqCst) <= 1,
+            "至多首批单 series 先成功 1 行"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
