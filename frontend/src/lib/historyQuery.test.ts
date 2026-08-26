@@ -277,8 +277,12 @@ describe('historyErrorMessage（503 reason 三态中文归一 + 400 双形态 + 
     expect(historyErrorMessage(400, '{"error":"unsupported aggregation"}'))
       .toContain('unsupported aggregation')
   })
-  it('500 → 含状态码串「500」（契约：未知态透传状态码）', () => {
+  it('500 纯文本 body → 含状态码串「500」（未知态透传兜底）', () => {
     expect(historyErrorMessage(500, 'oops')).toContain('500')
+  })
+  it('500 JSON body → 含 error 字段值（引擎错误串透传，审查 L9）', () => {
+    expect(historyErrorMessage(500, '{"error":"history engine: lock occupied"}'))
+      .toContain('history engine: lock occupied')
   })
 })
 
