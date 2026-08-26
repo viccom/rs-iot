@@ -67,6 +67,11 @@ pub struct AppState {
     /// 无条件编译（`history/mod.rs`），本字段零 cfg 散布；feature off 构建
     /// 恒 None。
     pub history_reader: Option<std::sync::Arc<dyn crate::history::HistoryReader>>,
+    /// 历史治理观测句柄（Phase 3 P4 无条件编译）：None = 引擎未运行
+    /// （disabled/init_failed/feature off），/metrics 与 /sysstatus 的治理
+    /// family 据此省略。`HistoryTelemetry` trait 无条件编译
+    /// （`history/mod.rs`），本字段零 cfg 散布；feature off 构建恒 None。
+    pub history_telemetry: Option<std::sync::Arc<dyn crate::history::HistoryTelemetry>>,
     /// 实时数据订阅 watcher（订阅升级 Phase 2，P7/P9）：ksub 模式下消费
     /// `ksubscribe("rtdata:*")` 维护 per-devid 版本表；poll 模式常驻构造但不
     /// 启动消费循环（零开销承诺，P8）。无条件编译（T5 将接 subscribe producer
@@ -79,6 +84,28 @@ pub const PUBLIC_PATHS: &[&str] = &["/api/v1/user/login", "/api/v1/user/register
 
 pub fn is_public(path: &str) -> bool {
     PUBLIC_PATHS.contains(&path) || path.starts_with("/apitest") || path.starts_with("/scada")
+}
+
+// ---------- 历史治理快照 helper（供 routes_metrics/routes_sys 复用） ----------
+
+/// 采集历史治理 telemetry 三元组（Phase 3 P4/P5）：`series_count()` 为
+/// O(series) 分配 → `spawn_blocking` 不占 runtime worker；JoinErr（阻塞任务
+/// panic/取消）→ `Default` 零快照防御降级。telemetry None 分支在调用方
+/// `history_stats` Some 前置下理论不可达（lib.rs 与引擎 ok 成对注入），
+/// 防御取零快照。
+pub(crate) async fn history_telemetry_snapshot(
+    st: &AppState,
+) -> routes_metrics::render::TelemetrySnapshot {
+    match st.history_telemetry.clone() {
+        Some(t) => tokio::task::spawn_blocking(move || routes_metrics::render::TelemetrySnapshot {
+            memory_used_bytes: t.memory_used_bytes(),
+            memory_budget_bytes: t.memory_budget_bytes(),
+            series: t.series_count(),
+        })
+        .await
+        .unwrap_or_default(),
+        None => routes_metrics::render::TelemetrySnapshot::default(),
+    }
 }
 
 // ---------- lux Hash 读写 helper（供各 routes 复用） ----------

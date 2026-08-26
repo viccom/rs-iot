@@ -1,6 +1,7 @@
 //! 系统/插件实例相关路由。
 
-use crate::api::{str_from_value, AppState};
+use crate::api::{history_telemetry_snapshot, str_from_value, AppState};
+use crate::history::rows::WriteErrorKind;
 use crate::types::{AppType, InstConfig};
 use axum::extract::State;
 use axum::response::IntoResponse;
@@ -20,6 +21,65 @@ pub async fn sysstatus(State(st): State<AppState>) -> Json<serde_json::Value> {
     let m = &st.metrics;
     // sysinfo 现采进程 CPU%/mem（process_metrics 公共函数，/metrics 复用）。
     let (cpu, mem) = crate::process_metrics::sample_process_resource();
+    // 历史引擎可见性 + Phase 3 治理字段（P6）：stats 仅 engine=="ok"
+    // （Some）时非 null；水位/series/archived_tags/deadbands 与 stats 的
+    // deadband_evaluated/errors_by_kind 仅 ok 态输出——非 ok 整体省略
+    // （省略语义而非 null，与 stats 的 null 语义区分）。ratio 口径与
+    // /metrics 一致（P2：suppressed/evaluated，分母 0 时 0）。
+    let history = match &st.history_stats {
+        Some(h) => {
+            let snap = history_telemetry_snapshot(&st).await;
+            let archived_tags = crate::model::cache::effective()
+                .values()
+                .filter(|p| p.history)
+                .count();
+            let evaluated = h
+                .deadband_evaluated
+                .load(std::sync::atomic::Ordering::Relaxed);
+            let ratio = if evaluated > 0 {
+                h.deadbanded.load(std::sync::atomic::Ordering::Relaxed) as f64 / evaluated as f64
+            } else {
+                0.0
+            };
+            let mut errors_by_kind = serde_json::Map::new();
+            for kind in WriteErrorKind::ALL {
+                errors_by_kind.insert(
+                    kind.as_str().to_string(),
+                    serde_json::json!(h.error_rows_of(kind)),
+                );
+            }
+            serde_json::json!({
+                "feature": cfg!(feature = "history"),
+                "enabled": st.config.history.enabled,
+                "engine": st.history_engine_state.as_ref(),
+                "memory_used_bytes": snap.memory_used_bytes,
+                "memory_budget_bytes": snap.memory_budget_bytes,
+                "series": snap.series,
+                "archived_tags": archived_tags,
+                "deadbands": {
+                    "evaluated": evaluated,
+                    "ratio": ratio,
+                },
+                "stats": {
+                    "sent": h.sent.load(std::sync::atomic::Ordering::Relaxed),
+                    "written": h.written.load(std::sync::atomic::Ordering::Relaxed),
+                    "dropped": h.dropped.load(std::sync::atomic::Ordering::Relaxed),
+                    "deadbanded": h.deadbanded.load(std::sync::atomic::Ordering::Relaxed),
+                    "deadband_evaluated": evaluated,
+                    "skipped": h.skipped.load(std::sync::atomic::Ordering::Relaxed),
+                    "lane_mismatch": h.lane_mismatch.load(std::sync::atomic::Ordering::Relaxed),
+                    "errors": h.errors.load(std::sync::atomic::Ordering::Relaxed),
+                    "errors_by_kind": serde_json::Value::Object(errors_by_kind),
+                },
+            })
+        }
+        None => serde_json::json!({
+            "feature": cfg!(feature = "history"),
+            "enabled": st.config.history.enabled,
+            "engine": st.history_engine_state.as_ref(),
+            "stats": serde_json::Value::Null,
+        }),
+    };
     Json(serde_json::json!({
         "status": "ok",
         "dbsize": dbsize,
@@ -48,23 +108,8 @@ pub async fn sysstatus(State(st): State<AppState>) -> Json<serde_json::Value> {
             "cpu_pct": cpu,
             "mem_bytes": mem,
         },
-        // 历史引擎可见性（Phase 3 前置）：feature 在 handler 内编译期求值
-        // （不进 AppState）；stats 仅 engine=="ok" 时非 null（lib.rs 接线保证
-        // Some(stats) 与 engine ok 成对出现，此处按字段原样反映）。
-        "history": {
-            "feature": cfg!(feature = "history"),
-            "enabled": st.config.history.enabled,
-            "engine": st.history_engine_state.as_ref(),
-            "stats": st.history_stats.as_ref().map(|h| serde_json::json!({
-                "sent": h.sent.load(std::sync::atomic::Ordering::Relaxed),
-                "written": h.written.load(std::sync::atomic::Ordering::Relaxed),
-                "dropped": h.dropped.load(std::sync::atomic::Ordering::Relaxed),
-                "deadbanded": h.deadbanded.load(std::sync::atomic::Ordering::Relaxed),
-                "skipped": h.skipped.load(std::sync::atomic::Ordering::Relaxed),
-                "lane_mismatch": h.lane_mismatch.load(std::sync::atomic::Ordering::Relaxed),
-                "errors": h.errors.load(std::sync::atomic::Ordering::Relaxed),
-            })),
-        }
+        // 历史引擎可见性（Phase 3 前置 + P6 治理扩展，构建见上方 history）。
+        "history": history,
     }))
 }
 

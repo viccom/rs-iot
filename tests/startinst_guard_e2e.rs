@@ -167,6 +167,7 @@ async fn rest_startinst_double_returns_409() {
         history_stats: None,
         history_engine_state: Arc::from("disabled"),
         history_reader: None,
+        history_telemetry: None,
         rtdata_watch: std::sync::Arc::new(rs_iot::api::rtdata_watch::RtdataWatchService::new()),
     };
     let app = build_router(state);

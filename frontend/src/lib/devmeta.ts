@@ -107,8 +107,11 @@ export function mergeTagProps(tmpl: TagProps, ov: TagOverride | undefined): TagP
   if (!ov) return { ...tmpl }
   let deadband = tmpl.deadband
   if (ov.deadband !== undefined) deadband = ov.deadband
-  const desc = ov.desc === undefined ? tmpl.desc : ov.desc === '' ? null : ov.desc
-  const unit = ov.unit === undefined ? tmpl.unit : ov.unit === '' ? null : ov.unit
+  // desc/unit：后端 Option<String> 的 JSON null=None=继承（仅空串 ""=显式清除，
+  // 与 deadband 的内层 null=显式关不同）——null 不得误判清除。`== null` 同收
+  // null/undefined 两态，空串走下方显式清除分支。
+  const desc = ov.desc == null ? tmpl.desc : ov.desc === '' ? null : ov.desc
+  const unit = ov.unit == null ? tmpl.unit : ov.unit === '' ? null : ov.unit
   return {
     history: ov.history ?? tmpl.history,
     deadband,

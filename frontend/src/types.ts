@@ -181,7 +181,9 @@ export interface SysMetricsInfo {
   [k: string]: unknown
 }
 
-/** 历史引擎七计数器（sysstatus.history.stats；与 /metrics rs_iot_history_* family 同源）。 */
+/** 历史引擎七计数器（sysstatus.history.stats；与 /metrics rs_iot_history_* family 同源）。
+ *  P6 扩展字段（deadband_evaluated/errors_by_kind）全可选——旧后端缺省，
+ *  UI 按"缺字段省略行"降级（ed54a6d 四件同惯例）。 */
 export interface HistoryStats {
   sent: number
   written: number
@@ -190,18 +192,34 @@ export interface HistoryStats {
   skipped: number
   lane_mismatch: number
   errors: number
+  /** 死区评估计数（deadband=Some 标签的数值点；削减率分母，P2/P6）。 */
+  deadband_evaluated?: number
+  /** 写错误按行分型计数（五桶 memory_budget/cardinality/wal_disk/closed/other；
+   *  Σkind == errors 不变量，P3/P6）。 */
+  errors_by_kind?: Record<string, number>
 }
 
 /**
  * sysstatus.history 子结构（历史引擎可见性，routes_sys.rs）。
  * engine 三态：feature off 或 enabled=false → "disabled"；init 失败 →
  * "init_failed"；成功 → "ok"。stats 与 "ok" 成对出现（非 ok 恒 null）。
+ * P6 治理字段（内存水位/series/archived_tags/deadbands）仅 engine ok 时
+ * 输出、非 ok 整体省略（省略语义而非 null）——全部可选，旧后端降级安全。
  */
 export interface SysStatusHistory {
   feature: boolean
   enabled: boolean
   engine: 'ok' | 'disabled' | 'init_failed'
   stats: HistoryStats | null
+  /** 内存水位（引擎口径，HistoryTelemetry；MiB 换算展示）。 */
+  memory_used_bytes?: number
+  memory_budget_bytes?: number
+  /** 引擎内活跃 series 数。 */
+  series?: number
+  /** 归档白名单计数（effective() history=true）。 */
+  archived_tags?: number
+  /** 死区削减（evaluated=评估点计数；ratio=deadbanded/evaluated，分母 0 时 0）。 */
+  deadbands?: { evaluated: number; ratio: number }
 }
 
 /** GET /sysstatus 响应（前端消费子集；索引签名容忍后端增字段与旧后端缺块）。 */
