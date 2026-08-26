@@ -204,8 +204,11 @@ pub(crate) async fn cascade_delete(st: &AppState, inst_id: &str) {
     }
     // 5. 清报文 trace 注册（内存态，deactivate 即从 DashMap 移除）。
     st.trace_registry.deactivate(inst_id);
-    // 6. 删实例配置（HDEL）。
-    let _ = st.lux.execute("HDEL", &["instances", inst_id]).await;
+    // 6. 删实例配置（HDEL）。审计 B1：对齐邻居步骤的 warn 模式（purge 级联
+    //    清理语义：单步失败告警继续，不因一步中断整条清理链）。
+    if let Err(e) = st.lux.execute("HDEL", &["instances", inst_id]).await {
+        tracing::warn!("[routes_inst] HDEL instances {inst_id} failed: {e}");
+    }
     // 7. 清外部插件 token（实例没了 token 必失效——安全底线）。
     if let Err(e) = crate::db::ext_token::remove(&st.lux, inst_id).await {
         tracing::warn!("[routes_inst] remove token for {inst_id} failed: {e}");

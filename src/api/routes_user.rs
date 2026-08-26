@@ -7,6 +7,15 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::Deserialize;
 
+/// 500 JSON 响应（审计 B1 写路径失败口径，对齐 routes_history 的 error 形态）。
+fn internal_err(msg: &str) -> Response {
+    (
+        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+        Json(serde_json::json!({"error": msg})),
+    )
+        .into_response()
+}
+
 #[derive(Deserialize)]
 pub struct IdQuery {
     pub user_id: String,
@@ -32,10 +41,18 @@ pub struct SetReq {
     pub object: serde_json::Value,
 }
 
-pub async fn set(State(st): State<AppState>, Json(req): Json<SetReq>) -> Json<serde_json::Value> {
-    let s = serde_json::to_string(&req.object).unwrap_or_default();
-    let _ = st.lux.execute("HSET", &["users", &req.user_id, &s]).await;
-    Json(serde_json::json!({"status": "ok"}))
+/// 写路径失败必须 5xx（审计 B1：原 `let _ =` 吞错谎报 ok——改密/绑定
+/// 落库失败时客户端显示成功）；序列化失败同理，不再写空串。
+pub async fn set(State(st): State<AppState>, Json(req): Json<SetReq>) -> Response {
+    let Ok(s) = serde_json::to_string(&req.object) else {
+        tracing::warn!("[routes_user] 用户对象序列化失败: {}", req.user_id);
+        return internal_err("用户对象序列化失败");
+    };
+    if let Err(e) = st.lux.execute("HSET", &["users", &req.user_id, &s]).await {
+        tracing::warn!("[routes_user] HSET users {} 失败: {e}", req.user_id);
+        return internal_err("用户落库失败");
+    }
+    Json(serde_json::json!({"status": "ok"})).into_response()
 }
 
 #[derive(Deserialize)]
@@ -43,13 +60,17 @@ pub struct DelReq {
     pub user_id: String,
 }
 
-pub async fn delete(
-    State(st): State<AppState>,
-    Json(req): Json<DelReq>,
-) -> Json<serde_json::Value> {
-    let _ = st.lux.execute("HDEL", &["users", &req.user_id]).await;
-    let _ = st.lux.execute("HDEL", &["passwords", &req.user_id]).await;
-    Json(serde_json::json!({"status": "deleted"}))
+pub async fn delete(State(st): State<AppState>, Json(req): Json<DelReq>) -> Response {
+    // 两表清理：任一失败即 5xx（审计 B1）——半删状态可重试（delete 幂等）。
+    if let Err(e) = st.lux.execute("HDEL", &["users", &req.user_id]).await {
+        tracing::warn!("[routes_user] HDEL users {} 失败: {e}", req.user_id);
+        return internal_err("用户删除失败");
+    }
+    if let Err(e) = st.lux.execute("HDEL", &["passwords", &req.user_id]).await {
+        tracing::warn!("[routes_user] HDEL passwords {} 失败: {e}", req.user_id);
+        return internal_err("密码记录删除失败");
+    }
+    Json(serde_json::json!({"status": "deleted"})).into_response()
 }
 
 #[derive(Deserialize)]
@@ -92,10 +113,16 @@ pub async fn changepass(State(st): State<AppState>, Json(req): Json<ChangePassRe
     }
     match bcrypt::hash(&req.new_pass, bcrypt::DEFAULT_COST) {
         Ok(h) => {
-            let _ = st
+            // 审计 B1：改密落库失败必须 5xx——原吞错返回 ok，用户以为改密
+            // 成功，旧密码仍在生效（下次登录才发现）。
+            if let Err(e) = st
                 .lux
                 .execute("HSET", &["passwords", &req.user_id, &h])
-                .await;
+                .await
+            {
+                tracing::warn!("[routes_user] HSET passwords {} 失败: {e}", req.user_id);
+                return internal_err("密码落库失败");
+            }
             Json(serde_json::json!({"status": "ok"})).into_response()
         }
         Err(e) => (

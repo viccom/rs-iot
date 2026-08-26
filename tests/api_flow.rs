@@ -151,3 +151,63 @@ async fn token_grants_access_to_sysinfo() {
 
     common::stop_lux(handle).await;
 }
+
+/// B1（审计：写路径谎报 ok）正向守门：set 正常路径 200 ok + 回读一致
+/// ——锁定修复（失败路径返 5xx）不破坏正常路径。
+/// 失败路径行为红测**不可达**（豁免登记）：EmbeddedClient 进程内直连
+/// store，shutdown_and_wait 后 execute 仍成功，无注入口；serde_json::Value
+/// 序列化恒成功。失败分支以代码审查 + 本守门护航。
+#[tokio::test]
+async fn user_set_normal_path_roundtrip() {
+    let (app, handle) = test_app().await;
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/user/login")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"user_id":"admin","pass":"admin"}"#))
+                .expect("request"),
+        )
+        .await
+        .expect("call app");
+    let token = body_json(resp).await["token"]
+        .as_str()
+        .expect("token")
+        .to_string();
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/user/set")
+                .header(header::AUTHORIZATION, &token)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"user_id":"u1","object":{"role":"viewer"}}"#))
+                .expect("request"),
+        )
+        .await
+        .expect("call app");
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(body_json(resp).await["status"], "ok");
+
+    // 回读一致（落库真实生效）
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/user/get?user_id=u1")
+                .header(header::AUTHORIZATION, &token)
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("call app");
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    assert_eq!(json["u1"]["role"], "viewer", "set 后回读必须一致: {json}");
+
+    common::stop_lux(handle).await;
+}
