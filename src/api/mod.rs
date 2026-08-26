@@ -86,6 +86,28 @@ pub fn is_public(path: &str) -> bool {
     PUBLIC_PATHS.contains(&path) || path.starts_with("/apitest") || path.starts_with("/scada")
 }
 
+// ---------- 历史治理快照 helper（供 routes_metrics/routes_sys 复用） ----------
+
+/// 采集历史治理 telemetry 三元组（Phase 3 P4/P5）：`series_count()` 为
+/// O(series) 分配 → `spawn_blocking` 不占 runtime worker；JoinErr（阻塞任务
+/// panic/取消）→ `Default` 零快照防御降级。telemetry None 分支在调用方
+/// `history_stats` Some 前置下理论不可达（lib.rs 与引擎 ok 成对注入），
+/// 防御取零快照。
+pub(crate) async fn history_telemetry_snapshot(
+    st: &AppState,
+) -> routes_metrics::render::TelemetrySnapshot {
+    match st.history_telemetry.clone() {
+        Some(t) => tokio::task::spawn_blocking(move || routes_metrics::render::TelemetrySnapshot {
+            memory_used_bytes: t.memory_used_bytes(),
+            memory_budget_bytes: t.memory_budget_bytes(),
+            series: t.series_count(),
+        })
+        .await
+        .unwrap_or_default(),
+        None => routes_metrics::render::TelemetrySnapshot::default(),
+    }
+}
+
 // ---------- lux Hash 读写 helper（供各 routes 复用） ----------
 
 pub fn str_from_value(v: &lux::EmbeddedValue) -> String {

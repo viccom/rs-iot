@@ -44,11 +44,18 @@ pub async fn metrics(State(st): State<AppState>) -> axum::response::Response {
     }
     body.push_str(&render_instances(&rows));
 
-    // 历史旁路七计数器（Phase 3 前置）：仅 stats 存在（引擎 ok）时输出——
+    // 历史旁路七计数器 + Phase 3 治理 family：仅 stats 存在（引擎 ok）时输出——
     // disabled/init_failed 不输出，避免误导性零值（rows.rs 无条件编译，
     // feature off 构建下 AppState.history_stats 恒 None，同一判定天然成立）。
+    // 治理输入（P1）：archived_tags 从 effective 全局快照直呼计数；telemetry
+    // 三元组经 spawn_blocking 采集（P5，helper 见 api/mod.rs）。
     if let Some(history) = &st.history_stats {
-        body.push_str(&render_history(history));
+        let snap = crate::api::history_telemetry_snapshot(&st).await;
+        let archived_tags = crate::model::cache::effective()
+            .values()
+            .filter(|p| p.history)
+            .count();
+        body.push_str(&render_history(history, &snap, archived_tags));
     }
 
     (

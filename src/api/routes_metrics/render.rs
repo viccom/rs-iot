@@ -1,7 +1,7 @@
 //! `/metrics` 端点 render 层(Prometheus 文本格式化的纯函数)。spec §3-§6。
 
 use crate::db::stat::InstanceStat;
-use crate::history::rows::HistoryStats;
+use crate::history::rows::{HistoryStats, WriteErrorKind};
 use crate::plugin::instance::InstState;
 use crate::process_metrics::ProcessMetrics;
 use std::sync::atomic::Ordering;
@@ -323,12 +323,36 @@ pub(crate) fn render_instances(rows: &[InstanceRow]) -> String {
     s
 }
 
-/// 历史旁路七计数器 → Prometheus 文本（Phase 3 前置，spec §3/§6 同规）。
+/// 历史治理 telemetry 快照（P4/P5：handler 侧采集后传入，保持 render 层纯函数）。
+///
+/// `Default`（0/0/0）兼作防御降级值：telemetry 缺席 / `spawn_blocking` JoinErr
+/// 时以零快照输出（调用方 `history_stats` Some 前置下理论不可达）。
+#[derive(Default)]
+pub(crate) struct TelemetrySnapshot {
+    /// 内存已用字节（tsink `memory_used()` 口径）。
+    pub(crate) memory_used_bytes: u64,
+    /// 内存预算字节（D6 `memory_limit_mb` 换算）。
+    pub(crate) memory_budget_bytes: u64,
+    /// series 数（`list_metrics().len()` 官方口径）。
+    pub(crate) series: u64,
+}
+
+/// 历史旁路七计数器 + Phase 3 治理七 family → Prometheus 文本
+/// （Phase 3 前置，spec §3/§6 同规；P1/P2/P3）。
 ///
 /// **仅引擎 ok（stats 存在）时被 handler 调用**：disabled/init_failed 态不输出
 /// ——零值 counter 会误导抓取方以为归档在跑而数据为零。计数语义与
 /// `HistoryStats` 字段一一对应（`sent+dropped+skipped == fan_out 遍历总数`）。
-pub(crate) fn render_history(h: &HistoryStats) -> String {
+///
+/// 治理扩展：白名单规模/引擎水位 gauge（`t` 快照 + `archived_tags`）、死区
+/// 评估 counter 与削减率 gauge（P2：ratio = deadbanded/evaluated，分母 0 时
+/// 输出 0）、写错误五桶 labeled counter（P3：Σkind == errors_total，值 0 桶
+/// 也输出，齐五桶）。
+pub(crate) fn render_history(
+    h: &HistoryStats,
+    t: &TelemetrySnapshot,
+    archived_tags: usize,
+) -> String {
     let mut s = String::new();
     let rel = Ordering::Relaxed;
     for (name, help, val) in [
@@ -370,6 +394,84 @@ pub(crate) fn render_history(h: &HistoryStats) -> String {
     ] {
         family_header(&mut s, name, help, "counter");
         metric_line(&mut s, name, "", &val.to_string());
+    }
+
+    // 白名单规模与引擎水位（P1 gauge：archived_tags 由 handler 从 effective
+    // 快照计数传入，其余三项为 telemetry 快照）。
+    for (name, help, val) in [
+        (
+            "rs_iot_history_archived_tags",
+            "历史白名单 tag 数(effective 快照 history=true 计数)",
+            archived_tags.to_string(),
+        ),
+        (
+            "rs_iot_history_series",
+            "历史引擎 series 数(list_metrics 官方口径)",
+            t.series.to_string(),
+        ),
+        (
+            "rs_iot_history_memory_used_bytes",
+            "历史引擎内存已用字节(tsink 口径)",
+            t.memory_used_bytes.to_string(),
+        ),
+        (
+            "rs_iot_history_memory_budget_bytes",
+            "历史引擎内存预算字节(D6 memory_limit)",
+            t.memory_budget_bytes.to_string(),
+        ),
+    ] {
+        family_header(&mut s, name, help, "gauge");
+        metric_line(&mut s, name, "", &val);
+    }
+
+    // 死区评估计数与削减率（P2：分子分母同源同点计数；ratio 口径明写
+    // suppressed/evaluated，R8——Phase 4 门禁"削减率 ≥50%"直接对表）。
+    let evaluated = h.deadband_evaluated.load(rel);
+    family_header(
+        &mut s,
+        "rs_iot_history_deadband_evaluated_total",
+        "历史死区评估行数(P2 削减率分母,deadband=Some 标签的数值点)",
+        "counter",
+    );
+    metric_line(
+        &mut s,
+        "rs_iot_history_deadband_evaluated_total",
+        "",
+        &evaluated.to_string(),
+    );
+    let ratio = if evaluated > 0 {
+        h.deadbanded.load(rel) as f64 / evaluated as f64
+    } else {
+        0.0
+    };
+    family_header(
+        &mut s,
+        "rs_iot_history_deadband_reduction_ratio",
+        "历史死区削减率(suppressed/evaluated,分母 0 时输出 0)",
+        "gauge",
+    );
+    metric_line(
+        &mut s,
+        "rs_iot_history_deadband_reduction_ratio",
+        "",
+        &ratio.to_string(),
+    );
+
+    // 写错误五桶分型（P3：Σkind == rs_iot_history_errors_total；值 0 桶也
+    // 输出，齐五桶保证抓取方面板字段稳定）。
+    family_header(
+        &mut s,
+        "rs_iot_history_write_errors_total",
+        "历史 insert_rows 失败行数按 kind 分桶(Σkind == errors_total)",
+        "counter",
+    );
+    for kind in WriteErrorKind::ALL {
+        metric_line(
+            &mut s,
+            "rs_iot_history_write_errors_total",
+            &format!("{{kind=\"{}\"}}", kind.as_str()),
+            &h.error_rows_of(kind).to_string(),
+        );
     }
     s
 }
@@ -583,13 +685,22 @@ mod tests {
     }
 
     #[test]
-    fn render_history_seven_counter_families_with_values() {
-        let out = render_history(&history_stats());
-        // 恰好 7 个 family,全部 counter
+    fn render_history_fourteen_families_with_values() {
+        let out = render_history(
+            &history_stats(),
+            &TelemetrySnapshot {
+                memory_used_bytes: 111,
+                memory_budget_bytes: 268_435_456,
+                series: 7,
+            },
+            1,
+        );
+        // 恰好 14 个 family:7 既有 counter + 7 治理(四水位 gauge + 死区评估
+        // counter + 削减率 gauge + 写错误五桶 labeled counter)
         assert_eq!(
             out.lines().filter(|l| l.starts_with("# TYPE ")).count(),
-            7,
-            "history 应输出 7 个 metric family"
+            14,
+            "history 应输出 14 个 metric family"
         );
         // 每个 family:HELP/TYPE 头 + 数值行
         for (name, val) in [
@@ -616,7 +727,11 @@ mod tests {
     #[test]
     fn render_history_counters_all_end_with_total() {
         // 命名规范锁定:history counter 名以 _total 结尾(与 render_process 同规)。
-        let out = render_history(&crate::history::rows::HistoryStats::default());
+        let out = render_history(
+            &crate::history::rows::HistoryStats::default(),
+            &TelemetrySnapshot::default(),
+            0,
+        );
         for line in out.lines() {
             if line.starts_with("# TYPE ") && line.ends_with(" counter") {
                 let name = line
