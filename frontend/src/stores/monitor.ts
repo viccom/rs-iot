@@ -80,8 +80,8 @@ export const useMonitorStore = defineStore('monitor', () => {
   const packets = ref<PacketEntry[]>([])
   /** rtdata 快照：`{devId: {tag: [ts, localTime, value]}}`。 */
   const rtdata = ref<Record<string, Record<string, RtdataCell>>>({})
-  /** 后端归属表（GET /devices 运行时条目的 owner_inst——dev2inst 全插件口径；
-   *  配置设备不在此（配置源已覆盖），仅运行时产生设备有键。 */
+  /** 后端归属表（GET /devices 条目的 owner_inst——dev2inst 全插件口径，
+   *  devreg 设备与运行时设备均可能有归属）。 */
   const deviceOwners = ref<Record<string, string>>({})
   /** 设备聚合视图全量（GET /devices；M-2 起点表来自设备模型——类型映射/预览用）。 */
   const deviceCatalog = ref<Record<string, DeviceSpec>>({})
@@ -268,8 +268,8 @@ export const useMonitorStore = defineStore('monitor', () => {
     } catch { /* 轮询失败静默，下周期重试 */ }
   }
 
-  /** 拉取后端设备归属表（GET /devices；提取运行时条目 owner_inst——dev2inst
-   *  全插件口径。归属变化频率低，页面 setup 拉一次即可）。 */
+  /** 拉取后端设备归属表（GET /devices；提取条目 owner_inst——dev2inst 全插件
+   *  口径，devreg 设备也可有归属。归属变化频率低，页面 setup 拉一次即可）。 */
   async function loadDeviceOwners() {
     if (isPreviewAuthToken(useAuthStore().token)) return
     try {
@@ -282,7 +282,7 @@ export const useMonitorStore = defineStore('monitor', () => {
       deviceCatalog.value = data
       const out: Record<string, string> = {}
       for (const [devId, entry] of Object.entries(data)) {
-        if (entry?.runtime && entry.owner_inst) out[devId] = entry.owner_inst
+        if (entry?.owner_inst) out[devId] = entry.owner_inst
       }
       deviceOwners.value = out
     } catch { /* 静默：归属表缺席时前端退化为配置+runtime_devices 口径 */ }

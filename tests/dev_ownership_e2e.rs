@@ -321,6 +321,59 @@ async fn purge_clears_dev2inst_both_scopes() {
     common::stop_lux(handle).await;
 }
 
+/// GET /api/v1/devices 的 **devreg 派生条目**也应并入 dev2inst 归属：设备在模型
+/// 注册表（条目有 model 字段、无 runtime 字段——devreg 是权威来源）且 dev2inst
+/// 有宿主时，条目带 `owner_inst`。缺口场景：selfMonitor 把 rsiot→self 登记进
+/// dev2inst，但聚合把 devreg 内设备 `continue` 丢归属，前端按 owner_inst 提取
+/// 归属表后遥测页选 self 实例查无设备。
+#[tokio::test]
+async fn devices_endpoint_exposes_owner_inst_for_devreg_device() {
+    let (app, handle, mgr, lux) = test_app("own_ownerinst").await;
+    let token = login_token(&app).await;
+
+    // 模型 + devreg 设备 own-dv1（sim_inst 内经 model::store 落 devreg）+ 启动
+    // 实例——start_source 预登记 dev2inst: own-dv1 → own-e2e。
+    mgr.start_source(sim_inst("own-e2e", &["own-dv1"], &lux).await)
+        .await
+        .expect("start");
+
+    // GET /api/v1/devices（带 JWT，照本文件 oneshot 惯例）。
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/v1/devices")
+                .header(header::AUTHORIZATION, &token)
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("call app");
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20)
+        .await
+        .expect("body");
+    let json: serde_json::Value = serde_json::from_slice(&bytes).expect("devices json");
+
+    let entry = &json["own-dv1"];
+    assert!(
+        entry.get("model").is_some(),
+        "own-dv1 应为 devreg 派生条目（有 model 字段）"
+    );
+    assert!(
+        entry.get("runtime").is_none(),
+        "devreg 派生条目不带 runtime 字段（devreg 仍是权威来源）"
+    );
+    assert_eq!(
+        entry["owner_inst"].as_str(),
+        Some("own-e2e"),
+        "devreg 设备也应并入 dev2inst 归属（owner_inst）"
+    );
+
+    common::stop_lux(handle).await;
+}
+
 /// runtime-only 实例 stop 后 startinst 可恢复（routes_sys::startinst 配置双源：
 /// lux miss → mgr 快照回退）。selfMonitor 不落 lux instances——stop 后经此重启，
 /// 此前 404 "instance not found"（前端实例页"可停不可启"缺口）。

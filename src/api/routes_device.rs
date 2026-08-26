@@ -4,7 +4,8 @@
 //! - `GET /api/v1/devices`：devreg 全设备聚合（点表从设备模型展开，形态兼容
 //!   旧 `{dev_id: {label, value, children, inst_id}}`——前端/MCP 消费方零改动）
 //!   ∪ dev2inst 运行时补集（lua `set_value` 等未建模设备带 `runtime: true`，
-//!   M-3 校验闸上线后消失）；
+//!   M-3 校验闸上线后消失）；devreg 派生条目也并入 dev2inst 归属
+//!   （`owner_inst`，不带 `runtime`——devreg 仍是权威来源）；
 //! - `GET /api/v1/device/get?dev_id=`：聚合后过滤单设备；
 //! - `POST /api/v1/device/set`：**绑定设备到实例**（dev_id 须已存在于 devreg——
 //!   元数据唯一出生地；object 为 bind 参数如 `{"slave_id": 2}`）；
@@ -45,7 +46,8 @@ pub async fn get(State(st): State<AppState>, Query(q): Query<IdQuery>) -> Json<s
     }
 }
 
-/// 聚合入口（list/get 共用）：devreg 派生 ∪ dev2inst 运行时补集。
+/// 聚合入口（list/get 共用）：devreg 派生 ∪ dev2inst 运行时补集；devreg 派生
+/// 条目也并入 dev2inst 归属（owner_inst——前端/北向按宿主过滤设备用）。
 async fn aggregate(st: &AppState) -> serde_json::Map<String, serde_json::Value> {
     let mut agg = serde_json::Map::new();
     // devreg 派生（权威）：每设备 children 从模型模板合成（label=tag 名，
@@ -78,19 +80,28 @@ async fn aggregate(st: &AppState) -> serde_json::Map<String, serde_json::Value> 
             }),
         );
     }
-    // 运行时补集（D-OWN-3）：dev2inst 在册而 devreg 无（动态产生设备）。
+    // dev2inst 归属并入（D-OWN-3）：devreg 内设备给派生条目补 owner_inst
+    // （不加 runtime——devreg 仍是权威来源；多宿主逗号串与补集口径一致）；
+    // devreg 无此设备才走运行时补集（动态产生设备，带 runtime: true）。
     let reg = crate::db::dev_registry::all(&st.lux)
         .await
         .unwrap_or_default();
     for (devid, owners) in reg {
-        if owners.is_empty() || agg.contains_key(&devid) {
+        if owners.is_empty() {
+            continue;
+        }
+        let owner_inst = owners.join(",");
+        if let Some(entry) = agg.get_mut(&devid) {
+            if let Some(obj) = entry.as_object_mut() {
+                obj.insert("owner_inst".into(), serde_json::json!(owner_inst));
+            }
             continue;
         }
         agg.insert(
             devid.clone(),
             serde_json::json!({
                 "label": devid, "value": devid, "children": [],
-                "runtime": true, "owner_inst": owners.join(","),
+                "runtime": true, "owner_inst": owner_inst,
             }),
         );
     }
