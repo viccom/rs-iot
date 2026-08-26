@@ -123,6 +123,14 @@ pub fn str_from_value(v: &lux::EmbeddedValue) -> String {
 pub async fn hgetall(lux: &lux::EmbeddedClient, key: &str) -> serde_json::Value {
     match lux.execute_value("HGETALL", &[key]).await {
         Ok(lux::EmbeddedValue::Array(arr)) => {
+            // 奇数长度 = field/value 对不完整（lux HGETALL 正常恒偶数）——尾部
+            // 元素将被丢弃，静默吞不如留痕（审查 Phase2-L4）。
+            if arr.len() % 2 != 0 {
+                tracing::warn!(
+                    "[api] HGETALL {key} 返回奇数长度 {}，尾部元素丢弃",
+                    arr.len()
+                );
+            }
             let mut map = serde_json::Map::new();
             let mut i = 0;
             while i + 1 < arr.len() {
