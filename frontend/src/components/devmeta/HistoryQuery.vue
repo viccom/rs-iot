@@ -10,7 +10,8 @@
 import { computed, ref, watch } from 'vue'
 import { useAuthStore } from '../../stores/auth'
 import {
-  buildHistoryUrl, buildSparklinePath, decimate, historyErrorMessage, numericPoints, windowToRange,
+  buildHistoryUrl, buildSparklinePath, decimate, historyErrorMessage, numericPoints,
+  parseHistoryBody, windowToRange,
   type HistoryAgg, type HistoryQueryParams, type NumericPointsResult, type TsdbHistoryResponse,
   type WindowPreset,
 } from '../../lib/historyQuery'
@@ -117,9 +118,14 @@ async function onQuery() {
     } else if (!r.ok) {
       errorBanner.value = historyErrorMessage(r.status, await r.text())
     } else {
-      result.value = (await r.json()) as TsdbHistoryResponse
+      // M9：r.text()+parseHistoryBody 把「响应体非法 JSON」从外层 catch 的
+      // 「网关不可达」里分离——fetch 已成功返回，解析失败是响应问题非网络。
+      const parsed = parseHistoryBody(await r.text())
+      if (parsed.ok) result.value = parsed.data
+      else errorBanner.value = parsed.message
     }
   } catch {
+    // 仅剩 fetch 网络异常（DNS/断连/超时）落此分支
     errorBanner.value = '网络错误（网关不可达）'
   }
   querying.value = false

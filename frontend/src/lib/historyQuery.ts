@@ -98,6 +98,21 @@ export function numericPoints(
   return { numeric, skipped }
 }
 
+/** 200 响应体解析结果（M9）：ok=false 时 message 为归一错误文案。 */
+export type HistoryBodyResult =
+  | { ok: true; data: TsdbHistoryResponse }
+  | { ok: false; message: string }
+
+/** 解析 200 响应体（M9）：非法 JSON（网关误路由/HTML 错误页/代理注入）与
+ *  fetch 网络异常区分文案——前者是「响应解析失败」，不再是「网关不可达」。 */
+export function parseHistoryBody(text: string): HistoryBodyResult {
+  try {
+    return { ok: true, data: JSON.parse(text) as TsdbHistoryResponse }
+  } catch {
+    return { ok: false, message: '响应解析失败（网关返回非 JSON）' }
+  }
+}
+
 /** min/max/last 抽稀（points 须按 ts 升序传入）。
  *  桶归属按 ts 线性划分：t0=首点 ts、t1=末点 ts、span=(t1-t0)/buckets，
  *  桶索引 = min(floor((ts-t0)/span), buckets-1)（末桶闭区间含 t1；

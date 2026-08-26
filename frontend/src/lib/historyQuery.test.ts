@@ -60,6 +60,7 @@ import {
   decimate,
   historyErrorMessage,
   numericPoints,
+  parseHistoryBody,
   windowToRange,
   type DecimatedPoint,
   type HistoryQueryParams,
@@ -290,5 +291,23 @@ describe('windowToRange（窗口预设 → {startSec,endSec}，endSec==nowSec）
       const r = windowToRange(preset, now)
       expect(r).toEqual({ startSec: now - deltas[preset], endSec: now })
     }
+  })
+})
+
+describe('parseHistoryBody（200 响应体解析，M9：解析失败≠网关不可达）', () => {
+  it('合法 JSON → ok:true 且 data 保形', () => {
+    const r = parseHistoryBody('{"dev_id":"devA","tag":"temp","points":[{"ts":1,"value":2}],"count":1}')
+    expect(r.ok).toBe(true)
+    if (r.ok) {
+      expect(r.data.dev_id).toBe('devA')
+      expect(r.data.tag).toBe('temp')
+      expect(r.data.points).toEqual([{ ts: 1, value: 2 }])
+      expect(r.data.count).toBe(1)
+    }
+  })
+  it('非法 JSON（网关误路由/HTML 错误页）→ ok:false 且文案区分于网络错误', () => {
+    const r = parseHistoryBody('<html>502 Bad Gateway</html>')
+    expect(r.ok).toBe(false)
+    if (!r.ok) expect(r.message).toBe('响应解析失败（网关返回非 JSON）')
   })
 })
