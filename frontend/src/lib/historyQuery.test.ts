@@ -93,6 +93,10 @@ describe('buildHistoryUrl（P8：gateway 全路径 /api/rsiot/api/v1/history，�
       '/api/rsiot/api/v1/history?dev_id=devA&tag=temp&start=100&end=200&limit=500',
     )
   })
+  it('agg 有 intervalSec 无（半配置）→ throw「agg 与 intervalSec 必须成对提供」', () => {
+    const p: HistoryQueryParams = { devId: 'devA', tag: 'temp', startSec: 0, endSec: 600, agg: 'avg' }
+    expect(() => buildHistoryUrl(p)).toThrowError('agg 与 intervalSec 必须成对提供')
+  })
   it('devId/tag 特殊字符经 encodeURIComponent（空格→%20、&→%26）', () => {
     const p: HistoryQueryParams = { devId: 'de v.1', tag: 'tag&x', startSec: 1, endSec: 2, limit: 10 }
     expect(buildHistoryUrl(p)).toBe(

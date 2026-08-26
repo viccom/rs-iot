@@ -64,7 +64,11 @@ export function buildHistoryUrl(p: HistoryQueryParams): string {
     `start=${p.startSec}`,
     `end=${p.endSec}`,
   ]
-  // agg 与 intervalSec 成对出现（无 agg 则无 interval）
+  // agg 与 intervalSec 成对出现（无 agg 则无 interval）；半配置直接拒绝
+  // （M7：agg 有 intervalSec 无将产出 `interval=undefined` 的畸形 URL）
+  if (p.agg !== undefined && p.intervalSec === undefined) {
+    throw new Error('agg 与 intervalSec 必须成对提供')
+  }
   if (p.agg !== undefined) {
     parts.push(`agg=${encodeURIComponent(p.agg)}`)
     parts.push(`interval=${p.intervalSec}`)
