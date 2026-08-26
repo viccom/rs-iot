@@ -48,7 +48,7 @@ pub struct StatTracker {
 /// 前显式 `flush()` 一次（保持「运行中 stat:<inst> 即存在」的原有可见性）。
 pub fn flush_ticker(inst_id: &str) -> tokio::time::Interval {
     let period = Duration::from_secs(FLUSH_INTERVAL_SECS);
-    let phase = Duration::from_millis(crate::plugin::ticker::phase_ms(
+    let phase = Duration::from_millis(crate::ticker::phase_ms(
         &format!("{inst_id}#stat"),
         period,
     ));
@@ -277,7 +277,7 @@ mod tests {
         let period = Duration::from_secs(FLUSH_INTERVAL_SECS);
         let phases: Vec<u64> = ["i0", "i1", "i2", "i3", "i4", "i5", "i6", "i7"]
             .iter()
-            .map(|id| crate::plugin::ticker::phase_ms(&format!("{id}#stat"), period))
+            .map(|id| crate::ticker::phase_ms(&format!("{id}#stat"), period))
             .collect();
         let distinct = phases
             .iter()

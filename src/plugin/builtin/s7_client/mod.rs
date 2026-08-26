@@ -464,7 +464,7 @@ impl Source for S7Client {
 
         let period = Duration::from_secs(cfg.period);
         // jitter 相位：FNV-1a(inst_id) % period，多实例首次 tick 散布，削整点脉冲。
-        let phase = std::time::Duration::from_millis(crate::plugin::ticker::phase_ms(
+        let phase = std::time::Duration::from_millis(crate::ticker::phase_ms(
             inst_id.as_str(),
             period,
         ));

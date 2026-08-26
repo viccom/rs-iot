@@ -154,7 +154,7 @@ impl Source for LuaTransform {
             token.clone(),
         );
         let period = std::time::Duration::from_secs(cfg.period.max(1));
-        let phase = std::time::Duration::from_millis(crate::plugin::ticker::phase_ms(
+        let phase = std::time::Duration::from_millis(crate::ticker::phase_ms(
             inst.inst_id.as_str(),
             period,
         ));
