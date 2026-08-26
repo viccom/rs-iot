@@ -300,6 +300,27 @@ pub fn maybe_init(
     if !cfg.enabled {
         return None;
     }
+    // 陷阱 4（2026-08-26 本机复现）：tsink StorageBuilder build 深链在 1MiB
+    // 线程（Windows debug 主线程）栈溢出（0xC00000FD）——与 D3 writer 线程
+    // 同一缓解：init 全程放 8MiB 专线执行，调用方栈深无关。scope 借用
+    // cfg/effective 免 clone；join 解包传播子线程 panic。
+    std::thread::scope(|s| {
+        std::thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn_scoped(s, || maybe_init_impl(cfg, effective))
+            .expect("spawn init 8MiB 专线线程必须成功")
+            .join()
+            .expect("init 8MiB 专线线程 panic 必须传播给调用方")
+    })
+}
+
+/// [`maybe_init`] 的 init 深链本体（陷阱 4：只在 8MiB 专线线程上执行）：
+/// enabled 判定在 [`maybe_init`] 入口完成（disabled 零副作用不 spawn），
+/// 此处恒走组装路径。
+fn maybe_init_impl(
+    cfg: &HistoryConfig,
+    effective: &HashMap<String, TagProps>,
+) -> Option<TResult<HistoryEngine>> {
     let cardinality = if cfg.cardinality_limit > 0 {
         cfg.cardinality_limit
     } else {
