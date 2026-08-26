@@ -50,7 +50,8 @@ const PROTO_VER: &str = "2";
 /// 单帧最大字节数（codec 上限，容纳大配置 push）。
 const MAX_FRAME: usize = 4 * 1024 * 1024;
 /// task 侧心跳超时缺省（`app_config.heartbeat_timeout_secs` 可覆盖）。
-const HB_TIMEOUT_DEFAULT_SECS: u64 = 15;
+/// 引用 config 单源常量（审计 B6：与 bridge 服务端默认同一来源，防两端漂移）。
+const HB_TIMEOUT_DEFAULT_SECS: u64 = crate::config::DEFAULT_HEARTBEAT_TIMEOUT_SECS;
 
 fn default_ver() -> String {
     PROTO_VER.into()

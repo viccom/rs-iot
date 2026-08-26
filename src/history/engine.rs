@@ -21,6 +21,9 @@ use crate::history::rows::HistoryHandle;
 use crate::history::writer::spawn_writer;
 use crate::types::{SampleValue, TagProps};
 
+/// 天→秒换算因子（审计 B6 具名化；retention_days 配置换算用）。
+const SECS_PER_DAY: u64 = 86_400;
+
 /// tsink 存储句柄的透明包装：`dyn Storage` 未实现 `Debug`（trait 无
 /// `Debug` supertrait，孤儿规则下也无法在外部补），而引擎句柄与错误断言
 /// 路径（`Result::expect_err` 要求 Ok 侧 `Debug`）都需要它。
@@ -95,7 +98,7 @@ pub fn build_storage(cfg: &HistoryConfig, cardinality: usize) -> TResult<Storage
         .with_memory_limit(cfg.memory_limit_mb.saturating_mul(1024 * 1024))
         .with_cardinality_limit(cardinality)
         .with_retention(Duration::from_secs(
-            cfg.retention_days.saturating_mul(86400),
+            cfg.retention_days.saturating_mul(SECS_PER_DAY),
         ))
         .with_wal_size_limit(cfg.wal_size_limit_mb.saturating_mul(1024 * 1024))
         .with_wal_sync_mode(wal_sync_mode)

@@ -185,7 +185,9 @@ pub async fn login(State(st): State<AppState>, Json(req): Json<LoginReq>) -> Res
         "user": user,
     }))
     .into_response();
-    let cookie = format!("token={token}; Path=/; HttpOnly; Max-Age=86400");
+    // 会话 cookie 有效期 1 天（具名常量，审计 B6）。
+    const SESSION_COOKIE_MAX_AGE_SECS: u64 = 86_400;
+    let cookie = format!("token={token}; Path=/; HttpOnly; Max-Age={SESSION_COOKIE_MAX_AGE_SECS}");
     if let Ok(v) = cookie.parse() {
         resp.headers_mut().insert(axum::http::header::SET_COOKIE, v);
     }

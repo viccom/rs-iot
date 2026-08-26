@@ -18,6 +18,14 @@ import type {
 } from '../types'
 import { useAuthStore } from './auth'
 import { apiFetch } from '../api/fetch'
+
+/** 轮询节拍（审计 B6 具名化；start 与 visibility 恢复双分支共用同一组——
+ *  原两处内联同值，调一处漏一处会出现隐藏/恢复后节拍不一致）。 */
+const POLL_RTDATA_MS = 2000
+const POLL_SYSSTATUS_MS = 5000
+const POLL_ROSTER_MS = 5000
+const POLL_ALARM_MS = 30_000
+
 import { createPreviewSnapshot, isPreviewAuthToken } from '../lib/previewSession'
 
 /** 日志环形缓冲容量（最新在前）。 */
@@ -523,10 +531,10 @@ export const useMonitorStore = defineStore('monitor', () => {
       if (rosterTimer) { clearInterval(rosterTimer); rosterTimer = null }
       if (alarmTimer) { clearInterval(alarmTimer); alarmTimer = null }
     } else if (!rtdataTimer || !sysstatusTimer || !rosterTimer || !alarmTimer) {
-      rtdataTimer = setInterval(loadRtdata, 2000)
-      sysstatusTimer = setInterval(loadSysstatus, 5000)
-      rosterTimer = setInterval(() => { void loadInstances(); void loadInstanceConfigs() }, 5000)
-      alarmTimer = setInterval(() => void loadAlarms(), 30_000)
+      rtdataTimer = setInterval(loadRtdata, POLL_RTDATA_MS)
+      sysstatusTimer = setInterval(loadSysstatus, POLL_SYSSTATUS_MS)
+      rosterTimer = setInterval(() => { void loadInstances(); void loadInstanceConfigs() }, POLL_ROSTER_MS)
+      alarmTimer = setInterval(() => void loadAlarms(), POLL_ALARM_MS)
     }
   }
 
@@ -570,11 +578,11 @@ export const useMonitorStore = defineStore('monitor', () => {
     void loadRtdata()
     void loadSysstatus()
     void loadAlarms()
-    rtdataTimer = setInterval(loadRtdata, 2000)
-    sysstatusTimer = setInterval(loadSysstatus, 5000)
-    rosterTimer = setInterval(() => { void loadInstances(); void loadInstanceConfigs() }, 5000)
+    rtdataTimer = setInterval(loadRtdata, POLL_RTDATA_MS)
+    sysstatusTimer = setInterval(loadSysstatus, POLL_SYSSTATUS_MS)
+    rosterTimer = setInterval(() => { void loadInstances(); void loadInstanceConfigs() }, POLL_ROSTER_MS)
     // 复审 P2-2：告警低频轮询兜底（SSE 丢帧后 30s 内收敛；可见性联动同其它 timer）。
-    alarmTimer = setInterval(() => void loadAlarms(), 30_000)
+    alarmTimer = setInterval(() => void loadAlarms(), POLL_ALARM_MS)
     document.addEventListener('visibilitychange', onVisibility)
   }
 

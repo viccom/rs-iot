@@ -11,6 +11,12 @@ pub const DEFAULT_EVENT_BUS_CAPACITY: usize = 256;
 /// 审计 B3 裁定非破坏护栏）。
 pub const DEFAULT_JWT_SECRET: &str = "qwerty1234567890asdfgh1234567890";
 
+/// sidecar 心跳失联判定默认秒数（bridge 服务端默认值；**sidecar_client 的
+/// `HB_TIMEOUT_DEFAULT_SECS` 必须引用本常量**——审计 B6：两端各自定义同一
+/// 失联参数是已发生的双源，漂移会出现 server 判失联/client 自认健康的
+/// 幽灵断连）。
+pub const DEFAULT_HEARTBEAT_TIMEOUT_SECS: u64 = 15;
+
 /// 应用总配置。从 toml 加载，缺失字段走 Default。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -173,7 +179,7 @@ impl Default for BridgeConfig {
             enable: false,
             bind_host: "127.0.0.1".into(),
             port: 8781,
-            heartbeat_timeout_secs: 15,
+            heartbeat_timeout_secs: DEFAULT_HEARTBEAT_TIMEOUT_SECS,
             accept_hello_timeout_secs: 10,
             max_connections: 512,
         }

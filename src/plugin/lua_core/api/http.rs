@@ -179,7 +179,9 @@ async fn http_request(
                 .bytes()
                 .await
                 .map_err(|e| mlua::Error::RuntimeError(format!("http body: {e}")))?;
-            if bytes.len() > 1024 * 1024 {
+            // Lua 脚本 HTTP 响应体上限 1MiB（具名常量，审计 B6）。
+            const MAX_HTTP_BODY_BYTES: usize = 1024 * 1024;
+            if bytes.len() > MAX_HTTP_BODY_BYTES {
                 let ms = start.elapsed().as_millis();
                 tracing::warn!(
                     "[lua:{inst}] HTTP {method} {url} -> body 过大 ({}B > 1MB, {ms}ms)",
