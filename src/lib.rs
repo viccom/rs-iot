@@ -319,9 +319,11 @@ pub async fn run_app_with_shutdown(
         Ok(n) => tracing::debug!("[discovery] 发现队列装载 {n} 条"),
         Err(e) => tracing::warn!("[discovery] 发现队列装载失败(计数重新累计): {e}"),
     }
-    // 历史引擎初始化（Phase 1b）：cache::reload 之后（auto cardinality 读
-    // effective）、pipeline spawn 之前（handle 注入 HostContext）。P8 fail-soft：
-    // 初始化失败（进程锁被占/磁盘错）仅 error! 并停用归档，主程序继续。
+    // 历史引擎初始化 + 编排件提取（Phase 1b/审计 B7）：cache::reload 之后
+    //（auto cardinality 读 effective）、pipeline spawn 之前（handle 注入
+    // HostContext）。P8 fail-soft：init 失败仅 error! 停用归档；三态推导与
+    // 四件套提取收敛在 history::EngineParts（引擎所有权留此——D10 关停序
+    // 需要 &mut close）。
     #[cfg(feature = "history")]
     let mut history_engine = history::engine::maybe_init(&cfg.history, &model::cache::effective())
         .and_then(|r| match r {
@@ -336,49 +338,15 @@ pub async fn run_app_with_shutdown(
         // P7：L1/L2 正交——feature off 而 enabled=true 是配置错误，告警并忽略。
         tracing::warn!("[history] 配置 enabled=true 但编译未含 history feature,忽略");
     }
-    // HostContext.history 注入：ctx 字面量在 reload 之前构造，此处统一补注句柄
-    // （feature off 时 hist_handle 恒 None，赋值两分支恒编译，无 unused_mut）。
     #[cfg(feature = "history")]
-    let hist_handle = history_engine.as_ref().and_then(|e| e.handle());
+    let parts = history::EngineParts::of(history_engine.as_ref(), &cfg.history, hwid.as_str());
     #[cfg(not(feature = "history"))]
-    let hist_handle = None;
-    // Phase 3 前置（可见性）：stats/运行态快照注入 AppState。AppState 在引擎
-    // init **之后**构造，直接取值即可（无需共享可变槽）——engine_state 取值：
-    // feature off 恒 "disabled"；on 时 enabled=false → "disabled"、init 失败
-    // （上方 P8 error! 分支已把 Err 折叠为 None）→ "init_failed"、成功 → "ok"。
-    // Some(stats) 与 "ok" 由同一来源（ctx.history/engine）成对产出，非 ok 态
-    // stats 恒 None（/metrics 据此省略 history family，/sysstatus stats 为 null）。
-    // stats 从注入后的 ctx.history 取（字段已定型，feature off 的 None 字面量
-    // 不产生类型歧义）。
-    #[cfg(feature = "history")]
-    let history_engine_state: Arc<str> = if !cfg.history.enabled {
-        Arc::from("disabled")
-    } else if history_engine.is_some() {
-        Arc::from("ok")
-    } else {
-        Arc::from("init_failed")
-    };
-    #[cfg(not(feature = "history"))]
-    let history_engine_state: Arc<str> = Arc::from("disabled");
-    // 历史读句柄注入 AppState（Phase 2 P1）：engine 就绪（Some）→ reader(进程
-    // hwid)（clone storage 包 Arc<dyn HistoryReader>；series 身份含 hwid，由
-    // 调用点传入）；fail-soft None 时 503 矩阵按 engine_state 三态可判。
-    // feature off 分支恒 None（类型由 AppState 字段统一推断，同 hist_handle
-    // 两 cfg 块模式）。
-    #[cfg(feature = "history")]
-    let history_reader = history_engine.as_ref().map(|e| e.reader(hwid.as_str()));
-    #[cfg(not(feature = "history"))]
-    let history_reader = None;
-    // 历史治理观测句柄注入 AppState（Phase 3 Task 2，P4）：engine 就绪
-    // （Some）→ telemetry()（clone storage 包 Arc<dyn HistoryTelemetry>，
-    // 读内存水位/预算/series 数）；fail-soft None。feature off 分支恒 None
-    // （同 history_reader 两 cfg 块模式）。
-    #[cfg(feature = "history")]
-    let history_telemetry = history_engine.as_ref().map(|e| e.telemetry());
-    #[cfg(not(feature = "history"))]
-    let history_telemetry = None;
-    ctx.history = hist_handle;
-    let history_stats = ctx.history.as_ref().map(|h| h.stats.clone());
+    let parts = history::EngineParts::disabled();
+    ctx.history = parts.handle;
+    let history_stats = parts.stats;
+    let history_engine_state = parts.state;
+    let history_reader = parts.reader;
+    let history_telemetry = parts.telemetry;
     let pipeline_token = shutdown.child_token();
     let pipeline_handle = tokio::spawn(pipeline::run(
         ctx.clone(),
