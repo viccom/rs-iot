@@ -5,6 +5,8 @@
 //   秒半开区间（rest-api.md §4.14）；
 // - decimate：min/max/last 抽稀（≤800 桶，P7）——ts 线性分桶，
 //   span=(t1-t0)/buckets，末桶 clamp 含 t1，空桶剔除；
+// - numericPoints：非数值点过滤（H2 前端防御——后端 NaN 序列化为 null、
+//   旧数据/纵深场景逐点剔除并计数，曲线只绘数值点不再整条消失）；
 // - buildSparklinePath：手写 SVG 单一折线（每桶 (x,ymax) 与 (x,ymin)
 //   交替两点，max 线在上 min 线在下合并一条 path——零图表库依赖）；
 // - historyErrorMessage：503 reason 三态中文归一（feature_not_compiled /
@@ -69,6 +71,27 @@ export function buildHistoryUrl(p: HistoryQueryParams): string {
   }
   parts.push(`limit=${p.limit ?? 10000}`)
   return `${HISTORY_BASE}?${parts.join('&')}`
+}
+
+/** 无效点过滤结果：numeric=仅数值点（保序）；skipped=剔除的非数值点数。 */
+export interface NumericPointsResult {
+  numeric: Array<{ ts: number; value: number }>
+  skipped: number
+}
+
+/** 逐点过滤非 typeof number 值（H2 前端防御）：后端 NaN→null 序列化点、
+ *  Bool/Str 点均剔除并计数——曲线只绘数值点，一个 null 不再整条消失。
+ *  points 取宽 unknown 值域（TsdbHistoryPoint[] 可直接传入）。 */
+export function numericPoints(
+  points: Array<{ ts: number; value: unknown }>,
+): NumericPointsResult {
+  const numeric: Array<{ ts: number; value: number }> = []
+  let skipped = 0
+  for (const p of points) {
+    if (typeof p.value === 'number') numeric.push({ ts: p.ts, value: p.value })
+    else skipped++
+  }
+  return { numeric, skipped }
 }
 
 /** min/max/last 抽稀（points 须按 ts 升序传入）。

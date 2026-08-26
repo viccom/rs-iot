@@ -57,6 +57,7 @@ import {
   buildSparklinePath,
   decimate,
   historyErrorMessage,
+  numericPoints,
   windowToRange,
   type DecimatedPoint,
   type HistoryQueryParams,
@@ -194,6 +195,37 @@ describe('buildSparklinePath（每桶 (x,ymax) 与 (x,ymin) 交替单一折线�
   })
   it('空数组 → 空串（契约：不渲染 path）', () => {
     expect(buildSparklinePath([], 100, 40)).toBe('')
+  })
+})
+
+describe('numericPoints（无效点过滤：非 typeof number 值剔除并计数，H2 前端防御）', () => {
+  it('混合 [数值, null, 字符串] → numeric 仅数值点、skipped==2（精确整串）', () => {
+    const pts: Array<{ ts: number; value: unknown }> = [
+      { ts: 1, value: 5 },
+      { ts: 2, value: null },
+      { ts: 3, value: 'x' },
+    ]
+    expect(numericPoints(pts)).toEqual({
+      numeric: [{ ts: 1, value: 5 }],
+      skipped: 2,
+    })
+  })
+  it('全数值点 → numeric 全量保序、skipped==0', () => {
+    expect(numericPoints([{ ts: 1, value: 1.5 }, { ts: 2, value: -2 }])).toEqual({
+      numeric: [{ ts: 1, value: 1.5 }, { ts: 2, value: -2 }],
+      skipped: 0,
+    })
+  })
+  it('Bool/Str 混排 → 布尔同样剔除（typeof number 之外全非）', () => {
+    const pts: Array<{ ts: number; value: unknown }> = [
+      { ts: 1, value: true },
+      { ts: 2, value: 3 },
+      { ts: 3, value: false },
+    ]
+    expect(numericPoints(pts)).toEqual({
+      numeric: [{ ts: 2, value: 3 }],
+      skipped: 2,
+    })
   })
 })
 
