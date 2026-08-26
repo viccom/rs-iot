@@ -48,10 +48,7 @@ pub struct StatTracker {
 /// 前显式 `flush()` 一次（保持「运行中 stat:<inst> 即存在」的原有可见性）。
 pub fn flush_ticker(inst_id: &str) -> tokio::time::Interval {
     let period = Duration::from_secs(FLUSH_INTERVAL_SECS);
-    let phase = Duration::from_millis(crate::ticker::phase_ms(
-        &format!("{inst_id}#stat"),
-        period,
-    ));
+    let phase = Duration::from_millis(crate::ticker::phase_ms(&format!("{inst_id}#stat"), period));
     tokio::time::interval_at(tokio::time::Instant::now() + phase, period)
 }
 

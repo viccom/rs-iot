@@ -38,8 +38,8 @@ pub mod pipeline;
 pub mod plugin;
 /// 进程级指标（M4）：Atomic 计数器，REST /sysstatus 直读。
 pub mod process_metrics;
-pub mod transform;
 pub mod ticker;
+pub mod transform;
 pub mod types;
 
 use error::RsIotError;
