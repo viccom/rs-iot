@@ -67,6 +67,11 @@ pub struct AppState {
     /// 无条件编译（`history/mod.rs`），本字段零 cfg 散布；feature off 构建
     /// 恒 None。
     pub history_reader: Option<std::sync::Arc<dyn crate::history::HistoryReader>>,
+    /// 历史治理观测句柄（Phase 3 P4 无条件编译）：None = 引擎未运行
+    /// （disabled/init_failed/feature off），/metrics 与 /sysstatus 的治理
+    /// family 据此省略。`HistoryTelemetry` trait 无条件编译
+    /// （`history/mod.rs`），本字段零 cfg 散布；feature off 构建恒 None。
+    pub history_telemetry: Option<std::sync::Arc<dyn crate::history::HistoryTelemetry>>,
     /// 实时数据订阅 watcher（订阅升级 Phase 2，P7/P9）：ksub 模式下消费
     /// `ksubscribe("rtdata:*")` 维护 per-devid 版本表；poll 模式常驻构造但不
     /// 启动消费循环（零开销承诺，P8）。无条件编译（T5 将接 subscribe producer

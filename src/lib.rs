@@ -361,6 +361,14 @@ pub async fn run_app_with_shutdown(
     let history_reader = history_engine.as_ref().map(|e| e.reader(hwid.as_str()));
     #[cfg(not(feature = "history"))]
     let history_reader = None;
+    // 历史治理观测句柄注入 AppState（Phase 3 Task 2，P4）：engine 就绪
+    // （Some）→ telemetry()（clone storage 包 Arc<dyn HistoryTelemetry>，
+    // 读内存水位/预算/series 数）；fail-soft None。feature off 分支恒 None
+    // （同 history_reader 两 cfg 块模式）。
+    #[cfg(feature = "history")]
+    let history_telemetry = history_engine.as_ref().map(|e| e.telemetry());
+    #[cfg(not(feature = "history"))]
+    let history_telemetry = None;
     ctx.history = hist_handle;
     let history_stats = ctx.history.as_ref().map(|h| h.stats.clone());
     let pipeline_token = shutdown.child_token();
@@ -431,6 +439,7 @@ pub async fn run_app_with_shutdown(
         history_stats,
         history_engine_state,
         history_reader,
+        history_telemetry,
         rtdata_watch,
     };
     let app = api::build_router(state);

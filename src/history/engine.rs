@@ -171,6 +171,36 @@ fn series_labels(devid: &str, hwid: &str) -> Vec<Label> {
     vec![Label::new("devid", devid), Label::new("hwid", hwid)]
 }
 
+/// [`crate::history::HistoryTelemetry`] 的引擎侧实现（Phase 3 Task 2，
+/// P4/P5）：持 StorageHandle clone（Arc 语义）与 writer/引擎共享同一底层
+/// 存储——engine close 后句柄仍存活，读数进入 StorageClosed 可观测态
+/// （`list_metrics` Err → 0 + debug 日志，不 panic）。
+struct EngineTelemetry {
+    /// tsink 存储句柄（clone，共享同一 Arc）——三读数经 Deref 直调
+    /// `dyn Storage` 方法。
+    storage: StorageHandle,
+}
+
+impl crate::history::HistoryTelemetry for EngineTelemetry {
+    fn memory_used_bytes(&self) -> u64 {
+        self.storage.memory_used() as u64
+    }
+
+    fn memory_budget_bytes(&self) -> u64 {
+        self.storage.memory_budget() as u64
+    }
+
+    fn series_count(&self) -> u64 {
+        match self.storage.list_metrics() {
+            Ok(v) => v.len() as u64,
+            Err(e) => {
+                tracing::debug!("[history] telemetry list_metrics 失败(按 0 计): {e}");
+                0
+            }
+        }
+    }
+}
+
 /// HistoryAgg → tsink Aggregation（P3 六值同名直映）。
 ///
 /// HistoryAgg 六变体恰好覆盖 tsink 的六个同名变体，穷尽 match 即可——
@@ -306,6 +336,16 @@ impl HistoryEngine {
         Arc::new(EngineReader {
             storage: self.storage.clone(),
             hwid: hwid.to_string(),
+        })
+    }
+
+    /// 治理观测句柄（Phase 3 Task 2，P4/P5）：clone 存储句柄包成
+    /// `Arc<dyn HistoryTelemetry>` 交 REST 层（AppState.history_telemetry），
+    /// 读 tsink 内存水位/预算/series 数（close 后仍可调——StorageHandle
+    /// 是 Arc clone，存活即读，Err 按 0，见 [`EngineTelemetry`]）。
+    pub fn telemetry(&self) -> Arc<dyn crate::history::HistoryTelemetry> {
+        Arc::new(EngineTelemetry {
+            storage: self.storage.clone(),
         })
     }
 
@@ -590,6 +630,106 @@ mod tests {
         );
 
         storage.close().expect("close");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 7. 治理观测面（P4/P5）：init（memory_limit_mb=64，临时目录）→ 直接经
+    ///    storage 写 2 个不同 metric series 各 1 行 → `telemetry()` 装箱为
+    ///    `Arc<dyn HistoryTelemetry>` 轮询断言：预算=64MiB（D6 即配即读）、
+    ///    内存水位 >0、series 计数=2；close 后 telemetry 读数仍可调用不 panic
+    ///    （值断言 ≥0 即可——u64 值域天然 ≥0，取值成功即满足；显式 `>= 0`
+    ///    恒真比较会被 clippy absurd_extreme_comparisons 拒，故以取值代替）。
+    #[test]
+    fn telemetry_memory_and_series() {
+        let dir = unique_dir("telemetry");
+        let cfg = HistoryConfig {
+            enabled: true,
+            memory_limit_mb: 64,
+            // 写 2 个 series 需基数上限 ≥2：空 effective 下 auto 校准兜底 1，
+            // 会以 CardinalityLimitExceeded 拒掉第二个 series，故显式放宽。
+            cardinality_limit: 8,
+            ..cfg_with_dir(&dir)
+        };
+
+        let mut engine = maybe_init(&cfg, &HashMap::new())
+            .expect("enabled=true 必须返回 Some")
+            .expect("临时目录上引擎初始化必须成功");
+
+        let rows = [
+            Row::with_labels("m_tel_a", series_labels(), DataPoint::new(TS_MS, 1.5f64)),
+            Row::with_labels(
+                "m_tel_b",
+                series_labels(),
+                DataPoint::new(TS_MS + 1, 2.5f64),
+            ),
+        ];
+        engine
+            .storage()
+            .insert_rows(&rows)
+            .expect("两 series 各 1 行写入必须成功");
+
+        // 红阶段构造修正(非断言改动,绿阶段代理显式报告):计划调用面写作
+        // `rs_iot::history::HistoryTelemetry`,但 crate 自名路径在 lib 单元
+        // 测试内不可解析(E0433,自名引用仅集成测试/外部 crate 可用)——改用
+        // crate 内规范等价路径 `crate::history::` 引用同一 trait,断言语义零改动。
+        let t: std::sync::Arc<dyn crate::history::HistoryTelemetry> = engine.telemetry();
+
+        // 轮询 5s（50ms 步进）：写入与记账/series 可见之间可能存在传播窗。
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let ready = t.memory_budget_bytes() == 64 * 1024 * 1024
+                && t.memory_used_bytes() > 0
+                && t.series_count() == 2;
+            if ready || std::time::Instant::now() >= deadline {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert_eq!(
+            t.memory_budget_bytes(),
+            64 * 1024 * 1024,
+            "预算必须等于 D6 配置 64MiB"
+        );
+        assert!(t.memory_used_bytes() > 0, "写入后内存水位必须 >0");
+        assert_eq!(
+            t.series_count(),
+            2,
+            "2 个不同 metric series 各 1 行，计数必须为 2"
+        );
+
+        engine.close(Duration::from_secs(cfg.close_timeout_secs));
+        // close 后读数不 panic：实现自由（恒 0/冻结值/Err→0 皆可），u64 值域恒 ≥0。
+        let _after_close: u64 = t.series_count();
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 8. trait object 面（P4）：`telemetry()` 返回值直接绑定
+    ///    `Arc<dyn HistoryTelemetry>` 并调用三方法——锁死 trait 的 dyn 兼容
+    ///    （未来误加泛型方法/关联项时本测试编译即红）。无写入即读：预算恒
+    ///    等于 D6 配置值（即配即读，不需轮询）；used/series 仅证明经 dyn
+    ///    面可调，无写入时 used 可为 0，不作值断言。
+    #[test]
+    fn telemetry_trait_object_safe() {
+        let dir = unique_dir("tel-object");
+        let cfg = HistoryConfig {
+            enabled: true,
+            memory_limit_mb: 64,
+            ..cfg_with_dir(&dir)
+        };
+
+        let mut engine = maybe_init(&cfg, &HashMap::new())
+            .expect("enabled=true 必须返回 Some")
+            .expect("临时目录上引擎初始化必须成功");
+
+        // 路径修正同 telemetry_memory_and_series 测试:crate:: 等价路径。
+        let t: std::sync::Arc<dyn crate::history::HistoryTelemetry> = engine.telemetry();
+        let _used = t.memory_used_bytes();
+        let budget = t.memory_budget_bytes();
+        let _series = t.series_count();
+        assert_eq!(budget, 64 * 1024 * 1024, "无写入时预算也必须等于配置 64MiB");
+
+        engine.close(Duration::from_secs(cfg.close_timeout_secs));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

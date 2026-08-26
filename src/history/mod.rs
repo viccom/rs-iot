@@ -91,3 +91,17 @@ pub trait HistoryReader: Send + Sync {
         q: &HistoryQuery,
     ) -> Result<Vec<HistoryPoint>, String>;
 }
+
+/// 历史引擎资源水位（Phase 3 治理，P4 无条件编译）：tsink 引擎内部口径
+/// 外露——D6 恒设 memory_limit 故记账常开，读数纯原子。impl 藏 feature
+/// 门控的 engine.rs（同 [`HistoryReader`] 先例），AppState 持
+/// `Option<Arc<dyn HistoryTelemetry>>` 零 cfg 散布，feature off 构建不拉 tsink。
+pub trait HistoryTelemetry: Send + Sync {
+    /// 内存水位（tsink `memory_used()` 口径，字节；记账常开时读数纯原子）。
+    fn memory_used_bytes(&self) -> u64;
+    /// 内存预算（D6 `memory_limit_mb` 换算字节，即配即读）。
+    fn memory_budget_bytes(&self) -> u64;
+    /// series 数（`list_metrics().len()` 官方口径，O(series) 分配——调用方
+    /// 以 `spawn_blocking` 包裹，P5；引擎关闭后 Err 按 0，不 panic）。
+    fn series_count(&self) -> u64;
+}
