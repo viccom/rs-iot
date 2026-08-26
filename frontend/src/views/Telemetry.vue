@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, nextTick, ref, watch } from 'vue'
 import RtdataPanel from '../components/monitor/RtdataPanel.vue'
 import AlarmPanel from '../components/monitor/AlarmPanel.vue'
 import HistoryQuery from '../components/devmeta/HistoryQuery.vue'
@@ -84,6 +84,10 @@ const selectedDeviceTags = computed(() => {
 const showHistory = ref(true)
 /** 面板预填 dev_id（随设备 chip 选中联动）。 */
 const hqDevId = ref('')
+/** 面板预填 tag（实时表行「趋势」入口点击时更新）。 */
+const hqTag = ref('')
+/** 历史面板锚点（行入口点击后滚动到位）。 */
+const histZone = ref<HTMLElement | null>(null)
 watch(
   () => monitor.selectedDevice,
   d => {
@@ -91,6 +95,13 @@ watch(
   },
   { immediate: true },
 )
+/** 实时表行「趋势」入口：预填 dev/tag，展开面板并滚动到位。 */
+function onRowHistory(p: { dev: string; tag: string }) {
+  hqDevId.value = p.dev
+  hqTag.value = p.tag
+  showHistory.value = true
+  void nextTick(() => histZone.value?.scrollIntoView({ behavior: 'smooth', block: 'nearest' }))
+}
 /** tag 建议：当前设备实时点位键去掉 `<devid>.` 前缀（REST tag 参数用短名）。 */
 const hqTagOptions = computed(() => {
   const dev = hqDevId.value
@@ -211,13 +222,13 @@ useWorkspacePage(() => ({
           {{ showHistory ? '收起趋势' : '历史趋势' }}
         </button>
       </div>
-      <RtdataPanel />
+      <RtdataPanel @history="onRowHistory" />
     </article>
 
     <!-- 历史趋势：实时遥测同页（2026-08-26 自模型页迁入）——归档白名单内的
          点位可查 raw/六聚合曲线；503 三态/400 双形态错误归一横幅。开关在
-         「实时点位列表」头部（本面板 v-if 挂载，自身不带按钮）。 -->
-    <article v-if="showHistory" class="page-panel">
+         「实时点位列表」头部；实时表行「趋势」按钮预填直达（ad-hoc 惯例）。 -->
+    <article v-if="showHistory" ref="histZone" class="page-panel">
       <div class="panel-head">
         <div>
           <p class="panel-label">历史趋势</p>
@@ -225,7 +236,7 @@ useWorkspacePage(() => ({
         </div>
         <span>{{ hqDevId ? `设备 ${hqDevId} 预填（点设备 chip 切换）` : '未选设备（点左侧设备 chip 预填）' }}</span>
       </div>
-      <HistoryQuery :dev-id="hqDevId" :dev-options="visibleDevices" :tag-options="hqTagOptions" />
+      <HistoryQuery :dev-id="hqDevId" :tag="hqTag" :dev-options="visibleDevices" :tag-options="hqTagOptions" />
     </article>
 
     <!-- 活跃告警（Q12 最小闭环）：rtdata 面板近旁——数据异常（点位越限）时告警就近可见。 -->

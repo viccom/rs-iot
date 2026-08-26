@@ -17,6 +17,11 @@ const ROW_H = 40
 /** 可视区上下缓冲行数（防快速滚动闪白）。 */
 const BUFFER = 6
 
+/** 行级趋势入口事件（payload = 设备 + tag 短名；父层据此预填历史查询面板）。 */
+const emit = defineEmits<{
+  history: [payload: { dev: string; tag: string }]
+}>()
+
 const tagFilter = ref('')
 const typeFilter = ref('')
 /** 滚动容器 scrollTop（虚拟滚动计算可视范围）。 */
@@ -154,7 +159,7 @@ onUnmounted(() => {
       <div class="spacer" :style="{ height: totalH + 'px', paddingTop: padTop + 'px', paddingBottom: padBottom + 'px' }">
         <table>
           <thead>
-            <tr><th>设备</th><th>Tag</th><th>值</th><th>类型</th><th>归属实例</th><th>时间</th></tr>
+            <tr><th>设备</th><th>Tag</th><th>值</th><th>类型</th><th>归属实例</th><th>时间</th><th>操作</th></tr>
           </thead>
           <tbody>
             <tr v-for="r in visibleRows" :key="r.dev + '.' + r.tag" class="row">
@@ -167,6 +172,11 @@ onUnmounted(() => {
                 <template v-else>—</template>
               </td>
               <td class="ts">{{ r.ts }}</td>
+              <td>
+                <!-- 行级趋势入口（ad-hoc trend 惯例：实时列表 → 点选即出曲线）；
+                     emit 供父层（遥测页）预填历史查询面板。 -->
+                <button class="trend-btn" :title="`查看 ${r.dev}.${r.tag} 历史曲线`" @click="emit('history', { dev: r.dev, tag: r.tag })">趋势</button>
+              </td>
             </tr>
           </tbody>
         </table>
@@ -197,6 +207,18 @@ onUnmounted(() => {
   padding: 10px 0 14px;
   border-bottom: 1px solid var(--color-divider);
 }
+
+/* 行级趋势入口（操作列）：轻量文字按钮，不抢数据列视觉。 */
+.trend-btn {
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  padding: 2px 6px;
+  color: var(--color-primary);
+  font-size: 12px;
+  text-decoration: underline;
+}
+.trend-btn:hover { opacity: 0.8; text-decoration: none; }
 .filter input, .filter select {
   padding: 8px 12px; border-radius: 10px;
   border: 1px solid var(--card-border); background: var(--card-bg); color: var(--color-ink);
