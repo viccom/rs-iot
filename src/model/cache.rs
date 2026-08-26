@@ -23,10 +23,7 @@ fn cell() -> &'static RwLock<Arc<HashMap<String, TagProps>>> {
 /// 当前 effective 快照（Arc clone 廉价；未装载时空表）。
 pub fn effective() -> Arc<HashMap<String, TagProps>> {
     // 毒化恢复：reload 临界区 panic 后旧快照仍完整有效，读比崩好（L-4）。
-    cell()
-        .read()
-        .unwrap_or_else(|p| p.into_inner())
-        .clone()
+    cell().read().unwrap_or_else(|p| p.into_inner()).clone()
 }
 
 /// 全量重建（启动装载 + 写路径失效）。返回物化表（`tag_key → TagProps`）。
