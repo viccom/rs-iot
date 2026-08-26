@@ -1,6 +1,20 @@
 # 非破坏性质量修复包（审计后续）
 
-> **状态**：in-progress（分支 `fix/quality-nonbreaking`，worktree `E:/Rs_Codes/rs-iot-qfix`）
+> **状态**：implemented（2026-08-26 收口；B1-B7 全修，门禁三档全绿）
+
+## 验收记录（commit 对照）
+
+| 项 | commit | 锚点 |
+|---|---|---|
+| B1 谎报 ok | `8b7f486` | 6 处写点 warn+500（set/del/changepass/group×2/accesskey）+inst HDEL 对齐邻居；失败注入不可达豁免（EmbeddedClient 进程内直连 store），正向守门 set 回读一致 api_flow 4/4 |
+| B2 毒化恢复 | `cc32af7` | discovery 生产 6 处+lua_client+lua_transform(.ok() 链适配)；红实证（临时回退单点→毒化 panic）→绿；测试体 4 处 unwrap 连带统一 |
+| B3 弱密钥+bind_host | `17f8e6c` | DEFAULT_JWT_SECRET 常量+启动 error 提示（不拒启）+api_bind_host 增量键默认 0.0.0.0 零变化；config 56/56 |
+| B4 消环 | `41f5769`+`6f53b02` | 三 helper 下沉 db，api 经 pub(crate) re-export；rg 实证 model/plugin 逆向引用清零（2 环消解）；3 个 e2e import 随迁；items-after-test-module lint 收尾 |
+| B5 前端收敛 | `d7cd46c` | api/fetch.ts 拆档（plain object+大小写规范化出口，可观察形态逐字节一致）；18 处 Bearer 复制收敛；197 测断言零改动+build |
+| B6 常量化 | `6c1e4e7` | 四常量+心跳单源（config 导出 sidecar 引用）+前端轮询四节拍+gateway 注释；纯重构零值变化 |
+| B7 EngineParts | `8d73b45` | lib.rs 60 行引擎知识收敛 of()/disabled()；引擎所有权留调用方（D10 &mut close）；dataflow 2/2+init_failed 1/1 |
+
+**门禁**（2026-08-26 实测）：fmt --check 过；clippy 双档零警告；默认档全绿；history 档全绿；minimal 358/0；前端 197+build。
 > **日期**：2026-08-26
 > **来源**：全仓三路审计（硬编码/空实现/耦合）+ 用户裁决「修复对当前代码不带来破坏的问题」
 > **执行方式**：主会话直做（额度不稳先例）；TDD 能红则红，纯重构以编译+全量门禁为验证
