@@ -5,6 +5,8 @@
 //   秒半开区间（rest-api.md §4.14）；
 // - decimate：min/max/last 抽稀（≤800 桶，P7）——ts 线性分桶，
 //   span=(t1-t0)/buckets，末桶 clamp 含 t1，空桶剔除；
+// - numericPoints：非数值点过滤（H2 前端防御——后端 NaN 序列化为 null、
+//   旧数据/纵深场景逐点剔除并计数，曲线只绘数值点不再整条消失）；
 // - buildSparklinePath：手写 SVG 单一折线（每桶 (x,ymax) 与 (x,ymin)
 //   交替两点，max 线在上 min 线在下合并一条 path——零图表库依赖）；
 // - historyErrorMessage：503 reason 三态中文归一（feature_not_compiled /
@@ -62,13 +64,53 @@ export function buildHistoryUrl(p: HistoryQueryParams): string {
     `start=${p.startSec}`,
     `end=${p.endSec}`,
   ]
-  // agg 与 intervalSec 成对出现（无 agg 则无 interval）
+  // agg 与 intervalSec 成对出现（无 agg 则无 interval）；半配置直接拒绝
+  // （M7：agg 有 intervalSec 无将产出 `interval=undefined` 的畸形 URL）
+  if (p.agg !== undefined && p.intervalSec === undefined) {
+    throw new Error('agg 与 intervalSec 必须成对提供')
+  }
   if (p.agg !== undefined) {
     parts.push(`agg=${encodeURIComponent(p.agg)}`)
     parts.push(`interval=${p.intervalSec}`)
   }
   parts.push(`limit=${p.limit ?? 10000}`)
   return `${HISTORY_BASE}?${parts.join('&')}`
+}
+
+/** 无效点过滤结果：numeric=仅数值点（保序）；skipped=剔除的非数值点数。 */
+export interface NumericPointsResult {
+  numeric: Array<{ ts: number; value: number }>
+  skipped: number
+}
+
+/** 逐点过滤非 typeof number 值（H2 前端防御）：后端 NaN→null 序列化点、
+ *  Bool/Str 点均剔除并计数——曲线只绘数值点，一个 null 不再整条消失。
+ *  points 取宽 unknown 值域（TsdbHistoryPoint[] 可直接传入）。 */
+export function numericPoints(
+  points: Array<{ ts: number; value: unknown }>,
+): NumericPointsResult {
+  const numeric: Array<{ ts: number; value: number }> = []
+  let skipped = 0
+  for (const p of points) {
+    if (typeof p.value === 'number') numeric.push({ ts: p.ts, value: p.value })
+    else skipped++
+  }
+  return { numeric, skipped }
+}
+
+/** 200 响应体解析结果（M9）：ok=false 时 message 为归一错误文案。 */
+export type HistoryBodyResult =
+  | { ok: true; data: TsdbHistoryResponse }
+  | { ok: false; message: string }
+
+/** 解析 200 响应体（M9）：非法 JSON（网关误路由/HTML 错误页/代理注入）与
+ *  fetch 网络异常区分文案——前者是「响应解析失败」，不再是「网关不可达」。 */
+export function parseHistoryBody(text: string): HistoryBodyResult {
+  try {
+    return { ok: true, data: JSON.parse(text) as TsdbHistoryResponse }
+  } catch {
+    return { ok: false, message: '响应解析失败（网关返回非 JSON）' }
+  }
 }
 
 /** min/max/last 抽稀（points 须按 ts 升序传入）。
@@ -106,7 +148,10 @@ export function decimate(
 
 /** 手写 SVG 折线串 `M x y L x y ...`（每桶先 (x,ymax) 后 (x,ymin) 交替——
  *  max/min 双线合并为一条 path）；d 为空返回 ''（不渲染 path）。
- *  x_k = round(k*w/(n-1))（首桶 0 末桶 w；n===1 除零防御取 x=0）；
+ *  x 按 ts 线性映射（M8）：ts0/ts1 取首末桶 ts（decimate 输出按 ts 升序），
+ *  x = round((ts-ts0)/(ts1-ts0)*w)（首桶 0 末桶 w——稀疏序列时间轴不失真，
+ *  桶序均分会把长间隔压扁）；全同 ts（ts1==ts0）回退桶序均分
+ *  x_k = round(k*w/(n-1))（n===1 除零防御取 x=0）；
  *  y = round(h - (v-vmin)/(vmax-vmin)*h)（vmin/vmax 取全部桶 min/max 全局，
  *  SVG y 向下：值大 y 小）；vmin===vmax（全等值）时 y 恒为 round(h/2)。 */
 export function buildSparklinePath(d: DecimatedPoint[], w: number, h: number): string {
@@ -120,9 +165,14 @@ export function buildSparklinePath(d: DecimatedPoint[], w: number, h: number): s
   }
   const yOf = (v: number): number =>
     vmin === vmax ? Math.round(h / 2) : Math.round(h - ((v - vmin) / (vmax - vmin)) * h)
+  const ts0 = d[0].ts
+  const ts1 = d[n - 1].ts
   const segs: string[] = []
   d.forEach((b, k) => {
-    const x = n === 1 ? 0 : Math.round((k * w) / (n - 1))
+    // x 按 ts 线性映射；ts1==ts0（全同 ts）回退桶序均分，n===1 取 0
+    const x = ts1 > ts0
+      ? Math.round(((b.ts - ts0) / (ts1 - ts0)) * w)
+      : n === 1 ? 0 : Math.round((k * w) / (n - 1))
     segs.push(`${x} ${yOf(b.max)}`)
     segs.push(`${x} ${yOf(b.min)}`)
   })

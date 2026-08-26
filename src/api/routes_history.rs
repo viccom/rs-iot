@@ -133,8 +133,13 @@ pub async fn history(State(st): State<AppState>, Query(q): Query<HistoryParams>)
     //    聚合（rollup 物化仅部分加速），无护栏时大窗+窄桶构成重查询 DoS 面。
     //    raw 路径有 limit 分页早停（select_raw_series_page），不受此限。
     if let Some(iv) = q.interval {
-        // start < end 已证（差为正），i64 正数 as u64 无损。
-        if (end - start) as u64 / iv > MAX_BUCKETS {
+        // start < end 已证，但差值本身可能溢出 i64（start=i64::MIN × end=i64::MAX
+        // 的数学差 > i64::MAX）——审查 H5：裸 `end - start` 在 debug 档直接
+        // overflow panic（远程可触发），checked_sub 溢出按参数错 400。
+        let Some(span) = end.checked_sub(start) else {
+            return bad_request("start/end 窗口跨度过大（差值溢出）");
+        };
+        if span as u64 / iv > MAX_BUCKETS {
             return bad_request("降采样桶数 (end-start)/interval 不得超过 100000");
         }
     }

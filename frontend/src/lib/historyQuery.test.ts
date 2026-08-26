@@ -32,7 +32,9 @@
 //   - 非空 → 单一折线串，格式 `M x0 y0 L x1 y1 L x2 y2 ...`（动词与数字
 //     间、数字与数字间单空格），点序 = 每桶先 (x, ymax) 后 (x, ymin)
 //     交替（max 线在上、min 线在下的单一 path）；
-//   - x_k = Math.round(k * w / (n-1))（n=桶数，首桶 0 末桶 w）；
+//   - x 按 ts 线性映射（M8）：ts0/ts1 取首末桶 ts，
+//     x = Math.round((ts-ts0)/(ts1-ts0) * w)（首桶 0 末桶 w）；全同 ts
+//     （ts1==ts0）回退桶序均分 x_k = Math.round(k * w / (n-1))，n===1 取 0；
 //   - y = Math.round(h - (v - vmin) / (vmax - vmin) * h)，vmin/vmax 取全部
 //     桶 min/max 全局（值大 y 小，SVG y 向下）；vmin===vmax（全等值）时
 //     y 恒为 Math.round(h/2)；坐标一律取整、十进制无小数输出。
@@ -57,6 +59,8 @@ import {
   buildSparklinePath,
   decimate,
   historyErrorMessage,
+  numericPoints,
+  parseHistoryBody,
   windowToRange,
   type DecimatedPoint,
   type HistoryQueryParams,
@@ -91,6 +95,10 @@ describe('buildHistoryUrl（P8：gateway 全路径 /api/rsiot/api/v1/history，�
     expect(buildHistoryUrl(p)).toBe(
       '/api/rsiot/api/v1/history?dev_id=devA&tag=temp&start=100&end=200&limit=500',
     )
+  })
+  it('agg 有 intervalSec 无（半配置）→ throw「agg 与 intervalSec 必须成对提供」', () => {
+    const p: HistoryQueryParams = { devId: 'devA', tag: 'temp', startSec: 0, endSec: 600, agg: 'avg' }
+    expect(() => buildHistoryUrl(p)).toThrowError('agg 与 intervalSec 必须成对提供')
   })
   it('devId/tag 特殊字符经 encodeURIComponent（空格→%20、&→%26）', () => {
     const p: HistoryQueryParams = { devId: 'de v.1', tag: 'tag&x', startSec: 1, endSec: 2, limit: 10 }
@@ -192,8 +200,58 @@ describe('buildSparklinePath（每桶 (x,ymax) 与 (x,ymin) 交替单一折线�
     expect(pts[0][0]).toBe(0)
     expect(pts[pts.length - 1][0]).toBe(w)
   })
+  it('非均匀 ts 间隔：x 按 ts 线性比例 ts=0/90/100 → x=0/90/100，非桶序均分（M8）', () => {
+    const d: DecimatedPoint[] = [
+      { ts: 0, min: 0, max: 0, last: 0 },
+      { ts: 90, min: 5, max: 5, last: 5 },
+      { ts: 100, min: 10, max: 10, last: 10 },
+    ]
+    // vmin=0 vmax=10 h=40 → y=40-4v（0→40、5→20、10→0）；每桶 min==max 两点同坐标；
+    // 桶序均分将得 x=0,50,100——中桶 50≠90 即红（稀疏序列时间轴失真）
+    expect(buildSparklinePath(d, 100, 40)).toBe(
+      'M 0 40 L 0 40 L 90 20 L 90 20 L 100 0 L 100 0',
+    )
+  })
+  it('全同 ts（ts1==ts0，n>1）：回退桶序均分 x=round(k*w/(n-1))（M8 除零回退）', () => {
+    const d: DecimatedPoint[] = [7, 7, 7, 7].map(ts => ({ ts, min: 3, max: 3, last: 3 }))
+    // 等值 y=round(40/2)=20；x=round(k*100/3)=0,33,67,100
+    expect(buildSparklinePath(d, 100, 40)).toBe(
+      'M 0 20 L 0 20 L 33 20 L 33 20 L 67 20 L 67 20 L 100 20 L 100 20',
+    )
+  })
   it('空数组 → 空串（契约：不渲染 path）', () => {
     expect(buildSparklinePath([], 100, 40)).toBe('')
+  })
+})
+
+describe('numericPoints（无效点过滤：非 typeof number 值剔除并计数，H2 前端防御）', () => {
+  it('混合 [数值, null, 字符串] → numeric 仅数值点、skipped==2（精确整串）', () => {
+    const pts: Array<{ ts: number; value: unknown }> = [
+      { ts: 1, value: 5 },
+      { ts: 2, value: null },
+      { ts: 3, value: 'x' },
+    ]
+    expect(numericPoints(pts)).toEqual({
+      numeric: [{ ts: 1, value: 5 }],
+      skipped: 2,
+    })
+  })
+  it('全数值点 → numeric 全量保序、skipped==0', () => {
+    expect(numericPoints([{ ts: 1, value: 1.5 }, { ts: 2, value: -2 }])).toEqual({
+      numeric: [{ ts: 1, value: 1.5 }, { ts: 2, value: -2 }],
+      skipped: 0,
+    })
+  })
+  it('Bool/Str 混排 → 布尔同样剔除（typeof number 之外全非）', () => {
+    const pts: Array<{ ts: number; value: unknown }> = [
+      { ts: 1, value: true },
+      { ts: 2, value: 3 },
+      { ts: 3, value: false },
+    ]
+    expect(numericPoints(pts)).toEqual({
+      numeric: [{ ts: 2, value: 3 }],
+      skipped: 2,
+    })
   })
 })
 
@@ -233,5 +291,23 @@ describe('windowToRange（窗口预设 → {startSec,endSec}，endSec==nowSec）
       const r = windowToRange(preset, now)
       expect(r).toEqual({ startSec: now - deltas[preset], endSec: now })
     }
+  })
+})
+
+describe('parseHistoryBody（200 响应体解析，M9：解析失败≠网关不可达）', () => {
+  it('合法 JSON → ok:true 且 data 保形', () => {
+    const r = parseHistoryBody('{"dev_id":"devA","tag":"temp","points":[{"ts":1,"value":2}],"count":1}')
+    expect(r.ok).toBe(true)
+    if (r.ok) {
+      expect(r.data.dev_id).toBe('devA')
+      expect(r.data.tag).toBe('temp')
+      expect(r.data.points).toEqual([{ ts: 1, value: 2 }])
+      expect(r.data.count).toBe(1)
+    }
+  })
+  it('非法 JSON（网关误路由/HTML 错误页）→ ok:false 且文案区分于网络错误', () => {
+    const r = parseHistoryBody('<html>502 Bad Gateway</html>')
+    expect(r.ok).toBe(false)
+    if (!r.ok) expect(r.message).toBe('响应解析失败（网关返回非 JSON）')
   })
 })

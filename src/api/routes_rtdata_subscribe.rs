@@ -606,4 +606,54 @@ mod tests {
             other => panic!("epoch 一致应为 Partial: {other:?}"),
         }
     }
+
+    /// M5 守门①：ksub 独有的 project_baseline——3 设备基线、脏域仅 devA 且值
+    /// 未变时，投影后 diff 不得把非脏域（devB/devC）整域误报 removed。删除
+    /// 投影直接喂全量基线的形态下 removed 会含 devB.t1/devC.t1，本测即红
+    /// ——防该防误报守门被未来重构无声移除（对 scada 前端是灾难性闪烁）。
+    #[test]
+    fn project_baseline_limits_diff_to_dirty_domain() {
+        let last = baseline(&[("devA.t1", "1"), ("devB.t1", "2"), ("devC.t1", "3")]);
+        let dirty = || {
+            let points: serde_json::Map<String, serde_json::Value> =
+                [("devA.t1".to_string(), json!([0, "lt", "1"]))]
+                    .into_iter()
+                    .collect();
+            vec![("devA".to_string(), points)]
+        };
+        // ksub Partial 路径逐字复刻（主循环 ReadOutcome::Partial 分支）。
+        let proj = project_baseline(&last, &dirty());
+        let (changes, removed) = diff_scope(collect_current(dirty(), None), &proj);
+        assert!(
+            changes.is_empty() && removed.is_empty(),
+            "脏域值未变且非脏域不得误报: changes={changes:?} removed={removed:?}"
+        );
+        // 对照（论证投影必要性 = 守门意义）：直接喂全量基线（删投影形态），
+        // devB/devC 整域必误报 removed。
+        let (_, removed_no_proj) = diff_scope(collect_current(dirty(), None), &last);
+        assert_eq!(
+            removed_no_proj.len(),
+            2,
+            "无投影时非脏域必误报（devB.t1/devC.t1）: {removed_no_proj:?}"
+        );
+        assert!(
+            removed_no_proj.contains(&"devB.t1".to_string())
+                && removed_no_proj.contains(&"devC.t1".to_string())
+        );
+    }
+
+    /// M5 守门②：dev_segment 归域语义——field `<devid>.<tag>` 的 devid 段
+    /// 取 rsplit_once（倒数第一段是 tag，与 tag_of 互补）；无点 field 原样
+    /// 返回（tag_key contains 分支无前缀、反解析不可得——保守归自身，最多
+    /// 漏判归属不误报，R12 边界）。
+    #[test]
+    fn dev_segment_splits_last_dot_as_tag() {
+        assert_eq!(
+            dev_segment("a.b.c"),
+            "a.b",
+            "倒数第一段是 tag，前缀是 devid"
+        );
+        assert_eq!(dev_segment("line1.temp"), "line1");
+        assert_eq!(dev_segment("nodot"), "nodot", "无点原样返回（保守归自身）");
+    }
 }

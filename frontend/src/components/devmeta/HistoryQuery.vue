@@ -10,8 +10,10 @@
 import { computed, ref, watch } from 'vue'
 import { useAuthStore } from '../../stores/auth'
 import {
-  buildHistoryUrl, buildSparklinePath, decimate, historyErrorMessage, windowToRange,
-  type HistoryAgg, type HistoryQueryParams, type TsdbHistoryResponse, type WindowPreset,
+  buildHistoryUrl, buildSparklinePath, decimate, historyErrorMessage, numericPoints,
+  parseHistoryBody, windowToRange,
+  type HistoryAgg, type HistoryQueryParams, type NumericPointsResult, type TsdbHistoryResponse,
+  type WindowPreset,
 } from '../../lib/historyQuery'
 
 const props = defineProps<{
@@ -116,35 +118,38 @@ async function onQuery() {
     } else if (!r.ok) {
       errorBanner.value = historyErrorMessage(r.status, await r.text())
     } else {
-      result.value = (await r.json()) as TsdbHistoryResponse
+      // M9：r.text()+parseHistoryBody 把「响应体非法 JSON」从外层 catch 的
+      // 「网关不可达」里分离——fetch 已成功返回，解析失败是响应问题非网络。
+      const parsed = parseHistoryBody(await r.text())
+      if (parsed.ok) result.value = parsed.data
+      else errorBanner.value = parsed.message
     }
   } catch {
+    // 仅剩 fetch 网络异常（DNS/断连/超时）落此分支
     errorBanner.value = '网络错误（网关不可达）'
   }
   querying.value = false
 }
 
 // ---- 结果派生 ----
-/** 全数值 series 才有曲线（P7：Bool/Str 无意义不画）；否则 null。 */
-const numPoints = computed<Array<{ ts: number; value: number }> | null>(() => {
+/** 无效点过滤（H2 前端防御）：NaN→null 等非数值点逐点剔除并计数，
+ *  曲线只绘数值点——一个 null 点不再整条消失+误报类型问题。 */
+const numPoints = computed<NumericPointsResult | null>(() => {
   const r = result.value
-  if (!r) return null
-  return r.points.every(p => typeof p.value === 'number')
-    ? (r.points as Array<{ ts: number; value: number }>)
-    : null
+  return r ? numericPoints(r.points) : null
 })
 
 const SPARK_W = 800
 const SPARK_H = 240
 const sparkPath = computed(() => {
-  const pts = numPoints.value
+  const pts = numPoints.value?.numeric
   if (!pts?.length) return ''
   return buildSparklinePath(decimate(pts, Math.min(800, pts.length)), SPARK_W, SPARK_H)
 })
 
 /** 值域/首末时间标注（全局 min/max + 首末点 ts）。 */
 const sparkExtent = computed(() => {
-  const pts = numPoints.value
+  const pts = numPoints.value?.numeric
   if (!pts?.length) return null
   let vmin = Infinity
   let vmax = -Infinity
@@ -235,7 +240,10 @@ const fmtValue = (v: number | boolean | string): string =>
 
       <p v-if="!result.points.length" class="hq-empty">窗口内无归档数据点。</p>
 
-      <template v-else-if="numPoints">
+      <template v-else-if="numPoints?.numeric.length">
+        <p v-if="numPoints.skipped > 0" class="hq-skip">
+          {{ numPoints.skipped }} 个无效点未绘制曲线（NaN/非数值，已逐点剔除）
+        </p>
         <svg
           class="hq-chart" :viewBox="`0 0 ${SPARK_W} ${SPARK_H}`"
           preserveAspectRatio="none" role="img"
@@ -308,6 +316,7 @@ const fmtValue = (v: number | boolean | string): string =>
 }
 .hq-summary { margin: 12px 0 8px; font-size: 12px; color: var(--color-ink-secondary); }
 .hq-empty { margin: 10px 0 0; font-size: 12px; color: var(--color-ink-dim); }
+.hq-skip { margin: 10px 0 0; font-size: 12px; color: var(--color-ink-dim); }
 
 .hq-chart { width: 100%; height: 240px; display: block; }
 .hq-axis {

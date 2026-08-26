@@ -181,6 +181,7 @@ cd frontend && npm run build && npm run test -- --run   # 零前端改动也应�
 | R10 | 版本表不删项(设计声明"表即注册表")——脏键/历史键可致无界增长 | IoT 网关设备量级可控,登记;恶化时加 TTL/容量逐出(审查 Low,2026-08-26) |
 | R11 | ksub Partial 分支逐设备串行 HGETALL,脏集大时单 tick 耗时长 | embedded lux 进程内延迟低 + MissedTickBehavior::Skip 兜底;backlog:脏集大时 join_all 并行(审查 Low,2026-08-26 登记) |
 | R12 | tag 名含点使 `dev_segment` 按最后点切分误归设备域(ksub 增量投影路径) | 表现为删→重推抖动,不丢数据;rest-api.md §4.14 声明 tag 不含点约束(审查 Low,2026-08-26) |
+| R13 | 双 impl 等价守门 = 「同一组断言 ksub/poll 各跑一遍」,**非** poll vs ksub 输出逐字 diff——两档共同漂移不设防(如 diff_scope 语义在两档同时变) | 知情接受(审查 M10,2026-08-26):逐字 diff 需固定时间轴的确定性注入(双实例同刻同写),成本高于收益;共同漂移的最后防线是 diff_scope 纯函数单测(值同不推/removed/空 current 全删)+ 下游消费者;守门补强已落 project_baseline/dev_segment 单测(审查修复包 F10) |
 
 ## 三、验收记录(2026-08-25 收口回填,均为真实运行输出)
 
