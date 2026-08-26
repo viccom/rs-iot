@@ -209,6 +209,14 @@ pub async fn run_app_with_shutdown(
     });
     tracing::info!(%hwid, "rs-iot starting");
 
+    // 审计 B3 非破坏护栏：默认弱 JWT 密钥（公开常量，可伪造 token）只提示
+    // 不拒启——生产部署（尤其 api_bind_host 非 loopback 时）必须显式配置。
+    if cfg.jwt_secret == config::DEFAULT_JWT_SECRET {
+        tracing::error!(
+            "JWT 使用默认弱密钥（源码公开常量，任何读过源码者可伪造 token）——             生产部署请在 config.toml 显式配置强 jwt_secret"
+        );
+    }
+
     // D-SEC-1：secrets AEAD 密钥进程级初始化（jwt_secret 恒定）——先于任何
     // secrets 读写（REST/脚本/北向路径共享同一派生键）。
     db::secrets::init_key(&cfg.jwt_secret);
@@ -444,8 +452,9 @@ pub async fn run_app_with_shutdown(
     };
     let app = api::build_router(state);
     let api_port = cfg.api_port;
+    let api_bind_host = cfg.api_bind_host.clone();
     let axum_handle = tokio::spawn(async move {
-        match tokio::net::TcpListener::bind(("0.0.0.0", api_port)).await {
+        match tokio::net::TcpListener::bind((api_bind_host.as_str(), api_port)).await {
             Ok(listener) => {
                 tracing::info!("REST API listening on :{api_port} (apiTest: http://localhost:{api_port}/apitest)");
                 if let Err(e) = axum::serve(listener, app).await {
