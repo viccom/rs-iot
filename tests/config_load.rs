@@ -11,7 +11,7 @@ fn temp_cfg(name: &str) -> PathBuf {
 #[test]
 fn no_path_returns_default() {
     let cfg = AppConfig::load_or_default(None).expect("default");
-    assert_eq!(cfg.api_port, 8780);
+    assert_eq!(cfg.api_port, 8790);
     assert_eq!(cfg.lux.port, 6390);
     assert_eq!(cfg.mqtt.host, "localhost");
     assert_eq!(cfg.mqtt.publish_interval_secs, 5);
@@ -21,7 +21,7 @@ fn no_path_returns_default() {
 fn missing_file_path_returns_default() {
     let missing = temp_cfg("missing");
     let cfg = AppConfig::load_or_default(Some(&missing)).expect("default");
-    assert_eq!(cfg.api_port, 8780);
+    assert_eq!(cfg.api_port, 8790);
 }
 
 #[test]

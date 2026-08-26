@@ -2,7 +2,7 @@
 //!
 //! 内嵌 lux 作为进程内 Redis 兼容数据库；南向 Source 采集 → hub → pipeline →
 //! lux rtdata；北向走默认 luaNorth 实例 mqtt-pub-default（T8 起，mqttPub 兼容
-//! 脚本，pull 模式周期发布）发布到外部 broker；axum REST 管理 API（默认 :8780）。
+//! 脚本，pull 模式周期发布）发布到外部 broker；axum REST 管理 API（默认 :8790）。
 //!
 #![warn(
     missing_docs,

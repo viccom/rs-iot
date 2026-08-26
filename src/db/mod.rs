@@ -40,7 +40,7 @@ pub fn validate_lux_bind(bind_host: &str, password: &str) -> Result<(), String> 
 ///   `[lux] password`（D-LUX-1：`validate_lux_bind` 拒绝无密码配置，主启动路径
 ///   `run_app` 以 Err 前置拦截，此处 panic 兜住绕过 run_app 的调用方；lux 自身
 ///   对非 loopback 无认证另有 `allow_insecure_no_auth` 拒绝兜底，双保险）
-/// - 禁用 lux 自带 HTTP（`http_port = 0`），管理面用我们自己的 axum :8780
+/// - 禁用 lux 自带 HTTP（`http_port = 0`），管理面用我们自己的 axum :8790
 /// - `storage.mode = Tiered`：每写刷 WAL，真正持久化
 /// - `save_interval` 保留周期快照（截断 WAL，避免无限增长）
 /// - `auth.enabled = false`：JWT 由 rs-iot 自管，不用 lux 的 /auth/v1/*

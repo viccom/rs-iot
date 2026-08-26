@@ -1,7 +1,7 @@
 # rs-iot REST API 文档
 
 > **状态**：活文档（API 变更同步）
-> 管理 API（axum）。默认端口 **8780**（`config.rs` 默认值；仓库 `config.toml` 改为 **8790** 避让本机占用，下文示例统一用 8790）。
+> 管理 API（axum）。默认端口 **8790**（2026-08-26 用户裁决统一——`config.rs` 默认值、rsiot-mcp 缺省 `RSIOT_BASE`、rsiot-gateway 默认基址三处一致；下文示例同）。
 > 鉴权：JWT（24h）+ `X-Access-Key` + 白名单。业务前缀 `/api/v1`；`/metrics` 为顶层路径（免 JWT，Prometheus 抓取）。
 > 请求/响应体均为 JSON（`Content-Type: application/json`），唯 `/metrics` 返回 Prometheus 文本。
 

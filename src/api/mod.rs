@@ -1,6 +1,6 @@
 //! REST 管理 API（axum）。
 //!
-//! 端口默认 :8780。JWT 中间件 + 白名单（login/register/静态资源）+ X-Access-Key 直通。
+//! 端口默认 :8790。JWT 中间件 + 白名单（login/register/静态资源）+ X-Access-Key 直通。
 //! 路由对标 Lite_IOT（见各 routes_*.rs）。
 
 // REST 管理层为 rs-iot 内部实现（非库公开 API）。

@@ -111,7 +111,10 @@ impl Default for AppConfig {
     fn default() -> Self {
         Self {
             lux: LuxConfig::default(),
-            api_port: 8780,
+            // 2026-08-26 用户裁决统一 8790（测试验证阶段无兼容负担；
+            // rsiot-mcp 缺省 RSIOT_BASE 与 rsiot-gateway 默认基址同为 8790，
+            // 三处口径自此一致——原 8780 为 Lite_IOT 沿袭值）。
+            api_port: 8790,
             api_bind_host: "0.0.0.0".into(),
             jwt_secret: DEFAULT_JWT_SECRET.into(),
             mqtt: MqttConfig::default(),
