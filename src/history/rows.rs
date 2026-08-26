@@ -13,6 +13,13 @@ use tokio::sync::mpsc;
 
 use crate::types::{tag_key, Sample, SampleValue, TagProps};
 
+/// fan_out 时界窗下界回看（D-C，毫秒口径）：早于 now−7d 的 ts 拒收——工业采集
+/// 正常抖动远小于窗；现场回补历史是显式运维动作，可走 tsink 工具不走本写路径。
+const TS_WINDOW_PAST_MS: i64 = 7 * 86_400_000;
+/// fan_out 时界窗上界前瞻（D-C，毫秒口径）：晚于 now+1h 的 ts 拒收（容采集端
+/// 小幅时钟超前；大幅超前视为错配/恶意）。
+const TS_WINDOW_FUTURE_MS: i64 = 3_600_000;
+
 /// fan-out 出口行：`fan_out` 产出、writer 线程消费的热路径中间类型
 /// （刻意不含 tsink 类型，P6）。
 ///
@@ -36,10 +43,10 @@ pub struct HistoryRow {
 
 /// 历史旁路计数：e2e 确定性与 Phase 3 metrics 的数据源。
 ///
-/// 计数不变量：`sent + dropped + skipped` == fan_out 遍历的 (tag,value) 总数
-/// ——每个出口恰好落入其一。`written/deadbanded/deadband_evaluated/
-/// lane_mismatch/errors/nonfinite_skipped/dup_ts_skipped` 由 writer 线程在
-/// flush 状态机中递增。
+/// 计数不变量：`sent + dropped + skipped + ts_rejected` == fan_out 遍历的
+/// (tag,value) 总数——每个出口恰好落入其一。`written/deadbanded/
+/// deadband_evaluated/lane_mismatch/errors/nonfinite_skipped/dup_ts_skipped`
+/// 由 writer 线程在 flush 状态机中递增。
 ///
 /// Phase 3 治理口径（P2/P3）：死区削减率分母 `deadband_evaluated` 与分子
 /// `deadbanded` 同源同点计数；写错误按行分桶（[`WriteErrorKind`]），
@@ -68,6 +75,9 @@ pub struct HistoryStats {
     pub nonfinite_skipped: AtomicU64,
     /// 跨批同 series 同 ts 跳过行数（P5 防双点；M11：计数消除对账黑洞）。
     pub dup_ts_skipped: AtomicU64,
+    /// 时间戳域坏行数（M1/D-C：`ts×1000` 溢出或超出 `[now−7d, now+1h]`
+    /// 时界窗——坏 ts 单行拒收，不再连坐整批）。
+    pub ts_rejected: AtomicU64,
     /// 写错误分桶行数（P3 按 kind 计数，Σ == errors；顺序同 [`WriteErrorKind::ALL`]）。
     pub error_rows: [AtomicU64; 5],
 }
@@ -197,14 +207,23 @@ impl HistoryHandle {
 /// 零分配）；即满时非白名单行也计 `dropped`，仅非饱和路径区分 `skipped`。
 /// 非饱和时按 L3 三类前置过滤：tag 空名、effective 无 `tag_key(devid, tag)`
 /// 卡、或 `history != true` 一律 `skipped++`（缺卡与显式 false 同语义，
-/// history 默认 false 是安全默认）；白名单命中则构造 [`HistoryRow`]
-/// （ts_ms = timestamp 秒 ×1000）经 `try_send` 直通——Ok 计 `sent`，
-/// Err（满或断开）计 `dropped`，均不阻塞。
+/// history 默认 false 是安全默认）；白名单命中后再过 **M1 时界钳制**：
+/// `timestamp.checked_mul(1000)` 溢出或 `ts_ms` 落在 `[now_ms−7d,
+/// now_ms+1h]`（D-C 窗，批首取一次 now）之外 → `ts_rejected++` 单行拒收
+/// ——坏时间戳不再以 tsink 拒整批的方式连坐同批好行；通过者构造
+/// [`HistoryRow`] 经 `try_send` 直通——Ok 计 `sent`，Err（满或断开）计
+/// `dropped`，均不阻塞。
 ///
-/// 计数本地累积（P11）：三计数在循环内只动本地变量，循环外每 flush
+/// 计数本地累积（P11）：四计数在循环内只动本地变量，循环外每 flush
 /// 一次性原子合并（SeqCst 保持），消除逐行原子争用。
 pub fn fan_out(samples: &[Sample], effective: &HashMap<String, TagProps>, h: &HistoryHandle) {
-    let (mut sent, mut dropped, mut skipped) = (0u64, 0u64, 0u64);
+    let (mut sent, mut dropped, mut skipped, mut ts_rejected) = (0u64, 0u64, 0u64, 0u64);
+    // 批首一次 now_ms（D-C）：整批同一时间基，行间判定不因取时刻漂移抖动；
+    // 时钟异常（epoch 前）取 0 → 所有行落窗外拒收，fail-soft 且 ts_rejected 可观测。
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
     for sample in samples {
         for (tag, value) in &sample.values {
             // P11 饱和快速路径：满即丢先行，白名单判定/行构造整体短路
@@ -225,11 +244,19 @@ pub fn fan_out(samples: &[Sample], effective: &HashMap<String, TagProps>, h: &Hi
                     continue;
                 }
             };
+            // M1 时界钳制：ts×1000 溢出或超出 [now−7d, now+1h] 单行拒收
+            let ts_ms = match sample.timestamp.checked_mul(1000) {
+                Some(ts) if ts >= now_ms - TS_WINDOW_PAST_MS && ts <= now_ms + TS_WINDOW_FUTURE_MS => ts,
+                _ => {
+                    ts_rejected += 1;
+                    continue;
+                }
+            };
             let row = HistoryRow {
                 devid: sample.devid.clone(),
                 hwid: sample.hwid.as_ref().to_owned(),
                 tag: tag.clone(),
-                ts_ms: sample.timestamp * 1000,
+                ts_ms,
                 value: value.clone(),
                 deadband: props.deadband,
             };
@@ -243,6 +270,7 @@ pub fn fan_out(samples: &[Sample], effective: &HashMap<String, TagProps>, h: &Hi
     stats.sent.fetch_add(sent, Ordering::SeqCst);
     stats.dropped.fetch_add(dropped, Ordering::SeqCst);
     stats.skipped.fetch_add(skipped, Ordering::SeqCst);
+    stats.ts_rejected.fetch_add(ts_rejected, Ordering::SeqCst);
 }
 
 #[cfg(test)]
@@ -270,6 +298,7 @@ mod tests {
             errors: AtomicU64::new(0),
             nonfinite_skipped: AtomicU64::new(0),
             dup_ts_skipped: AtomicU64::new(0),
+            ts_rejected: AtomicU64::new(0),
             error_rows: std::array::from_fn(|_| AtomicU64::new(0)),
         })
     }
@@ -287,6 +316,14 @@ mod tests {
         }
     }
 
+    /// 当前 Unix 秒（M1 时界窗后测试取当前时刻附近的 ts，writer.rs 同款）。
+    fn now_secs() -> i64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock after unix epoch")
+            .as_secs() as i64
+    }
+
     /// 排空接收端（try_recv 至 Err 为止）。
     /// 红阶段构造缺陷修复(非断言,绿阶段代理显式报告):tokio Receiver::try_recv
     /// 要求 &mut self,参数按 &mut 收;断言零改动。
@@ -302,12 +339,14 @@ mod tests {
     ///    （ts_ms=timestamp×1000、value 原样 Float、deadband 透传 None）；
     ///    tagB（history=false，effective 中存在但未开白名单）走 skip 路径——
     ///    与 effective 缺卡同一语义（history 默认 false）。
+    ///    ts 取当前时刻（M1 时界窗 [now−7d, now+1h] 后固定历史 ts 会被拒收，
+    ///    本测锚定白名单/字段映射而非时界——时界另见测试 7）。
     #[test]
     fn fan_out_whitelist_only() {
         let (tx, mut rx) = mpsc::channel(64);
         let handle = HistoryHandle::new(tx, fresh_stats());
 
-        let ts_a = 1_700_000_000i64;
+        let ts_a = now_secs();
         let ts_b = ts_a + 1;
         let samples = vec![
             sample("dev1", "hw1", ts_a, &[("tagA", SampleValue::Float(1.5))]),
@@ -354,6 +393,7 @@ mod tests {
     /// 2. tag_key 构造一致性：tag 名已含 devid 前缀（"dev1.temp"）时 types::tag_key
     ///    原样返回（不重复拼接），effective 用该 key 建卡即可命中白名单；
     ///    行内 tag 保持 tag 原名（P1 metric=原名），deadband=Some 透传到行。
+    ///    ts 取当前时刻（M1 时界窗，同测试 1 说明）。
     #[test]
     fn fan_out_tag_key_matching() {
         let (tx, mut rx) = mpsc::channel(64);
@@ -362,7 +402,7 @@ mod tests {
         // 语义锚点：types::tag_key 对已含 devid 的 tag 原样返回
         assert_eq!(tag_key("dev1", "dev1.temp"), "dev1.temp");
 
-        let ts = 1_700_000_000i64;
+        let ts = now_secs();
         let samples = vec![sample(
             "dev1",
             "hw1",
@@ -596,5 +636,51 @@ mod tests {
             ],
             "ALL 五桶顺序与 as_str 字符串必须精确"
         );
+    }
+
+    /// 7. fan_out 时界钳制（M1/D-C）：白名单命中但 timestamp 域坏的三行——
+    ///    i64::MAX（×1000 溢出）、now−8d（早于 7d 下界）→ ts_rejected==2 且
+    ///    均不发送；now−1h（窗内）→ 正常发送（sent==1、行 ts 精确映射）。
+    ///    当前实现对前两者照发（红：rows.len()==3 / ts_rejected==0）。
+    #[test]
+    fn fan_out_timestamp_window_rejects() {
+        let (tx, mut rx) = mpsc::channel(64);
+        let handle = HistoryHandle::new(tx, fresh_stats());
+
+        let now_s = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock after unix epoch")
+            .as_secs() as i64;
+        let samples = vec![
+            sample("dev1", "hw1", i64::MAX, &[("tagA", SampleValue::Float(1.0))]),
+            sample("dev1", "hw1", now_s - 8 * 86400, &[("tagA", SampleValue::Float(2.0))]),
+            sample("dev1", "hw1", now_s - 3600, &[("tagA", SampleValue::Float(3.0))]),
+        ];
+        let mut effective = HashMap::new();
+        effective.insert(
+            tag_key("dev1", "tagA"),
+            TagProps {
+                history: true,
+                ..TagProps::default()
+            },
+        );
+
+        fan_out(&samples, &effective, &handle);
+
+        let rows = drain(&mut rx);
+        assert_eq!(
+            rows.len(),
+            1,
+            "溢出与 now−8d 两行必须拒收，只有窗内 now−1h 一行发出"
+        );
+        assert_eq!(rows[0].ts_ms, (now_s - 3600) * 1000, "窗内行 ts 精确映射");
+        assert_eq!(
+            handle.stats().ts_rejected.load(Ordering::SeqCst),
+            2,
+            "i64::MAX 溢出与 now−8d 两行必须计 ts_rejected"
+        );
+        assert_eq!(handle.stats().sent.load(Ordering::SeqCst), 1);
+        assert_eq!(handle.stats().dropped.load(Ordering::SeqCst), 0);
+        assert_eq!(handle.stats().skipped.load(Ordering::SeqCst), 0);
     }
 }

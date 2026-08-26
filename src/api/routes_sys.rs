@@ -74,6 +74,9 @@ pub async fn sysstatus(State(st): State<AppState>) -> Json<serde_json::Value> {
                     "dup_ts_skipped": h
                         .dup_ts_skipped
                         .load(std::sync::atomic::Ordering::Relaxed),
+                    "ts_rejected": h
+                        .ts_rejected
+                        .load(std::sync::atomic::Ordering::Relaxed),
                     "errors": h.errors.load(std::sync::atomic::Ordering::Relaxed),
                     "errors_by_kind": serde_json::Value::Object(errors_by_kind),
                 },
