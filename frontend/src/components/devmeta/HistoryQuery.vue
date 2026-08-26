@@ -9,6 +9,7 @@
 // 显隐由父层 v-if 控制；本组件不自带折叠头部（保持简单）。
 import { computed, ref, watch } from 'vue'
 import { useAuthStore } from '../../stores/auth'
+import { apiFetch } from '../../api/fetch'
 import {
   buildHistoryUrl, buildSparklinePath, decimate, historyErrorMessage, numericPoints,
   parseHistoryBody, windowToRange,
@@ -109,9 +110,7 @@ async function onQuery() {
   errorBanner.value = ''
   result.value = null
   try {
-    const r = await fetch(buildHistoryUrl(params), {
-      headers: { Authorization: `Bearer ${auth.token}` },
-    })
+    const r = await apiFetch(buildHistoryUrl(params))
     if (r.status === 401) {
       auth.clear()
       errorBanner.value = '登录已过期，请重新登录'
