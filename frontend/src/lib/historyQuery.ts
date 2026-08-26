@@ -133,7 +133,10 @@ export function decimate(
 
 /** 手写 SVG 折线串 `M x y L x y ...`（每桶先 (x,ymax) 后 (x,ymin) 交替——
  *  max/min 双线合并为一条 path）；d 为空返回 ''（不渲染 path）。
- *  x_k = round(k*w/(n-1))（首桶 0 末桶 w；n===1 除零防御取 x=0）；
+ *  x 按 ts 线性映射（M8）：ts0/ts1 取首末桶 ts（decimate 输出按 ts 升序），
+ *  x = round((ts-ts0)/(ts1-ts0)*w)（首桶 0 末桶 w——稀疏序列时间轴不失真，
+ *  桶序均分会把长间隔压扁）；全同 ts（ts1==ts0）回退桶序均分
+ *  x_k = round(k*w/(n-1))（n===1 除零防御取 x=0）；
  *  y = round(h - (v-vmin)/(vmax-vmin)*h)（vmin/vmax 取全部桶 min/max 全局，
  *  SVG y 向下：值大 y 小）；vmin===vmax（全等值）时 y 恒为 round(h/2)。 */
 export function buildSparklinePath(d: DecimatedPoint[], w: number, h: number): string {
@@ -147,9 +150,14 @@ export function buildSparklinePath(d: DecimatedPoint[], w: number, h: number): s
   }
   const yOf = (v: number): number =>
     vmin === vmax ? Math.round(h / 2) : Math.round(h - ((v - vmin) / (vmax - vmin)) * h)
+  const ts0 = d[0].ts
+  const ts1 = d[n - 1].ts
   const segs: string[] = []
   d.forEach((b, k) => {
-    const x = n === 1 ? 0 : Math.round((k * w) / (n - 1))
+    // x 按 ts 线性映射；ts1==ts0（全同 ts）回退桶序均分，n===1 取 0
+    const x = ts1 > ts0
+      ? Math.round(((b.ts - ts0) / (ts1 - ts0)) * w)
+      : n === 1 ? 0 : Math.round((k * w) / (n - 1))
     segs.push(`${x} ${yOf(b.max)}`)
     segs.push(`${x} ${yOf(b.min)}`)
   })

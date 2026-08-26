@@ -32,7 +32,9 @@
 //   - 非空 → 单一折线串，格式 `M x0 y0 L x1 y1 L x2 y2 ...`（动词与数字
 //     间、数字与数字间单空格），点序 = 每桶先 (x, ymax) 后 (x, ymin)
 //     交替（max 线在上、min 线在下的单一 path）；
-//   - x_k = Math.round(k * w / (n-1))（n=桶数，首桶 0 末桶 w）；
+//   - x 按 ts 线性映射（M8）：ts0/ts1 取首末桶 ts，
+//     x = Math.round((ts-ts0)/(ts1-ts0) * w)（首桶 0 末桶 w）；全同 ts
+//     （ts1==ts0）回退桶序均分 x_k = Math.round(k * w / (n-1))，n===1 取 0；
 //   - y = Math.round(h - (v - vmin) / (vmax - vmin) * h)，vmin/vmax 取全部
 //     桶 min/max 全局（值大 y 小，SVG y 向下）；vmin===vmax（全等值）时
 //     y 恒为 Math.round(h/2)；坐标一律取整、十进制无小数输出。
@@ -196,6 +198,25 @@ describe('buildSparklinePath（每桶 (x,ymax) 与 (x,ymin) 交替单一折线�
     }
     expect(pts[0][0]).toBe(0)
     expect(pts[pts.length - 1][0]).toBe(w)
+  })
+  it('非均匀 ts 间隔：x 按 ts 线性比例 ts=0/90/100 → x=0/90/100，非桶序均分（M8）', () => {
+    const d: DecimatedPoint[] = [
+      { ts: 0, min: 0, max: 0, last: 0 },
+      { ts: 90, min: 5, max: 5, last: 5 },
+      { ts: 100, min: 10, max: 10, last: 10 },
+    ]
+    // vmin=0 vmax=10 h=40 → y=40-4v（0→40、5→20、10→0）；每桶 min==max 两点同坐标；
+    // 桶序均分将得 x=0,50,100——中桶 50≠90 即红（稀疏序列时间轴失真）
+    expect(buildSparklinePath(d, 100, 40)).toBe(
+      'M 0 40 L 0 40 L 90 20 L 90 20 L 100 0 L 100 0',
+    )
+  })
+  it('全同 ts（ts1==ts0，n>1）：回退桶序均分 x=round(k*w/(n-1))（M8 除零回退）', () => {
+    const d: DecimatedPoint[] = [7, 7, 7, 7].map(ts => ({ ts, min: 3, max: 3, last: 3 }))
+    // 等值 y=round(40/2)=20；x=round(k*100/3)=0,33,67,100
+    expect(buildSparklinePath(d, 100, 40)).toBe(
+      'M 0 20 L 0 20 L 33 20 L 33 20 L 67 20 L 67 20 L 100 20 L 100 20',
+    )
   })
   it('空数组 → 空串（契约：不渲染 path）', () => {
     expect(buildSparklinePath([], 100, 40)).toBe('')
