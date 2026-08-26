@@ -428,7 +428,7 @@ async fn devreg_list_filter_effective_and_delete() {
         .execute_value("HGET", &["instances", "inst-x"])
         .await
         .unwrap();
-    let raw = rs_iot::api::str_from_value(&inst);
+    let raw = rs_iot::db::str_from_value(&inst);
     let j: serde_json::Value = serde_json::from_str(&raw).unwrap();
     let devs: Vec<&str> = j["devices"]
         .as_array()

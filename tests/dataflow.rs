@@ -63,7 +63,7 @@ async fn hash_fields(client: &lux::EmbeddedClient, key: &str) -> Vec<String> {
         Ok(lux::EmbeddedValue::Array(a)) => a
             .iter()
             .step_by(2)
-            .map(rs_iot::api::str_from_value)
+            .map(rs_iot::db::str_from_value)
             .collect(),
         other => panic!("expected array for {key}, got {other:?}"),
     }

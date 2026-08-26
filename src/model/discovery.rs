@@ -107,7 +107,7 @@ pub async fn note_with_window(
     let mut to_flush: Vec<(String, String)> = Vec::new();
     let mut to_evict: Vec<String> = Vec::new();
     {
-        let mut g = engine().lock().unwrap();
+        let mut g = engine().lock().unwrap_or_else(|p| p.into_inner());
         let mut key = String::new();
         let mut now = None::<Instant>; // 惰性取一次时钟（本批有未建模才取）
         for s in samples {
@@ -220,7 +220,7 @@ pub async fn note_with_window(
 /// 落盘失败回滚：把 keys 的 `last_flush` 重置为 None（下一批重新视为到期，
 /// 立即重试落盘）。幂等——不在缓冲的键跳过；并发批次已重置/推进则维持其值。
 fn unmark_flushed(keys: &[String]) {
-    let mut g = engine().lock().unwrap();
+    let mut g = engine().lock().unwrap_or_else(|p| p.into_inner());
     for k in keys {
         if let Some(p) = g.pending.get_mut(k) {
             p.last_flush = None;
@@ -306,7 +306,7 @@ pub async fn clear(c: &EmbeddedClient, dev_id: Option<&str>) -> Result<usize, Rs
             c.execute("HDEL", &[HASH, k]).await?;
         }
     }
-    let mut g = engine().lock().unwrap();
+    let mut g = engine().lock().unwrap_or_else(|p| p.into_inner());
     for k in &keys {
         g.pending.remove(k);
     }
@@ -317,7 +317,7 @@ pub async fn clear(c: &EmbeddedClient, dev_id: Option<&str>) -> Result<usize, Rs
 pub async fn load(c: &EmbeddedClient) -> Result<usize, RsIotError> {
     let all = list(c).await?;
     let n = all.len();
-    let mut g = engine().lock().unwrap();
+    let mut g = engine().lock().unwrap_or_else(|p| p.into_inner());
     for (key, disc) in all {
         // 已在缓冲的条目不动（本批新计数优先——load 与 flush 的竞态下新数据准）。
         let last_val = serde_json::from_str(&disc.sample_value)
@@ -335,7 +335,7 @@ pub async fn load(c: &EmbeddedClient) -> Result<usize, RsIotError> {
 /// 快照中的 key（模型删 tag / 设备删除）不再被短路——同 tag 数据重新走发现
 /// 路径。仍在快照中的 key 保留（稳态短路零开销不变）。
 pub(crate) fn retain_modeled(effective: &HashMap<String, TagProps>) {
-    let mut g = engine().lock().unwrap();
+    let mut g = engine().lock().unwrap_or_else(|p| p.into_inner());
     g.seen_modeled.retain(|k| effective.contains_key(k));
 }
 
@@ -353,7 +353,7 @@ pub async fn sweep_modeled(
     for k in &keys {
         c.execute("HDEL", &[HASH, k]).await?;
     }
-    let mut g = engine().lock().unwrap();
+    let mut g = engine().lock().unwrap_or_else(|p| p.into_inner());
     for k in &keys {
         g.pending.remove(k);
     }
@@ -410,6 +410,24 @@ mod tests {
         e.pending.clear();
         e.seen_modeled.clear();
         g
+    }
+
+    /// B2 毒化恢复（L-4 范式推广）：ENGINE 锁毒化后公共摄入路径不得 panic
+    /// ——任何临界区 panic 一次即毒化，此后 pipeline 每批样本 note_once 都崩
+    ///（数据面中断）。修复前 `engine().lock().unwrap()` panic（红，经 stash
+    /// 法实证）；修复后 into_inner 返回旧状态继续。
+    #[tokio::test]
+    async fn engine_poison_recovery_note_once() {
+        let _g = serialized_and_reset().await;
+        // 毒化注入：子线程持锁 panic（guard drop 时毒化）
+        let _ = std::thread::spawn(|| {
+            let _e = engine().lock().unwrap();
+            panic!("注入毒化");
+        })
+        .join();
+        // 摄入路径不 panic（修复后；修复前此处 panic）——retain_modeled 是
+        // cache::reload 的下游（无 lux 依赖的公共锁点，同族其余入口同范式）。
+        retain_modeled(&HashMap::new());
     }
 
     /// 唯一临时 data_dir（tag 区分用例防并行互扰；store::tests 模式）。
@@ -494,7 +512,7 @@ mod tests {
         assert!(list(&c).await.unwrap().is_empty(), "已建模不进队列");
         // 断言数据锁内收集、锁外断言（panic 不毒化全局锁）。
         let (in_pending, in_seen) = {
-            let g = engine().lock().unwrap();
+            let g = engine().lock().unwrap_or_else(|e| e.into_inner());
             (
                 g.pending.contains_key("discdev1.temp"),
                 g.seen_modeled.contains("discdev1.temp"),
@@ -606,7 +624,7 @@ mod tests {
         assert!(!m.contains_key("discdev2.a"), "最旧被 LRU 逐出");
         assert!(m.contains_key("discdev2.b") && m.contains_key("discdev2.c"));
         let a_in_pending = {
-            let g = engine().lock().unwrap();
+            let g = engine().lock().unwrap_or_else(|e| e.into_inner());
             g.pending.contains_key("discdev2.a")
         };
         assert!(!a_in_pending, "内存缓冲同步逐出");
@@ -668,7 +686,7 @@ mod tests {
         assert_eq!(clear(&c, None).await.unwrap(), 1, "全清余量");
         assert!(list(&c).await.unwrap().is_empty());
         let (x_in_pending, y_in_pending) = {
-            let g = engine().lock().unwrap();
+            let g = engine().lock().unwrap_or_else(|e| e.into_inner());
             (
                 g.pending.contains_key("discdev1.x"),
                 g.pending.contains_key("discdev2.y"),
@@ -750,7 +768,7 @@ mod tests {
         assert_eq!(sweep_modeled(&c, &e).await.unwrap(), 1);
         assert!(list(&c).await.unwrap().is_empty());
         let still_pending = {
-            let g = engine().lock().unwrap();
+            let g = engine().lock().unwrap_or_else(|e| e.into_inner());
             g.pending.contains_key("discdev1.adopted")
         };
         assert!(!still_pending);

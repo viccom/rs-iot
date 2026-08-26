@@ -6,6 +6,17 @@ use std::path::Path;
 /// （install/uninstall 管理命令的 `init_tracing(None)`）引用同一默认。
 pub const DEFAULT_EVENT_BUS_CAPACITY: usize = 256;
 
+/// 默认 JWT 密钥（与 Lite_IOT 对齐的兼容值）。**可预测的公开常量**——
+/// 生产部署必须显式配置强密钥；启动时对默认值打 error 提示（不拒启，
+/// 审计 B3 裁定非破坏护栏）。
+pub const DEFAULT_JWT_SECRET: &str = "qwerty1234567890asdfgh1234567890";
+
+/// sidecar 心跳失联判定默认秒数（bridge 服务端默认值；**sidecar_client 的
+/// `HB_TIMEOUT_DEFAULT_SECS` 必须引用本常量**——审计 B6：两端各自定义同一
+/// 失联参数是已发生的双源，漂移会出现 server 判失联/client 自认健康的
+/// 幽灵断连）。
+pub const DEFAULT_HEARTBEAT_TIMEOUT_SECS: u64 = 15;
+
 /// 应用总配置。从 toml 加载，缺失字段走 Default。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -14,6 +25,10 @@ pub struct AppConfig {
     pub lux: LuxConfig,
     /// REST API 端口（M3）
     pub api_port: u16,
+    /// REST API 绑定地址（审计 B3 增量配置：与 lux/bridge 的 bind_host 姿态
+    /// 对齐；默认 "0.0.0.0" **保持既有行为不变**，跨机部署需 JWT 强密钥 +
+    /// 显式绑定）。旧配置文件无此键走默认。
+    pub api_bind_host: String,
     /// JWT 签名密钥（HS256，32 字节）。默认值与 Lite_IOT 对齐。
     pub jwt_secret: String,
     /// 北向 MQTT broker（T8 起等价生成默认 luaNorth 实例 mqtt-pub-default；
@@ -97,7 +112,8 @@ impl Default for AppConfig {
         Self {
             lux: LuxConfig::default(),
             api_port: 8780,
-            jwt_secret: "qwerty1234567890asdfgh1234567890".into(),
+            api_bind_host: "0.0.0.0".into(),
+            jwt_secret: DEFAULT_JWT_SECRET.into(),
             mqtt: MqttConfig::default(),
             log: LogConfig::default(),
             bridge: BridgeConfig::default(),
@@ -163,7 +179,7 @@ impl Default for BridgeConfig {
             enable: false,
             bind_host: "127.0.0.1".into(),
             port: 8781,
-            heartbeat_timeout_secs: 15,
+            heartbeat_timeout_secs: DEFAULT_HEARTBEAT_TIMEOUT_SECS,
             accept_hello_timeout_secs: 10,
             max_connections: 512,
         }

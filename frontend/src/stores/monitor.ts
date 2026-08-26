@@ -17,6 +17,15 @@ import type {
   SysStatus,
 } from '../types'
 import { useAuthStore } from './auth'
+import { apiFetch } from '../api/fetch'
+
+/** 轮询节拍（审计 B6 具名化；start 与 visibility 恢复双分支共用同一组——
+ *  原两处内联同值，调一处漏一处会出现隐藏/恢复后节拍不一致）。 */
+const POLL_RTDATA_MS = 2000
+const POLL_SYSSTATUS_MS = 5000
+const POLL_ROSTER_MS = 5000
+const POLL_ALARM_MS = 30_000
+
 import { createPreviewSnapshot, isPreviewAuthToken } from '../lib/previewSession'
 
 /** 日志环形缓冲容量（最新在前）。 */
@@ -117,10 +126,9 @@ export const useMonitorStore = defineStore('monitor', () => {
   /**
    * 401 会话失效处理（审查 Important 修复）。
    *
-   * 本 store 刻意绕过 client.ts（其 import router 链破坏 vitest），故 client.ts 的
-   * 401 清 token+跳登录分支对本 store 失效——token 失效后轮询/SSE 会无限 401 空转。
-   * 此处统一兜底：清 token + 硬跳转 /login（整页刷新顺带清掉所有 SSE 僵尸连接）。
-   * 不 import router（测试环境无 window/createWebHistory），用 location.href。
+   * 审计 B5：fetch 走 apiFetch（无 router 链，可测），401 语义留在本 store
+   * 统一兜底：清 token + 硬跳转 /login（整页刷新顺带清掉所有 SSE 僵尸连接，
+   * 与 api() 的软路由跳转不同——轮询/SSE 场景需要硬跳）。
    * 仅在有 token 时跳转（防登录页自身 401 触发循环）。
    */
   function handleUnauthorized() {
@@ -260,9 +268,7 @@ export const useMonitorStore = defineStore('monitor', () => {
       return
     }
     try {
-      const r = await fetch('/api/rsiot/api/v1/inst/stats', {
-        headers: { Authorization: `Bearer ${useAuthStore().token}` },
-      })
+      const r = await apiFetch('/api/rsiot/api/v1/inst/stats')
       if (r.status === 401) { handleUnauthorized(); return }
       if (r.ok) instances.value = (await r.json()) as InstanceStat[]
     } catch { /* 轮询失败静默，下周期重试 */ }
@@ -273,9 +279,7 @@ export const useMonitorStore = defineStore('monitor', () => {
   async function loadDeviceOwners() {
     if (isPreviewAuthToken(useAuthStore().token)) return
     try {
-      const r = await fetch('/api/rsiot/api/v1/devices', {
-        headers: { Authorization: `Bearer ${useAuthStore().token}` },
-      })
+      const r = await apiFetch('/api/rsiot/api/v1/devices')
       if (r.status === 401) { handleUnauthorized(); return }
       if (!r.ok) return
       const data = (await r.json()) as Record<string, DeviceSpec>
@@ -291,9 +295,7 @@ export const useMonitorStore = defineStore('monitor', () => {
   /** 拉取实例完整配置表（GET /insts，含 app_config/devices；实例管理 + 类型映射用）。 */
   async function loadInstanceConfigs() {
     try {
-      const r = await fetch('/api/rsiot/api/v1/insts', {
-        headers: { Authorization: `Bearer ${useAuthStore().token}` },
-      })
+      const r = await apiFetch('/api/rsiot/api/v1/insts')
       if (r.status === 401) { handleUnauthorized(); return }
       if (r.ok) instanceConfigs.value = (await r.json()) as InstanceConfigs
     } catch { /* 静默，CRUD 后会重拉 */ }
@@ -306,9 +308,7 @@ export const useMonitorStore = defineStore('monitor', () => {
       return
     }
     try {
-      const r = await fetch('/api/rsiot/api/v1/rtdatas', {
-        headers: { Authorization: `Bearer ${useAuthStore().token}` },
-      })
+      const r = await apiFetch('/api/rsiot/api/v1/rtdatas')
       if (r.status === 401) { handleUnauthorized(); return }
       if (r.ok) rtdata.value = await r.json()
     } catch { /* 轮询失败静默，下周期重试 */ }
@@ -321,9 +321,7 @@ export const useMonitorStore = defineStore('monitor', () => {
       return
     }
     try {
-      const r = await fetch('/api/rsiot/api/v1/sysstatus', {
-        headers: { Authorization: `Bearer ${useAuthStore().token}` },
-      })
+      const r = await apiFetch('/api/rsiot/api/v1/sysstatus')
       if (r.status === 401) { handleUnauthorized(); return }
       if (r.ok) sysstatus.value = await r.json()
     } catch { /* 轮询失败静默，下周期重试 */ }
@@ -338,9 +336,7 @@ export const useMonitorStore = defineStore('monitor', () => {
   async function loadAlarms() {
     if (isPreviewAuthToken(useAuthStore().token)) return
     try {
-      const r = await fetch('/api/rsiot/api/v1/alarms', {
-        headers: { Authorization: `Bearer ${useAuthStore().token}` },
-      })
+      const r = await apiFetch('/api/rsiot/api/v1/alarms')
       if (r.status === 401) { handleUnauthorized(); return }
       // Array.isArray 防御：非数组响应（旧后端/网关错误页）不写——alarm 收敛路径
       // 依赖数组方法（filter），写入非数组会炸面板渲染。
@@ -358,10 +354,7 @@ export const useMonitorStore = defineStore('monitor', () => {
    */
   async function clearAlarm(key: string): Promise<boolean> {
     try {
-      const r = await fetch(`/api/rsiot/api/v1/alarms?key=${encodeURIComponent(key)}`, {
-        method: 'DELETE',
-        headers: { Authorization: `Bearer ${useAuthStore().token}` },
-      })
+      const r = await apiFetch(`/api/rsiot/api/v1/alarms?key=${encodeURIComponent(key)}`, { method: 'DELETE' })
       if (r.status === 401) { handleUnauthorized(); return false }
       return r.ok
     } catch { return false }
@@ -378,9 +371,7 @@ export const useMonitorStore = defineStore('monitor', () => {
       return
     }
     try {
-      const r = await fetch('/api/rsiot/api/v1/logs/recent?limit=200', {
-        headers: { Authorization: `Bearer ${useAuthStore().token}` },
-      })
+      const r = await apiFetch('/api/rsiot/api/v1/logs/recent?limit=200')
       if (r.status === 401) { handleUnauthorized(); return }
       if (r.ok) {
         const entries: LogEntry[] = await r.json()
@@ -403,12 +394,7 @@ export const useMonitorStore = defineStore('monitor', () => {
    */
   async function postJson(path: string, body: unknown): Promise<Response | null> {
     try {
-      const r = await fetch(path, {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${useAuthStore().token}`,
-          'Content-Type': 'application/json',
-        },
+      const r = await apiFetch(path, { method: 'POST',
         body: JSON.stringify(body),
       })
       if (r.status === 401) { handleUnauthorized(); return null }
@@ -476,12 +462,7 @@ export const useMonitorStore = defineStore('monitor', () => {
   ): Promise<{ ok: boolean; error?: string; status?: number }> {
     try { JSON.parse(data) } catch { return { ok: false, error: 'data 不是合法 JSON' } }
     try {
-      const r = await fetch('/api/rsiot/api/v1/command/send', {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${useAuthStore().token}`,
-          'Content-Type': 'application/json',
-        },
+      const r = await apiFetch('/api/rsiot/api/v1/command/send', { method: 'POST',
         body: JSON.stringify({ instance, devid, cmd: 'write', data }),
       })
       if (r.status === 401) { handleUnauthorized(); return { ok: false, error: '登录已过期，请重新登录', status: 401 } }
@@ -550,10 +531,10 @@ export const useMonitorStore = defineStore('monitor', () => {
       if (rosterTimer) { clearInterval(rosterTimer); rosterTimer = null }
       if (alarmTimer) { clearInterval(alarmTimer); alarmTimer = null }
     } else if (!rtdataTimer || !sysstatusTimer || !rosterTimer || !alarmTimer) {
-      rtdataTimer = setInterval(loadRtdata, 2000)
-      sysstatusTimer = setInterval(loadSysstatus, 5000)
-      rosterTimer = setInterval(() => { void loadInstances(); void loadInstanceConfigs() }, 5000)
-      alarmTimer = setInterval(() => void loadAlarms(), 30_000)
+      rtdataTimer = setInterval(loadRtdata, POLL_RTDATA_MS)
+      sysstatusTimer = setInterval(loadSysstatus, POLL_SYSSTATUS_MS)
+      rosterTimer = setInterval(() => { void loadInstances(); void loadInstanceConfigs() }, POLL_ROSTER_MS)
+      alarmTimer = setInterval(() => void loadAlarms(), POLL_ALARM_MS)
     }
   }
 
@@ -597,11 +578,11 @@ export const useMonitorStore = defineStore('monitor', () => {
     void loadRtdata()
     void loadSysstatus()
     void loadAlarms()
-    rtdataTimer = setInterval(loadRtdata, 2000)
-    sysstatusTimer = setInterval(loadSysstatus, 5000)
-    rosterTimer = setInterval(() => { void loadInstances(); void loadInstanceConfigs() }, 5000)
+    rtdataTimer = setInterval(loadRtdata, POLL_RTDATA_MS)
+    sysstatusTimer = setInterval(loadSysstatus, POLL_SYSSTATUS_MS)
+    rosterTimer = setInterval(() => { void loadInstances(); void loadInstanceConfigs() }, POLL_ROSTER_MS)
     // 复审 P2-2：告警低频轮询兜底（SSE 丢帧后 30s 内收敛；可见性联动同其它 timer）。
-    alarmTimer = setInterval(() => void loadAlarms(), 30_000)
+    alarmTimer = setInterval(() => void loadAlarms(), POLL_ALARM_MS)
     document.addEventListener('visibilitychange', onVisibility)
   }
 
@@ -616,12 +597,7 @@ export const useMonitorStore = defineStore('monitor', () => {
   async function startPacketTrace(durationSecs = 60): Promise<boolean> {
     if (!selectedInstance.value) return false
     try {
-      const r = await fetch('/api/rsiot/api/v1/inst/trace', {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${useAuthStore().token}`,
-          'Content-Type': 'application/json',
-        },
+      const r = await apiFetch('/api/rsiot/api/v1/inst/trace', { method: 'POST',
         body: JSON.stringify({ inst_id: selectedInstance.value, duration_secs: durationSecs }),
       })
       if (r.status === 401) { handleUnauthorized(); return false }
@@ -641,10 +617,7 @@ export const useMonitorStore = defineStore('monitor', () => {
   async function stopPacketTrace(instId: string) {
     if (!instId) return
     try {
-      const r = await fetch(`/api/rsiot/api/v1/inst/trace?inst_id=${encodeURIComponent(instId)}`, {
-        method: 'DELETE',
-        headers: { Authorization: `Bearer ${useAuthStore().token}` },
-      })
+      const r = await apiFetch(`/api/rsiot/api/v1/inst/trace?inst_id=${encodeURIComponent(instId)}`, { method: 'DELETE' })
       if (r.status === 401) { handleUnauthorized(); return }
       if (!r.ok) console.warn('monitor: deactivate packet trace failed', r.status)
     } catch { /* 关闭失败静默（deadline 兜底过期） */ }

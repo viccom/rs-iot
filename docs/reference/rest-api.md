@@ -10,7 +10,7 @@
 | 项 | 值 |
 |---|---|
 | 框架 | axum 0.8（`src/api/mod.rs::build_router`） |
-| 监听 | `0.0.0.0:{api_port}` |
+| 监听 | `{api_bind_host}:{api_port}`（`api_bind_host` 缺省 `0.0.0.0` 保持既有行为，2026-08-26 审计 B3 增量键——与 lux/bridge bind_host 姿态对齐） |
 | 业务前缀 | `/api/v1/...` |
 | 持久层 | lux 嵌入式 KV（Hash: `users`/`passwords`/`instances`/`devices`(遗留)/`groups`/`secrets`/`alarms`/`devmodels`/`devreg`/`discoveries`；string: `accesskey`；Hash: `rtdata:<devId>`；string: `stat:<inst>`；Hash: `ext_tokens`。旧 `tags` 表已退役 M-4——被 devreg.overrides 吸收，遗留数据经 `/api/v1/tags/legacy-export` 导出） |
 | 鉴权中间件 | 全局 `auth::auth_middleware`（`from_fn_with_state`）+ `tower_http::TraceLayer` |

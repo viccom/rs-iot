@@ -508,6 +508,8 @@ async fn restart_reasonix(st: &GwState) -> (bool, Option<String>) {
     match st
         .client
         .post(&url)
+        // warden 重启探针 10s：覆盖上游冷启动（模型加载秒级）+网络往返，
+        // 短于此会把慢启动误判为不健康（审计 B6 补注释）。
         .timeout(Duration::from_secs(10))
         .send()
         .await
@@ -623,6 +625,8 @@ pub async fn fetch_models(
     };
     let mut attempts: Vec<String> = Vec::new();
     for (url, use_openai_auth) in build_models_urls(&req.base_url, &req.kind) {
+        // models 列表探测 15s：上游 /models 是冷查询（部分网关首次全量拉
+        // 目录），比单次补全宽（审计 B6 补注释）。
         let mut r = st.client.get(&url).timeout(Duration::from_secs(15));
         if let Some(k) = &key {
             if use_openai_auth {

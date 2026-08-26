@@ -69,7 +69,7 @@ fn gate_collect(
     Option<BTreeMap<String, crate::types::SampleValue>>,
     BTreeMap<String, crate::types::SampleValue>,
 ) {
-    let snap = snapshot.lock().unwrap();
+    let snap = snapshot.lock().unwrap_or_else(|p| p.into_inner());
     let Some(dev) = snap.get(devid) else {
         gate_rejected.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         tracing::warn!(

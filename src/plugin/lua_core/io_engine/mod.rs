@@ -101,7 +101,10 @@ pub(crate) fn spawn_io_task(
     dropped_frames: std::sync::Arc<std::sync::atomic::AtomicU64>,
     token: tokio_util::sync::CancellationToken,
 ) -> (IoEngine, tokio::task::JoinHandle<()>) {
-    let (tx, mut rx) = mpsc::channel::<IoRequest>(64);
+    // IO 请求队列容量（具名常量，审计 B6）：64 = 并发脚本 IO 意图的
+    // 有界背压（满则脚本侧 await 排队，无丢）。
+    const IO_CHAN_CAP: usize = 64;
+    let (tx, mut rx) = mpsc::channel::<IoRequest>(IO_CHAN_CAP);
     let join = tokio::spawn(async move {
         loop {
             tokio::select! {

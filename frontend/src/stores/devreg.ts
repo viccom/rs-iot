@@ -6,6 +6,7 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
 import { useAuthStore } from './auth'
+import { apiFetch } from '../api/fetch'
 import type { DeviceEntry, DeviceModel } from '../lib/devmeta'
 import type { EffectiveProps } from '../lib/tagops'
 
@@ -83,9 +84,7 @@ export const useDevregStore = defineStore('devreg', () => {
 
   async function fetchJson(path: string): Promise<unknown | null> {
     try {
-      const r = await fetch(path, {
-        headers: { Authorization: `Bearer ${useAuthStore().token}` },
-      })
+      const r = await apiFetch(path)
       if (r.status === 401) {
         useAuthStore().clear()
         return null
@@ -99,12 +98,7 @@ export const useDevregStore = defineStore('devreg', () => {
 
   async function postJson(path: string, body: unknown): Promise<Response | null> {
     try {
-      const r = await fetch(path, {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${useAuthStore().token}`,
-          'Content-Type': 'application/json',
-        },
+      const r = await apiFetch(path, { method: 'POST',
         body: JSON.stringify(body),
       })
       if (r.status === 401) {

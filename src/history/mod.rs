@@ -105,3 +105,65 @@ pub trait HistoryTelemetry: Send + Sync {
     /// 以 `spawn_blocking` 包裹，P5；引擎关闭后 Err 按 0，不 panic）。
     fn series_count(&self) -> u64;
 }
+
+// ---------- 编排注入件（审计 B7：lib.rs 引擎知识收敛） ----------
+//
+// 原 lib.rs 以 ~60 行双 cfg 块 + 三态推导拼装五个注入件（handle/reader/
+// telemetry/stats/state）——引擎内部知识泄漏进编排层。本结构一次产出，
+// lib.rs 只取件；引擎所有权留在调用方（D10 关停序需要 `&mut engine.close`）。
+
+use std::sync::Arc;
+
+/// 引擎编排注入件（AppState 四槽 + HostContext.history + 三态字符串）。
+/// （Debug 省略：trait object 字段无 Debug，同 AppState/HostContext expect 惯例。）
+#[expect(missing_debug_implementations)]
+pub struct EngineParts {
+    /// HostContext.history（pipeline fan_out 出口；fail-soft None）。
+    pub handle: Option<HistoryHandle>,
+    /// AppState.history_reader（Phase 2 读路径）。
+    pub reader: Option<Arc<dyn HistoryReader>>,
+    /// AppState.history_telemetry（Phase 3 治理观测）。
+    pub telemetry: Option<Arc<dyn HistoryTelemetry>>,
+    /// AppState.history_stats（治理计数，与 handle 同源）。
+    pub stats: Option<Arc<rows::HistoryStats>>,
+    /// 三态："ok" | "init_failed" | "disabled"。
+    pub state: Arc<str>,
+}
+
+impl EngineParts {
+    /// feature off 恒 disabled 全 None（P7 enabled=true 告警由调用点）。
+    pub fn disabled() -> Self {
+        Self {
+            handle: None,
+            reader: None,
+            telemetry: None,
+            stats: None,
+            state: Arc::from("disabled"),
+        }
+    }
+
+    /// feature on：从 init 结果提取五件套并推导三态（原 lib.rs 逻辑原样
+    /// 收敛——Some(stats) 与 "ok" 由同一 engine 来源成对产出）。
+    #[cfg(feature = "history")]
+    pub fn of(
+        engine: Option<&engine::HistoryEngine>,
+        cfg: &crate::config::HistoryConfig,
+        hwid: &str,
+    ) -> Self {
+        let handle = engine.and_then(|e| e.handle());
+        let stats = handle.as_ref().map(|h| h.stats.clone());
+        Self {
+            reader: engine.map(|e| e.reader(hwid)),
+            telemetry: engine.map(|e| e.telemetry()),
+            handle,
+            stats,
+            state: if !cfg.enabled {
+                Arc::from("disabled")
+            } else if engine.is_some() {
+                Arc::from("ok")
+            } else {
+                Arc::from("init_failed")
+            },
+        }
+    }
+}

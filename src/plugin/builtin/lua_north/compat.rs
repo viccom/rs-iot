@@ -188,7 +188,7 @@ pub(crate) async fn start_default_north(
     }
     // lux 已有同名配置 → 沿用（用户自定义生效，不覆盖）；auto_start=true 时交
     // try_start_from_lux 启动（本函数不直接 start，防双启动——仍单通道）。
-    let existing = match crate::api::hget(lux, "instances", DEFAULT_INST_ID).await {
+    let existing = match crate::db::hget(lux, "instances", DEFAULT_INST_ID).await {
         Some(raw) => match serde_json::from_str::<InstConfig>(&raw) {
             Ok(inst) => Some(inst),
             Err(e) => {
@@ -680,7 +680,7 @@ mod tests {
         }
 
         // lux 已持久化（REST 可见），auto_start=false（防 lux autoStart 双启动）
-        let raw = crate::api::hget(&client, "instances", DEFAULT_INST_ID)
+        let raw = crate::db::hget(&client, "instances", DEFAULT_INST_ID)
             .await
             .expect("lux 应有实例配置");
         let inst: InstConfig = serde_json::from_str(&raw).expect("配置应可反序列化");
@@ -780,7 +780,7 @@ mod tests {
             DefaultNorth::Started => {}
             other => panic!("既有配置沿用 + 启动应 Started：{other:?}"),
         }
-        let raw = crate::api::hget(&client, "instances", DEFAULT_INST_ID)
+        let raw = crate::db::hget(&client, "instances", DEFAULT_INST_ID)
             .await
             .unwrap();
         let inst: InstConfig = serde_json::from_str(&raw).unwrap();

@@ -88,6 +88,54 @@ pub async fn shutdown_lux(handle: lux::ServerHandle) -> Result<(), crate::error:
     Ok(())
 }
 
+// ---------- lux Hash 读写 helper（审计 B4 自 api/mod.rs 下沉） ----------
+// 原定义于 api 层导致 model::migrate / lua_north::compat 反向 use crate::api
+//（全仓仅有的 2 个循环依赖环根因）——db 是 lux 值转换的应许之家。
+
+/// RESP 单值 → String（Bulk/Simple/Int 直映，其余空串）。
+pub fn str_from_value(v: &lux::EmbeddedValue) -> String {
+    match v {
+        lux::EmbeddedValue::Bulk(b) => String::from_utf8_lossy(b).to_string(),
+        lux::EmbeddedValue::Simple(s) => s.clone(),
+        lux::EmbeddedValue::Int(i) => i.to_string(),
+        _ => String::new(),
+    }
+}
+
+/// `HGETALL key` → JSON 对象（每个 value 尝试解析为 JSON，失败保留原始字符串）。
+pub async fn hgetall(lux: &lux::EmbeddedClient, key: &str) -> serde_json::Value {
+    match lux.execute_value("HGETALL", &[key]).await {
+        Ok(lux::EmbeddedValue::Array(arr)) => {
+            // 奇数长度 = field/value 对不完整（lux HGETALL 正常恒偶数）——尾部
+            // 元素将被丢弃，静默吞不如留痕（审查 Phase2-L4）。
+            if arr.len() % 2 != 0 {
+                tracing::warn!(
+                    "[db] HGETALL {key} 返回奇数长度 {}，尾部元素丢弃",
+                    arr.len()
+                );
+            }
+            let mut map = serde_json::Map::new();
+            let mut i = 0;
+            while i + 1 < arr.len() {
+                let k = str_from_value(&arr[i]);
+                let raw = str_from_value(&arr[i + 1]);
+                let parsed = serde_json::from_str(&raw).unwrap_or(serde_json::Value::String(raw));
+                map.insert(k, parsed);
+                i += 2;
+            }
+            serde_json::Value::Object(map)
+        }
+        _ => serde_json::Value::Object(serde_json::Map::new()),
+    }
+}
+
+/// `HGET key field` → Option<String>（Nil → None）。
+pub async fn hget(lux: &lux::EmbeddedClient, key: &str, field: &str) -> Option<String> {
+    match lux.execute_value("HGET", &[key, field]).await {
+        Ok(v) if !matches!(v, lux::EmbeddedValue::Nil) => Some(str_from_value(&v)),
+        _ => None,
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
