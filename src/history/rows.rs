@@ -38,7 +38,8 @@ pub struct HistoryRow {
 ///
 /// 计数不变量：`sent + dropped + skipped` == fan_out 遍历的 (tag,value) 总数
 /// ——每个出口恰好落入其一。`written/deadbanded/deadband_evaluated/
-/// lane_mismatch/errors` 由 writer 线程在 flush 状态机中递增。
+/// lane_mismatch/errors/nonfinite_skipped/dup_ts_skipped` 由 writer 线程在
+/// flush 状态机中递增。
 ///
 /// Phase 3 治理口径（P2/P3）：死区削减率分母 `deadband_evaluated` 与分子
 /// `deadbanded` 同源同点计数；写错误按行分桶（[`WriteErrorKind`]），
@@ -62,6 +63,11 @@ pub struct HistoryStats {
     pub lane_mismatch: AtomicU64,
     /// insert_rows 失败行数（fail-soft 整批丢弃）。
     pub errors: AtomicU64,
+    /// NaN/Inf 非有限值写侧拒收行数（H1/D-A：坏质量位非有效测量值，不落盘、
+    /// 不毒化 last_val——NaN 参与死区比较恒 false 会使死区永久失效）。
+    pub nonfinite_skipped: AtomicU64,
+    /// 跨批同 series 同 ts 跳过行数（P5 防双点；M11：计数消除对账黑洞）。
+    pub dup_ts_skipped: AtomicU64,
     /// 写错误分桶行数（P3 按 kind 计数，Σ == errors；顺序同 [`WriteErrorKind::ALL`]）。
     pub error_rows: [AtomicU64; 5],
 }
@@ -250,7 +256,8 @@ mod tests {
     use crate::types::{tag_key, Hwid, Sample, SampleValue, TagProps};
 
     /// 零值计数器：字段名与全 pub 即 HistoryStats 的公共契约（无 Default 假设）。
-    /// 绿阶段仅扩构造补新字段（deadband_evaluated/error_rows），断言零改动。
+    /// 绿阶段仅扩构造补新字段（deadband_evaluated/error_rows/nonfinite_skipped/
+    /// dup_ts_skipped），断言零改动。
     fn fresh_stats() -> Arc<HistoryStats> {
         Arc::new(HistoryStats {
             sent: AtomicU64::new(0),
@@ -261,6 +268,8 @@ mod tests {
             skipped: AtomicU64::new(0),
             lane_mismatch: AtomicU64::new(0),
             errors: AtomicU64::new(0),
+            nonfinite_skipped: AtomicU64::new(0),
+            dup_ts_skipped: AtomicU64::new(0),
             error_rows: std::array::from_fn(|_| AtomicU64::new(0)),
         })
     }

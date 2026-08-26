@@ -210,8 +210,12 @@ struct Writer {
 #[cfg(feature = "history")]
 impl Writer {
     /// flush 状态机（逐行，顺序即后写胜出序）：
+    /// 0. Float 非有限值（NaN/Inf）→ `nonfinite_skipped++` 剔行，lane/last_ts/
+    ///    last_val 均不动（H1/D-A：坏质量位非有效测量值——NaN 落盘会毒化
+    ///    last_val 使死区永久失效，读侧 NaN→null 还会让整条曲线消失）；
     /// 1. lane 型变（Float↔Int 互变也拒）→ `lane_mismatch++` 剔除（P3）；
-    /// 2. `last_ts == ts_ms` → 静默跳过，不更新任何状态（P5）；
+    /// 2. `last_ts == ts_ms` → `dup_ts_skipped++` 跳过，不更新任何状态（P5，
+    ///    M11 计数消除对账黑洞）；
     /// 3. deadband=Some 且数值 → `deadband_evaluated++`（P2 分母，与分子
     ///    同点计数）；last_val 有值且 `|new − last| < db` → `deadbanded++`
     ///    跳过，last_val 不更新（PI exception，P4）；
@@ -225,6 +229,13 @@ impl Writer {
         dedup.clear();
         let mut rows: Vec<TsinkRow> = Vec::with_capacity(buf.len());
         for row in buf.drain(..) {
+            // 0. 非有限值拒收（先于 lane 判定）：NaN/Inf 不落盘、不毒化状态
+            if let SampleValue::Float(f) = row.value {
+                if !f.is_finite() {
+                    self.stats.nonfinite_skipped.fetch_add(1, Ordering::SeqCst);
+                    continue;
+                }
+            }
             let lane = lane_of(&row.value);
             let st = self
                 .series
@@ -235,8 +246,9 @@ impl Writer {
                 self.stats.lane_mismatch.fetch_add(1, Ordering::SeqCst);
                 continue;
             }
-            // 2. 同 ts 跨批双点静默跳过
+            // 2. 同 ts 跨批双点跳过（M11：计数对账）
             if st.last_ts == row.ts_ms {
+                self.stats.dup_ts_skipped.fetch_add(1, Ordering::SeqCst);
                 continue;
             }
             // 3. 绝对死区（仅数值；剔行者 last_val 不更新）：P2 口径——
@@ -968,6 +980,140 @@ mod tests {
             stats.written.load(Ordering::SeqCst) <= 1,
             "至多首批单 series 先成功 1 行"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 14. NaN/Inf 写侧拒收 + 死区不毒化（H1/D-A）：同 series 依次发
+    ///     [NaN, 5.0, 5.0]（互异 ts，deadband=1.0）——NaN 计 nonfinite_skipped==1
+    ///     不落盘且不更新任何状态；首笔 5.0 无 last_val 恒档（written==1）；
+    ///     第二笔 5.0 |Δ|=0<1.0 被死区抑制（deadbanded==1）——若 NaN 毒化
+    ///     last_val（NaN 参与比较恒 false）死区失效，第二笔 5.0 也会落盘；
+    ///     重开 select 值集精确等于 {5.0}（NaN 不落盘）。
+    #[test]
+    fn writer_nonfinite_rejected_deadband_not_poisoned() {
+        let dir = unique_dir("nonfinite");
+        let cfg = cfg_with_dir(&dir);
+        let storage = build_storage(&cfg, 8).expect("build_storage 必须成功");
+        let (handle, join) = spawn_writer(storage, &cfg);
+        let stats = handle.stats.clone();
+
+        let base = now_ms();
+        for (i, v) in [f64::NAN, 5.0, 5.0].into_iter().enumerate() {
+            handle
+                .send(row("temp", base + i as i64, SampleValue::Float(v), Some(1.0)))
+                .expect("send 必须成功");
+        }
+        assert!(
+            poll_until(Duration::from_secs(5), || {
+                stats.nonfinite_skipped.load(Ordering::SeqCst) == 1
+                    && stats.written.load(Ordering::SeqCst) == 1
+                    && stats.deadbanded.load(Ordering::SeqCst) == 1
+            }),
+            "NaN 拒收后应得 nonfinite=1/written=1/deadbanded=1,实际 nonfinite={} written={} deadbanded={}",
+            stats.nonfinite_skipped.load(Ordering::SeqCst),
+            stats.written.load(Ordering::SeqCst),
+            stats.deadbanded.load(Ordering::SeqCst)
+        );
+        thread::sleep(Duration::from_millis(200));
+
+        drop(handle);
+        join_with_timeout(
+            join,
+            Duration::from_secs(10),
+            "writer_nonfinite_rejected_deadband_not_poisoned",
+        );
+        assert_eq!(
+            stats.nonfinite_skipped.load(Ordering::SeqCst),
+            1,
+            "NaN 恰一行计拒收"
+        );
+        assert_eq!(
+            stats.written.load(Ordering::SeqCst),
+            1,
+            "只有首笔 5.0 落盘（NaN 拒收 + 第二笔 5.0 死区抑制）"
+        );
+        assert_eq!(
+            stats.deadbanded.load(Ordering::SeqCst),
+            1,
+            "第二笔 5.0 必须被死区抑制——NaN 不得毒化 last_val"
+        );
+
+        let reopened = build_storage(&cfg, 8).expect("writer close 后同目录重开必须成功");
+        let pts = reopened
+            .select("temp", &series_labels(), 0, i64::MAX)
+            .expect("重开后 select 必须成功");
+        let got: Vec<f64> = pts.iter().map(|p| f64_of(&p.value)).collect();
+        assert_eq!(
+            got,
+            vec![5.0],
+            "落盘值集必须精确为 {{5.0}}（NaN 不落盘）"
+        );
+        reopened.close().expect("重开实例 close");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 15. 跨批同 series 同 ts 跳过计数（M11）：同 ts 两行分两批（批间跨攒批
+    ///     周期）——P5 跳过路径必须计 dup_ts_skipped==1 且 written==1；
+    ///     重开 select 单点（值=首笔 1.0，后到同 ts 行被跳过不覆盖）。
+    #[test]
+    fn writer_cross_batch_dup_ts_counted() {
+        let dir = unique_dir("dup-ts");
+        let cfg = cfg_with_dir(&dir);
+        let storage = build_storage(&cfg, 8).expect("build_storage 必须成功");
+        let (handle, join) = spawn_writer(storage, &cfg);
+        let stats = handle.stats.clone();
+
+        let ts = now_ms();
+        handle
+            .send(row("m", ts, SampleValue::Float(1.0), None))
+            .expect("send 必须成功");
+        // 首笔先行落盘（进度信号），再跨至少一个攒批窗口发同 ts 第二笔
+        // ——确保两行分属不同批，走跨批跳过路径（step 2）而非批内去重。
+        assert!(
+            poll_until(Duration::from_secs(5), || {
+                stats.written.load(Ordering::SeqCst) == 1
+            }),
+            "首笔应先落盘 written=1,实际 {}",
+            stats.written.load(Ordering::SeqCst)
+        );
+        thread::sleep(Duration::from_millis(200));
+        handle
+            .send(row("m", ts, SampleValue::Float(2.0), None))
+            .expect("send 必须成功");
+
+        assert!(
+            poll_until(Duration::from_secs(5), || {
+                stats.dup_ts_skipped.load(Ordering::SeqCst) == 1
+            }),
+            "同 ts 第二笔应计 dup_ts_skipped=1,实际 {}",
+            stats.dup_ts_skipped.load(Ordering::SeqCst)
+        );
+        thread::sleep(Duration::from_millis(200));
+
+        drop(handle);
+        join_with_timeout(join, Duration::from_secs(10), "writer_cross_batch_dup_ts_counted");
+        assert_eq!(
+            stats.written.load(Ordering::SeqCst),
+            1,
+            "同 ts 第二笔不落盘，written 保持 1"
+        );
+        assert_eq!(
+            stats.dup_ts_skipped.load(Ordering::SeqCst),
+            1,
+            "跨批同 ts 跳过必须计数（M11 对账）"
+        );
+
+        let reopened = build_storage(&cfg, 8).expect("writer close 后同目录重开必须成功");
+        let pts = reopened
+            .select("m", &series_labels(), 0, i64::MAX)
+            .expect("重开后 select 必须成功");
+        assert_eq!(pts.len(), 1, "该 ts 必须单点");
+        assert_eq!(
+            pts[0].value,
+            Value::F64(1.0),
+            "跨批跳过保首笔：value 必须是 1.0"
+        );
+        reopened.close().expect("重开实例 close");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
