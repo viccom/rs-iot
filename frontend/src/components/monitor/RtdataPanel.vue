@@ -5,7 +5,7 @@
   - 类型不在 rtdata cell（lux 不存原始类型），从 ChildSpec 反查（同模块 2 后端决策）。
 -->
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { RouterLink } from 'vue-router'
 import { useMonitorStore } from '../../stores/monitor'
 import { buildDeviceOwnership } from '../../lib/instRelations'
@@ -78,8 +78,14 @@ const rows = computed(() => {
 
 /** 虚拟滚动：总高度（占位撑开滚动条）。 */
 const totalH = computed(() => rows.value.length * ROW_H)
-/** 可视起始行（夹到 [0, len)）。 */
-const startIdx = computed(() => Math.max(0, Math.floor(scrollTop.value / ROW_H) - BUFFER))
+/** 可视起始行（夹到 [0, len)——上界缺失时过滤收窄（选设备/tag 过滤）后
+ *  scrollTop 残留大值，slice 起点越界渲染出空表，2026-08-26 遥测页实测）。 */
+const startIdx = computed(() =>
+  Math.min(
+    Math.max(0, Math.floor(scrollTop.value / ROW_H) - BUFFER),
+    Math.max(0, rows.value.length - 1),
+  ),
+)
 /** 可视行数（视口能容纳 + 双倍缓冲）。 */
 const visibleCount = computed(() => Math.ceil(viewportH.value / ROW_H) + BUFFER * 2)
 /** 实际渲染的行切片。 */
@@ -88,6 +94,16 @@ const visibleRows = computed(() => rows.value.slice(startIdx.value, startIdx.val
 const padTop = computed(() => startIdx.value * ROW_H)
 /** 下方占位高度（撑总高度）。 */
 const padBottom = computed(() => Math.max(0, totalH.value - padTop.value - visibleRows.value.length * ROW_H))
+
+/** 行集收缩（选设备/过滤收窄）时钳制 scrollTop 到新行集范围内——与 startIdx
+ *  夹取双保险：浏览器对 scrollTop 的收缩钳制依赖 scroll 事件回灌，竞态下
+ *  可能停在大值，此处直接同步状态免空窗（2026-08-26 遥测页实测）。 */
+watch(
+  () => rows.value.length,
+  (len, old) => {
+    if (len < old) scrollTop.value = Math.min(scrollTop.value, Math.max(0, len - 1) * ROW_H)
+  },
+)
 
 /** 滚动事件：更新 scrollTop（虚拟滚动核心）。 */
 function onScroll(e: Event) {
