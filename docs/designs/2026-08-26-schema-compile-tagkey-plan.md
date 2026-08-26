@@ -1,6 +1,16 @@
 # C1-C3：schema 默认值单源 / 默认编译面收敛 / tag_key 串扰修复
 
-> **状态**：in-progress（分支 `fix/schema-port-tagkey`，worktree `E:/Rs_Codes/rs-iot-c123`）
+> **状态**：implemented（2026-08-26 收口；C1-C3 全修，四档门禁全绿）
+
+## 验收记录
+
+| 项 | commit | 锚点 |
+|---|---|---|
+| C1 默认值单源 | `7d88344` | 四模块 DEFAULT_* 常量；**漂移实证 5 处修正**（period 前端全系误写 1，后端 3/3/3/2；modbus reconnect 2≠3；补 gap 16/s7 timeout 5000）；schema-values.test.ts 前端镜像锁 5 测 + modbus 后端锁定测；前端 202+build |
+| C2 编译面+ticker | `cfd6ded` | default=[lua,lua-http,opcua,modbus]；ticker→src/ticker.rs 12 消费点；decisions 登记；s7 2/2+eip 2/2+feature_gate 4/4 |
+| C3 tag_key fail-closed | `7f7cbc0` | effective_all 碰撞剔除+warn；红（后写胜）→绿；前端最长前缀精确剥离；collision 2/2+model 101/101 |
+
+**门禁**（实测）：fmt；clippy 三档（默认/history/s7,eip）零警告；test 四档（默认 614 lib 全绿/history 全绿/minimal 360/s7,eip 全绿）；前端 202+build。
 > **日期**：2026-08-26
 > **来源**：三项 backlog 的用户裁决——①pluginSchemas 短期修法；②插件编译面收敛为 datasim/lua/modbus/opcua + 最小风险拆分方案；③tag_key 串扰按最优方案修复
 
