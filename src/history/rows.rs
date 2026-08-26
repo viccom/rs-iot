@@ -19,6 +19,11 @@ const TS_WINDOW_PAST_MS: i64 = 7 * 86_400_000;
 /// fan_out 时界窗上界前瞻（D-C，毫秒口径）：晚于 now+1h 的 ts 拒收（容采集端
 /// 小幅时钟超前；大幅超前视为错配/恶意）。
 const TS_WINDOW_FUTURE_MS: i64 = 3_600_000;
+/// fan_out 长度预检上限（M2，UTF-8 字节）：tag ≤ 64KiB——`String::len` 即
+/// 字节长；超长行单行拒收计 `len_rejected`，不再以 tsink 拒整批方式连坐。
+const TAG_MAX_BYTES: usize = 65_535;
+/// fan_out 长度预检上限（M2，UTF-8 字节）：devid/hwid series label ≤ 16KiB。
+const LABEL_MAX_BYTES: usize = 16 * 1024;
 
 /// fan-out 出口行：`fan_out` 产出、writer 线程消费的热路径中间类型
 /// （刻意不含 tsink 类型，P6）。
@@ -43,8 +48,8 @@ pub struct HistoryRow {
 
 /// 历史旁路计数：e2e 确定性与 Phase 3 metrics 的数据源。
 ///
-/// 计数不变量：`sent + dropped + skipped + ts_rejected` == fan_out 遍历的
-/// (tag,value) 总数——每个出口恰好落入其一。`written/deadbanded/
+/// 计数不变量：`sent + dropped + skipped + ts_rejected + len_rejected` ==
+/// fan_out 遍历的 (tag,value) 总数——每个出口恰好落入其一。`written/deadbanded/
 /// deadband_evaluated/lane_mismatch/errors/nonfinite_skipped/dup_ts_skipped`
 /// 由 writer 线程在 flush 状态机中递增。
 ///
@@ -78,6 +83,9 @@ pub struct HistoryStats {
     /// 时间戳域坏行数（M1/D-C：`ts×1000` 溢出或超出 `[now−7d, now+1h]`
     /// 时界窗——坏 ts 单行拒收，不再连坐整批）。
     pub ts_rejected: AtomicU64,
+    /// 超长行数（M2：tag > 64KiB / devid、hwid > 16KiB（UTF-8 字节）——
+    /// 超长行单行拒收，不再连坐整批）。
+    pub len_rejected: AtomicU64,
     /// 写错误分桶行数（P3 按 kind 计数，Σ == errors；顺序同 [`WriteErrorKind::ALL`]）。
     pub error_rows: [AtomicU64; 5],
 }
@@ -210,14 +218,16 @@ impl HistoryHandle {
 /// history 默认 false 是安全默认）；白名单命中后再过 **M1 时界钳制**：
 /// `timestamp.checked_mul(1000)` 溢出或 `ts_ms` 落在 `[now_ms−7d,
 /// now_ms+1h]`（D-C 窗，批首取一次 now）之外 → `ts_rejected++` 单行拒收
-/// ——坏时间戳不再以 tsink 拒整批的方式连坐同批好行；通过者构造
-/// [`HistoryRow`] 经 `try_send` 直通——Ok 计 `sent`，Err（满或断开）计
-/// `dropped`，均不阻塞。
+/// ——坏时间戳不再以 tsink 拒整批的方式连坐同批好行；随后 **M2 长度预检**：
+/// tag > 64KiB / devid、hwid > 16KiB（UTF-8 字节）→ `len_rejected++` 单行
+/// 拒收（同理防连坐）；通过者构造 [`HistoryRow`] 经 `try_send` 直通——Ok 计
+/// `sent`，Err（满或断开）计 `dropped`，均不阻塞。
 ///
-/// 计数本地累积（P11）：四计数在循环内只动本地变量，循环外每 flush
+/// 计数本地累积（P11）：五计数在循环内只动本地变量，循环外每 flush
 /// 一次性原子合并（SeqCst 保持），消除逐行原子争用。
 pub fn fan_out(samples: &[Sample], effective: &HashMap<String, TagProps>, h: &HistoryHandle) {
-    let (mut sent, mut dropped, mut skipped, mut ts_rejected) = (0u64, 0u64, 0u64, 0u64);
+    let (mut sent, mut dropped, mut skipped, mut ts_rejected, mut len_rejected) =
+        (0u64, 0u64, 0u64, 0u64, 0u64);
     // 批首一次 now_ms（D-C）：整批同一时间基，行间判定不因取时刻漂移抖动；
     // 时钟异常（epoch 前）取 0 → 所有行落窗外拒收，fail-soft 且 ts_rejected 可观测。
     let now_ms = std::time::SystemTime::now()
@@ -252,6 +262,15 @@ pub fn fan_out(samples: &[Sample], effective: &HashMap<String, TagProps>, h: &Hi
                     continue;
                 }
             };
+            // M2 长度预检：tag/devid/hwid 超长（UTF-8 字节）单行拒收——
+            // tsink 对超长行拒整批，写入侧预检避免连坐同批好行。
+            if tag.len() > TAG_MAX_BYTES
+                || sample.devid.len() > LABEL_MAX_BYTES
+                || sample.hwid.as_ref().len() > LABEL_MAX_BYTES
+            {
+                len_rejected += 1;
+                continue;
+            }
             let row = HistoryRow {
                 devid: sample.devid.clone(),
                 hwid: sample.hwid.as_ref().to_owned(),
@@ -271,6 +290,7 @@ pub fn fan_out(samples: &[Sample], effective: &HashMap<String, TagProps>, h: &Hi
     stats.dropped.fetch_add(dropped, Ordering::SeqCst);
     stats.skipped.fetch_add(skipped, Ordering::SeqCst);
     stats.ts_rejected.fetch_add(ts_rejected, Ordering::SeqCst);
+    stats.len_rejected.fetch_add(len_rejected, Ordering::SeqCst);
 }
 
 #[cfg(test)]
@@ -299,6 +319,7 @@ mod tests {
             nonfinite_skipped: AtomicU64::new(0),
             dup_ts_skipped: AtomicU64::new(0),
             ts_rejected: AtomicU64::new(0),
+            len_rejected: AtomicU64::new(0),
             error_rows: std::array::from_fn(|_| AtomicU64::new(0)),
         })
     }
@@ -674,13 +695,54 @@ mod tests {
             "溢出与 now−8d 两行必须拒收，只有窗内 now−1h 一行发出"
         );
         assert_eq!(rows[0].ts_ms, (now_s - 3600) * 1000, "窗内行 ts 精确映射");
-        assert_eq!(
-            handle.stats().ts_rejected.load(Ordering::SeqCst),
-            2,
-            "i64::MAX 溢出与 now−8d 两行必须计 ts_rejected"
-        );
+        assert_eq!(handle.stats().ts_rejected.load(Ordering::SeqCst), 2, "i64::MAX 溢出与 now−8d 两行必须计 ts_rejected");
         assert_eq!(handle.stats().sent.load(Ordering::SeqCst), 1);
         assert_eq!(handle.stats().dropped.load(Ordering::SeqCst), 0);
+        assert_eq!(handle.stats().skipped.load(Ordering::SeqCst), 0);
+    }
+
+    /// 8. fan_out 长度预检（M2）：白名单命中后 tag 超长（70KiB > 64KiB 上限）
+    ///    → len_rejected==1 且不发送——超长行不再以 tsink 拒整批方式连坐
+    ///    同批好行；同批窗内正常 tag 照常发送。当前实现照发（红：len_rejected==0）。
+    #[test]
+    fn fan_out_oversize_tag_rejected() {
+        let (tx, mut rx) = mpsc::channel(64);
+        let handle = HistoryHandle::new(tx, fresh_stats());
+
+        let big_tag = "x".repeat(70 * 1024);
+        let now = now_secs();
+        let samples = vec![
+            sample("dev1", "hw1", now, &[(&big_tag, SampleValue::Float(1.0))]),
+            sample("dev1", "hw1", now, &[("ok_tag", SampleValue::Float(2.0))]),
+        ];
+        let mut effective = HashMap::new();
+        effective.insert(
+            tag_key("dev1", &big_tag),
+            TagProps {
+                history: true,
+                ..TagProps::default()
+            },
+        );
+        effective.insert(
+            tag_key("dev1", "ok_tag"),
+            TagProps {
+                history: true,
+                ..TagProps::default()
+            },
+        );
+
+        fan_out(&samples, &effective, &handle);
+
+        let rows = drain(&mut rx);
+        assert_eq!(rows.len(), 1, "超长 tag 单行拒收，正常 tag 照发不连坐");
+        assert_eq!(rows[0].tag, "ok_tag");
+        assert_eq!(
+            handle.stats().len_rejected.load(Ordering::SeqCst),
+            1,
+            "超长 tag 必须计 len_rejected"
+        );
+        assert_eq!(handle.stats().sent.load(Ordering::SeqCst), 1);
+        assert_eq!(handle.stats().ts_rejected.load(Ordering::SeqCst), 0);
         assert_eq!(handle.stats().skipped.load(Ordering::SeqCst), 0);
     }
 }

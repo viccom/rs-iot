@@ -342,8 +342,8 @@ pub(crate) struct TelemetrySnapshot {
 ///
 /// **仅引擎 ok（stats 存在）时被 handler 调用**：disabled/init_failed 态不输出
 /// ——零值 counter 会误导抓取方以为归档在跑而数据为零。计数语义与
-/// `HistoryStats` 字段一一对应（`sent+dropped+skipped+ts_rejected == fan_out
-/// 遍历总数`）。
+/// `HistoryStats` 字段一一对应（`sent+dropped+skipped+ts_rejected+len_rejected
+/// == fan_out 遍历总数`）。
 ///
 /// 治理扩展：白名单规模/引擎水位 gauge（`t` 快照 + `archived_tags`）、死区
 /// 评估 counter 与削减率 gauge（P2：ratio = deadbanded/evaluated，分母 0 时
@@ -401,6 +401,11 @@ pub(crate) fn render_history(
             "rs_iot_history_ts_rejected_total",
             "历史时间戳域坏拒收行数(M1:×1000溢出或超[now-7d,now+1h]窗)",
             h.ts_rejected.load(rel),
+        ),
+        (
+            "rs_iot_history_len_rejected_total",
+            "历史超长行拒收行数(M2:tag>64KiB/label>16KiB)",
+            h.len_rejected.load(rel),
         ),
         (
             "rs_iot_history_errors_total",
@@ -699,12 +704,13 @@ mod tests {
         h.nonfinite_skipped.store(4, Ordering::Relaxed);
         h.dup_ts_skipped.store(6, Ordering::Relaxed);
         h.ts_rejected.store(10, Ordering::Relaxed);
+        h.len_rejected.store(12, Ordering::Relaxed);
         h.errors.store(9, Ordering::Relaxed);
         h
     }
 
     #[test]
-    fn render_history_seventeen_families_with_values() {
+    fn render_history_eighteen_families_with_values() {
         let out = render_history(
             &history_stats(),
             &TelemetrySnapshot {
@@ -714,13 +720,13 @@ mod tests {
             },
             1,
         );
-        // 恰好 17 个 family:9 既有+新增 counter(nonfinite_skipped/dup_ts_skipped/
-        // ts_rejected)+ 7 治理(四水位 gauge + 死区评估 counter + 削减率 gauge
-        // + 写错误五桶 labeled counter)
+        // 恰好 18 个 family:9 既有+新增 counter(nonfinite_skipped/dup_ts_skipped/
+        // ts_rejected/len_rejected)+ 7 治理(四水位 gauge + 死区评估 counter +
+        // 削减率 gauge + 写错误五桶 labeled counter)
         assert_eq!(
             out.lines().filter(|l| l.starts_with("# TYPE ")).count(),
-            17,
-            "history 应输出 17 个 metric family"
+            18,
+            "history 应输出 18 个 metric family"
         );
         // 每个 family:HELP/TYPE 头 + 数值行
         for (name, val) in [
@@ -733,6 +739,7 @@ mod tests {
             ("rs_iot_history_nonfinite_skipped_total", "4"),
             ("rs_iot_history_dup_ts_skipped_total", "6"),
             ("rs_iot_history_ts_rejected_total", "10"),
+            ("rs_iot_history_len_rejected_total", "12"),
             ("rs_iot_history_errors_total", "9"),
         ] {
             assert!(
