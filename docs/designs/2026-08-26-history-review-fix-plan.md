@@ -1,9 +1,29 @@
 # 历史存储 Phase 1/2/3 审查修复计划
 
-> **状态**：in-progress（分支 `fix/history-review-fix`，worktree `E:/Rs_Codes/rs-iot-review-fix`）
+> **状态**：implemented（2026-08-26 收口；High×5 + Medium×11 全修，Low×17 延后见 §七/backlog）
 > **日期**：2026-08-26
 > **来源**：Phase 1/2/3 深度代码审查（三路并行审查 + 主会话逐项复核，**16/16 复核成立**，无一推翻；Low 17 项延后见 §七）
 > **范围**：仅 High×5 + Medium×11；不动 Low；不动数据面架构（写路径 D1-D11 ADR 不变）
+
+## 验收记录（2026-08-26，全部真实运行输出见各 commit）
+
+| 项 | commit | 红→绿锚点 |
+|---|---|---|
+| F1 H1+M11 NaN 拒收+dup_ts 计数 | `52b995d` | writer 10 测（新增 2：nonfinite 不毒化死区/跨批同 ts 计数）+render 16→18 family |
+| F2 M1 时界钳制+checked_mul | `7f04565` | rows 单测 3 例（溢出/now−8d 拒、now−1h 收） |
+| F3 M2 长度预检 | `61d80e9` | rows 单测（70KiB tag 拒） |
+| F4 H4 配置校验+饱和乘法 | `9399dae` | config 非法值矩阵 Err + engine_invalid_config_err_not_panic（红：巨值 Ok/panic→绿：Err） |
+| F5 M3 spawn Err 通道 | `402b623` | 豁免行为红测（线程创建失败不可注入，登记）；12 测试调用点机械适配 |
+| F6 M6 series TTL 缓存 | `b83103c` | telemetry_series_count_ttl_cached（红：直插即见 2→绿：TTL 内 1/过期 2；测试档 TTL 2s） |
+| F7 H3 Restart 双 bump | `51492e3` | watch_restart_double_bump_covers_midwindow_cursors（单 bump 盲区对照臂）+watch e2e 4/4 |
+| F8 H5 checked_sub | `b8efa37` | 400 矩阵 +1 例（红：`attempt to subtract with overflow`→绿：400）；read e2e 10/10 |
+| F9 M4 panic 监督 | `0c7cc6d` | watch_supervise_restarts_on_panic（编译红→绿；panic×2→epoch 恰+2）+subscribe e2e 11/11 |
+| F10 M5 投影守门 | `ff7fcca` | 单测×2（含删投影对照臂）+e2e JSON 断言（devB.t1 不误报）；守门测试预期即绿（D-F；夹具首跑红系裸 tag 误用，修正记录于 commit） |
+| F11 M10 R13 登记 | `6a43d35` | 文档（phase2 plan §二 R13） |
+| F12-F15 前端 H2/M7/M8/M9 | `60c6a21`/`64c27e2`/`7ef2fae`/`9ad8ebc` | 196 测（基线 188+8）+ build 过 |
+| 文档同步 | 本 commit | rest-api.md §4.1 十三计数器/§4.10 18 family/§4.18 写侧拒收语义+校验边界+400 溢出+面板迁址（Low-L1 顺手） |
+
+**门禁**：全量四档 cargo test（默认/history/minimal）+ 双档 clippy + fmt + 前端 vitest 196+build——见收口 commit。
 
 **Goal**: 消除审查发现的 5 High / 11 Medium——NaN/Inf 数值域防线、tsink「一行连坐」写入预检、配置边界校验与算术溢出、订阅重建窗口丢帧与 panic 监督、测试守门缺口、前端脏数据防御。
 

@@ -99,6 +99,15 @@ L3 的批量操作面 = 已交付的 `POST /api/v1/tag/batch`（glob）。归档
 5. （lux 侧联动，非 fork）KSUB field 级事件增强（现 key 级，HSET 后仍需 HGETALL 该设备）
 6. 运行期 cardinality limit setter（或引擎重启重校准）——Phase 3 实测命中 R4 边界：运行期扩白名单不重算 cardinality（启动白名单 0→校准 1→开 3 标签全拒，`errors_by_kind.cardinality` 精确暴露），现须重启才按新白名单校准归档
 
+## 七-2、审查遗留 backlog（2026-08-26 深度审查修复包延后项）
+
+Phase 1/2/3 深度审查发现 High×5 + Medium×11 已全部修复（[2026-08-26-history-review-fix-plan.md](2026-08-26-history-review-fix-plan.md) 验收记录）；Low 级延后清单：
+
+- **写路径**：`last_ts` 取 max 语义（乱序流跨批双点变体，R3 同族）；`tag_key` contains 白名单前缀串扰（与 rtdata 同源，知情登记）；`model::cache` RwLock 毒化 unwrap（改 into_inner）
+- **读/订阅**：恒真断言（subscribe e2e buf<1MB）；反压红门判别弱于构造（补推 1 台即绿）；dev_id/tag 读侧长度上限；hgetall 奇数长度静默丢尾 warn
+- **治理/前端**：hqTagOptions startsWith 前缀歧义（tag_key 串扰同根）；archived_tags 两处重复计数；WriteErrorKind index/ALL 双硬编码；死区评估分母口径文案（step1/2 排除点）；init_failed e2e 未断言 /metrics family 省略；datalist 固定 DOM id；stats Some+telemetry None 零值水位防御分支；500 body error 细节前端透传
+- （Low-L1 rest-api 面板位置已随修复包顺手同步）
+
 ## 附录：实测基线（2026-08-24，Ryzen 9 5900HX/63GB/NVMe/Win10；真实边缘盒按比例折减，相对关系可迁移）
 
 **tsink 内嵌（tsink-bench，重启零丢失全轮验证，磁盘 7.7-8.9 B/点）**：单写×2000 点批 **182,292 pts/s**（p50 9.0ms）/ 4 写×500 点 143,598 / 16 写×200 点 83,028 / 50 写×200 点 38,404（p50 264ms，WAL 锁护航）/ 50 写 PerAppend 24,802（p50 410ms）/ mixed 50 写+读：读 p50 0.08ms；进程 WS 峰：单写 ~390MB，50 客户端 ~1.0GB；CPU 全程 ≤13%（16 核占比）；close 排空 8-13s。
