@@ -205,6 +205,12 @@ export function historyErrorMessage(status: number, body: string): string {
     const err = typeof obj?.error === 'string' ? obj.error : ''
     return `查询参数错误（400）：${err || body}`
   }
+  if (status === 500) {
+    // 500 提取 JSON error（审查 L9）：后端引擎串（如 "history engine: ..."）
+    // 不再被吞，排障不必开网络面板。
+    const err = typeof obj?.error === 'string' ? obj.error : ''
+    return `查询失败（500）：${err || body}`
+  }
   return `查询失败（HTTP ${status}）`
 }
 

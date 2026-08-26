@@ -280,9 +280,14 @@ async fn subscribe_with_jwt_200_event_stream() {
     let (app, handle, _lux) = test_app("sub200").await;
     let tok = jwt(&app).await;
     let mut stream = connect(&app, "", &tok).await;
-    // 骨架（空流）下流立即结束——窗口收集返回空或 keep-alive，不卡死即可。
+    // 骨架（空流）下流立即结束——窗口收集返回空或 keep-alive，不卡死即可
+    // （原 <1MB 断言恒真无守门价值，审查 Phase2-L1）；强化：空库连接不得
+    // 推任何数据帧（snapshot/datachange 出现即骨架破例）。
     let buf = collect_window(&mut stream, std::time::Duration::from_millis(300)).await;
-    assert!(buf.len() < 1 << 20);
+    assert!(
+        !buf.contains("event: datachange") && !buf.contains("event: snapshot"),
+        "空库连接不得推数据帧: {buf}"
+    );
     common::stop_lux(handle).await;
 }
 
@@ -579,9 +584,35 @@ async fn ksub_change_during_snapshot_not_lost() {
     // 的值变更必须以 datachange 补推。
     let buf2 = collect_window(&mut stream, std::time::Duration::from_millis(1500)).await;
     let combined = format!("{buf1}{buf2}");
+    // 判别强化（审查 Phase2-L2）：原 contains 单帧即绿——补推 1 台也过；改为
+    // JSON 解析统计 datachanges 中携带新值 "9" 的不同设备数，构造注释的
+    // "≥9 台已推走旧值"下界必须兑现（20 台 − channel 容量 8）。
+    let mut updated: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for line in combined.lines() {
+        let Some(payload) = line.strip_prefix("data: ") else {
+            continue;
+        };
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(payload) else {
+            continue;
+        };
+        let Some(changes) = v.get("changes").and_then(|c| c.as_object()) else {
+            continue;
+        };
+        for (field, cell) in changes {
+            let is_nine = cell
+                .as_array()
+                .and_then(|a| a.last())
+                .and_then(|e| e.as_str())
+                .is_some_and(|s| s == "9");
+            if is_nine {
+                updated.insert(field.clone());
+            }
+        }
+    }
     assert!(
-        combined.contains("event: datachange"),
-        "snapshot 期间的值变更不得丢帧（游标基线须先于 snapshot 建立）: {combined}"
+        updated.len() >= 9,
+        "snapshot 期间的值变更不得丢帧：新值 9 须补推 ≥9 台（20−8 下界），实际 {} 台: {combined}",
+        updated.len()
     );
     token.cancel();
     common::stop_lux(handle).await;

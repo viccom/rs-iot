@@ -197,6 +197,20 @@ async fn init_failed_real_lock_503_and_failsoft() {
         "归档 init 失败不得影响主链路(fail-soft)"
     );
 
+    // ---- ③b /metrics → history family 省略（P6 契约的真实 init_failed 态锁点；
+    //      原仅 visibility e2e 注入态覆盖，审查 Phase3-L6）----
+    let resp = client
+        .get(format!("{base}/metrics"))
+        .send()
+        .await
+        .expect("metrics 请求");
+    assert_eq!(resp.status(), 200);
+    let body = resp.text().await.expect("metrics body 文本");
+    assert!(
+        !body.contains("rs_iot_history_"),
+        "init_failed 态 /metrics 不得输出 history family（误导性零值防线）"
+    );
+
     // ---- 6. cancel → app 正常退出（返回 Ok；30s 兜底容 pipeline join 5s + lux SAVE） ----
     shutdown.cancel();
     tokio::time::timeout(Duration::from_secs(30), app_handle)

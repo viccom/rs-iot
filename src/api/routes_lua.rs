@@ -797,10 +797,13 @@ mod tests {
                 .join("hex.lua")
         );
         assert!(asset_read_path(Some("bogus"), "x").is_err());
-        // 白名单仍生效：lib 单段 / 撞保留段 / 穿越照拒
+        // 白名单仍生效：lib 单段 / 穿越照拒
         assert!(asset_read_path(Some("lib"), "foo.lua").is_err());
-        assert!(asset_read_path(Some("lib"), "algo/evil.lua").is_err());
         assert!(asset_read_path(Some("lib"), "../evil.lua").is_err());
+        // 撞保留段仅 lua feature 开启时拒绝——is_reserved_lib_top 关档恒
+        // false 系设计（require 路由层缺席，保留段语义无从谈起，见其 doc）。
+        #[cfg(feature = "lua")]
+        assert!(asset_read_path(Some("lib"), "algo/evil.lua").is_err());
     }
 
     // ---- sync 生效 pin 解析（§3.3 默认锁定，阶段 A 审查修复）----
@@ -1066,12 +1069,19 @@ mod tests {
     }
 
     /// 非法 lib 名在保存核心同门被拒（校验先于任何 fs 副作用）。
+    /// 撞保留段（algo/…）仅 lua feature 开启时拒绝——is_reserved_lib_top
+    /// 关档恒 false 系设计（见其 doc），minimal 档该拒绝项缺席。
     #[test]
     fn lib_save_rejects_invalid_names() {
         let tmp = fresh_tmp("lib-save-reject");
-        for bad in ["foo.lua", "algo/evil.lua", "../evil.lua"] {
+        for bad in ["foo.lua", "../evil.lua"] {
             assert!(save_lib_under(&tmp, bad, "x").is_err(), "应拒绝：{bad}");
         }
+        #[cfg(feature = "lua")]
+        assert!(
+            save_lib_under(&tmp, "algo/evil.lua", "x").is_err(),
+            "应拒绝：algo/evil.lua"
+        );
         assert!(!tmp.join("_lib").exists(), "拒绝的保存不应建 _lib 目录");
         let _ = std::fs::remove_dir_all(&tmp);
     }

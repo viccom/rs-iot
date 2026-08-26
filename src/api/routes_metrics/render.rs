@@ -398,6 +398,11 @@ pub(crate) fn render_history(
             h.dup_ts_skipped.load(rel),
         ),
         (
+            "rs_iot_history_stale_ts_dropped_total",
+            "历史跨批回卷严格更旧 ts 丢弃行数(D-T3:迟到样本不落盘)",
+            h.stale_ts_dropped.load(rel),
+        ),
+        (
             "rs_iot_history_ts_rejected_total",
             "历史时间戳域坏拒收行数(M1:×1000溢出或超[now-7d,now+1h]窗)",
             h.ts_rejected.load(rel),
@@ -703,6 +708,7 @@ mod tests {
         h.lane_mismatch.store(1, Ordering::Relaxed);
         h.nonfinite_skipped.store(4, Ordering::Relaxed);
         h.dup_ts_skipped.store(6, Ordering::Relaxed);
+        h.stale_ts_dropped.store(3, Ordering::Relaxed);
         h.ts_rejected.store(10, Ordering::Relaxed);
         h.len_rejected.store(12, Ordering::Relaxed);
         h.errors.store(9, Ordering::Relaxed);
@@ -710,7 +716,7 @@ mod tests {
     }
 
     #[test]
-    fn render_history_eighteen_families_with_values() {
+    fn render_history_nineteen_families_with_values() {
         let out = render_history(
             &history_stats(),
             &TelemetrySnapshot {
@@ -720,13 +726,13 @@ mod tests {
             },
             1,
         );
-        // 恰好 18 个 family:9 既有+新增 counter(nonfinite_skipped/dup_ts_skipped/
-        // ts_rejected/len_rejected)+ 7 治理(四水位 gauge + 死区评估 counter +
+        // 恰好 19 个 family:8 既有+新增 counter(nonfinite_skipped/dup_ts_skipped/
+        // stale_ts_dropped/ts_rejected/len_rejected)+ 7 治理(四水位 gauge + 死区评估 counter +
         // 削减率 gauge + 写错误五桶 labeled counter)
         assert_eq!(
             out.lines().filter(|l| l.starts_with("# TYPE ")).count(),
-            18,
-            "history 应输出 18 个 metric family"
+            19,
+            "history 应输出 19 个 metric family"
         );
         // 每个 family:HELP/TYPE 头 + 数值行
         for (name, val) in [
@@ -738,6 +744,7 @@ mod tests {
             ("rs_iot_history_lane_mismatch_total", "1"),
             ("rs_iot_history_nonfinite_skipped_total", "4"),
             ("rs_iot_history_dup_ts_skipped_total", "6"),
+            ("rs_iot_history_stale_ts_dropped_total", "3"),
             ("rs_iot_history_ts_rejected_total", "10"),
             ("rs_iot_history_len_rejected_total", "12"),
             ("rs_iot_history_errors_total", "9"),
