@@ -80,6 +80,10 @@ impl Default for SeriesState {
 /// spawn 单写线程并返回发送句柄与线程 join（D3：8 MiB 栈，陷阱 4——默认栈
 /// 不够 tsink 排空/compaction 递归）。
 ///
+/// 线程创建失败（资源耗尽等）返回 `Err`（M3/P8 fail-soft）：由 engine 侧
+/// 串化进既有 init_failed Err 通道（error! + 引擎 None + 主程序继续），
+/// 不再 `expect` panic 击穿启动序。
+///
 /// 线程内建一次 current_thread runtime 驱动 tokio mpsc 的超时 recv（std
 /// thread 无法直接 await）：`timeout(50ms, rx.recv())` 攒批，窗口满
 /// `batch_max_rows` 或超时即 flush；sender 全断（recv None）→ 排空残余 →
@@ -88,7 +92,7 @@ impl Default for SeriesState {
 pub fn spawn_writer(
     storage: StorageHandle,
     cfg: &HistoryConfig,
-) -> (HistoryHandle, std::thread::JoinHandle<()>) {
+) -> Result<(HistoryHandle, std::thread::JoinHandle<()>), String> {
     let (tx, rx) = mpsc::channel(cfg.channel_capacity);
     let stats = Arc::new(HistoryStats::default());
     let handle = HistoryHandle::new(tx, stats.clone());
@@ -97,8 +101,8 @@ pub fn spawn_writer(
         .stack_size(8 * 1024 * 1024)
         .name("history-writer".to_owned())
         .spawn(move || writer_loop(storage, stats, rx, batch_max))
-        .expect("spawn history writer thread");
-    (handle, join)
+        .map_err(|e| format!("spawn history writer thread: {e}"))?;
+    Ok((handle, join))
 }
 
 /// 写线程主循环（见 [`spawn_writer`] 文档）。
@@ -471,7 +475,8 @@ mod tests {
         let dir = unique_dir("flush");
         let cfg = cfg_with_dir(&dir);
         let storage = build_storage(&cfg, 100).expect("build_storage 必须成功");
-        let (handle, join) = spawn_writer(storage, &cfg);
+        let (handle, join) = spawn_writer(storage, &cfg)
+            .expect("测试环境 spawn history writer 线程必须成功");
         let stats = handle.stats.clone();
 
         let base = now_ms();
@@ -526,7 +531,8 @@ mod tests {
         let dir = unique_dir("deadband");
         let cfg = cfg_with_dir(&dir);
         let storage = build_storage(&cfg, 8).expect("build_storage 必须成功");
-        let (handle, join) = spawn_writer(storage, &cfg);
+        let (handle, join) = spawn_writer(storage, &cfg)
+            .expect("测试环境 spawn history writer 线程必须成功");
         let stats = handle.stats.clone();
 
         let base = now_ms();
@@ -581,7 +587,8 @@ mod tests {
         let dir = unique_dir("deadband-nonnum");
         let cfg = cfg_with_dir(&dir);
         let storage = build_storage(&cfg, 8).expect("build_storage 必须成功");
-        let (handle, join) = spawn_writer(storage, &cfg);
+        let (handle, join) = spawn_writer(storage, &cfg)
+            .expect("测试环境 spawn history writer 线程必须成功");
         let stats = handle.stats.clone();
 
         let base = now_ms();
@@ -644,7 +651,8 @@ mod tests {
         let dir = unique_dir("dedup");
         let cfg = cfg_with_dir(&dir);
         let storage = build_storage(&cfg, 8).expect("build_storage 必须成功");
-        let (handle, join) = spawn_writer(storage, &cfg);
+        let (handle, join) = spawn_writer(storage, &cfg)
+            .expect("测试环境 spawn history writer 线程必须成功");
         let stats = handle.stats.clone();
 
         let ts = now_ms();
@@ -698,7 +706,8 @@ mod tests {
         let dir = unique_dir("lane");
         let cfg = cfg_with_dir(&dir);
         let storage = build_storage(&cfg, 8).expect("build_storage 必须成功");
-        let (handle, join) = spawn_writer(storage, &cfg);
+        let (handle, join) = spawn_writer(storage, &cfg)
+            .expect("测试环境 spawn history writer 线程必须成功");
         let stats = handle.stats.clone();
 
         let ts_float = now_ms();
@@ -756,7 +765,8 @@ mod tests {
         let dir = unique_dir("fidelity");
         let cfg = cfg_with_dir(&dir);
         let storage = build_storage(&cfg, 8).expect("build_storage 必须成功");
-        let (handle, join) = spawn_writer(storage, &cfg);
+        let (handle, join) = spawn_writer(storage, &cfg)
+            .expect("测试环境 spawn history writer 线程必须成功");
         let stats = handle.stats.clone();
 
         let ts = now_ms();
@@ -866,7 +876,8 @@ mod tests {
         let dir = unique_dir("deadband-eval");
         let cfg = cfg_with_dir(&dir);
         let storage = build_storage(&cfg, 8).expect("build_storage 必须成功");
-        let (handle, join) = spawn_writer(storage, &cfg);
+        let (handle, join) = spawn_writer(storage, &cfg)
+            .expect("测试环境 spawn history writer 线程必须成功");
         let stats = handle.stats.clone();
 
         let base = now_ms();
@@ -935,7 +946,8 @@ mod tests {
         let dir = unique_dir("err-kind-card");
         let cfg = cfg_with_dir(&dir);
         let storage = build_storage(&cfg, 1).expect("build_storage 必须成功");
-        let (handle, join) = spawn_writer(storage, &cfg);
+        let (handle, join) = spawn_writer(storage, &cfg)
+            .expect("测试环境 spawn history writer 线程必须成功");
         let stats = handle.stats.clone();
 
         let ts = now_ms();
@@ -994,7 +1006,8 @@ mod tests {
         let dir = unique_dir("nonfinite");
         let cfg = cfg_with_dir(&dir);
         let storage = build_storage(&cfg, 8).expect("build_storage 必须成功");
-        let (handle, join) = spawn_writer(storage, &cfg);
+        let (handle, join) = spawn_writer(storage, &cfg)
+            .expect("测试环境 spawn history writer 线程必须成功");
         let stats = handle.stats.clone();
 
         let base = now_ms();
@@ -1060,7 +1073,8 @@ mod tests {
         let dir = unique_dir("dup-ts");
         let cfg = cfg_with_dir(&dir);
         let storage = build_storage(&cfg, 8).expect("build_storage 必须成功");
-        let (handle, join) = spawn_writer(storage, &cfg);
+        let (handle, join) = spawn_writer(storage, &cfg)
+            .expect("测试环境 spawn history writer 线程必须成功");
         let stats = handle.stats.clone();
 
         let ts = now_ms();

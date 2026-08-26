@@ -339,16 +339,19 @@ fn maybe_init_impl(
     } else {
         auto_cardinality(effective)
     };
-    Some(build_storage(cfg, cardinality).map(|storage| {
+    Some(build_storage(cfg, cardinality).and_then(|storage| {
         // engine 内部接线（Task 5）：storage clone 给 writer（共享同一 Arc），
         // handle/join 存入 engine——编排层经 `handle()` 取 clone，不经返回值。
-        let (handle, writer_join) = spawn_writer(storage.clone(), cfg);
-        HistoryEngine {
+        // spawn 失败（M3/P8：线程创建资源耗尽）串化进既有 init_failed Err
+        // 通道（error! + 引擎 None + 主程序继续），不再 panic 击穿启动序。
+        let (handle, writer_join) =
+            spawn_writer(storage.clone(), cfg).map_err(RsIotError::HistoryEngine)?;
+        Ok(HistoryEngine {
             storage,
             handle: Some(handle),
             writer_join: Some(writer_join),
             closed: false,
-        }
+        })
     }))
 }
 
