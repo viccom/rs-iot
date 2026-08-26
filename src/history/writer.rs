@@ -475,8 +475,8 @@ mod tests {
         let dir = unique_dir("flush");
         let cfg = cfg_with_dir(&dir);
         let storage = build_storage(&cfg, 100).expect("build_storage 必须成功");
-        let (handle, join) = spawn_writer(storage, &cfg)
-            .expect("测试环境 spawn history writer 线程必须成功");
+        let (handle, join) =
+            spawn_writer(storage, &cfg).expect("测试环境 spawn history writer 线程必须成功");
         let stats = handle.stats.clone();
 
         let base = now_ms();
@@ -531,8 +531,8 @@ mod tests {
         let dir = unique_dir("deadband");
         let cfg = cfg_with_dir(&dir);
         let storage = build_storage(&cfg, 8).expect("build_storage 必须成功");
-        let (handle, join) = spawn_writer(storage, &cfg)
-            .expect("测试环境 spawn history writer 线程必须成功");
+        let (handle, join) =
+            spawn_writer(storage, &cfg).expect("测试环境 spawn history writer 线程必须成功");
         let stats = handle.stats.clone();
 
         let base = now_ms();
@@ -587,8 +587,8 @@ mod tests {
         let dir = unique_dir("deadband-nonnum");
         let cfg = cfg_with_dir(&dir);
         let storage = build_storage(&cfg, 8).expect("build_storage 必须成功");
-        let (handle, join) = spawn_writer(storage, &cfg)
-            .expect("测试环境 spawn history writer 线程必须成功");
+        let (handle, join) =
+            spawn_writer(storage, &cfg).expect("测试环境 spawn history writer 线程必须成功");
         let stats = handle.stats.clone();
 
         let base = now_ms();
@@ -651,8 +651,8 @@ mod tests {
         let dir = unique_dir("dedup");
         let cfg = cfg_with_dir(&dir);
         let storage = build_storage(&cfg, 8).expect("build_storage 必须成功");
-        let (handle, join) = spawn_writer(storage, &cfg)
-            .expect("测试环境 spawn history writer 线程必须成功");
+        let (handle, join) =
+            spawn_writer(storage, &cfg).expect("测试环境 spawn history writer 线程必须成功");
         let stats = handle.stats.clone();
 
         let ts = now_ms();
@@ -706,8 +706,8 @@ mod tests {
         let dir = unique_dir("lane");
         let cfg = cfg_with_dir(&dir);
         let storage = build_storage(&cfg, 8).expect("build_storage 必须成功");
-        let (handle, join) = spawn_writer(storage, &cfg)
-            .expect("测试环境 spawn history writer 线程必须成功");
+        let (handle, join) =
+            spawn_writer(storage, &cfg).expect("测试环境 spawn history writer 线程必须成功");
         let stats = handle.stats.clone();
 
         let ts_float = now_ms();
@@ -765,8 +765,8 @@ mod tests {
         let dir = unique_dir("fidelity");
         let cfg = cfg_with_dir(&dir);
         let storage = build_storage(&cfg, 8).expect("build_storage 必须成功");
-        let (handle, join) = spawn_writer(storage, &cfg)
-            .expect("测试环境 spawn history writer 线程必须成功");
+        let (handle, join) =
+            spawn_writer(storage, &cfg).expect("测试环境 spawn history writer 线程必须成功");
         let stats = handle.stats.clone();
 
         let ts = now_ms();
@@ -876,8 +876,8 @@ mod tests {
         let dir = unique_dir("deadband-eval");
         let cfg = cfg_with_dir(&dir);
         let storage = build_storage(&cfg, 8).expect("build_storage 必须成功");
-        let (handle, join) = spawn_writer(storage, &cfg)
-            .expect("测试环境 spawn history writer 线程必须成功");
+        let (handle, join) =
+            spawn_writer(storage, &cfg).expect("测试环境 spawn history writer 线程必须成功");
         let stats = handle.stats.clone();
 
         let base = now_ms();
@@ -946,8 +946,8 @@ mod tests {
         let dir = unique_dir("err-kind-card");
         let cfg = cfg_with_dir(&dir);
         let storage = build_storage(&cfg, 1).expect("build_storage 必须成功");
-        let (handle, join) = spawn_writer(storage, &cfg)
-            .expect("测试环境 spawn history writer 线程必须成功");
+        let (handle, join) =
+            spawn_writer(storage, &cfg).expect("测试环境 spawn history writer 线程必须成功");
         let stats = handle.stats.clone();
 
         let ts = now_ms();
@@ -1006,14 +1006,19 @@ mod tests {
         let dir = unique_dir("nonfinite");
         let cfg = cfg_with_dir(&dir);
         let storage = build_storage(&cfg, 8).expect("build_storage 必须成功");
-        let (handle, join) = spawn_writer(storage, &cfg)
-            .expect("测试环境 spawn history writer 线程必须成功");
+        let (handle, join) =
+            spawn_writer(storage, &cfg).expect("测试环境 spawn history writer 线程必须成功");
         let stats = handle.stats.clone();
 
         let base = now_ms();
         for (i, v) in [f64::NAN, 5.0, 5.0].into_iter().enumerate() {
             handle
-                .send(row("temp", base + i as i64, SampleValue::Float(v), Some(1.0)))
+                .send(row(
+                    "temp",
+                    base + i as i64,
+                    SampleValue::Float(v),
+                    Some(1.0),
+                ))
                 .expect("send 必须成功");
         }
         assert!(
@@ -1056,11 +1061,7 @@ mod tests {
             .select("temp", &series_labels(), 0, i64::MAX)
             .expect("重开后 select 必须成功");
         let got: Vec<f64> = pts.iter().map(|p| f64_of(&p.value)).collect();
-        assert_eq!(
-            got,
-            vec![5.0],
-            "落盘值集必须精确为 {{5.0}}（NaN 不落盘）"
-        );
+        assert_eq!(got, vec![5.0], "落盘值集必须精确为 {{5.0}}（NaN 不落盘）");
         reopened.close().expect("重开实例 close");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1073,8 +1074,8 @@ mod tests {
         let dir = unique_dir("dup-ts");
         let cfg = cfg_with_dir(&dir);
         let storage = build_storage(&cfg, 8).expect("build_storage 必须成功");
-        let (handle, join) = spawn_writer(storage, &cfg)
-            .expect("测试环境 spawn history writer 线程必须成功");
+        let (handle, join) =
+            spawn_writer(storage, &cfg).expect("测试环境 spawn history writer 线程必须成功");
         let stats = handle.stats.clone();
 
         let ts = now_ms();
@@ -1105,7 +1106,11 @@ mod tests {
         thread::sleep(Duration::from_millis(200));
 
         drop(handle);
-        join_with_timeout(join, Duration::from_secs(10), "writer_cross_batch_dup_ts_counted");
+        join_with_timeout(
+            join,
+            Duration::from_secs(10),
+            "writer_cross_batch_dup_ts_counted",
+        );
         assert_eq!(
             stats.written.load(Ordering::SeqCst),
             1,

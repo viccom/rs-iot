@@ -256,7 +256,11 @@ pub fn fan_out(samples: &[Sample], effective: &HashMap<String, TagProps>, h: &Hi
             };
             // M1 时界钳制：ts×1000 溢出或超出 [now−7d, now+1h] 单行拒收
             let ts_ms = match sample.timestamp.checked_mul(1000) {
-                Some(ts) if ts >= now_ms - TS_WINDOW_PAST_MS && ts <= now_ms + TS_WINDOW_FUTURE_MS => ts,
+                Some(ts)
+                    if ts >= now_ms - TS_WINDOW_PAST_MS && ts <= now_ms + TS_WINDOW_FUTURE_MS =>
+                {
+                    ts
+                }
                 _ => {
                     ts_rejected += 1;
                     continue;
@@ -673,9 +677,24 @@ mod tests {
             .expect("system clock after unix epoch")
             .as_secs() as i64;
         let samples = vec![
-            sample("dev1", "hw1", i64::MAX, &[("tagA", SampleValue::Float(1.0))]),
-            sample("dev1", "hw1", now_s - 8 * 86400, &[("tagA", SampleValue::Float(2.0))]),
-            sample("dev1", "hw1", now_s - 3600, &[("tagA", SampleValue::Float(3.0))]),
+            sample(
+                "dev1",
+                "hw1",
+                i64::MAX,
+                &[("tagA", SampleValue::Float(1.0))],
+            ),
+            sample(
+                "dev1",
+                "hw1",
+                now_s - 8 * 86400,
+                &[("tagA", SampleValue::Float(2.0))],
+            ),
+            sample(
+                "dev1",
+                "hw1",
+                now_s - 3600,
+                &[("tagA", SampleValue::Float(3.0))],
+            ),
         ];
         let mut effective = HashMap::new();
         effective.insert(
@@ -695,7 +714,11 @@ mod tests {
             "溢出与 now−8d 两行必须拒收，只有窗内 now−1h 一行发出"
         );
         assert_eq!(rows[0].ts_ms, (now_s - 3600) * 1000, "窗内行 ts 精确映射");
-        assert_eq!(handle.stats().ts_rejected.load(Ordering::SeqCst), 2, "i64::MAX 溢出与 now−8d 两行必须计 ts_rejected");
+        assert_eq!(
+            handle.stats().ts_rejected.load(Ordering::SeqCst),
+            2,
+            "i64::MAX 溢出与 now−8d 两行必须计 ts_rejected"
+        );
         assert_eq!(handle.stats().sent.load(Ordering::SeqCst), 1);
         assert_eq!(handle.stats().dropped.load(Ordering::SeqCst), 0);
         assert_eq!(handle.stats().skipped.load(Ordering::SeqCst), 0);
