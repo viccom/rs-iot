@@ -116,6 +116,11 @@ struct S7Cfg {
 const S7_PORT: u16 = 102;
 
 /// 从 `app_config` JSON 解析插件配置。
+// 表单默认值常量（审计 C1；前端 pluginSchemas.ts s7Client 镜像契约）。
+const DEFAULT_PLC_TYPE: &str = "s1200";
+const DEFAULT_PERIOD_SECS: u64 = 2;
+const DEFAULT_TIMEOUT_MS: u64 = 5000;
+
 fn parse_cfg(app: &serde_json::Value) -> Result<S7Cfg, String> {
     let endpoint = app
         .get("endpoint")
@@ -130,7 +135,7 @@ fn parse_cfg(app: &serde_json::Value) -> Result<S7Cfg, String> {
     let plc_type = parse_plc_type(
         app.get("plc_type")
             .and_then(|v| v.as_str())
-            .unwrap_or("s1200"),
+            .unwrap_or(DEFAULT_PLC_TYPE),
     )?;
     let rack_slot = match (app.get("rack"), app.get("slot")) {
         (Some(r), Some(s)) => {
@@ -143,12 +148,12 @@ fn parse_cfg(app: &serde_json::Value) -> Result<S7Cfg, String> {
     let period = app
         .get("period")
         .and_then(|v| v.as_u64())
-        .unwrap_or(2)
+        .unwrap_or(DEFAULT_PERIOD_SECS)
         .max(1);
     let timeout_ms = app
         .get("timeout_ms")
         .and_then(|v| v.as_u64())
-        .unwrap_or(5000);
+        .unwrap_or(DEFAULT_TIMEOUT_MS);
     let auto_reconnect = app
         .get("auto_reconnect")
         .and_then(|v| v.as_bool())

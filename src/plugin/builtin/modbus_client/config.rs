@@ -73,10 +73,29 @@ pub(super) struct ModbusCfg {
     pub(super) request_timeout_secs: u64,
 }
 
+// ---------- 表单默认值（单一事实源；前端 pluginSchemas.ts modbusClient 镜像
+// 此组值，改动须双侧同步——镜像契约由 config.rs defaults 锁定测试 +
+// frontend schema-values.test.ts 双向锚定，审计 C1） ----------
+pub(super) const DEFAULT_KIND: &str = "tcp";
+pub(super) const DEFAULT_BAUD_RATE: u64 = 9600;
+pub(super) const DEFAULT_DATA_BITS: u64 = 8;
+pub(super) const DEFAULT_STOP_BITS: u64 = 1;
+pub(super) const DEFAULT_SLAVE_ID: u64 = 1;
+pub(super) const DEFAULT_PERIOD_SECS: u64 = 3;
+pub(super) const DEFAULT_GAP_THRESHOLD: u64 = 16;
+pub(super) const DEFAULT_MAX_REGS: u64 = 100;
+pub(super) const DEFAULT_RECONNECT_SECS: u64 = 2;
+pub(super) const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 2;
+// match None 分支的默认（parity/flow_control/poll_strategy 无 unwrap_or
+// 字面量，语义即缺省）：parity=none / flow=none / poll=round_robin。
+
 /// 解析 `app_config`。`kind` 扁平：tcp（默认，向后兼容）/ rtu_serial / rtu_tcp / rtu_udp。
 /// rtu_serial 必须有 `serial_port`，其余必须有 `endpoint`。串口参数缺省 9600/8N1/NONE。
 pub(super) fn parse_cfg(app: &serde_json::Value) -> Result<ModbusCfg, String> {
-    let kind = app.get("kind").and_then(|v| v.as_str()).unwrap_or("tcp");
+    let kind = app
+        .get("kind")
+        .and_then(|v| v.as_str())
+        .unwrap_or(DEFAULT_KIND);
     let transport = match kind {
         "tcp" => Transport::Tcp,
         "rtu_serial" => Transport::RtuSerial,
@@ -110,8 +129,11 @@ pub(super) fn parse_cfg(app: &serde_json::Value) -> Result<ModbusCfg, String> {
     let baud_rate = app
         .get("baud_rate")
         .and_then(|v| v.as_u64())
-        .unwrap_or(9600) as u32;
-    let data_bits = app.get("data_bits").and_then(|v| v.as_u64()).unwrap_or(8) as u8;
+        .unwrap_or(DEFAULT_BAUD_RATE) as u32;
+    let data_bits = app
+        .get("data_bits")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(DEFAULT_DATA_BITS) as u8;
     if !matches!(data_bits, 5..=8) {
         return Err(format!("unsupported data_bits {data_bits}（5/6/7/8）"));
     }
@@ -121,7 +143,10 @@ pub(super) fn parse_cfg(app: &serde_json::Value) -> Result<ModbusCfg, String> {
         Some("none") | None => ParityKind::None,
         Some(other) => return Err(format!("unsupported parity '{other}'（none/even/odd）")),
     };
-    let stop_bits = app.get("stop_bits").and_then(|v| v.as_u64()).unwrap_or(1) as u8;
+    let stop_bits = app
+        .get("stop_bits")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(DEFAULT_STOP_BITS) as u8;
     if !matches!(stop_bits, 1 | 2) {
         return Err(format!("unsupported stop_bits {stop_bits}（1/2）"));
     }
@@ -135,25 +160,28 @@ pub(super) fn parse_cfg(app: &serde_json::Value) -> Result<ModbusCfg, String> {
             ))
         }
     };
-    let slave_id = app.get("slave_id").and_then(|v| v.as_u64()).unwrap_or(1) as u8;
+    let slave_id = app
+        .get("slave_id")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(DEFAULT_SLAVE_ID) as u8;
     let period = app
         .get("period")
         .and_then(|v| v.as_u64())
-        .unwrap_or(3)
+        .unwrap_or(DEFAULT_PERIOD_SECS)
         .max(1);
     let gap_threshold = app
         .get("gap_threshold")
         .and_then(|v| v.as_u64())
-        .unwrap_or(16) as u16;
+        .unwrap_or(DEFAULT_GAP_THRESHOLD) as u16;
     let max_regs = app
         .get("max_regs")
         .and_then(|v| v.as_u64())
-        .unwrap_or(100)
+        .unwrap_or(DEFAULT_MAX_REGS)
         .clamp(1, 125) as u16;
     let reconnect_secs = app
         .get("reconnect_secs")
         .and_then(|v| v.as_u64())
-        .unwrap_or(2)
+        .unwrap_or(DEFAULT_RECONNECT_SECS)
         .max(1);
     let poll_strategy = match app.get("poll_strategy").and_then(|v| v.as_str()) {
         Some("round_robin") | None => PollStrategy::RoundRobin,
@@ -167,7 +195,7 @@ pub(super) fn parse_cfg(app: &serde_json::Value) -> Result<ModbusCfg, String> {
     let request_timeout_secs = app
         .get("request_timeout_secs")
         .and_then(|v| v.as_u64())
-        .unwrap_or(2)
+        .unwrap_or(DEFAULT_REQUEST_TIMEOUT_SECS)
         .max(1);
     Ok(ModbusCfg {
         transport,
@@ -186,4 +214,30 @@ pub(super) fn parse_cfg(app: &serde_json::Value) -> Result<ModbusCfg, String> {
         poll_strategy,
         request_timeout_secs,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 表单默认值锁定（审计 C1）：空 app_config（合法最小形态 kind=tcp +
+    /// endpoint）→ 全字段等于 DEFAULT_* 常量——后端侧防静默改，前端
+    /// pluginSchemas.ts 以此组值为镜像契约（schema-values.test.ts 锚定）。
+    #[test]
+    fn defaults_match_frontend_mirror_contract() {
+        let cfg = parse_cfg(&serde_json::json!({"kind": "tcp", "endpoint": "127.0.0.1:502"}))
+            .expect("最小合法配置");
+        assert_eq!(cfg.period, DEFAULT_PERIOD_SECS);
+        assert_eq!(cfg.reconnect_secs, DEFAULT_RECONNECT_SECS);
+        assert_eq!(cfg.request_timeout_secs, DEFAULT_REQUEST_TIMEOUT_SECS);
+        assert_eq!(cfg.gap_threshold, DEFAULT_GAP_THRESHOLD as u16);
+        assert_eq!(cfg.max_regs, DEFAULT_MAX_REGS as u16);
+        // 串口参数（tcp 形态下也解析，供 rtu 切换）
+        assert_eq!(cfg.baud_rate, DEFAULT_BAUD_RATE as u32);
+        assert_eq!(cfg.slave_id, DEFAULT_SLAVE_ID as u8);
+        // match None 分支默认
+        assert!(matches!(cfg.parity, super::ParityKind::None));
+        assert!(matches!(cfg.flow_control, super::FlowKind::None));
+        assert!(matches!(cfg.poll_strategy, super::PollStrategy::RoundRobin));
+    }
 }

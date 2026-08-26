@@ -5,6 +5,12 @@
 //! lib build 仍未读，struct 级 allow 抑制字段级 dead_code；其余项（`parse_cfg`/
 //! `Transport`/`RecvMode`）已被 `run` 消费，不再 dead。
 
+// ---------- luaClient 表单默认值（审计 C1；前端 pluginSchemas.ts 镜像契约，改动须双侧同步） ----------
+pub(crate) const DEFAULT_PERIOD_SECS: u64 = 3;
+pub(crate) const DEFAULT_TIMEOUT_MS: u64 = 200;
+pub(crate) const DEFAULT_RECV_IDLE_MS: u64 = 50;
+pub(crate) const DEFAULT_RECONNECT_SECS: u64 = 5;
+
 /// 传输模式（Plan 1 仅实现 tcp；serial/udp 框架预留，Task 7 接入）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Transport {
@@ -204,20 +210,25 @@ pub(crate) fn parse_cfg(app: &serde_json::Value) -> Result<LuaCfg, String> {
         }
     };
 
-    let period = app.get("period").and_then(|v| v.as_u64()).unwrap_or(3);
+    // 表单默认值常量（审计 C1）：前端 pluginSchemas.ts luaClient 镜像此组值
+    //（改动须双侧同步；defaults 锁定测试 + schema-values.test.ts 锚定）。
+    let period = app
+        .get("period")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(DEFAULT_PERIOD_SECS);
     let timeout_ms = app
         .get("timeout_ms")
         .and_then(|v| v.as_u64())
-        .unwrap_or(200)
+        .unwrap_or(DEFAULT_TIMEOUT_MS)
         .max(10);
     let recv_idle_ms = app
         .get("recv_idle_ms")
         .and_then(|v| v.as_u64())
-        .unwrap_or(50);
+        .unwrap_or(DEFAULT_RECV_IDLE_MS);
     let reconnect_secs = app
         .get("reconnect_secs")
         .and_then(|v| v.as_u64())
-        .unwrap_or(5)
+        .unwrap_or(DEFAULT_RECONNECT_SECS)
         .max(1);
     let mem_limit_mb = app
         .get("mem_limit_mb")

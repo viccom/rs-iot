@@ -1,4 +1,8 @@
 // frontend/src/lib/pluginSchemas.ts
+// 镜像契约（审计 C1）：本文件所有 default 值与后端 parse 常量一一对应
+//（modbus_client/config.rs DEFAULT_*、lua_core/config.rs、opcua/s7 mod.rs、
+// lua_transform/config.rs）——改动任一侧须双侧同步，锁点：后端各 config 的
+// defaults 测试 + 本目录 schema-values.test.ts。长期方案为后端 schema 下发。
 /**
  * 各南向插件 app_config 字段 schema（供 InstanceForm 表单化渲染）。
  *
@@ -48,10 +52,10 @@ export const PLUGIN_SCHEMAS: Record<string, PluginField[]> = {
     { key: 'stop_bits', label: '停止位', type: 'number', default: 1 },
     { key: 'flow_control', label: '流控', type: 'select', options: ['none', 'software', 'hardware'], default: 'none' },
     { key: 'slave_id', label: '从站 ID', type: 'number', default: 1 },
-    { key: 'period', label: '采集周期(秒)', type: 'number', default: 1, hint: '全插件统一秒（非毫秒）；修改后需重启实例生效' },
-    { key: 'gap_threshold', label: '最大单空洞', type: 'number', hint: '相邻点最大寄存器空隙（合并批量读用）' },
+    { key: 'period', label: '采集周期(秒)', type: 'number', default: 3, hint: '全插件统一秒（非毫秒）；缺省 3s；修改后需重启实例生效' },
+    { key: 'gap_threshold', label: '最大单空洞', type: 'number', default: 16, hint: '相邻点最大寄存器空隙（合并批量读用）；缺省 16' },
     { key: 'max_regs', label: '单区间最大寄存器数', type: 'number', default: 100 },
-    { key: 'reconnect_secs', label: '重连间隔(秒)', type: 'number', default: 3 },
+    { key: 'reconnect_secs', label: '重连间隔(秒)', type: 'number', default: 2 },
     { key: 'poll_strategy', label: '轮询策略', type: 'select', options: ['round_robin', 'sequential'], default: 'round_robin' },
     { key: 'request_timeout_secs', label: '请求超时(秒)', type: 'number', default: 2 },
   ],
@@ -59,7 +63,7 @@ export const PLUGIN_SCHEMAS: Record<string, PluginField[]> = {
   opcuaClient: [
     { key: 'endpoint', label: 'OPC UA 端点', type: 'string', hint: 'opc.tcp://host:port', required: true },
     { key: 'security_policy', label: '安全策略', type: 'select', options: ['none', 'Basic256Sha256'], default: 'none' },
-    { key: 'period', label: '采集周期(秒)', type: 'number', default: 1, hint: '全插件统一秒（非毫秒）；修改后需重启实例生效' },
+    { key: 'period', label: '采集周期(秒)', type: 'number', default: 3, hint: '全插件统一秒（非毫秒）；缺省 3s；修改后需重启实例生效' },
     { key: 'verify_server', label: '校验服务器证书', type: 'bool', default: false, hint: '生产环境建议开' },
   ],
   // 西门子 S7（s7_client）
@@ -68,8 +72,8 @@ export const PLUGIN_SCHEMAS: Record<string, PluginField[]> = {
     { key: 'plc_type', label: 'PLC 类型', type: 'select', options: ['s200', 's200smart', 's300', 's400', 's1200', 's1500', 'sinumerik828d'], default: 's1200' },
     { key: 'rack', label: '机架号', type: 'number' },
     { key: 'slot', label: '插槽号', type: 'number' },
-    { key: 'period', label: '采集周期(秒)', type: 'number', default: 1, hint: '全插件统一秒（非毫秒）；修改后需重启实例生效' },
-    { key: 'timeout_ms', label: '超时(ms)', type: 'number' },
+    { key: 'period', label: '采集周期(秒)', type: 'number', default: 2, hint: '全插件统一秒（非毫秒）；缺省 2s；修改后需重启实例生效' },
+    { key: 'timeout_ms', label: '超时(ms)', type: 'number', default: 5000 },
     { key: 'auto_reconnect', label: '自动重连', type: 'bool', default: true },
   ],
   // Lua 脚本（lua_client/config.rs）
@@ -85,7 +89,7 @@ export const PLUGIN_SCHEMAS: Record<string, PluginField[]> = {
     { key: 'data_bits', label: '数据位', type: 'number', default: 8 },
     { key: 'parity', label: '校验', type: 'select', options: ['none', 'even', 'odd'], default: 'none' },
     { key: 'stop_bits', label: '停止位', type: 'number', default: 1 },
-    { key: 'period', label: '采集周期(秒)', type: 'number', default: 1, hint: '全插件统一秒（非毫秒）；修改后需重启实例生效' },
+    { key: 'period', label: '采集周期(秒)', type: 'number', default: 3, hint: '全插件统一秒（非毫秒）；缺省 3s；修改后需重启实例生效' },
     { key: 'timeout_ms', label: '请求超时(ms)', type: 'number', default: 200 },
     { key: 'recv_idle_ms', label: '接收空闲(ms)', type: 'number', default: 50 },
     { key: 'reconnect_secs', label: '重连间隔(秒)', type: 'number', default: 5 },

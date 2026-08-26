@@ -56,6 +56,9 @@ struct OpcuaCfg {
     verify_server: bool,
 }
 
+// 表单默认值常量（审计 C1；前端 pluginSchemas.ts opcuaClient 镜像契约）。
+const DEFAULT_PERIOD_SECS: u64 = 3;
+
 fn parse_cfg(app: &serde_json::Value) -> Result<OpcuaCfg, String> {
     let endpoint = app
         .get("endpoint")
@@ -78,7 +81,7 @@ fn parse_cfg(app: &serde_json::Value) -> Result<OpcuaCfg, String> {
     let period = app
         .get("period")
         .and_then(|v| v.as_u64())
-        .unwrap_or(3)
+        .unwrap_or(DEFAULT_PERIOD_SECS)
         .max(1);
     let verify_server = app
         .get("verify_server")
