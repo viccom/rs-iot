@@ -95,9 +95,13 @@ describe('mergeTagProps（三态合并镜像后端）', () => {
     expect(m.unit).toBe('MPa')
     expect(m.history).toBe(false)
   })
-  it('显式空串场景（表单编辑残留）——空串按清除处理', () => {
-    // 表单用空串表达"清空"，合并语义与 null 一致（提交前规范化为 null/undefined）。
-    expect(mergeTagProps(base, { desc: null }).desc).toBeNull()
+  it('desc/unit 的 null=继承（后端 Option<String> None 语义）——仅空串=显式清除', () => {
+    // 后端 GET /devreg 对未覆盖的 desc/unit 序列化为 JSON null（=继承模板），
+    // 仅空串 Some("") 才是显式清除——null 误判清除会造成对账假漂移+单位列丢失
+    // （2026-08-26 浏览器嵌入实测发现）。deadband 的 null 才是显式关（内层 Option）。
+    const m = mergeTagProps(base, { desc: null, unit: null })
+    expect(m.desc).toBe('模板')
+    expect(m.unit).toBe('kPa')
   })
 })
 
