@@ -184,8 +184,8 @@ pub async fn run(c: &EmbeddedClient) -> Result<MigrationSummary, RsIotError> {
     };
     let mut i = 0;
     while i + 1 < arr.len() {
-        let inst_id = crate::api::str_from_value(&arr[i]);
-        let raw = crate::api::str_from_value(&arr[i + 1]);
+        let inst_id = crate::db::str_from_value(&arr[i]);
+        let raw = crate::db::str_from_value(&arr[i + 1]);
         i += 2;
         let Ok(json) = serde_json::from_str::<serde_json::Value>(&raw) else {
             continue; // 坏值条目容错跳过

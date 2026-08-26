@@ -573,7 +573,7 @@ async fn try_start_from_lux(
             // M-2：旧内联形态实例在新类型下无法反序列化——强提示迁移（升级必经）。
             tracing::warn!(
                 "[startup] 实例配置反序列化失败（旧内联点表形态？）：{}——执行 POST /api/v1/migrate/inline-devices 迁移后重启",
-                crate::api::str_from_value(&arr[i])
+                crate::db::str_from_value(&arr[i])
             );
         }
         i += 2;

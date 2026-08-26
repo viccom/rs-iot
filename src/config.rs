@@ -6,12 +6,12 @@ use std::path::Path;
 /// （install/uninstall 管理命令的 `init_tracing(None)`）引用同一默认。
 pub const DEFAULT_EVENT_BUS_CAPACITY: usize = 256;
 
-/// 应用总配置。从 toml 加载，缺失字段走 Default。
 /// 默认 JWT 密钥（与 Lite_IOT 对齐的兼容值）。**可预测的公开常量**——
 /// 生产部署必须显式配置强密钥；启动时对默认值打 error 提示（不拒启，
 /// 审计 B3 裁定非破坏护栏）。
 pub const DEFAULT_JWT_SECRET: &str = "qwerty1234567890asdfgh1234567890";
 
+/// 应用总配置。从 toml 加载，缺失字段走 Default。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AppConfig {

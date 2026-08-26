@@ -288,8 +288,8 @@ pub async fn legacy_export(State(st): State<AppState>) -> Response {
     if let Ok(lux::EmbeddedValue::Array(arr)) = v {
         let mut i = 0;
         while i + 1 < arr.len() {
-            let k = crate::api::str_from_value(&arr[i]);
-            let raw = crate::api::str_from_value(&arr[i + 1]);
+            let k = crate::db::str_from_value(&arr[i]);
+            let raw = crate::db::str_from_value(&arr[i + 1]);
             let parsed = serde_json::from_str(&raw).unwrap_or(serde_json::Value::String(raw));
             out.insert(k, parsed);
             i += 2;

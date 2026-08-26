@@ -108,50 +108,11 @@ pub(crate) async fn history_telemetry_snapshot(
     }
 }
 
-// ---------- lux Hash 读写 helper（供各 routes 复用） ----------
-
-pub fn str_from_value(v: &lux::EmbeddedValue) -> String {
-    match v {
-        lux::EmbeddedValue::Bulk(b) => String::from_utf8_lossy(b).to_string(),
-        lux::EmbeddedValue::Simple(s) => s.clone(),
-        lux::EmbeddedValue::Int(i) => i.to_string(),
-        _ => String::new(),
-    }
-}
-
-/// `HGETALL key` → JSON 对象（每个 value 尝试解析为 JSON，失败保留原始字符串）。
-pub async fn hgetall(lux: &lux::EmbeddedClient, key: &str) -> serde_json::Value {
-    match lux.execute_value("HGETALL", &[key]).await {
-        Ok(lux::EmbeddedValue::Array(arr)) => {
-            // 奇数长度 = field/value 对不完整（lux HGETALL 正常恒偶数）——尾部
-            // 元素将被丢弃，静默吞不如留痕（审查 Phase2-L4）。
-            if arr.len() % 2 != 0 {
-                tracing::warn!(
-                    "[api] HGETALL {key} 返回奇数长度 {}，尾部元素丢弃",
-                    arr.len()
-                );
-            }
-            let mut map = serde_json::Map::new();
-            let mut i = 0;
-            while i + 1 < arr.len() {
-                let k = str_from_value(&arr[i]);
-                let raw = str_from_value(&arr[i + 1]);
-                let parsed = serde_json::from_str(&raw).unwrap_or(serde_json::Value::String(raw));
-                map.insert(k, parsed);
-                i += 2;
-            }
-            serde_json::Value::Object(map)
-        }
-        _ => serde_json::Value::Object(serde_json::Map::new()),
-    }
-}
-
-pub async fn hget(lux: &lux::EmbeddedClient, key: &str, field: &str) -> Option<String> {
-    match lux.execute_value("HGET", &[key, field]).await {
-        Ok(v) if !matches!(v, lux::EmbeddedValue::Nil) => Some(str_from_value(&v)),
-        _ => None,
-    }
-}
+// ---------- lux Hash 读写 helper（审计 B4 下沉 db 层） ----------
+// str_from_value/hgetall/hget 原定义于此——model::migrate 与 lua_north::compat
+// 曾为此反向 use crate::api（全仓仅有的 2 个循环依赖环根因）。api/routes 内
+// 继续经 re-export 使用（pub(crate)：编译期阻止 api 之外新增消费点）。
+pub(crate) use crate::db::{hget, hgetall, str_from_value};
 
 pub fn build_router(state: AppState) -> axum::Router {
     use axum::routing::{delete, get, post};
