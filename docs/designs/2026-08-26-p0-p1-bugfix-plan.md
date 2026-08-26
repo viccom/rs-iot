@@ -1,9 +1,23 @@
 # P0+P1 九项 BUG 修复计划
 
-> **状态**：in-progress（分支 `fix/p0-p1-batch`，worktree `E:/Rs_Codes/rs-iot-p0p1`）
+> **状态**：implemented（2026-08-26 收口；P0×1 + P1×8 全修）
 > **日期**：2026-08-26
 > **来源**：审查修复包收口后的遗留评估（会话裁决：P0×1 + P1×8）；Low 其余项维持 backlog 登记
 > **执行方式**：主会话直做——子代理额度两次中断先例 + 单项均 ≤60 行；TDD 除登记豁免项外全红→绿
+
+## 验收记录（2026-08-26，红→绿证据见各 commit）
+
+| 项 | commit | 锚点 |
+|---|---|---|
+| T1 P0 lua minimal 门控 | `d6740a3` | minimal 18+2红→20/20；默认 23/23（门控断言仍跑） |
+| T2 cache 毒化恢复 | `638a308` | 红（read().unwrap 毒化 panic）→绿；cache 5/5 |
+| T3 回卷双点（复核证实→修） | `31a803f` | 复核测试实证 t5→t3→t6→t3 盘上 t3 **双点**（max 方案证伪）→ 严格更旧丢弃 stale_ts_dropped；新语义锁定测试 + 治理面十四计数器/19 family + rest-api.md 声明 |
+| T4+T5 e2e 断言强化 | `ea8d0bd` | 恒真→禁数据帧；反压 contains→JSON 统计 ≥9 台；init_failed 补 /metrics 省略断言；subscribe 11/11 + init_failed 1/1 |
+| T8 hgetall warn | `6b5286f` | 测试豁免登记（需 mock lux client） |
+| T6 前端 500 透传 | `e48235d` | 红（error 串不含）→绿；197 测 + build |
+| T7 index 派生 | `c340dea` | 等价守门测试（D-F 预期即绿）；rows 9/9 |
+
+**门禁**（全部实测）：fmt --check 过；双档 clippy 零警告；默认档全绿；minimal 档 **357/0 恢复全绿**（T1 兑现）；history 档全量两轮——首轮 `model_registry_e2e::discovery_list_sorted_by_count_and_filtered_by_dev` 1 失败，**复跑零失败 + 单测隔离 5 连绿**：计时型 count 断言的全量并发 flake（model/discovery 本包零触碰，归因成立登记）；前端 197 测 + build 过。
 
 **Goal**: 修复 minimal 档门禁红（P0）与 8 项高确定性小修（P1），一个分支收口合并。
 
