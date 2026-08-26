@@ -395,6 +395,26 @@ async fn removed_on_device_delete_case(tier: Tier) {
         "{buf2}"
     );
     assert!(buf2.contains("devA.t1"), "removed 应列 devA.t1: {buf2}");
+    // M5：JSON 解析断言（替代 contains 串的模糊面）——removed 必含 devA.t1
+    // 且不得误报非脏设备 devB.t1（project_baseline 投影的 e2e 守门：删除
+    // 投影直接喂全量基线时，ksub 档此断言红——poll 档不受影响，其 current
+    // 本就全量）。
+    let data_line = buf2
+        .lines()
+        .find(|l| l.starts_with("data:") && l.contains("\"removed\""))
+        .expect("必有一帧含 removed");
+    let payload: serde_json::Value =
+        serde_json::from_str(data_line.trim_start_matches("data:").trim())
+            .expect("datachange 帧必须是合法 JSON");
+    let removed = payload["removed"].as_array().expect("removed 须为数组");
+    assert!(
+        removed.iter().any(|v| v == "devA.t1"),
+        "removed 必含 devA.t1: {payload}"
+    );
+    assert!(
+        !removed.iter().any(|v| v == "devB.t1"),
+        "非脏设备 devB 不得整域误报 removed（project_baseline 守门）: {payload}"
+    );
     token.cancel();
     common::stop_lux(handle).await;
 }
