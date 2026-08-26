@@ -23,7 +23,7 @@
 | F12-F15 前端 H2/M7/M8/M9 | `60c6a21`/`64c27e2`/`7ef2fae`/`9ad8ebc` | 196 测（基线 188+8）+ build 过 |
 | 文档同步 | 本 commit | rest-api.md §4.1 十三计数器/§4.10 18 family/§4.18 写侧拒收语义+校验边界+400 溢出+面板迁址（Low-L1 顺手） |
 
-**门禁**：全量四档 cargo test（默认/history/minimal）+ 双档 clippy + fmt + 前端 vitest 196+build——见收口 commit。
+**门禁**（2026-08-26 收口实测）：fmt --check 过；clippy 双档（默认+history）零警告；cargo test 默认档全绿（lib 626）+ history 档全绿（lib 647 + e2e read 10/subscribe 11/watch 4/write/kill/dataflow/visibility/init_stack/init_failed 全过）；minimal 档 `--no-default-features --lib` **353 过 + 2 失败——既有问题，与本包无关**：`routes_lua` 的 `asset_read_path_script_and_lib`/`lib_save_rejects_invalid_names` 在 lua feature 关闭档失败，根因 = `is_reserved_lib_top` 关档恒 false（routes_lua.rs:346 注释明示的设计），测试的 `"algo/evil.lua"` 拒绝项未按 feature 门控；基线 2786f2e 裸仓复跑同样 2 失败（已实证归因，测试用例引入于 lua 阶段 A d8e4c80/e4ba59d）。后续修复项登记总方案 §七-2。前端 vitest 196 + build 过。
 
 **Goal**: 消除审查发现的 5 High / 11 Medium——NaN/Inf 数值域防线、tsink「一行连坐」写入预检、配置边界校验与算术溢出、订阅重建窗口丢帧与 panic 监督、测试守门缺口、前端脏数据防御。
 

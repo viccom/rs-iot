@@ -241,8 +241,10 @@ impl RtdataWatchService {
             // `watch_restart_double_bump_covers_midwindow_cursors`。
             if need_rebump {
                 self.bump_epoch();
-                need_rebump = false;
             }
+            // 消费式置位（写在 if 后防死赋值）：本轮起恒 bump2——初代迭代
+            // 的 false 来自下方初值，启动铺底在前无丢事件窗口。
+            need_rebump = true;
             loop {
                 tokio::select! {
                     _ = token.cancelled() => break 'subscribe,
@@ -281,13 +283,12 @@ impl RtdataWatchService {
             // 异常重建序（H3 双 bump）：先退订（RAII drop → kunsub，先于
             // 重建新订阅），bump1 让持有旧 epoch 的存量连接全量重读，重铺
             // KEYS 补注册断订期间的设备，退避防异常风暴 tight loop，然后
-            // 外层重建 ksubscribe 并 **再 bump 一次**（need_rebump——护
-            // 重建窗口内新建的连接，见循环顶部注释）。
+            // 外层重建 ksubscribe——循环顶部的 need_rebump（已置 true）在
+            // 新订阅建立后触发 bump2，护重建窗口内新建的连接。
             drop(sub);
             self.bump_epoch();
             self.backfill_keys(&client).await;
             tokio::time::sleep(RESTART_BACKOFF).await;
-            need_rebump = true;
         }
         // 'subscribe 跳出时 sub 随作用域结束 drop（RAII kunsub），先于
         // client 离场。
@@ -314,9 +315,7 @@ where
         match factory().await {
             Ok(()) => break,
             Err(e) => {
-                error!(
-                    "[rtdataWatch] watcher task panic: {e}; epoch+1 全量重同步 + 退避重启"
-                );
+                error!("[rtdataWatch] watcher task panic: {e}; epoch+1 全量重同步 + 退避重启");
                 svc.bump_epoch();
                 tokio::time::sleep(RESTART_BACKOFF).await;
             }

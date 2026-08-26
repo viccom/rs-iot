@@ -615,12 +615,10 @@ mod tests {
     fn project_baseline_limits_diff_to_dirty_domain() {
         let last = baseline(&[("devA.t1", "1"), ("devB.t1", "2"), ("devC.t1", "3")]);
         let dirty = || {
-            let points: serde_json::Map<String, serde_json::Value> = [(
-                "devA.t1".to_string(),
-                json!([0, "lt", "1"]),
-            )]
-            .into_iter()
-            .collect();
+            let points: serde_json::Map<String, serde_json::Value> =
+                [("devA.t1".to_string(), json!([0, "lt", "1"]))]
+                    .into_iter()
+                    .collect();
             vec![("devA".to_string(), points)]
         };
         // ksub Partial 路径逐字复刻（主循环 ReadOutcome::Partial 分支）。
@@ -650,7 +648,11 @@ mod tests {
     /// 漏判归属不误报，R12 边界）。
     #[test]
     fn dev_segment_splits_last_dot_as_tag() {
-        assert_eq!(dev_segment("a.b.c"), "a.b", "倒数第一段是 tag，前缀是 devid");
+        assert_eq!(
+            dev_segment("a.b.c"),
+            "a.b",
+            "倒数第一段是 tag，前缀是 devid"
+        );
         assert_eq!(dev_segment("line1.temp"), "line1");
         assert_eq!(dev_segment("nodot"), "nodot", "无点原样返回（保守归自身）");
     }

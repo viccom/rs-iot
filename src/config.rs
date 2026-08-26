@@ -604,21 +604,25 @@ close_timeout_secs = 30"#,
         assert_eq!(HistoryConfig::default().validate(), Ok(()));
 
         // 各字段上下确界同时取到仍合法
-        let mut c = HistoryConfig::default();
-        c.memory_limit_mb = 1 << 20;
-        c.wal_size_limit_mb = 1;
-        c.retention_days = 36_500;
-        c.channel_capacity = 1 << 24;
-        c.batch_max_rows = 1 << 20;
-        c.cardinality_limit = 1 << 24;
+        let c = HistoryConfig {
+            memory_limit_mb: 1 << 20,
+            wal_size_limit_mb: 1,
+            retention_days: 36_500,
+            channel_capacity: 1 << 24,
+            batch_max_rows: 1 << 20,
+            cardinality_limit: 1 << 24,
+            ..HistoryConfig::default()
+        };
         assert_eq!(c.validate(), Ok(()), "上下确界组合必须合法");
 
         // 0 哨兵语义合法：cardinality_limit=0 自动校准；wal_sync_ms=0 =
         // PerAppend；close_timeout_secs=0 = 立即放弃（均不设限字段）
-        let mut c = HistoryConfig::default();
-        c.cardinality_limit = 0;
-        c.wal_sync_ms = 0;
-        c.close_timeout_secs = 0;
+        let c = HistoryConfig {
+            cardinality_limit: 0,
+            wal_sync_ms: 0,
+            close_timeout_secs: 0,
+            ..HistoryConfig::default()
+        };
         assert_eq!(c.validate(), Ok(()));
     }
 

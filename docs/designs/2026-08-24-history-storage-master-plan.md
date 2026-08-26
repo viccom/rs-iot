@@ -107,6 +107,7 @@ Phase 1/2/3 深度审查发现 High×5 + Medium×11 已全部修复（[2026-08-2
 - **读/订阅**：恒真断言（subscribe e2e buf<1MB）；反压红门判别弱于构造（补推 1 台即绿）；dev_id/tag 读侧长度上限；hgetall 奇数长度静默丢尾 warn
 - **治理/前端**：hqTagOptions startsWith 前缀歧义（tag_key 串扰同根）；archived_tags 两处重复计数；WriteErrorKind index/ALL 双硬编码；死区评估分母口径文案（step1/2 排除点）；init_failed e2e 未断言 /metrics family 省略；datalist 固定 DOM id；stats Some+telemetry None 零值水位防御分支；500 body error 细节前端透传
 - （Low-L1 rest-api 面板位置已随修复包顺手同步）
+- **minimal 档既有测试红**（2026-08-26 审查修复包门禁发现并归因，与该包无关）：`routes_lua` 两测（`asset_read_path_script_and_lib`/`lib_save_rejects_invalid_names`）在 `--no-default-features` 档失败——`is_reserved_lib_top` lua feature 关闭恒 false（保留段语义缺席的设计，routes_lua.rs 注释明示），测试的 `"algo/evil.lua"` 拒绝项未按 feature 门控；修法 = 该两断言项 cfg 门控或按 feature 分期望（lua 模块，另行小修）
 
 ## 附录：实测基线（2026-08-24，Ryzen 9 5900HX/63GB/NVMe/Win10；真实边缘盒按比例折减，相对关系可迁移）
 
