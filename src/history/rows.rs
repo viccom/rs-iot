@@ -129,15 +129,14 @@ impl WriteErrorKind {
         }
     }
 
-    /// [`HistoryStats::error_rows`] 桽数组下标（`ALL` 顺序即下标序）。
+    /// [`HistoryStats::error_rows`] 桶数组下标。派生自 [`WriteErrorKind::ALL`]
+    /// 的位置（审查 L4：手写 match 与 ALL 字面量是两处独立硬编码，错位时
+    /// 记数/读数闭环自洽不报警——单源派生后只剩 ALL 一处序）。
     fn index(self) -> usize {
-        match self {
-            Self::MemoryBudget => 0,
-            Self::Cardinality => 1,
-            Self::WalDisk => 2,
-            Self::Closed => 3,
-            Self::Other => 4,
-        }
+        Self::ALL
+            .iter()
+            .position(|k| *k == self)
+            .expect("ALL 覆盖全部变体（枚举定义穷尽性保证）")
     }
 }
 
@@ -302,6 +301,7 @@ pub fn fan_out(samples: &[Sample], effective: &HashMap<String, TagProps>, h: &Hi
 
 #[cfg(test)]
 mod tests {
+
     use std::collections::{BTreeMap, HashMap};
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
@@ -309,6 +309,16 @@ mod tests {
 
     use super::*;
     use crate::types::{tag_key, Hwid, Sample, SampleValue, TagProps};
+
+    /// index() 与 ALL 序等价守门（审查 L4，D-F 预期即绿）：派生重构后下标
+    /// 序 === ALL 字面量序——错位时 record_error_rows 写错桶而读数闭环自洽，
+    /// 本测是唯一报警点。
+    #[test]
+    fn write_error_kind_index_matches_all_order() {
+        for (i, k) in WriteErrorKind::ALL.iter().enumerate() {
+            assert_eq!(k.index(), i, "{k:?} 下标必须等于 ALL 序 {i}");
+        }
+    }
 
     /// 零值计数器：字段名与全 pub 即 HistoryStats 的公共契约（无 Default 假设）。
     /// 绿阶段仅扩构造补新字段（deadband_evaluated/error_rows/nonfinite_skipped/
