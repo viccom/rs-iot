@@ -22,7 +22,11 @@ fn cell() -> &'static RwLock<Arc<HashMap<String, TagProps>>> {
 
 /// 当前 effective 快照（Arc clone 廉价；未装载时空表）。
 pub fn effective() -> Arc<HashMap<String, TagProps>> {
-    cell().read().unwrap().clone()
+    // 毒化恢复：reload 临界区 panic 后旧快照仍完整有效，读比崩好（L-4）。
+    cell()
+        .read()
+        .unwrap_or_else(|p| p.into_inner())
+        .clone()
 }
 
 /// 全量重建（启动装载 + 写路径失效）。返回物化表（`tag_key → TagProps`）。
@@ -33,7 +37,7 @@ pub async fn reload(c: &EmbeddedClient) -> Result<HashMap<String, TagProps>, RsI
     let models = crate::model::store::list_models(c).await?;
     let devs = crate::model::store::list_devices(c).await?;
     let map = crate::model::effective::effective_all(&models, &devs);
-    *cell().write().unwrap() = Arc::new(map.clone());
+    *cell().write().unwrap_or_else(|p| p.into_inner()) = Arc::new(map.clone());
     crate::model::discovery::retain_modeled(&map);
     Ok(map)
 }
@@ -188,5 +192,21 @@ mod tests {
     async fn reload_empty_tables_ok() {
         let c = test_client("empty").await;
         assert!(reload(&c).await.unwrap().is_empty());
+    }
+
+    /// 毒化恢复（审查 L-4）：reload 临界区 panic 毒化后，effective() 读旧
+    /// 快照不得 panic——否则该次毒化后所有 pipeline worker 在 flush 热路径
+    /// 连环崩（每次调用必 panic，dispatcher 的 panic 补调机制救不了）。
+    /// 全局静态锁毒化对其他测试无害：修复后读写均走 into_inner。
+    #[test]
+    fn effective_read_survives_lock_poison() {
+        let join = std::thread::Builder::new()
+            .spawn(|| {
+                let _g = cell().write().unwrap();
+                panic!("注入毒化");
+            })
+            .unwrap();
+        let _ = join.join(); // Err(panic) → 锁已毒化
+        let _ = effective(); // 红：当前 read().unwrap() panic；绿：返回旧快照
     }
 }
