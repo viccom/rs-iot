@@ -67,6 +67,15 @@ pub enum ModelError {
         /// 覆盖键（tag 名）。
         tag: String,
     },
+    /// extra 扩展槽键违反命名契约（设计 §4.1：`^x_[A-Za-z0-9_]+$`）。
+    BadExtraKey {
+        /// 模型 id。
+        model: String,
+        /// 所属 tag 名（模型级 extra 无 tag → None）。
+        tag: Option<String>,
+        /// 违规键名。
+        key: String,
+    },
 }
 
 impl fmt::Display for ModelError {
@@ -95,6 +104,16 @@ impl fmt::Display for ModelError {
             Self::UnknownTagOverride { devid, tag } => {
                 write!(f, "设备 {devid} 覆盖的 tag {tag:?} 不在其模型 tags")
             }
+            Self::BadExtraKey { model, tag, key } => match tag {
+                Some(tag) => write!(
+                    f,
+                    "模型 {model} 的 tag {tag:?} 扩展键 {key:?} 非法：须匹配 ^x_[A-Za-z0-9_]+$"
+                ),
+                None => write!(
+                    f,
+                    "模型 {model} 的扩展键 {key:?} 非法：须匹配 ^x_[A-Za-z0-9_]+$"
+                ),
+            },
         }
     }
 }
@@ -110,13 +129,30 @@ pub fn valid_id(s: &str) -> bool {
             .any(|c| c.is_whitespace() || ['.', '*', '{', '}', ','].contains(&c))
 }
 
-/// 模型结构自校验：model_id/tag 名/addr 占位符一致性。
+/// extra 扩展槽键契约（设计 §4.1，规范性）：`x_` 前缀 + 非空的
+/// ASCII 字母/数字/下划线余部，即 `^x_[A-Za-z0-9_]+$`。
+fn valid_extra_key(k: &str) -> bool {
+    k.strip_prefix("x_").is_some_and(|rest| {
+        !rest.is_empty() && rest.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+    })
+}
+
+/// 模型结构自校验：model_id/tag 名/addr 占位符一致性 + extra 键契约（§4.1）。
 pub fn validate_model(m: &DeviceModel) -> Result<(), ModelError> {
     if !valid_id(&m.model_id) {
         return Err(ModelError::InvalidId {
             what: "model_id",
             value: m.model_id.clone(),
         });
+    }
+    for key in m.extra.keys() {
+        if !valid_extra_key(key) {
+            return Err(ModelError::BadExtraKey {
+                model: m.model_id.clone(),
+                tag: None,
+                key: key.clone(),
+            });
+        }
     }
     let mut seen: BTreeSet<&str> = BTreeSet::new();
     let declared: BTreeSet<&str> = m.params.iter().map(String::as_str).collect();
@@ -132,6 +168,15 @@ pub fn validate_model(m: &DeviceModel) -> Result<(), ModelError> {
                 model: m.model_id.clone(),
                 tag: t.name.clone(),
             });
+        }
+        for key in t.extra.keys() {
+            if !valid_extra_key(key) {
+                return Err(ModelError::BadExtraKey {
+                    model: m.model_id.clone(),
+                    tag: Some(t.name.clone()),
+                    key: key.clone(),
+                });
+            }
         }
         if let Some(a) = &t.addr {
             for name in addr::placeholders(a).map_err(|e| ModelError::BadAddr {
@@ -320,6 +365,77 @@ mod tests {
         let mut m = ok_model();
         m.tags[0].addr = None;
         m.tags[1].addr = None;
+        assert_eq!(validate_model(&m), Ok(()));
+    }
+
+    // ===== extra 扩展槽键契约（设计 §4.1：^x_[A-Za-z0-9_]+$） =====
+
+    #[test]
+    fn model_extra_bad_key_rejected() {
+        // 模型级 extra 非 x_ 前缀键 → Err（带 model/键名，tag=None）。
+        let mut m = ok_model();
+        m.extra.insert("bad_key".into(), serde_json::json!(1));
+        assert_eq!(
+            validate_model(&m),
+            Err(ModelError::BadExtraKey {
+                model: "vx_dtz341".into(),
+                tag: None,
+                key: "bad_key".into()
+            })
+        );
+    }
+
+    #[test]
+    fn tag_extra_typo_key_rejected() {
+        // tag 级 extra 拼写错误键（"vendo"）→ Err（带 model/tag/键名）。
+        let mut m = ok_model();
+        m.tags[0]
+            .extra
+            .insert("vendo".into(), serde_json::json!("威胜"));
+        assert_eq!(
+            validate_model(&m),
+            Err(ModelError::BadExtraKey {
+                model: "vx_dtz341".into(),
+                tag: Some("ua".into()),
+                key: "vendo".into()
+            })
+        );
+    }
+
+    #[test]
+    fn extra_key_edge_cases() {
+        // 合法：x_scale（纯小写）+ x_S7_len（大写/数字允许）。
+        let mut m = ok_model();
+        m.extra.insert("x_scale".into(), serde_json::json!(0.1));
+        m.tags[0]
+            .extra
+            .insert("x_S7_len".into(), serde_json::json!(4));
+        assert_eq!(
+            validate_model(&m),
+            Ok(()),
+            "x_scale / x_S7_len（大写允许）合法"
+        );
+        // "x_" 单独：余部为空 → Err。
+        let mut m = ok_model();
+        m.extra.insert("x_".into(), serde_json::json!(1));
+        assert!(
+            matches!(
+                validate_model(&m),
+                Err(ModelError::BadExtraKey { key, .. }) if key == "x_"
+            ),
+            "x_ 余部为空非法"
+        );
+    }
+
+    #[test]
+    fn valid_extra_keys_pass() {
+        let mut m = ok_model();
+        m.extra.insert("x_code".into(), serde_json::json!(7));
+        m.extra
+            .insert("x_asset_category".into(), serde_json::json!("动力配电"));
+        m.tags[1]
+            .extra
+            .insert("x_alarm_high".into(), serde_json::json!(90.0));
         assert_eq!(validate_model(&m), Ok(()));
     }
 

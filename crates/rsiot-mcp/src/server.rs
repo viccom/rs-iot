@@ -174,6 +174,24 @@ pub struct DeleteDeviceRequest {
     pub dev_id: String,
 }
 
+/// `rsiot_list_devmodels`：列设备模型。对标 `routes_model::ListQuery`。
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ListDevmodelsRequest {
+    #[schemars(description = "Optional model ID filter; omit to list all device models")]
+    pub model_id: Option<String>,
+}
+
+/// `rsiot_list_effective_tags`：列 effective 标签视图。对标 `routes_tag::ListQuery`。
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ListEffectiveTagsRequest {
+    #[schemars(description = "Optional device ID filter; omit for all devices")]
+    pub dev_id: Option<String>,
+    #[schemars(
+        description = "true = only tags whitelisted for history archiving (effective value)"
+    )]
+    pub history: Option<bool>,
+}
+
 // ============ query 拼接辅助 ============
 
 /// percent-encode query 参数值（输入边界防护，对标规则5「系统边界处验证输入」）。
@@ -212,11 +230,11 @@ pub enum ToolRisk {
 ///
 /// 未知名字按 `CriticalWrite` 保守对待（**fail-closed**：新增工具漏登记进表时，
 /// 默认被 risk 拦截而非静默放行——"默认最严"对表外名字同样成立）。完整性由
-/// `all_tools_registered_in_risk_table` 测试锁定（23 工具逐一断言非 default）。
+/// `all_tools_registered_in_risk_table` 测试锁定（25 工具逐一断言非 default）。
 fn tool_risk(name: &str) -> ToolRisk {
     use ToolRisk::*;
     match name {
-        // 只读（12）
+        // 只读（14）
         "rsiot_list_devices"
         | "rsiot_read_tags"
         | "rsiot_get_status"
@@ -228,7 +246,9 @@ fn tool_risk(name: &str) -> ToolRisk {
         | "rsiot_list_lua_scripts"
         | "rsiot_get_instance_config"
         | "rsiot_list_plugins"
-        | "rsiot_get_sysinfo" => ReadOnly,
+        | "rsiot_get_sysinfo"
+        | "rsiot_list_devmodels"
+        | "rsiot_list_effective_tags" => ReadOnly,
         // 普通写（描述声明 + annotations，放行）
         "rsiot_send_device_command"
         | "rsiot_start_instance"
@@ -800,6 +820,57 @@ impl RsiotMcpServer {
             self.backend.get("/api/v1/sysinfo").await,
             "rsiot_get_sysinfo",
         )
+    }
+
+    // ---- 模型注册表读视图（M-2/M-4：devmodels + effective tags，只读）----
+
+    /// `rsiot_list_devmodels`：列设备模型。映射 `GET /api/v1/devmodels`。
+    ///
+    /// 返回 `{model_id: DeviceModel}` 全量 map（`extra` 扩展槽原样透传）；
+    /// 传 `model_id` 只回该模型（单键，未命中为空对象）。模型是多设备共享模板
+    /// （create-only），本工具是模型注册表的只读入口——绑定设备/建实例前查模板。
+    #[tool(
+        description = "List device models from the model registry: {model_id: DeviceModel} map (extra extension fields passed through as-is). Pass model_id to return only that model. Read-only.",
+        annotations(read_only_hint = true)
+    )]
+    async fn rsiot_list_devmodels(
+        &self,
+        Parameters(req): Parameters<ListDevmodelsRequest>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let path = match &req.model_id {
+            Some(id) => format!("/api/v1/devmodels?model_id={}", encode_query_value(id)),
+            None => "/api/v1/devmodels".to_string(),
+        };
+        backend_to_result(self.backend.get(&path).await, "rsiot_list_devmodels")
+    }
+
+    /// `rsiot_list_effective_tags`：列 effective 标签视图。映射 `GET /api/v1/tags`。
+    ///
+    /// 返回 `{tag_key: {…effective props, _source: "model"|"override"}}`——模型模板
+    /// 默认 ∪ 设备覆盖三态合并现算（M-4 tags 表退役，读写全走模型注册表）。
+    /// `history=true` 只列归档白名单内的标签（按 effective 值过滤）。
+    #[tool(
+        description = "List effective tag metadata view: {tag_key: {props..., _source: \"model\"|\"override\"}} — model template defaults merged with per-device overrides. Pass dev_id to filter one device; history=true to list only archive-whitelisted tags. Read-only.",
+        annotations(read_only_hint = true)
+    )]
+    async fn rsiot_list_effective_tags(
+        &self,
+        Parameters(req): Parameters<ListEffectiveTagsRequest>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        // 拼 query：只拼非空参数（口径同 get_recent_logs）；dev_id 经 percent-encode 防注入。
+        let mut qs: Vec<String> = Vec::new();
+        if let Some(d) = &req.dev_id {
+            qs.push(format!("dev_id={}", encode_query_value(d)));
+        }
+        if let Some(h) = req.history {
+            qs.push(format!("history={h}"));
+        }
+        let path = if qs.is_empty() {
+            "/api/v1/tags".to_string()
+        } else {
+            format!("/api/v1/tags?{}", qs.join("&"))
+        };
+        backend_to_result(self.backend.get(&path).await, "rsiot_list_effective_tags")
     }
 }
 
@@ -1528,6 +1599,72 @@ mod tests {
         assert_eq!(backend.recorded_paths()[0], "/api/v1/sysinfo");
     }
 
+    // ---- 模型注册表读视图（devmodels + effective tags，path 翻译）----
+
+    #[tokio::test]
+    async fn list_devmodels_translates_model_id_query() {
+        let backend = Arc::new(FakeBackend::new(
+            json!({"mdlA": {"model_id": "mdlA", "tags": []}}),
+        ));
+        let server = RsiotMcpServer::new(
+            backend.clone() as Arc<dyn RsiotBackend>,
+            RiskPolicy::default(),
+        );
+        let result = server
+            .rsiot_list_devmodels(Parameters(ListDevmodelsRequest { model_id: None }))
+            .await
+            .unwrap();
+        assert_ne!(result.is_error, Some(true));
+        assert!(text_of(&result).contains("mdlA"));
+        assert_eq!(backend.recorded_paths()[0], "/api/v1/devmodels");
+        // 验证意图：model_id 过滤走 query 参数（对标 routes_model::ListQuery）。
+        server
+            .rsiot_list_devmodels(Parameters(ListDevmodelsRequest {
+                model_id: Some("mdlA".into()),
+            }))
+            .await
+            .unwrap();
+        assert_eq!(
+            backend.recorded_paths()[1],
+            "/api/v1/devmodels?model_id=mdlA"
+        );
+    }
+
+    #[tokio::test]
+    async fn list_effective_tags_translates_dev_id_and_history_query() {
+        let backend = Arc::new(FakeBackend::new(
+            json!({"devA.temp": {"history": true, "_source": "model"}}),
+        ));
+        let server = RsiotMcpServer::new(
+            backend.clone() as Arc<dyn RsiotBackend>,
+            RiskPolicy::default(),
+        );
+        let result = server
+            .rsiot_list_effective_tags(Parameters(ListEffectiveTagsRequest {
+                dev_id: None,
+                history: None,
+            }))
+            .await
+            .unwrap();
+        assert_ne!(result.is_error, Some(true));
+        assert!(text_of(&result).contains("_source"));
+        // 无参不带 query（避免尾随 ?）。
+        assert_eq!(backend.recorded_paths()[0], "/api/v1/tags");
+        // 验证意图：dev_id/history 都走 query，& 分隔，bool 原样 true/false
+        // （对标 routes_tag::ListQuery 的 history=bool 过滤）。
+        server
+            .rsiot_list_effective_tags(Parameters(ListEffectiveTagsRequest {
+                dev_id: Some("devA".into()),
+                history: Some(true),
+            }))
+            .await
+            .unwrap();
+        assert_eq!(
+            backend.recorded_paths()[1],
+            "/api/v1/tags?dev_id=devA&history=true"
+        );
+    }
+
     // ---- risk 硬闸（RiskPolicy::check 纯函数路径）----
 
     #[test]
@@ -1587,18 +1724,20 @@ mod tests {
         assert_eq!(tool_risk("rsiot_unknown_tool"), CriticalWrite);
     }
 
-    /// 完整性测试（fail-closed 保障）：23 个工具逐一断言登记档位与期望一致。
+    /// 完整性测试（fail-closed 保障）：25 个工具逐一断言登记档位与期望一致。
     ///
     /// 验证意图（规则7）：`_ => CriticalWrite` 的 fail-closed 默认只在"漏登记"时生效，
-    /// 而本测试把 23 个名字的期望档位全枚举——新增工具若漏登记进 risk 表，
+    /// 而本测试把 25 个名字的期望档位全枚举——新增工具若漏登记进 risk 表，
     /// 这里会因档位不符而失败（而非靠 default 静默放行）。与 protocol.rs 的
     /// `handshake_lists_all_tools`(list_tools 注册完整性)互补:那边锁"注册",这边锁"risk 登记"。
     #[test]
     fn all_tools_registered_in_risk_table() {
         use ToolRisk::*;
-        // (工具名, 期望档位) 全量 23 个。
+        // (工具名, 期望档位) 全量 25 个。
         let expected: &[(&str, ToolRisk)] = &[
             ("rsiot_list_devices", ReadOnly),
+            ("rsiot_list_devmodels", ReadOnly),
+            ("rsiot_list_effective_tags", ReadOnly),
             ("rsiot_read_tags", ReadOnly),
             ("rsiot_get_status", ReadOnly),
             ("rsiot_list_instances", ReadOnly),

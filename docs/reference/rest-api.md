@@ -26,7 +26,7 @@
 
 1. **白名单**：`/api/v1/user/login`、`/api/v1/user/register`（注：`register` 路由**当前未注册**，白名单项悬空）、`/metrics`（Prometheus 抓取，机器出口）、`/apitest*`
 2. **`X-Access-Key` 直通**：请求头 `x-access-key` 与 lux `GET accesskey` 的值非空且相等 → 放行（机器对机器，对标 Lite_IOT `globalAccessKey`）
-3. **JWT**：`Authorization: <裸 token>`（**不剥离 `Bearer ` 前缀**，客户端直接传 token 字符串）或 Cookie `token=<jwt>`，HS256 校验
+3. **JWT**：`Authorization: Bearer <jwt>` 或裸 `<jwt>`（中间件自动剥离可选的 `Bearer ` 前缀，`auth.rs` auth_middleware）或 Cookie `token=<jwt>`，HS256 校验
 
 **JWT 要点**：
 - 签发：`POST /api/v1/user/login` 校验 bcrypt 密码 → 返回 `token`（body）+ `Set-Cookie: token=...; HttpOnly; Max-Age=86400`（24h）
@@ -42,7 +42,7 @@ TOKEN=$(curl -s -XPOST http://localhost:8790/api/v1/user/login \
   -H 'Content-Type: application/json' \
   -d '{"user_id":"admin","pass":"admin"}' | jq -r .token)
 
-# 2) 带 token 调 API（注意：Authorization 传裸 token，不加 Bearer）
+# 2) 带 token 调 API（Authorization 裸 token 与 "Bearer <token>" 两种写法均可，§2）
 curl -s -H "Authorization: $TOKEN" http://localhost:8790/api/v1/sysinfo
 curl -s -H "Authorization: $TOKEN" http://localhost:8790/api/v1/rtdatas           # 全量实时数据
 curl -s -H "Authorization: $TOKEN" "http://localhost:8790/api/v1/rtdatas?dev_id=devA"  # 单设备
@@ -388,6 +388,21 @@ curl -X POST -H "Authorization: Bearer $JWT" -H "Content-Type: application/json"
 | POST | `/api/v1/devreg/set` | JWT | DeviceEntry JSON（upsert；写前三级校验：模型存在/params 齐/覆盖 tag ∈ 模型） | `{"status":"ok","devid"}` |
 | POST | `/api/v1/devreg/delete` | JWT | `{"devid"}`（级联：**解绑实例引用** + dev2inst + rtdata；历史不动） | `{"status":"ok","unbound_instances":n}` |
 | POST | `/api/v1/migrate/inline-devices` | JWT | —（幂等；M-2 起**升级必经**——旧内联形态无法反序列化） | `{converted_models, converted_devices, converted_instances, failures}` |
+
+**开放扩展槽**（设计 [2026-08-27-model-extension-slot-design.md](../designs/2026-08-27-model-extension-slot-design.md)）：DeviceModel 与每个 tag 均可携带 `x_` 前缀扩展键（wire 上顶层平铺，如 `"x_asset_category":"动力配电"`；tag 级如 `"x_scale":{"k":0.1}`）。
+
+- 键契约：**MUST `^x_[A-Za-z0-9_]+$`**（模型级与 tag 级 extra 顶层键均查）；违规 → **400**（`ModelError` 既有映射）
+- 语义：宿主**不解释**扩展键（采集/归档/生效链路零消费）——供外置应用（报警/资产/协议元数据等）经 GET 读取；读写原样保留（跨版本读-改-写不丢）
+- GET `/api/v1/devmodels` 全量回显扩展键；前端 ModelForm 只读展示；MCP 工具 `rsiot_list_devmodels` 可读
+
+```bash
+# 带扩展键建模型（合法 x_ 键随 GET 原样回显；"vendo" 这类非 x_ 键会被 400 拒绝）
+curl -X POST -H "Authorization: Bearer $JWT" -H "Content-Type: application/json" -d '{
+  "model_id":"vx_dtz341","params":["base"],
+  "x_asset_category":"动力配电",
+  "tags":[{"name":"ua","data_type":"f32","addr":"holding:{base}:f32","x_scale":{"k":0.1}}]
+}' http://localhost:8790/api/v1/devmodel/set
+```
 
 ### 4.17 发现队列（`routes_discovery.rs`，M-4）
 

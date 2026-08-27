@@ -85,7 +85,7 @@ async fn spawn_handshake_with_policy(
     (client, server_task)
 }
 
-/// 协议握手 + list_tools：23 个工具全部暴露。
+/// 协议握手 + list_tools：25 个工具全部暴露。
 ///
 /// 验证意图（规则7）：`#[tool_router]` 宏注册的工具必须在 list_tools 出现——
 /// 漏一个说明宏配置错或工具方法签名错（reasonix 会看不到该工具）。
@@ -95,7 +95,7 @@ async fn handshake_lists_all_tools() {
     let tools = client.peer().list_tools(None).await.expect("list_tools");
     let names: Vec<&str> = tools.tools.iter().map(|t| t.name.as_ref()).collect();
 
-    // 23 个工具全在（漏一个 = 宏没注册，agent 调不到）。
+    // 25 个工具全在（漏一个 = 宏没注册，agent 调不到）。
     for expected in [
         // 既有 10 个
         "rsiot_list_devices",
@@ -122,13 +122,16 @@ async fn handshake_lists_all_tools() {
         "rsiot_delete_device",
         "rsiot_list_plugins",
         "rsiot_get_sysinfo",
+        // 新增 2 个（模型注册表/effective 读视图）
+        "rsiot_list_devmodels",
+        "rsiot_list_effective_tags",
     ] {
         assert!(
             names.contains(&expected),
             "tool {expected} must be listed; got {names:?}"
         );
     }
-    assert_eq!(names.len(), 23, "exactly 23 tools; got {names:?}");
+    assert_eq!(names.len(), 25, "exactly 25 tools; got {names:?}");
 
     let _ = client.cancel().await;
     server_task.abort();

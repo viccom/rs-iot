@@ -46,6 +46,16 @@ function setDeadband(t: TagTemplate, v: string) {
   t.props.deadband = v.trim() === '' || Number.isNaN(n) ? null : n
 }
 
+/** 扩展槽只读视图：wire 上 extra 平铺为顶层 `x_` 前缀键（后端 serde
+ *  flatten，响应无 `extra` 嵌套键），此处收集键值供展示；兼容已归并的
+ *  extra 字段。空槽返回 undefined（整块不渲染）。 */
+function extraOf(o: { extra?: Record<string, unknown> }): Record<string, unknown> | undefined {
+  const out: Record<string, unknown> = { ...(o.extra ?? {}) }
+  for (const [k, v] of Object.entries(o)) if (k.startsWith('x_')) out[k] = v
+  return Object.keys(out).length > 0 ? out : undefined
+}
+const modelExtra = computed(() => extraOf(form))
+
 const errs = computed(() => (saving.value ? [] : validateModel(form)))
 
 function addTag() { form.tags.push(blankTag()) }
@@ -103,6 +113,11 @@ async function onSubmit() {
           <label><span>描述</span><input v-model="form.desc" placeholder="三相电能表"></label>
         </div>
 
+        <div v-if="modelExtra" class="extra-block">
+          <p class="table-label">扩展槽（x_ 键，只读）——外置应用写入的数据，保存时原样保留</p>
+          <pre class="extra-pre mono">{{ JSON.stringify(modelExtra, null, 2) }}</pre>
+        </div>
+
         <div class="tags-head">
           <p class="table-label">标签模板（{{ form.tags.length }}）——模板默认属性 = 同型号设备基线</p>
           <button class="btn-add" @click="addTag">+ 标签</button>
@@ -115,21 +130,29 @@ async function onSubmit() {
             </tr>
           </thead>
           <tbody>
-            <tr v-for="(t, i) in form.tags" :key="i">
-              <td><input v-model="t.name" class="cell mono" placeholder="ua"></td>
-              <td><input v-model="t.data_type" class="cell mono w70" placeholder="f32"></td>
-              <td><input v-model="t.addr" class="cell mono" placeholder="holding:{base}:f32"></td>
-              <td>
-                <select v-model="t.rw" class="cell w60">
-                  <option value="r">只读</option>
-                  <option value="rw">读写</option>
-                </select>
-              </td>
-              <td><input v-model="t.props.history" type="checkbox" class="cb"></td>
-              <td><input :value="deadbandText(t)" class="cell mono w70" placeholder="（无）" @input="setDeadband(t, ($event.target as HTMLInputElement).value)"></td>
-              <td><input v-model="t.unit" class="cell w60" placeholder="V"></td>
-              <td><button class="btn-rm" @click="removeTag(i)">✕</button></td>
-            </tr>
+            <template v-for="(t, i) in form.tags" :key="i">
+              <tr>
+                <td><input v-model="t.name" class="cell mono" placeholder="ua"></td>
+                <td><input v-model="t.data_type" class="cell mono w70" placeholder="f32"></td>
+                <td><input v-model="t.addr" class="cell mono" placeholder="holding:{base}:f32"></td>
+                <td>
+                  <select v-model="t.rw" class="cell w60">
+                    <option value="r">只读</option>
+                    <option value="rw">读写</option>
+                  </select>
+                </td>
+                <td><input v-model="t.props.history" type="checkbox" class="cb"></td>
+                <td><input :value="deadbandText(t)" class="cell mono w70" placeholder="（无）" @input="setDeadband(t, ($event.target as HTMLInputElement).value)"></td>
+                <td><input v-model="t.unit" class="cell w60" placeholder="V"></td>
+                <td><button class="btn-rm" @click="removeTag(i)">✕</button></td>
+              </tr>
+              <tr v-if="extraOf(t)" class="tag-extra-row">
+                <td colspan="8">
+                  <span class="table-label">扩展槽（x_ 键，只读）</span>
+                  <pre class="extra-pre mono">{{ JSON.stringify(extraOf(t), null, 2) }}</pre>
+                </td>
+              </tr>
+            </template>
           </tbody>
         </table>
         <p v-if="!form.tags.length" class="empty">尚未定义标签模板（模型至少含 1 个标签才有采集意义，可先保存空模板）。</p>
@@ -198,6 +221,16 @@ input:disabled { opacity: 0.55; }
   cursor: pointer; font-size: 12px; padding: 2px 6px;
 }
 .empty { color: var(--color-ink-dim); font-size: 12px; margin: 6px 0 0; }
+
+/* 扩展槽（x_ 键）只读展示：模型级块 + tag 级附加行共用 */
+.extra-block { display: flex; flex-direction: column; gap: 2px; }
+.extra-pre {
+  margin: 4px 0 0; padding: 6px 8px; max-height: 120px; overflow: auto;
+  font-size: 11px; white-space: pre-wrap; word-break: break-all;
+  background: var(--card-bg); border: 1px solid var(--card-border); border-radius: 6px;
+  color: var(--color-ink-dim);
+}
+.tag-extra-row td { background: rgba(0, 0, 0, 0.02); }
 
 .errs { margin: 0; padding-left: 18px; color: var(--color-danger); font-size: 12px; }
 .errs li { margin: 2px 0; }

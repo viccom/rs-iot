@@ -25,6 +25,9 @@ export interface TagTemplate {
   addr: string | null
   rw: TagRw
   props: TagProps
+  /** 开放扩展槽（外置应用数据，前端只读透传）。注意：wire 上平铺为顶层
+   *  `x_` 前缀键（后端 serde flatten），响应里没有 `extra` 嵌套键。 */
+  extra?: Record<string, unknown>
 }
 
 /** 设备模型（物模型）。 */
@@ -36,6 +39,8 @@ export interface DeviceModel {
   desc: string | null
   params: string[]
   tags: TagTemplate[]
+  /** 开放扩展槽（语义同 TagTemplate.extra，模型级）。 */
+  extra?: Record<string, unknown>
 }
 
 /** 实例级标签覆盖（三态：字段缺省/undefined = 继承模板）。 */

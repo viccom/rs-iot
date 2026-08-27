@@ -301,6 +301,45 @@ async fn devmodel_invalid_create_bad_request() {
     assert_eq!(st, StatusCode::BAD_REQUEST);
 }
 
+/// extra 扩展槽端到端（设计 §4）：合法 `x_` 键（模型级 + tag 级）建模型 200
+/// 且 GET 回显；非 `x_` 键（typo "vendo"）→ 400 拒绝、不入库。
+#[tokio::test]
+async fn devmodel_extra_key_contract_persisted_and_enforced() {
+    let (app, _handle) = test_app("model-extra").await;
+    let token = jwt(&app).await;
+
+    // 合法扩展键：模型级 + tag 级 → 200。
+    let mut m = model_body("m_ext");
+    m["x_asset_category"] = serde_json::json!("动力配电");
+    m["tags"][0]["x_scale"] = serde_json::json!({ "k": 0.1 });
+    let (st, _) = post_json(&app, &token, "/api/v1/devmodel/set", m).await;
+    assert_eq!(st, StatusCode::OK, "合法 x_ 键建模型");
+
+    // GET 回显两级扩展键（flatten 平铺回顶层）。
+    let (st, v) = get_json(&app, &token, "/api/v1/devmodels?model_id=m_ext").await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(
+        v["m_ext"]["x_asset_category"],
+        serde_json::json!("动力配电"),
+        "模型级扩展键回显：{v}"
+    );
+    assert_eq!(
+        v["m_ext"]["tags"][0]["x_scale"],
+        serde_json::json!({ "k": 0.1 }),
+        "tag 级扩展键回显：{v}"
+    );
+
+    // 非 x_ 键（"vendo" typo）→ 400（ModelError 既有映射）。
+    let mut bad = model_body("m_badext");
+    bad["vendo"] = serde_json::json!("x");
+    let (st, v) = post_json(&app, &token, "/api/v1/devmodel/set", bad).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "非法扩展键 400：{v}");
+
+    // 拒绝后不入库。
+    let (_, v) = get_json(&app, &token, "/api/v1/devmodels?model_id=m_badext").await;
+    assert!(v.get("m_badext").is_none(), "非法键模型不入库：{v}");
+}
+
 /// devreg 引用完整性 4xx 矩阵：模型不存在 / 参数不齐 / 未知覆盖 tag / 非法 devid。
 #[tokio::test]
 async fn devreg_reference_matrix_4xx() {

@@ -65,6 +65,12 @@ describe('extractParams（占位符提取）', () => {
 
 describe('validateModel（提交前镜像后端校验）', () => {
   it('合法模型零错误', () => expect(validateModel(model())).toEqual([]))
+  it('extra 扩展槽可选：模型级/tag 级携带 extra 不影响校验（透传不丢）', () => {
+    const m = model()
+    m.extra = { x_asset_category: '动力配电' }
+    m.tags[0].extra = { x_scale: 0.1 }
+    expect(validateModel(m)).toEqual([])
+  })
   it('非法 model_id / 重复 tag / 未声明参数均报', () => {
     const m = model()
     m.model_id = 'bad id'
