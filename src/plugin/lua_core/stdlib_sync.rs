@@ -760,12 +760,15 @@ mod tests {
             .expect("sync");
         let (v1, e1) = inventory(&root);
         assert_eq!(v1.as_deref(), Some("1.0.0"));
-        assert_eq!(e1.len(), SEED_MODULES.len(), "1 synced + 3 seed");
+        assert_eq!(e1.len(), SEED_MODULES.len(), "1 synced + 其余 seed");
         let crc = e1.iter().find(|e| e.path == "algo/crc16.lua").unwrap();
         assert_eq!(crc.source, "synced");
         assert_eq!(crc.ver.as_deref(), Some("1.0.0"));
         assert_eq!(crc.name, "algo.crc16", "name 为点分模块名");
-        assert!(e1.iter().filter(|e| e.source == "seed").count() == 3);
+        assert!(
+            e1.iter().filter(|e| e.source == "seed").count() == SEED_MODULES.len() - 1,
+            "seed 数 = 总种子 - 1 synced"
+        );
 
         let _ = fs::remove_dir_all(&root);
         let _ = fs::remove_dir_all(&up);
@@ -989,12 +992,20 @@ mod tests {
             "sha256 selftest 应在默认 1M 指令护栏内通过"
         );
 
-        // 1.3.0 三库 fork（freeioe vendored，另起新 VM 单独预算）：middleclass/
-        // stream_buffer/bcd 纯 OO/字符串运算，默认 1M 护栏内可用（stream_buffer
-        // selftest 同时证明其内部 require('oo.middleclass') 的跨模块依赖链）
+        // 1.3.0 三库 + 1.4.0 两库 fork（freeioe vendored，另起新 VM 单独预算）：
+        // middleclass/stream_buffer/bcd 纯 OO/字符串运算，cov/threshold 同量级
+        // （cov selftest 七路含表比较，默认 1M 护栏内可用——stream_buffer selftest
+        // 同时证明其内部 require('oo.middleclass') 的跨模块依赖链；cov 证明
+        // util.tablex 依赖链）
         let lua_fork = mk_vm(1_000_000);
         load_main(&lua_fork, &lctx).unwrap();
-        for m in ["oo.middleclass", "proto.stream_buffer", "codec.bcd"] {
+        for m in [
+            "oo.middleclass",
+            "proto.stream_buffer",
+            "codec.bcd",
+            "algo.cov",
+            "util.threshold",
+        ] {
             assert!(
                 lua_fork
                     .load(format!("return require('{m}').selftest()"))

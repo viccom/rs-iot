@@ -154,7 +154,11 @@ async fn register_exposes_stdlib_table() {
         .load("return #stdlib.list()")
         .eval()
         .expect("stdlib.list 应可用");
-    assert_eq!(n as usize, 4, "纯种子视图应列 4 库（algo/codec/util×2）");
+    assert_eq!(
+        n as usize,
+        crate::plugin::lua_core::stdlib::SEED_MODULES.len(),
+        "纯种子视图应列全部种子库"
+    );
     let src: String = lua
         .load(r#"return stdlib.info("algo.crc16").source"#)
         .eval()

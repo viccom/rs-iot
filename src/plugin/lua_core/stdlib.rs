@@ -11,8 +11,20 @@
 struct Seed;
 
 /// 种子模块清单（selftest 冒烟遍历集，须与 `stdlib_seed/` 目录一一对应）。
-pub(crate) const SEED_MODULES: &[&str] =
-    &["algo/crc16", "codec/basexx", "util/retry", "util/tablex"];
+/// 1.5.0 扩容：1.3.0 三库（middleclass/stream_buffer/bcd）+ 1.4.0 两库
+/// （cov/threshold）进种子——冷启动内网现场（无 upstream 可达）require 兜底；
+/// 全部带 M.selftest 过闸。
+pub(crate) const SEED_MODULES: &[&str] = &[
+    "algo/crc16",
+    "algo/cov",
+    "codec/basexx",
+    "codec/bcd",
+    "oo/middleclass",
+    "proto/stream_buffer",
+    "util/retry",
+    "util/tablex",
+    "util/threshold",
+];
 
 /// 取种子源码：`path` 为点分模块名的 `/` 形式（`algo/crc16`），返回 `<path>.lua` 内容。
 pub(crate) fn seed_get(path: &str) -> Option<Vec<u8>> {
@@ -74,16 +86,32 @@ mod tests {
         assert!(seed_get("algo/nonexistent").is_none(), "未知路径应 miss");
     }
 
-    /// T7 冒烟闸门（§3.3）：全部 4 库在**沙箱 VM**（lua_core 生产形态——仅
+    /// T7 冒烟闸门（§3.3）：全部种子库在**沙箱 VM**（lua_core 生产形态——仅
     /// TABLE|STRING|MATH|COROUTINE，非满配 Lua）上 load→eval→selftest 通过。
+    /// VM 须先装 require 路由（load_main）：1.5.0 起种子含跨库依赖
+    /// （cov → oo.middleclass / util.tablex），裸 VM 无 require 会炸——这正是
+    /// 生产语义（种子互依赖经保留段路由→_stdlib miss→种子兜底）。
     #[test]
     fn seed_selftest_all_passes_on_sandbox_vm() {
+        // load_main 需要脚本目录存在（装 require 路由时会读 main.lua）——临时目录
+        // 提供最小 main.lua（与 stdlib_sync 测试 fresh_scripts 同法）。
+        let root = std::env::temp_dir().join(format!("rsiot-seedtest-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("t")).unwrap();
+        std::fs::write(root.join("t/main.lua"), "-- seed selftest host\n").unwrap();
         let cfg = parse_cfg(&json!({"script":"t","endpoint":"x"})).unwrap();
         let lua = new_vm(&cfg).unwrap();
+        let lctx = crate::plugin::lua_core::script::LoadCtx {
+            scripts_root: std::sync::Arc::from(root.as_path()),
+            script_name: std::sync::Arc::<str>::from("t"),
+        };
+        crate::plugin::lua_core::script::load_main(&lua, &lctx)
+            .expect("load_main 应装好 require 路由");
         assert_eq!(
             seed_selftest_all(&lua).expect("全部种子 selftest 应通过"),
             SEED_MODULES.len(),
-            "通过数应等于种子数（4）"
+            "通过数应等于种子数"
         );
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
