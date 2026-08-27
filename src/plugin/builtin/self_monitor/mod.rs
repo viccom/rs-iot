@@ -70,6 +70,7 @@ pub(crate) fn sys_model() -> crate::model::types::DeviceModel {
         addr: None, // 纯软设备（采集由代码驱动，无协议地址）
         rw: crate::model::types::TagRw::R,
         props: crate::types::TagProps::default(),
+        ..Default::default()
     };
     DeviceModel {
         model_id: SYS_MODEL_ID.into(),
@@ -99,6 +100,7 @@ pub(crate) fn sys_model() -> crate::model::types::DeviceModel {
             tag("watchdog", "int", "看门狗计数（可选）"),
             tag("note", "string", "人工备注（可选）"),
         ],
+        ..Default::default()
     }
 }
 

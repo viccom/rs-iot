@@ -33,6 +33,12 @@ pub struct DeviceModel {
     /// 标签模板集合（name 模型内唯一）。
     #[serde(default)]
     pub tags: Vec<TagTemplate>,
+    /// 开放扩展槽：捕获 wire 上未匹配已知字段的键，读-改-写原样保留
+    /// （前向兼容——旧代码不丢新版本写入的扩展字段；同款先例
+    /// `db::stat::InstanceStat.extra`）。空时不序列化，不用扩展槽的
+    /// wire 逐字节不变。
+    #[serde(flatten, skip_serializing_if = "serde_json::Map::is_empty")]
+    pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
 /// 标签模板（乐高最小对象）。
@@ -57,6 +63,9 @@ pub struct TagTemplate {
     /// 型号级默认属性（Phase 1a `TagProps` 转任模板默认结构）。
     #[serde(default)]
     pub props: TagProps,
+    /// 开放扩展槽（语义同 [`DeviceModel::extra`]，tag 级）。
+    #[serde(flatten, skip_serializing_if = "serde_json::Map::is_empty")]
+    pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
 /// 标签读写语义。缺省**只读**（最小权限：观察到的数据点默认不可写；可写须
@@ -170,6 +179,12 @@ mod tests {
         let m: DeviceModel = serde_json::from_str(r#"{"model_id":"m1"}"#).unwrap();
         assert_eq!(m.model_id, "m1");
         assert!(m.tags.is_empty() && m.params.is_empty());
+        // 不用扩展槽时 wire 不引入新键（skip_serializing_if 锁定）。
+        assert!(!serde_json::to_value(&m)
+            .unwrap()
+            .as_object()
+            .unwrap()
+            .contains_key("extra"));
         // 全字段往返。
         let full = DeviceModel {
             model_id: "vx_dtz341".into(),
@@ -190,7 +205,13 @@ mod tests {
                     deadband: Some(0.5),
                     ..Default::default()
                 },
+                extra: [("x_scale".into(), serde_json::json!(0.1))]
+                    .into_iter()
+                    .collect(),
             }],
+            extra: [("x_code".into(), serde_json::json!(7))]
+                .into_iter()
+                .collect(),
         };
         let back: DeviceModel =
             serde_json::from_value(serde_json::to_value(&full).unwrap()).unwrap();
@@ -231,6 +252,24 @@ mod tests {
         let back: DeviceBinding =
             serde_json::from_value(serde_json::to_value(&full).unwrap()).unwrap();
         assert_eq!(back, full);
+    }
+
+    #[test]
+    fn device_model_unknown_fields_roundtrip_preserved() {
+        // 前向兼容：wire 上未匹配已知字段的键（新版本写入的扩展键）读入后
+        // 原样保留，不静默丢弃——旧代码读-改-写不丢新字段。
+        let src = r#"{"model_id":"m1","vendor":"v","x_ext":{"code":7},"tags":[]}"#;
+        let m: DeviceModel = serde_json::from_str(src).unwrap();
+        let back = serde_json::to_value(&m).unwrap();
+        assert_eq!(back["x_ext"], serde_json::json!({"code": 7}));
+    }
+
+    #[test]
+    fn tag_template_unknown_fields_roundtrip_preserved() {
+        let src = r#"{"model_id":"m1","tags":[{"name":"ua","data_type":"f32","x_scale":0.1}]}"#;
+        let m: DeviceModel = serde_json::from_str(src).unwrap();
+        let back = serde_json::to_value(&m).unwrap();
+        assert_eq!(back["tags"][0]["x_scale"], serde_json::json!(0.1));
     }
 
     #[test]

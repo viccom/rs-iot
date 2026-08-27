@@ -113,6 +113,7 @@ pub fn convert(inst: &LegacyInst) -> ConvertOutcome {
                 },
                 rw: Default::default(),
                 props: ch.props.clone().unwrap_or_default(),
+                ..Default::default()
             });
         }
         out.models.push(DeviceModel {
