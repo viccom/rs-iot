@@ -26,6 +26,9 @@ pub async fn sysstatus(State(st): State<AppState>) -> Json<serde_json::Value> {
     // deadband_evaluated/errors_by_kind 仅 ok 态输出——非 ok 整体省略
     // （省略语义而非 null，与 stats 的 null 语义区分）。ratio 口径与
     // /metrics 一致（P2：suppressed/evaluated，分母 0 时 0）。
+    // P4 运行态上行：`degraded` = writer 错误路径锁存的 closed_latched
+    // （Closed 桶首增——引擎僵尸/关停），与静态三态 `engine` 分离——旧字段
+    // 语义不动（前端兼容），新增字段纯增量。
     let history = match &st.history_stats {
         Some(h) => {
             let snap = history_telemetry_snapshot(&st).await;
@@ -52,6 +55,9 @@ pub async fn sysstatus(State(st): State<AppState>) -> Json<serde_json::Value> {
                 "feature": cfg!(feature = "history"),
                 "enabled": st.config.history.enabled,
                 "engine": st.history_engine_state.as_ref(),
+                // P4 僵尸上行：Closed 桶首增锁存（引擎僵尸/关停时 writer 置位，
+                // 一次为真永不复位）——静态三态仍报 "ok"，运行态异常由此可见。
+                "degraded": h.closed_latched.load(std::sync::atomic::Ordering::Relaxed),
                 "memory_used_bytes": snap.memory_used_bytes,
                 "memory_budget_bytes": snap.memory_budget_bytes,
                 "series": snap.series,

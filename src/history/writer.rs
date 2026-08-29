@@ -301,6 +301,14 @@ impl Writer {
     /// insert_rows + 计数 + fail-soft：Ok→written+=n；Err→按行分型计数
     /// （`record_error_rows`：errors 与 kind 槽同增，P3）并 warn
     /// （整批丢弃不上抛不重试，1 秒节流防日志风暴）。
+    ///
+    /// P4 僵尸上行：`record_error_rows` 返回 true（Closed 桶**首增**，此前
+    /// 计数为 0）时打一次性 `error!`——StorageClosed/StorageShuttingDown
+    /// 意味着引擎已关停/僵尸，归档链路失效且不再自愈（常规关停序是排空
+    /// flush 先于 close，不经此路径，正常关停不误报）。db::alarms::fire
+    /// 需要 lux 句柄而 writer 是独立 std 线程不可达——告警消费走
+    /// `HistoryStats.closed_latched` → sysstatus `degraded` 上行（TODO:
+    /// 告警事件接入 telemetry/sysstatus 读侧 fire 通道）。
     fn insert(&mut self, rows: Vec<TsinkRow>) {
         let n = rows.len() as u64;
         match self.storage.insert_rows(&rows) {
@@ -309,7 +317,13 @@ impl Writer {
             }
             Err(e) => {
                 let kind = classify_err(&e);
-                self.stats.record_error_rows(kind, n);
+                let first_closed = self.stats.record_error_rows(kind, n);
+                if first_closed {
+                    tracing::error!(
+                        "[history] 引擎写入返回 Closed 类错误(引擎僵尸/已关停,归档失效,\
+                         sysstatus history.degraded=true): {e}"
+                    );
+                }
                 let now = Instant::now();
                 let throttled = self
                     .last_err_warn
@@ -1268,5 +1282,64 @@ mod tests {
         reopened.close().expect("重开实例 close");
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(pts.len(), 1, "盘上仅 t5——迟到 t3 不落盘（D-T3 语义）");
+    }
+
+    /// 18. Closed 桶首增锁存（P4 僵尸上行）：预 close 的 storage 上 spawn
+    ///     writer，发一行 → insert 以 StorageClosed 失败 → Closed 桶计数且
+    ///     `closed_latched` 置位（writer 侧经 record_error_rows 返回值打
+    ///     一次性 ERROR 日志——日志面在 tracing，断言面取锁存标志 + 计数）；
+    ///     再发一行 → 桶计数继续增长、锁存保持 true（一次性语义的返回值
+    ///     部分由 rows.rs 单测 record_error_rows_first_closed_latch 锁定）。
+    #[test]
+    fn writer_closed_error_latches_degraded() {
+        let dir = unique_dir("closed-latch");
+        let cfg = cfg_with_dir(&dir);
+        let storage = build_storage(&cfg, 8).expect("build_storage 必须成功");
+        storage
+            .close()
+            .expect("预 close：使 insert 恒返 StorageClosed");
+        let (handle, join) =
+            spawn_writer(storage, &cfg).expect("测试环境 spawn history writer 线程必须成功");
+        let stats = handle.stats.clone();
+
+        handle
+            .send(row("m", now_ms(), SampleValue::Float(1.0), None))
+            .expect("send 必须成功");
+        assert!(
+            poll_until(Duration::from_secs(5), || {
+                stats.error_rows_of(WriteErrorKind::Closed) >= 1
+            }),
+            "Closed 桶必须计数，实际 {}",
+            stats.error_rows_of(WriteErrorKind::Closed)
+        );
+        assert!(
+            stats.closed_latched.load(Ordering::SeqCst),
+            "Closed 首增必须置位运行态锁存（sysstatus degraded 上行源）"
+        );
+
+        // 第二批：非首增——桶计数继续增长，锁存保持（告警只此一次不刷屏）
+        let first = stats.error_rows_of(WriteErrorKind::Closed);
+        handle
+            .send(row("m", now_ms() + 1, SampleValue::Float(2.0), None))
+            .expect("send 必须成功");
+        assert!(
+            poll_until(Duration::from_secs(5), || {
+                stats.error_rows_of(WriteErrorKind::Closed) > first
+            }),
+            "第二批 Closed 错误必须继续计数，实际 {}",
+            stats.error_rows_of(WriteErrorKind::Closed)
+        );
+        assert!(
+            stats.closed_latched.load(Ordering::SeqCst),
+            "锁存一次为真永不复位"
+        );
+
+        drop(handle);
+        join_with_timeout(
+            join,
+            Duration::from_secs(10),
+            "writer_closed_error_latches_degraded",
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

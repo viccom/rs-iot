@@ -6,7 +6,7 @@
 //! Rust 可测（D4 类型保真在 writer 侧映射 tsink Value）。
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use tokio::sync::mpsc;
@@ -91,6 +91,13 @@ pub struct HistoryStats {
     pub len_rejected: AtomicU64,
     /// 写错误分桶行数（P3 按 kind 计数，Σ == errors；顺序同 [`WriteErrorKind::ALL`]）。
     pub error_rows: [AtomicU64; 5],
+    /// Closed 桶首增锁存（P4 僵尸上行，运行态可变载体）：writer 首次记入
+    /// Closed 桶（StorageClosed/StorageShuttingDown——引擎关停/僵尸）时置位，
+    /// **一次为真永不复位**（引擎无自愈路径）。sysstatus 据此上行
+    /// `degraded: true`（[`crate::api`] history 块新增字段，静态三态 `engine`
+    /// 不动）；由 [`HistoryStats::record_error_rows`] 单入口置位，writer 不
+    /// 直接 store。
+    pub closed_latched: AtomicBool,
 }
 
 /// 写失败分型桶（writer.rs `classify_err` 产出；计数按行，Σkind == errors）。
@@ -143,9 +150,19 @@ impl WriteErrorKind {
 impl HistoryStats {
     /// 记 n 行写失败（P3 单入口：`errors` 与 kind 槽同增，Σkind == errors
     /// 不变量由此保证——writer 失败路径不直接 fetch_add `errors`）。
-    pub fn record_error_rows(&self, kind: WriteErrorKind, n: u64) {
+    ///
+    /// 返回值（P4 僵尸上行）：本次记录是否伴随 **Closed 桶首增**（此前 Closed
+    /// 计数为 0）——true 时同步置位 [`HistoryStats::closed_latched`]，writer
+    /// 侧据此打一次性 ERROR 告警日志（一条，不刷屏）；非首增或非 Closed 恒
+    /// false。
+    pub fn record_error_rows(&self, kind: WriteErrorKind, n: u64) -> bool {
         self.errors.fetch_add(n, Ordering::SeqCst);
-        self.error_rows[kind.index()].fetch_add(n, Ordering::SeqCst);
+        let prev = self.error_rows[kind.index()].fetch_add(n, Ordering::SeqCst);
+        let first_closed = kind == WriteErrorKind::Closed && prev == 0;
+        if first_closed {
+            self.closed_latched.store(true, Ordering::SeqCst);
+        }
+        first_closed
     }
 
     /// 读 kind 桶累计行数（渲染/测试对账用）。
@@ -339,6 +356,7 @@ mod tests {
             ts_rejected: AtomicU64::new(0),
             len_rejected: AtomicU64::new(0),
             error_rows: std::array::from_fn(|_| AtomicU64::new(0)),
+            closed_latched: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
@@ -781,5 +799,47 @@ mod tests {
         assert_eq!(handle.stats().sent.load(Ordering::SeqCst), 1);
         assert_eq!(handle.stats().ts_rejected.load(Ordering::SeqCst), 0);
         assert_eq!(handle.stats().skipped.load(Ordering::SeqCst), 0);
+    }
+
+    /// 9. Closed 桶首增一次性锁存（P4 僵尸上行）：`record_error_rows` 首次
+    ///    记入 Closed 桶（此前计数为 0）返回 true 且 `closed_latched` 置位
+    ///    （writer 据此打一次性 ERROR，sysstatus 据此上行 degraded）；后续
+    ///    Closed 返回 false（不重复告警）；非 Closed kind 首增也不触发——
+    ///    StorageClosed/StorageShuttingDown 意味着引擎关停/僵尸，其余错误
+    ///    桶不代表引擎死亡。
+    #[test]
+    fn record_error_rows_first_closed_latch() {
+        let stats = fresh_stats();
+        assert!(!stats.closed_latched.load(Ordering::SeqCst), "初始未锁存");
+        assert!(
+            !stats.record_error_rows(WriteErrorKind::Cardinality, 1),
+            "非 Closed 首增不得触发"
+        );
+        assert!(
+            !stats.closed_latched.load(Ordering::SeqCst),
+            "Cardinality 错误不得锁存运行态"
+        );
+        assert!(
+            stats.record_error_rows(WriteErrorKind::Closed, 5),
+            "Closed 桶首增（此前计数为 0）必须返回 true"
+        );
+        assert!(
+            stats.closed_latched.load(Ordering::SeqCst),
+            "Closed 首增必须置位 closed_latched（sysstatus degraded 上行源）"
+        );
+        assert!(
+            !stats.record_error_rows(WriteErrorKind::Closed, 3),
+            "Closed 非首增必须返回 false（一次性告警，不刷屏）"
+        );
+        assert!(
+            stats.closed_latched.load(Ordering::SeqCst),
+            "锁存一次为真永不复位（引擎无自愈路径）"
+        );
+        assert_eq!(stats.error_rows_of(WriteErrorKind::Closed), 8);
+        assert_eq!(
+            stats.errors.load(Ordering::SeqCst),
+            9,
+            "计数不变量保持：1+5+3"
+        );
     }
 }

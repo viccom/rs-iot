@@ -546,3 +546,48 @@ async fn sysstatus_history_governance_fields() {
 
     common::stop_lux(handle).await;
 }
+
+/// /sysstatus 运行态上行（P4 僵尸告警）：history 块新增 `degraded` 字段反映
+/// writer 错误路径锁存的 `closed_latched`（Closed 桶首增——引擎僵尸/关停）。
+/// 同一 stats 对象先读（未锁存 degraded=false）、置位后再读（degraded=true），
+/// 锁死「静态三态 `engine` 与运行态 `degraded` 分离」：旧字段语义不动（前端
+/// 兼容，engine 仍报 ok），新增字段纯增量。
+#[tokio::test]
+async fn sysstatus_history_degraded_reflects_closed_latch() {
+    let stats = preset_stats();
+    let (app, handle, _client) = test_app(Some(stats.clone()), Arc::from("ok"), None).await;
+    let token = login_token(&app).await;
+
+    let get_hist = |app: axum::Router, token: String| async move {
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/v1/sysstatus")
+                    .header(header::AUTHORIZATION, &token)
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("call app");
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        json["history"].clone()
+    };
+
+    // 未锁存：degraded=false，engine 旧三态字段不动
+    let hist = get_hist(app.clone(), token.clone()).await;
+    assert_eq!(hist["degraded"], false, "未锁存 degraded 必须 false");
+    assert_eq!(hist["engine"], "ok", "旧字段语义不动");
+
+    // writer 错误路径置位锁存（模拟 Closed 桶首增）→ degraded=true 上行
+    stats.closed_latched.store(true, Ordering::SeqCst);
+    let hist = get_hist(app, token).await;
+    assert_eq!(
+        hist["degraded"], true,
+        "closed_latched 置位必须上行 degraded=true（引擎僵尸不再 sysstatus 报 ok 无异常）"
+    );
+    assert_eq!(hist["engine"], "ok", "engine 静态三态与运行态分离，不联动");
+
+    common::stop_lux(handle).await;
+}
