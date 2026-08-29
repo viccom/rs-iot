@@ -53,7 +53,8 @@ enum Lane {
     String,
 }
 
-/// flush 状态机 per-series 状态（key = `(devid, tag)`）。
+/// flush 状态机 per-series 状态（两级嵌套键 devid→tag，语义即 `(devid, tag)`
+/// 二元组；嵌套换取稳态命中路径 &str 借用零分配）。
 #[cfg(feature = "history")]
 #[derive(Debug)]
 struct SeriesState {
@@ -134,9 +135,12 @@ fn writer_loop(
         last_err_warn: None,
     };
     let mut buf: Vec<HistoryRow> = Vec::new();
-    // 批内去重索引（P2）：(devid, tag) → (ts_ms, buf 下标)，同 series 同 ts
-    // 原地替换值保后写；跨批不拦截（依赖 tsink 读取端 last-value-wins）。
-    let mut dedup: HashMap<(String, String), (i64, usize)> = HashMap::new();
+    // 批内去重索引（P2）：两级嵌套 devid→tag→(ts_ms, buf 下标)——语义等价
+    // (devid,tag) 二元组键，嵌套使两级查找均走 &str 借用（`String: Borrow<str>`
+    // 成立而 `(String,String): Borrow<(&str,&str)>` 不成立），稳态命中路径
+    // 零分配。同 series 同 ts 原地替换值保后写；跨批不拦截（依赖 tsink
+    // 读取端 last-value-wins）。
+    let mut dedup: HashMap<String, HashMap<String, (i64, usize)>> = HashMap::new();
     loop {
         // engine.close 的退出信号（Task 5，优先于 recv 检查）：断 sender 不足以
         // 退出——HistoryHandle clone 在 close 后仍可存活（HostContext/测试侧），
@@ -179,23 +183,40 @@ fn writer_loop(
 
 /// 批内追加 + 同 series 同 ts 去重（P2 保后写）：命中索引则原地替换
 /// value/deadband（后写整行胜出，buf 不增长），否则记索引并追加。
+///
+/// 分配口径（T10）：两级 &str 借用查找命中（同 ts 替换/新 ts 更新索引）
+/// 全程零分配；owned 键构造仅在**批内首见**该 series 时发生一次（旧行为：
+/// 每行无条件 clone 二元组键，命中也构造）。
 #[cfg(feature = "history")]
 fn push_dedup(
     buf: &mut Vec<HistoryRow>,
-    dedup: &mut HashMap<(String, String), (i64, usize)>,
+    dedup: &mut HashMap<String, HashMap<String, (i64, usize)>>,
     row: HistoryRow,
 ) {
-    let key = (row.devid.clone(), row.tag.clone());
-    match dedup.get(&key) {
-        Some((ts_ms, idx)) if *ts_ms == row.ts_ms => {
-            buf[*idx].value = row.value;
-            buf[*idx].deadband = row.deadband;
-        }
-        _ => {
-            dedup.insert(key, (row.ts_ms, buf.len()));
+    if let Some(slot) = dedup
+        .get_mut(row.devid.as_str())
+        .and_then(|inner| inner.get_mut(row.tag.as_str()))
+    {
+        if slot.0 == row.ts_ms {
+            // 同 series 同 ts：值/死区原地替换（旧行为等价路径）。
+            buf[slot.1].value = row.value;
+            buf[slot.1].deadband = row.deadband;
+        } else {
+            // 同 series 新 ts：索引改指新行（旧行仍在 buf 等待 flush），
+            // 等价旧实现的 insert 覆盖值，但免重建键。
+            *slot = (row.ts_ms, buf.len());
             buf.push(row);
         }
+        return;
     }
+    // 批内首见该 series：构造 owned 键一次并插入。
+    let len = buf.len();
+    dedup
+        .entry(row.devid.clone())
+        .or_default()
+        .entry(row.tag.clone())
+        .or_insert((row.ts_ms, len));
+    buf.push(row);
 }
 
 /// flush 上下文：持有 storage/计数/per-series 状态与告警节流器。
@@ -205,8 +226,10 @@ struct Writer {
     storage: StorageHandle,
     /// 旁路计数（written/deadbanded/lane_mismatch/errors 在本侧递增）。
     stats: Arc<HistoryStats>,
-    /// per-series 状态机（P3/P4/P5）。
-    series: HashMap<(String, String), SeriesState>,
+    /// per-series 状态机（P3/P4/P5）。两级嵌套 devid→tag→状态（语义等价
+    /// (devid,tag) 二元组键）：稳态命中 &str 借用查找零分配，owned 键仅在
+    /// 每 series 生命周期首见时构造一次。
+    series: HashMap<String, HashMap<String, SeriesState>>,
     /// insert 失败告警节流锚点。
     last_err_warn: Option<Instant>,
 }
@@ -229,9 +252,14 @@ impl Writer {
     fn flush(
         &mut self,
         buf: &mut Vec<HistoryRow>,
-        dedup: &mut HashMap<(String, String), (i64, usize)>,
+        dedup: &mut HashMap<String, HashMap<String, (i64, usize)>>,
     ) {
-        dedup.clear();
+        // 批间清理：仅清内层条目、保留两级表已分配容量（与整表 clear() 语义
+        // 等价——批首所有查找必 miss；容量复用免去下批逐设备重建 inner 表的
+        // 分配）。外层常驻设备域被 series 状态机键域上界覆盖，无额外膨胀面。
+        for inner in dedup.values_mut() {
+            inner.clear();
+        }
         let mut rows: Vec<TsinkRow> = Vec::with_capacity(buf.len());
         for row in buf.drain(..) {
             // 0. 非有限值拒收（先于 lane 判定）：NaN/Inf 不落盘、不毒化状态
@@ -242,10 +270,7 @@ impl Writer {
                 }
             }
             let lane = lane_of(&row.value);
-            let st = self
-                .series
-                .entry((row.devid.clone(), row.tag.clone()))
-                .or_default();
+            let st = series_state(&mut self.series, &row.devid, &row.tag);
             // 1. lane 型变剔除（首见 lane=None 恒过）
             if st.lane.is_some_and(|prev| prev != lane) {
                 self.stats.lane_mismatch.fetch_add(1, Ordering::SeqCst);
@@ -275,18 +300,17 @@ impl Writer {
                     continue;
                 }
             }
-            // 4. 通过：更新状态并构造 insert 行
+            // 4. 通过：更新状态并构造 insert 行。tag/devid/hwid 从 owned 行
+            //    内 **move** 进 TsinkRow（行尾再无使用，旧行为的逐字段 clone
+            //    纯属浪费）；labels `vec![a, b]` 宏本身即精确容量 2 分配。
             st.lane = Some(lane);
             if let Some(v) = numeric(&row.value) {
                 st.last_val = Some(v);
             }
             st.last_ts = row.ts_ms;
             rows.push(TsinkRow::with_labels(
-                row.tag.clone(),
-                vec![
-                    Label::new("devid", row.devid.clone()),
-                    Label::new("hwid", row.hwid.clone()),
-                ],
+                row.tag,
+                vec![Label::new("devid", row.devid), Label::new("hwid", row.hwid)],
                 DataPoint {
                     value: to_tsink_value(row.value),
                     timestamp: row.ts_ms,
@@ -344,6 +368,32 @@ impl Writer {
             tracing::warn!("[history] writer close 失败(排空已尽力,依赖 WAL 回放兜底): {e}");
         }
     }
+}
+
+/// series 状态机取址（T10）：命中路径两级 &str 借用查找零分配（旧行为：
+/// 每行 `entry` 前无条件构造 owned 二元组键，命中也分配）；仅**首见**
+/// （每 series 生命周期一次）构造 owned 键插默认态后回取。语义等价旧
+/// `entry(key).or_default()`——含"被过滤行也先建默认态"的原有次序。
+#[cfg(feature = "history")]
+fn series_state<'a>(
+    series: &'a mut HashMap<String, HashMap<String, SeriesState>>,
+    devid: &str,
+    tag: &str,
+) -> &'a mut SeriesState {
+    let exists = series
+        .get(devid)
+        .is_some_and(|inner| inner.contains_key(tag));
+    if !exists {
+        series
+            .entry(devid.to_owned())
+            .or_default()
+            .entry(tag.to_owned())
+            .or_default();
+    }
+    series
+        .get_mut(devid)
+        .and_then(|inner| inner.get_mut(tag))
+        .expect("首见已插默认态，两级取址必命中")
 }
 
 /// 写失败分型（P3）：tsink 错误变体 → 五桶。WalSizeLimitExceeded ∪
@@ -1340,6 +1390,96 @@ mod tests {
             Duration::from_secs(10),
             "writer_closed_error_latches_degraded",
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 19. 去重/series 键二维分离性质（T10 行为等价重构回归锚）：键语义是
+    ///     (devid, tag) **二元组**——同批同 ts 下 ① 同 devid 异 tag、② 异 devid
+    ///     同 tag、③ 异 devid 异 tag 的行互不去重、各自成 series 全落盘
+    ///     （written==4，无 skip/dedup 副作用）；重开按 (tag, devid) 逐 series
+    ///     各回读恰 1 点且值/ts 精确对应。任一维被误折叠（如嵌套键只按
+    ///     tag 或只按 devid）都会少 series、少点或值串台。
+    #[test]
+    fn writer_dedup_key_separation_devid_tag() {
+        let dir = unique_dir("key-sep");
+        let cfg = cfg_with_dir(&dir);
+        let storage = build_storage(&cfg, 8).expect("build_storage 必须成功");
+        let (handle, join) =
+            spawn_writer(storage, &cfg).expect("测试环境 spawn history writer 线程必须成功");
+        let stats = handle.stats.clone();
+
+        let ts = now_ms();
+        // (devid, tag, value) 全交叉：dev1/dev2 × tA/tB，同 ts 同批快速连发
+        //（与测试 8/10 同置信度：µs 级连发落在同一 50ms 攒批窗口）。
+        let cases = [
+            ("dev1", "tA", 1.0f64),
+            ("dev2", "tA", 2.0),
+            ("dev1", "tB", 3.0),
+            ("dev2", "tB", 4.0),
+        ];
+        for (dev, tag, v) in cases {
+            handle
+                .send(HistoryRow {
+                    devid: dev.into(),
+                    hwid: "hw1".into(),
+                    tag: tag.into(),
+                    ts_ms: ts,
+                    value: SampleValue::Float(v),
+                    deadband: None,
+                })
+                .expect("send 必须成功");
+        }
+        assert!(
+            poll_until(Duration::from_secs(5), || {
+                stats.written.load(Ordering::SeqCst) == 4
+            }),
+            "四组 (devid,tag) 二维交叉应各自成 series 全落盘 written=4，实际 written={} dropped={}",
+            stats.written.load(Ordering::SeqCst),
+            stats.dropped.load(Ordering::SeqCst)
+        );
+        thread::sleep(Duration::from_millis(200));
+
+        drop(handle);
+        join_with_timeout(
+            join,
+            Duration::from_secs(10),
+            "writer_dedup_key_separation_devid_tag",
+        );
+        assert_eq!(
+            stats.written.load(Ordering::SeqCst),
+            4,
+            "join 后计数冻结在 4——键任一维折叠都会少写"
+        );
+        assert_eq!(
+            stats.skipped.load(Ordering::SeqCst),
+            0,
+            "跨 series 行不得触发任何跳过/去重计数"
+        );
+        assert_eq!(
+            stats.dup_ts_skipped.load(Ordering::SeqCst),
+            0,
+            "同 ts 不同 series 是四个独立点，不是跨批重复"
+        );
+
+        let reopened = build_storage(&cfg, 8).expect("writer close 后同目录重开必须成功");
+        for (dev, tag, want) in cases {
+            let pts = reopened
+                .select(
+                    tag,
+                    &[Label::new("devid", dev), Label::new("hwid", "hw1")],
+                    0,
+                    i64::MAX,
+                )
+                .expect("重开后 select 必须成功");
+            assert_eq!(pts.len(), 1, "({dev},{tag}) 应恰单点");
+            assert_eq!(pts[0].timestamp, ts, "({dev},{tag}) ts 精确回读");
+            assert_eq!(
+                pts[0].value,
+                Value::F64(want),
+                "({dev},{tag}) 值不得串台——键二维分离"
+            );
+        }
+        reopened.close().expect("重开实例 close");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
