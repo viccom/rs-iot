@@ -91,7 +91,7 @@ pub fn build_storage(cfg: &HistoryConfig, cardinality: usize) -> TResult<Storage
     } else {
         WalSyncMode::Periodic(Duration::from_millis(cfg.wal_sync_ms))
     };
-    StorageBuilder::new()
+    let mut builder = StorageBuilder::new()
         .with_data_path(&cfg.data_dir)
         // builder 默认纳秒精度，必须显式毫秒（Sample.timestamp 秒 ×1000 的锚点）
         .with_timestamp_precision(TimestampPrecision::Milliseconds)
@@ -110,7 +110,19 @@ pub fn build_storage(cfg: &HistoryConfig, cardinality: usize) -> TResult<Storage
         // engine/tests/reliability.rs 的 background_flush_failures_only_
         // degrade_when_fail_fast_is_opted_out 与 background_persisted_
         // refresh_retries_after_repair_when_fail_fast_is_disabled 背书。
-        .with_background_fail_fast(false)
+        .with_background_fail_fast(false);
+    // T9（2026-08-29 压测调参面）：0=不调用 builder 方法 → tsink 引擎默认
+    // （chunk 2048 点 / 分区 3600s）；>0 透传。10 万 series 场景建议
+    // chunk_points ≤ 512——active 稳态 ≈ series × cap × 40B（2048→~4.1GB、
+    // 512→~1GB，见 docs/plans/2026-08-29-history-100k-improvement-plan.md
+    // Task 9）；越界值已在 HistoryConfig::validate 拒绝（防 tsink 钳位谎言）。
+    if cfg.chunk_points > 0 {
+        builder = builder.with_chunk_points(cfg.chunk_points);
+    }
+    if cfg.partition_secs > 0 {
+        builder = builder.with_partition_duration(Duration::from_secs(cfg.partition_secs));
+    }
+    builder
         .build()
         .map(|storage| StorageHandle {
             storage,
@@ -979,5 +991,123 @@ mod tests {
 
         storage.close().expect("close 释放进程锁");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 12. chunk_points 调参透传（T9，2026-08-29 压测调参面）：`chunk_points>0`
+    ///     必须透传 tsink `with_chunk_points`。断言面说明：tsink 快照
+    ///     （`observability_snapshot`）**无 chunk 配置字段**、builder getter
+    ///     是 `pub(crate)`——采用**行为差分**：active head 记账含
+    ///     `builder.capacity()×sizeof(ChunkPoint)`，而首块 tail 容量 =
+    ///     `min(chunk_points,64)`（tsink `ChunkBuilder::new`）——默认 2048 写
+    ///     1 点后 head 记账含 64×40B tail，chunk_points=8 仅 8×40B，差 ≈2240B。
+    ///     （512 与默认 2048 在 1 点处不可同步区分：tail 容量同为 64，封块
+    ///     只在后台 flush 发生；非 0 透传接线由本差分钉死，值保真依赖 tsink
+    ///     builder 原样存储契约——钳位仅在 65535 上界，已由 validate 拒绝越界。）
+    #[test]
+    fn engine_chunk_points_passthrough() {
+        let dir_default = unique_dir("chunk-def");
+        let dir_small = unique_dir("chunk-small");
+        let cfg_default = cfg_with_dir(&dir_default);
+        let cfg_small = HistoryConfig {
+            chunk_points: 8,
+            ..cfg_with_dir(&dir_small)
+        };
+
+        let storage_default =
+            build_storage(&cfg_default, 8).expect("默认配置 build_storage 必须成功");
+        let storage_small =
+            build_storage(&cfg_small, 8).expect("chunk_points=8 build_storage 必须成功");
+
+        // 同构单行写入：两存储各 1 个新 series 1 点（同 metric/labels/ts/value）
+        let row = Row::with_labels(
+            "m_chunk_cap",
+            series_labels(),
+            DataPoint::new(TS_MS, 1.0f64),
+        );
+        storage_default
+            .insert_rows(std::slice::from_ref(&row))
+            .expect("默认存储写入必须成功");
+        storage_small
+            .insert_rows(std::slice::from_ref(&row))
+            .expect("小 cap 存储写入必须成功");
+
+        // 记账是提交后同步增量（无 TTL/后台窗），立即读即稳定值
+        let bytes_default = storage_default
+            .observability_snapshot()
+            .memory
+            .active_and_sealed_bytes;
+        let bytes_small = storage_small
+            .observability_snapshot()
+            .memory
+            .active_and_sealed_bytes;
+        assert!(
+            bytes_default > bytes_small + 1024,
+            "默认(2048) 首块 tail 容量 64×40B 必须显著大于 chunk_points=8 的 8×40B \
+             （差理论 ≈2240B，断言余量 1024B）——若未透传 with_chunk_points 两边相等。\
+             实际 default={bytes_default} small={bytes_small}"
+        );
+
+        storage_default.close().expect("close 释放进程锁");
+        storage_small.close().expect("close 释放进程锁");
+        let _ = std::fs::remove_dir_all(&dir_default);
+        let _ = std::fs::remove_dir_all(&dir_small);
+    }
+
+    /// 13. partition_secs 调参透传（T9）：`partition_secs>0` 必须透传 tsink
+    ///     `with_partition_duration`。断言面同上走行为差分：分区窗口决定
+    ///     partition head 数——`partition_secs=1` 下相隔 3s 的两点落在 2 个
+    ///     分区（2 个 head），默认 3600s 下同 1 小区（1 个 head）；每 head
+    ///     记账 ≥ sizeof(ActivePartitionHead)+64×40B，差 >1024B。
+    #[test]
+    fn engine_partition_secs_passthrough() {
+        let dir_default = unique_dir("part-def");
+        let dir_p1 = unique_dir("part-1s");
+        let cfg_default = cfg_with_dir(&dir_default);
+        let cfg_p1 = HistoryConfig {
+            partition_secs: 1,
+            ..cfg_with_dir(&dir_p1)
+        };
+
+        let storage_default =
+            build_storage(&cfg_default, 8).expect("默认配置 build_storage 必须成功");
+        let storage_p1 = build_storage(&cfg_p1, 8).expect("partition_secs=1 必须成功");
+
+        // 同 series 前向相隔 3s 两点：1s 窗 → 2 分区；3600s 窗 → 同 1 分区
+        // （TS_MS 秒值 1_700_000_000 与 +3s 同属小时分区 472_222）
+        let rows = [
+            Row::with_labels("m_part", series_labels(), DataPoint::new(TS_MS, 1.0f64)),
+            Row::with_labels(
+                "m_part",
+                series_labels(),
+                DataPoint::new(TS_MS + 3_000, 2.0f64),
+            ),
+        ];
+        storage_default
+            .insert_rows(&rows)
+            .expect("默认存储写入必须成功");
+        storage_p1
+            .insert_rows(&rows)
+            .expect("1s 分区存储写入必须成功");
+
+        let bytes_default = storage_default
+            .observability_snapshot()
+            .memory
+            .active_and_sealed_bytes;
+        let bytes_p1 = storage_p1
+            .observability_snapshot()
+            .memory
+            .active_and_sealed_bytes;
+        assert!(
+            bytes_p1 > bytes_default + 1024,
+            "partition_secs=1 的 2 个分区 head 记账必须显著大于默认单 head\
+             （每 head ≥ sizeof(ActivePartitionHead)+64×40B，断言余量 1024B）\
+             ——若未透传 with_partition_duration 两边相等。\
+             实际 p1={bytes_p1} default={bytes_default}"
+        );
+
+        storage_default.close().expect("close 释放进程锁");
+        storage_p1.close().expect("close 释放进程锁");
+        let _ = std::fs::remove_dir_all(&dir_default);
+        let _ = std::fs::remove_dir_all(&dir_p1);
     }
 }

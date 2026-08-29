@@ -17,6 +17,11 @@ pub const DEFAULT_JWT_SECRET: &str = "qwerty1234567890asdfgh1234567890";
 /// 幽灵断连）。
 pub const DEFAULT_HEARTBEAT_TIMEOUT_SECS: u64 = 15;
 
+/// [history] partition_secs 上界（T9）：36500 天秒数，与 retention_days 上界
+/// 对齐——分区窗口超过保留上界无意义。u64 显式后缀防 format! 独立表达式
+/// 整型推断回退 i32 溢出（deny(arithmetic_overflow)）。
+const MAX_PARTITION_SECS: u64 = 36_500 * 86_400;
+
 /// 应用总配置。从 toml 加载，缺失字段走 Default。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -228,6 +233,15 @@ pub struct HistoryConfig {
     pub batch_max_rows: usize,
     /// 关停排空超时(秒;超时放弃,WAL 回放兜底),D10
     pub close_timeout_secs: u64,
+    /// 单 chunk 点数上限(active 内存主控)。0=不透传,走 tsink 引擎默认 2048;
+    /// 非 0 透传 tsink `with_chunk_points`(入参被钳位到 [1,65535])。
+    /// 10 万 series 场景建议 ≤512:active 稳态 ≈ series×cap×40B
+    /// (2048→~4.1GB / 512→~1GB,2026-08-29 压测审查)
+    pub chunk_points: usize,
+    /// 分区窗口(秒)。0=不透传,走 tsink 引擎默认 3600;非 0 透传 tsink
+    /// `with_partition_duration`。窗口越小 head 越早 seal(内存回收越快),
+    /// 但乱序跨窗写入受 tsink max_active_partition_heads_per_series 约束
+    pub partition_secs: u64,
 }
 
 impl Default for HistoryConfig {
@@ -243,6 +257,8 @@ impl Default for HistoryConfig {
             channel_capacity: 65536,
             batch_max_rows: 8192,
             close_timeout_secs: 15,
+            chunk_points: 0,
+            partition_secs: 0,
         }
     }
 }
@@ -298,6 +314,23 @@ impl HistoryConfig {
         }
         if self.data_dir.is_empty() {
             return Err("data_dir 不能为空".to_string());
+        }
+        // T9（2026-08-29 压测调参面）：上界 65535 = tsink builder 钳位上界
+        // （u16::MAX）——越界透传会被 tsink 静默钳位（配置谎言），显式拒绝；
+        // 下界 0 有合法语义（不透传走引擎默认 2048）
+        if self.chunk_points > 65_535 {
+            return Err(format!(
+                "chunk_points 必须在 0..=65535（0=引擎默认 2048），实际 {}",
+                self.chunk_points
+            ));
+        }
+        // T9：上界 36500 天（秒）= retention_days 上界对齐——分区窗口超过
+        // 保留上界无意义；0 有合法语义（不透传走引擎默认 3600s）
+        if self.partition_secs > MAX_PARTITION_SECS {
+            return Err(format!(
+                "partition_secs 必须在 0..={MAX_PARTITION_SECS}（0=引擎默认 3600s），实际 {}",
+                self.partition_secs
+            ));
         }
         Ok(())
     }
@@ -527,6 +560,16 @@ password = "s3cret""#,
         assert_eq!(h.channel_capacity, 65536);
         assert_eq!(h.batch_max_rows, 8192);
         assert_eq!(h.close_timeout_secs, 15);
+        // T9（2026-08-29 压测调参面）：缺省 0 = 不透传，走 tsink 引擎默认
+        // （chunk 2048 点 / 分区 3600s）
+        assert_eq!(
+            h.chunk_points, 0,
+            "0=引擎默认 2048（不调 with_chunk_points）"
+        );
+        assert_eq!(
+            h.partition_secs, 0,
+            "0=引擎默认 3600s（不调 with_partition_duration）"
+        );
     }
 
     /// [history] 完整节显式配置：每字段给非默认值，解析后逐字段覆盖默认。
@@ -543,7 +586,9 @@ wal_sync_ms = 0
 wal_size_limit_mb = 2048
 channel_capacity = 1024
 batch_max_rows = 4096
-close_timeout_secs = 30"#,
+close_timeout_secs = 30
+chunk_points = 512
+partition_secs = 1800"#,
         )
         .unwrap();
         let h = cfg.history;
@@ -557,6 +602,9 @@ close_timeout_secs = 30"#,
         assert_eq!(h.channel_capacity, 1024);
         assert_eq!(h.batch_max_rows, 4096);
         assert_eq!(h.close_timeout_secs, 30);
+        // T9：两新键显式配置覆盖默认 0（透传 tsink builder）
+        assert_eq!(h.chunk_points, 512);
+        assert_eq!(h.partition_secs, 1800);
     }
 
     /// 无 [history] 节（有最小其他内容）：解析成功，history 走 Default
@@ -585,6 +633,9 @@ close_timeout_secs = 30"#,
         assert_eq!(h.channel_capacity, 65536);
         assert_eq!(h.batch_max_rows, 8192);
         assert_eq!(h.close_timeout_secs, 15);
+        // partial-default 契约覆盖两新键：只设 enabled，新键仍走 Default 0
+        assert_eq!(h.chunk_points, 0);
+        assert_eq!(h.partition_secs, 0);
     }
 
     /// [history] 边界校验拒绝（H4）：≥4 类非法值逐一 Err——零值破坏语义
@@ -613,6 +664,17 @@ close_timeout_secs = 30"#,
         let mut c = base.clone();
         c.data_dir = String::new();
         assert!(c.validate().is_err(), "data_dir 空串必须拒绝");
+
+        // T9 负路径：chunk_points 超 tsink builder 钳位上界（u16::MAX）必须
+        // 显式拒绝——透传会被 tsink 静默钳到 65535（配置谎言），不如拒启
+        let mut c = base.clone();
+        c.chunk_points = 65_536;
+        assert!(c.validate().is_err(), "chunk_points>65535 必须拒绝");
+
+        // T9 负路径：partition_secs 超 retention 上界（36500 天秒数）必须拒绝
+        let mut c = base.clone();
+        c.partition_secs = MAX_PARTITION_SECS + 1;
+        assert!(c.validate().is_err(), "partition_secs>36500 天必须拒绝");
     }
 
     /// [history] 边界校验接受（H4）：默认值、各字段上下确界与 0 哨兵语义
@@ -630,16 +692,23 @@ close_timeout_secs = 30"#,
             channel_capacity: 1 << 24,
             batch_max_rows: 1 << 20,
             cardinality_limit: 1 << 24,
+            // T9 上下确界：chunk_points 上界 = tsink 钳位上界 65535；
+            // partition_secs 上界 = 36500 天（retention 上界）秒数
+            chunk_points: 65_535,
+            partition_secs: MAX_PARTITION_SECS,
             ..HistoryConfig::default()
         };
         assert_eq!(c.validate(), Ok(()), "上下确界组合必须合法");
 
         // 0 哨兵语义合法：cardinality_limit=0 自动校准；wal_sync_ms=0 =
-        // PerAppend；close_timeout_secs=0 = 立即放弃（均不设限字段）
+        // PerAppend；close_timeout_secs=0 = 立即放弃（均不设限字段）；
+        // chunk_points/partition_secs=0 = 引擎默认（T9）
         let c = HistoryConfig {
             cardinality_limit: 0,
             wal_sync_ms: 0,
             close_timeout_secs: 0,
+            chunk_points: 0,
+            partition_secs: 0,
             ..HistoryConfig::default()
         };
         assert_eq!(c.validate(), Ok(()));
