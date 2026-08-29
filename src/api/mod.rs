@@ -88,11 +88,11 @@ pub fn is_public(path: &str) -> bool {
 
 // ---------- 历史治理快照 helper（供 routes_metrics/routes_sys 复用） ----------
 
-/// 采集历史治理 telemetry 三元组（Phase 3 P4/P5）：`series_count()` 为
-/// O(series) 分配 → `spawn_blocking` 不占 runtime worker；JoinErr（阻塞任务
-/// panic/取消）→ `Default` 零快照防御降级。telemetry None 分支在调用方
-/// `history_stats` Some 前置下理论不可达（lib.rs 与引擎 ok 成对注入），
-/// 防御取零快照。
+/// 采集历史治理 telemetry 三元组（Phase 3 P4/P5；P3 改造后三读数全为
+/// O(1) 原子读，`spawn_blocking` 保留仅为与既有 handler 结构一致的防御
+/// 包裹，不再是 O(series) 物化的必要遮挡）；JoinErr（阻塞任务 panic/取消）
+/// → `Default` 零快照防御降级。telemetry None 分支在调用方 `history_stats`
+/// Some 前置下理论不可达（lib.rs 与引擎 ok 成对注入），防御取零快照。
 pub(crate) async fn history_telemetry_snapshot(
     st: &AppState,
 ) -> routes_metrics::render::TelemetrySnapshot {

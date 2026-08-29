@@ -333,7 +333,8 @@ pub(crate) struct TelemetrySnapshot {
     pub(crate) memory_used_bytes: u64,
     /// 内存预算字节（D6 `memory_limit_mb` 换算）。
     pub(crate) memory_budget_bytes: u64,
-    /// series 数（`list_metrics().len()` 官方口径）。
+    /// series 数（tsink registry 原子口径，近似——与 list_metrics 物化口径
+    /// 可能有 rollup/未剪枝死 series 差异）。
     pub(crate) series: u64,
 }
 
@@ -432,7 +433,7 @@ pub(crate) fn render_history(
         ),
         (
             "rs_iot_history_series",
-            "历史引擎 series 数(list_metrics 官方口径)",
+            "历史引擎 series 数(registry 原子口径,近似)",
             t.series.to_string(),
         ),
         (

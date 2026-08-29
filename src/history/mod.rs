@@ -101,8 +101,9 @@ pub trait HistoryTelemetry: Send + Sync {
     fn memory_used_bytes(&self) -> u64;
     /// 内存预算（D6 `memory_limit_mb` 换算字节，即配即读）。
     fn memory_budget_bytes(&self) -> u64;
-    /// series 数（`list_metrics().len()` 官方口径，O(series) 分配——调用方
-    /// 以 `spawn_blocking` 包裹，P5；引擎关闭后 Err 按 0，不 panic）。
+    /// series 数（tsink registry 原子口径，O(1)——可能与 list_metrics 的
+    /// 物化口径有近似差异：内部 rollup series / 未剪枝死 series；写入路径
+    /// 同步递增，写入返回后即精确可见；引擎关闭后读冻结值，不 panic）。
     fn series_count(&self) -> u64;
 }
 

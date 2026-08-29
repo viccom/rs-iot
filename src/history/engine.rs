@@ -7,8 +7,8 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::sync::Arc;
+use std::time::Duration;
 
 use tsink::{
     Aggregation, DataPoint, Label, QueryOptions, Storage, StorageBuilder, TimestampPrecision,
@@ -188,26 +188,15 @@ fn series_labels(devid: &str, hwid: &str) -> Vec<Label> {
     vec![Label::new("devid", devid), Label::new("hwid", hwid)]
 }
 
-/// series_count 缓存 TTL（M6）：生产 5s——sysstatus 5s 轮询与 15s scrape
-/// 均命中，list_metrics 的 O(series) 全量分配（name String + labels Vec）
-/// 频率收敛到 ≤1/TTL；测试档缩短到 2s 使过期路径可测（engine 单测
-/// `telemetry_series_count_ttl_cached` 的字面 sleep 与此值耦合）。
-#[cfg(not(test))]
-const SERIES_CACHE_TTL: Duration = Duration::from_secs(5);
-#[cfg(test)]
-const SERIES_CACHE_TTL: Duration = Duration::from_secs(2);
-
 /// [`crate::history::HistoryTelemetry`] 的引擎侧实现（Phase 3 Task 2，
 /// P4/P5）：持 StorageHandle clone（Arc 语义）与 writer/引擎共享同一底层
-/// 存储——engine close 后句柄仍存活，读数进入 StorageClosed 可观测态
-/// （`list_metrics` Err → 0 + debug 日志，不 panic）。
+/// 存储。三读数全为 O(1) 原子读（P3 改造：series_count 由 list_metrics
+/// 物化口径改为 tsink registry 原子口径直读），engine close 后句柄仍存活，
+/// 读数返回冻结值（registry 计数不随 close 清零），不 panic。
 struct EngineTelemetry {
     /// tsink 存储句柄（clone，共享同一 Arc）——三读数经 Deref 直调
     /// `dyn Storage` 方法。
     storage: StorageHandle,
-    /// series_count TTL 缓存（M6）：`(采集时刻, 值)`；None=未采集。采集
-    /// 失败（Err→0）不写缓存——瞬时故障不被冻结 0 一个 TTL。
-    series_cache: Mutex<Option<(Instant, u64)>>,
 }
 
 impl crate::history::HistoryTelemetry for EngineTelemetry {
@@ -220,24 +209,13 @@ impl crate::history::HistoryTelemetry for EngineTelemetry {
     }
 
     fn series_count(&self) -> u64 {
-        // M6 TTL 缓存：命中直接返回，过期（或未采集）才走 list_metrics。
-        // 锁中毒取残值——缓存 worst case 是过期数据，读比崩好（临界区无
-        // await/纯内存赋值，中毒仅意味着曾有人在临界区 panic）。
-        let mut cached = self.series_cache.lock().unwrap_or_else(|p| p.into_inner());
-        if let Some((at, v)) = &*cached {
-            if at.elapsed() < SERIES_CACHE_TTL {
-                return *v;
-            }
-        }
-        let v = match self.storage.list_metrics() {
-            Ok(v) => v.len() as u64,
-            Err(e) => {
-                tracing::debug!("[history] telemetry list_metrics 失败(按 0 计): {e}");
-                return 0;
-            }
-        };
-        *cached = Some((Instant::now(), v));
-        v
+        // P3（2026-08-29 压测实锤）：直读 tsink registry 原子计数（O(1)）——
+        // 原实现 5s TTL 过期即全量 list_metrics 物化 10 万 MetricSeries 只为
+        // 取 len（30-60 万次锁 + 50-100 万次分配），与写入路径在全局字典锁上
+        // 互卡，/metrics 单次 29-46s 且拖垮写入吞吐；O(1) 后无需（也已不可
+        // 能）缓存。registry 口径与 list_metrics 物化口径可能有近似差异
+        // （内部 rollup series / 未剪枝死 series），见 trait 方法文档。
+        self.storage.series_count()
     }
 }
 
@@ -414,11 +392,10 @@ impl HistoryEngine {
     /// 治理观测句柄（Phase 3 Task 2，P4/P5）：clone 存储句柄包成
     /// `Arc<dyn HistoryTelemetry>` 交 REST 层（AppState.history_telemetry），
     /// 读 tsink 内存水位/预算/series 数（close 后仍可调——StorageHandle
-    /// 是 Arc clone，存活即读，Err 按 0，见 [`EngineTelemetry`]）。
+    /// 是 Arc clone，存活即读，返回冻结值，见 [`EngineTelemetry`]）。
     pub fn telemetry(&self) -> Arc<dyn crate::history::HistoryTelemetry> {
         Arc::new(EngineTelemetry {
             storage: self.storage.clone(),
-            series_cache: Mutex::new(None),
         })
     }
 
@@ -828,13 +805,17 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// 10. series_count TTL 缓存（M6）：sysstatus 5s 轮询与 15s scrape 不再
-    ///     每次触发 list_metrics 的 O(series) 全量分配——TTL 内重复调用命中
-    ///     缓存（直插第 2 series 不可见），TTL 过期后重采。红：当前无缓存，
-    ///     第 2 series 对引擎可见后立即再调返回 2。
+    /// 10. series_count O(1) 直读（P3 改造，M6 TTL 缓存语义等价迁移）：
+    ///     tsink Storage trait 已暴露 registry 原子计数（O(1)，写入路径
+    ///     同步 fetch_add），telemetry 直调——原 TTL 缓存（M6，防 list_metrics
+    ///     O(series) 物化被 sysstatus 5s 轮询/15s scrape 打爆）随之删除：
+    ///     写入后**立即**精确可见，无 TTL 陈旧窗。旧断言"TTL 内命中缓存返回
+    ///     旧值 1"按新语义反转为"立即返回新值 2"——缓存存在的唯一目的
+    ///     （缓解 O(series) 开销）已被 O(1) 化根除，即时性即新契约；旧
+    ///     "TTL 过期后重采为 2"被本断言包含（语义等价迁移，非删除断言）。
     #[test]
-    fn telemetry_series_count_ttl_cached() {
-        let dir = unique_dir("tel-ttl");
+    fn telemetry_series_count_immediate() {
+        let dir = unique_dir("tel-immediate");
         let cfg = HistoryConfig {
             enabled: true,
             memory_limit_mb: 64,
@@ -852,41 +833,31 @@ mod tests {
             .insert_rows(&[Row::with_labels(
                 "m_tel_c1",
                 series_labels(),
-                DataPoint::new(TS_MS, 1.0f64),
+                DataPoint::new(TS_MS, 1.0),
             )])
             .expect("首 series 写入必须成功");
-        // 轮询首采 ==1（写入与 series 记账间有传播窗）
+        // 轮询首采 ==1（写入与 telemetry 读取间留传播余量）
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         while t.series_count() != 1 && std::time::Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(50));
         }
         assert_eq!(t.series_count(), 1, "首采必须为 1");
 
-        // 绕过 telemetry 直插第 2 series，并等它对 list_metrics 可见
+        // 直插第 2 series：registry 原子计数在 insert_rows 返回前已同步递增，
+        // 立即再调必须见 2——无任何缓存陈旧窗（旧 TTL 实现此处返回 1，红）。
         engine
             .storage()
             .insert_rows(&[Row::with_labels(
                 "m_tel_c2",
                 series_labels(),
-                DataPoint::new(TS_MS + 1, 2.0f64),
+                DataPoint::new(TS_MS + 1, 2.0),
             )])
             .expect("第 2 series 写入必须成功");
-        let visible = |n: usize| engine.storage().list_metrics().is_ok_and(|v| v.len() == n);
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        while !visible(2) && std::time::Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(50));
-        }
-        assert!(visible(2), "第 2 series 必须已对引擎可见（缓存断言的前置）");
-        // TTL 内立即再调：必须命中缓存仍 1（红：当前实现此处返回 2）
-        assert_eq!(t.series_count(), 1, "TTL 内必须命中缓存返回旧值 1");
-
-        // TTL 过期后重采 ==2（此处字面量须与 cfg(test) 档 SERIES_CACHE_TTL 一致）
-        std::thread::sleep(Duration::from_millis(2_150));
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        while t.series_count() != 2 && std::time::Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(50));
-        }
-        assert_eq!(t.series_count(), 2, "TTL 过期后必须重采为 2");
+        assert_eq!(
+            t.series_count(),
+            2,
+            "写入返回后立即读取必须为 2（O(1) 直读，无缓存陈旧窗）"
+        );
 
         engine.close(Duration::from_secs(cfg.close_timeout_secs));
         let _ = std::fs::remove_dir_all(&dir);
