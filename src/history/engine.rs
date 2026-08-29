@@ -102,6 +102,15 @@ pub fn build_storage(cfg: &HistoryConfig, cardinality: usize) -> TResult<Storage
         ))
         .with_wal_size_limit(cfg.wal_size_limit_mb.saturating_mul(1024 * 1024))
         .with_wal_sync_mode(wal_sync_mode)
+        // P4（2026-08-29 压测实锤）：显式关闭后台 fail_fast——tsink builder
+        // 默认 true 时后台 worker（flush/compaction 等）一次 IO 错误即触发
+        // 整引擎永久关闭（fail_fast 且无复位路径，读写全灭）；关闭后 worker
+        // 失败降级为计数+继续（tsink runtime.rs handle_result 的 Continue
+        // 分支），fail-fast-off 的降级/修复后重试语义有 tsink
+        // engine/tests/reliability.rs 的 background_flush_failures_only_
+        // degrade_when_fail_fast_is_opted_out 与 background_persisted_
+        // refresh_retries_after_repair_when_fail_fast_is_disabled 背书。
+        .with_background_fail_fast(false)
         .build()
         .map(|storage| StorageHandle {
             storage,
@@ -880,6 +889,30 @@ mod tests {
         assert_eq!(t.series_count(), 2, "TTL 过期后必须重采为 2");
 
         engine.close(Duration::from_secs(cfg.close_timeout_secs));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 11. 后台 fail_fast 关闭（P4，2026-08-29 压测实锤）：build_storage 组装
+    ///     必须显式 `.with_background_fail_fast(false)`——tsink builder 默认
+    ///     true，后台 worker（flush/compaction 等）一次 IO 错误即触发整引擎
+    ///     永久关闭（fail_fast 且无复位路径，读写全灭、数据全丢但服务表面
+    ///     正常）；关闭后 worker 失败降级为计数+继续（tsink `runtime.rs`
+    ///     `handle_result` 的 Continue 分支）。经 `Storage::
+    ///     observability_snapshot()` 的 `health.fail_fast_enabled` 读回组装
+    ///     产物的运行时配置面断言（builder 产物可内省，无需退化为链组装测试）。
+    #[test]
+    fn engine_background_fail_fast_disabled() {
+        let dir = unique_dir("no-failfast");
+        let cfg = cfg_with_dir(&dir);
+
+        let storage = build_storage(&cfg, 8).expect("build_storage 必须成功");
+        let snap = storage.observability_snapshot();
+        assert!(
+            !snap.health.fail_fast_enabled,
+            "build_storage 必须关闭后台 fail_fast（默认 true：后台 worker 一次 IO 错误→引擎永久僵尸），实际 fail_fast_enabled=true"
+        );
+
+        storage.close().expect("close 释放进程锁");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
