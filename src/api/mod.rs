@@ -101,6 +101,8 @@ pub(crate) async fn history_telemetry_snapshot(
             memory_used_bytes: t.memory_used_bytes(),
             memory_budget_bytes: t.memory_budget_bytes(),
             series: t.series_count(),
+            memory_components: t.memory_components(),
+            admission: t.admission_memory_gap(),
         })
         .await
         .unwrap_or_default(),

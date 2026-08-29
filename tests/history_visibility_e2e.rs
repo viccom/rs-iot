@@ -47,7 +47,8 @@ fn preset_stats() -> Arc<HistoryStats> {
 }
 
 /// 固定读数的假 telemetry（used=111 / budget=256MiB / series=7——互异且
-/// budget 字面即 268435456，断言防串位）。
+/// budget 字面即 268435456，断言防串位；Task 6 扩：内存五分量与 admission
+/// 缺口固定读数，同样互异防串位）。
 struct FakeTelemetry;
 
 impl rs_iot::history::HistoryTelemetry for FakeTelemetry {
@@ -59,6 +60,22 @@ impl rs_iot::history::HistoryTelemetry for FakeTelemetry {
     }
     fn series_count(&self) -> u64 {
         7
+    }
+    fn memory_components(&self) -> rs_iot::history::MemoryComponents {
+        rs_iot::history::MemoryComponents {
+            registry_bytes: 1_000,
+            metadata_cache_bytes: 2_000,
+            persisted_index_bytes: 3_000,
+            persisted_mmap_bytes: 4_000,
+            active_and_sealed_bytes: 5_000,
+        }
+    }
+    fn admission_memory_gap(&self) -> rs_iot::history::AdmissionMemoryGap {
+        rs_iot::history::AdmissionMemoryGap {
+            rejections_total: 2,
+            last_estimate_bytes: 6_000,
+            last_shortfall_bytes: 7_000,
+        }
     }
 }
 
@@ -360,8 +377,8 @@ async fn metrics_history_governance_families() {
     assert_eq!(resp.status(), StatusCode::OK, "/metrics 免 JWT");
     let body = body_text(resp).await;
 
-    // 六个无 label family：HELP/TYPE 头 + 精确数值行
-    let gov_families: [(&str, &str, &str); 6] = [
+    // 十四个无 label family：HELP/TYPE 头 + 精确数值行
+    let gov_families: [(&str, &str, &str); 14] = [
         (
             "rs_iot_history_archived_tags",
             "gauge",
@@ -387,6 +404,48 @@ async fn metrics_history_governance_families() {
             "rs_iot_history_deadband_reduction_ratio",
             "gauge",
             "rs_iot_history_deadband_reduction_ratio 0.625",
+        ),
+        // Task 6 内存分量 gauge（FakeTelemetry 固定读数，互异千位值防串位）
+        (
+            "rs_iot_history_memory_registry_bytes",
+            "gauge",
+            "rs_iot_history_memory_registry_bytes 1000",
+        ),
+        (
+            "rs_iot_history_memory_metadata_bytes",
+            "gauge",
+            "rs_iot_history_memory_metadata_bytes 2000",
+        ),
+        (
+            "rs_iot_history_memory_persisted_index_bytes",
+            "gauge",
+            "rs_iot_history_memory_persisted_index_bytes 3000",
+        ),
+        (
+            "rs_iot_history_memory_persisted_mmap_bytes",
+            "gauge",
+            "rs_iot_history_memory_persisted_mmap_bytes 4000",
+        ),
+        (
+            "rs_iot_history_memory_active_sealed_bytes",
+            "gauge",
+            "rs_iot_history_memory_active_sealed_bytes 5000",
+        ),
+        // Task 6 admission 缺口（拒绝 counter + 预估/缺口 gauge）
+        (
+            "rs_iot_history_admission_rejections_total",
+            "counter",
+            "rs_iot_history_admission_rejections_total 2",
+        ),
+        (
+            "rs_iot_history_admission_last_estimate_bytes",
+            "gauge",
+            "rs_iot_history_admission_last_estimate_bytes 6000",
+        ),
+        (
+            "rs_iot_history_admission_shortfall_bytes",
+            "gauge",
+            "rs_iot_history_admission_shortfall_bytes 7000",
         ),
     ];
     for (name, ty, line) in gov_families {
@@ -455,6 +514,15 @@ async fn metrics_history_governance_omitted_when_not_ok() {
         "rs_iot_history_deadband_evaluated_total",
         "rs_iot_history_deadband_reduction_ratio",
         "rs_iot_history_write_errors_total",
+        // Task 6：内存分量与 admission 缺口 family 同缺席语义
+        "rs_iot_history_memory_registry_bytes",
+        "rs_iot_history_memory_metadata_bytes",
+        "rs_iot_history_memory_persisted_index_bytes",
+        "rs_iot_history_memory_persisted_mmap_bytes",
+        "rs_iot_history_memory_active_sealed_bytes",
+        "rs_iot_history_admission_rejections_total",
+        "rs_iot_history_admission_last_estimate_bytes",
+        "rs_iot_history_admission_shortfall_bytes",
     ];
     for name in new_families {
         assert!(

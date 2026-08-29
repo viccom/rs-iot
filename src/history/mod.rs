@@ -105,6 +105,43 @@ pub trait HistoryTelemetry: Send + Sync {
     /// 物化口径有近似差异：内部 rollup series / 未剪枝死 series；写入路径
     /// 同步递增，写入返回后即精确可见；引擎关闭后读冻结值，不 panic）。
     fn series_count(&self) -> u64;
+    /// 内存分量快照（Task 6，2026-08-29 压测观测缺口）：tsink
+    /// `observability_snapshot().memory` 的五分量 O(1) 原子读——admission
+    /// 误拒时区分"预估虚高"（分量小而 required 高）与"真用满"（active+
+    /// sealed 或 registry 分量逼近预算）。引擎关闭后读冻结值，不 panic。
+    fn memory_components(&self) -> MemoryComponents;
+    /// 最近一次内存预算 admission 拒绝的观测（Task 6）：estimate=被拒批的
+    /// 预估增量（used+estimate=错误串 required），shortfall=required-budget；
+    /// 从未拒绝时三读数全零。引擎关闭后读冻结值，不 panic。
+    fn admission_memory_gap(&self) -> AdmissionMemoryGap;
+}
+
+/// 内存分量五元组（tsink `MemoryObservabilitySnapshot` 分量口径；Task 7
+/// 预算口径调整后 budgeted 与分量的包含关系可能变化，分量读数本身稳定）。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct MemoryComponents {
+    /// series registry 字典结构开销（metric/label 字典 + series 条目）。
+    pub registry_bytes: u64,
+    /// 元数据缓存与簿记（pending series + 可见性摘要/缓存 + persisted
+    /// watermarks + metadata shard index；tsink `metadata_cache_bytes`）。
+    pub metadata_cache_bytes: u64,
+    /// 持久化索引常驻内存结构（chunk refs / 时间戳索引 / postings）。
+    pub persisted_index_bytes: u64,
+    /// 持久化段 mmap 映射字节（页缓存 RSS 口径）。
+    pub persisted_mmap_bytes: u64,
+    /// active partition head + sealed chunk 热数据字节。
+    pub active_and_sealed_bytes: u64,
+}
+
+/// 最近一次内存预算 admission 拒绝（tsink flush 观测计数器的原子快照）。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AdmissionMemoryGap {
+    /// 累计拒绝次数（进程生命周期单调递增）。
+    pub rejections_total: u64,
+    /// 最近一次被拒批的预估内存增量（used+estimate=required）。
+    pub last_estimate_bytes: u64,
+    /// 最近一次拒绝的缺口（required-budget）。
+    pub last_shortfall_bytes: u64,
 }
 
 // ---------- 编排注入件（审计 B7：lib.rs 引擎知识收敛） ----------

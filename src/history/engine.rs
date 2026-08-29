@@ -217,6 +217,29 @@ impl crate::history::HistoryTelemetry for EngineTelemetry {
         // （内部 rollup series / 未剪枝死 series），见 trait 方法文档。
         self.storage.series_count()
     }
+
+    fn memory_components(&self) -> crate::history::MemoryComponents {
+        // Task 6：tsink `observability_snapshot()` 全程原子/锁读（WAL
+        // size_bytes 亦为记账原子而非文件系统 stat），O(1) 无 IO，scrape
+        // 直调无缓存。
+        let memory = &self.storage.observability_snapshot().memory;
+        crate::history::MemoryComponents {
+            registry_bytes: memory.registry_bytes as u64,
+            metadata_cache_bytes: memory.metadata_cache_bytes as u64,
+            persisted_index_bytes: memory.persisted_index_bytes as u64,
+            persisted_mmap_bytes: memory.persisted_mmap_bytes as u64,
+            active_and_sealed_bytes: memory.active_and_sealed_bytes as u64,
+        }
+    }
+
+    fn admission_memory_gap(&self) -> crate::history::AdmissionMemoryGap {
+        let flush = &self.storage.observability_snapshot().flush;
+        crate::history::AdmissionMemoryGap {
+            rejections_total: flush.admission_memory_rejections_total,
+            last_estimate_bytes: flush.admission_memory_last_estimate_bytes,
+            last_shortfall_bytes: flush.admission_memory_last_shortfall_bytes,
+        }
+    }
 }
 
 /// HistoryAgg → tsink Aggregation（P3 六值同名直映）。
@@ -750,6 +773,77 @@ mod tests {
         engine.close(Duration::from_secs(cfg.close_timeout_secs));
         // close 后读数不 panic：实现自由（恒 0/冻结值/Err→0 皆可），u64 值域恒 ≥0。
         let _after_close: u64 = t.series_count();
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 7b. 内存分量与 admission 缺口读数（Task 6，2026-08-29 压测观测缺口）：
+    ///     写入 2 series 后 `memory_components()` 的 registry 与 active+sealed
+    ///     分量必须 >0（tsink `observability_snapshot().memory` 口径，O(1) 原子
+    ///     读）；未发生预算拒绝时 `admission_memory_gap()` 三读数全零。
+    ///     拒绝值的精确数学（estimate/shortfall）由 tsink 侧测试钉住（拒绝对
+    ///     象为 engine 内部状态，rs-iot 无收紧预算的公开面，不在此重复构造
+    ///     30s 写超时的慢场景）。
+    #[test]
+    fn telemetry_memory_components_and_admission_gap() {
+        let dir = unique_dir("tel-components");
+        let cfg = HistoryConfig {
+            enabled: true,
+            memory_limit_mb: 64,
+            cardinality_limit: 8,
+            ..cfg_with_dir(&dir)
+        };
+
+        let mut engine = maybe_init(&cfg, &HashMap::new())
+            .expect("enabled=true 必须返回 Some")
+            .expect("临时目录上引擎初始化必须成功");
+
+        let rows = [
+            Row::with_labels("m_tel_c", series_labels(), DataPoint::new(TS_MS, 1.5f64)),
+            Row::with_labels(
+                "m_tel_d",
+                series_labels(),
+                DataPoint::new(TS_MS + 1, 2.5f64),
+            ),
+        ];
+        engine
+            .storage()
+            .insert_rows(&rows)
+            .expect("两 series 各 1 行写入必须成功");
+
+        let t: std::sync::Arc<dyn crate::history::HistoryTelemetry> = engine.telemetry();
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let ready = t.memory_used_bytes() > 0 && t.series_count() == 2;
+            if ready || std::time::Instant::now() >= deadline {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+
+        let components = t.memory_components();
+        assert!(
+            components.registry_bytes > 0,
+            "2 个已注册 series 的 registry 分量必须 >0,实际: {components:?}"
+        );
+        assert!(
+            components.active_and_sealed_bytes > 0,
+            "写入后 active+sealed 分量必须 >0,实际: {components:?}"
+        );
+
+        let gap = t.admission_memory_gap();
+        assert_eq!(
+            gap.rejections_total, 0,
+            "64MiB 预算下两行写入不得触发 admission 拒绝"
+        );
+        assert_eq!(gap.last_estimate_bytes, 0, "未拒绝时预估读数为 0");
+        assert_eq!(gap.last_shortfall_bytes, 0, "未拒绝时缺口读数为 0");
+
+        engine.close(Duration::from_secs(cfg.close_timeout_secs));
+        // close 后读数不 panic（防御面，同 telemetry_memory_and_series 契约）
+        let _after_close = t.memory_components();
+        let _after_close = t.admission_memory_gap();
 
         let _ = std::fs::remove_dir_all(&dir);
     }
