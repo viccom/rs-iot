@@ -1,4 +1,5 @@
-//! 历史丢弃水位内建告警（Task 18，P6 收官）：不依赖现场脚本的系统级告警。
+//! 历史丢弃水位内建告警（Task 18，P6 收官）+ 引擎僵尸告警（Task A/#3，
+//! writer.rs 遗留 TODO 收口）：不依赖现场脚本的系统级告警。
 //!
 //! 2026-08-29 压测暴露 92% 丢弃期间无任何主动告警——Q12 告警闭环（lua
 //! `ctx:fire_event` → lux alarms → REST/SSE）存在但触发全靠现场脚本。本模块
@@ -10,22 +11,28 @@
 //!   两头失准（小部署 50/100 pts/s 丢一半也够不着 100/s 门槛；100K 场景
 //!   0.1% 噪声反而触发）；单占比在小流量上分子噪声抖动（偶发 5/50=10%）。
 //!   双条件 = 绝对量下限 + 相对量显著性，两面兼顾。
-//! - **动作**：`tracing::warn!`（非 error——error 级保留给 T3 closed_latched
-//!   引擎僵尸）+ [`crate::db::alarms::fire`]（level=warn，source 由宿主填，
+//! - **动作**：`tracing::warn!`（非 error——error 级属僵尸告警）+
+//!   [`crate::db::alarms::fire`]（level=warn，source 由宿主填，
 //!   对齐 lua fire_event 惯例）+ EventBus SSE Fire 帧。
+//! - **僵尸告警**（[`ClosedAlarmWatch`]）：周期读 `closed_latched` 锁存位，
+//!   置位即 fire **error 级** `rsiot.history_closed`（引擎已僵尸、数据将全
+//!   丢，比 drop 的 warn 更高）——writer 是独立 std 线程无 lux 句柄不可达
+//!   fire，读侧周期任务收口该上行。
 //! - **去抖/恢复**：只 fire 不自动 clear（工业惯例——告警消除需人知悉，
 //!   REST DELETE 人工确认）；"同一活动期不重复 fire"以 **lux 键存在性**为
 //!   活动期判据：键在（未清除）恒不刷（count 不递增、SSE 不重发）；人工
-//!   清除即活动期结束，若仍超阈下一拍再触发（count 重开）——确认后仍故障
-//!   则重新告警的运维闭环。
+//!   清除即活动期结束，若故障仍在（超阈/锁存位仍置位）下一拍再触发
+//!   （count 重开）——确认后仍故障则重新告警的运维闭环。closed_latched
+//!   一次置位永不复位，人工清除后会持续重触发——**有意为之**：引擎确实
+//!   还僵尸着，持续故障持续可见（重启恢复才是根治）。
 //! - **挂载**：独立 spawn 任务（lib.rs `run_app_with_shutdown`，照
 //!   `log_cleanup::spawn_cleanup_task` 先例）。不进 pipeline worker 上下文
 //!   （N worker 各自判定需选举，且周期判定不应进数据面热循环）；不借
 //!   selfMonitor 周期（那是用户可调的上报节拍 1-3600s，告警节拍是基础设施
 //!   关注点，解耦）。engine=None（feature off/init_failed）时 `dropped`
 //!   恒 0 判定无意义，spawn 点直接不启动（最小面）。
-//! - 周期与阈值先常量后配置（计划 Task 18 约定）；lux 故障 fail-soft：
-//!   去抖查询/fire 失败仅 warn 本拍跳过，下一拍重试。
+//! - 周期与阈值先常量后配置（计划 Task 18 约定；Task B/#4 阈值配置化）；
+//!   lux 故障 fail-soft：去抖查询/fire 失败仅 warn 本拍跳过，下一拍重试。
 
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -40,7 +47,7 @@ use crate::history::rows::HistoryStats;
 /// 告警键（lux alarms hash field；source 域前缀防与脚本自定义键撞名，
 /// ≤128 字符同 lua validate_key 口径）。
 const ALARM_KEY: &str = "rsiot.history_drop";
-/// 级别：warn（error 级保留给 T3 closed_latched 引擎僵尸上行）。
+/// 级别：warn（error 级是 [`ClosedAlarmWatch`] 僵尸告警的档位）。
 const ALARM_LEVEL: &str = "warn";
 /// 来源（宿主填，脚本不可伪造语义同 lua 面 source=inst_id）：网关自身，
 /// 对齐 selfMonitor devid=`rsiot` 的自监控身份。
@@ -154,6 +161,78 @@ impl DropAlarmWatch {
     }
 }
 
+/// closed_latched 僵尸告警键（Task A/#3，writer.rs 遗留 TODO 收口）。
+const CLOSED_ALARM_KEY: &str = "rsiot.history_closed";
+/// 级别：error（引擎已僵尸、数据将全丢——比 drop 告警的 warn 更高）。
+const CLOSED_ALARM_LEVEL: &str = "error";
+
+/// 引擎僵尸看护（无状态）：读 [`HistoryStats::closed_latched`] 锁存位，
+/// 置位即 fire error 级系统告警（去抖语义同 [`DropAlarmWatch`]）。
+pub(crate) struct ClosedAlarmWatch;
+
+impl ClosedAlarmWatch {
+    /// 一拍判定：锁存位置位且非活动期 → error 日志 + lux fire + SSE。
+    ///
+    /// closed_latched 一次置位永不复位（锁存语义），无差分基线可言——
+    /// 每拍直接读位；lux 读写失败 fail-soft 跳过本拍。**重触发语义**：
+    /// 人工清除后锁存位仍置位 → 下一拍重新 fire（新活动期 count 重开）
+    /// ——持续故障持续可见（引擎确实还僵尸着，静默即失明）；与 drop
+    /// 告警"确认后仍故障则重新告警"的运维闭环同构。
+    pub(crate) async fn tick(&self, stats: &HistoryStats, lux: &EmbeddedClient, bus: &EventBus) {
+        if !stats.closed_latched.load(Ordering::SeqCst) {
+            return; // 引擎健在（Closed 桶从未首增）
+        }
+        // 去抖：活动期判据 = lux 键存在性（同 DropAlarmWatch 惯例）——
+        // 键在（未清除）恒不刷；坏 JSON 记录 get 视为不存在，走 fire 覆盖
+        // 修复；lux 读失败 fail-soft 跳过本拍（下拍重试）。
+        match crate::db::alarms::get(lux, CLOSED_ALARM_KEY).await {
+            Ok(Some(_)) => return, // 同活动期去抖
+            Err(e) => {
+                tracing::warn!("[history] 僵尸告警去抖查询失败(本拍跳过): {e}");
+                return;
+            }
+            Ok(None) => {} // 无活动告警 → 开新活动期
+        }
+        let message = "历史引擎已关闭（僵尸态），归档停止，需重启恢复";
+        let ts = crate::event_bus::now_iso8601();
+        match crate::db::alarms::fire(
+            lux,
+            CLOSED_ALARM_KEY,
+            CLOSED_ALARM_LEVEL,
+            ALARM_SOURCE,
+            message,
+            &ts,
+        )
+        .await
+        {
+            Ok(crate::db::alarms::FireOutcome::Stored(_)) => {
+                // error 级（引擎已僵尸、数据将全丢——比 drop 告警的 warn 高）；
+                // 与 writer 首增时的一次性 error! 呼应：这里承载周期可见性。
+                tracing::error!(
+                    "[history] 引擎僵尸告警已触发 key={CLOSED_ALARM_KEY} \
+                     level={CLOSED_ALARM_LEVEL} by={ALARM_SOURCE}: {message}"
+                );
+                bus.publish(EventPayload::Alarm {
+                    action: AlarmAction::Fire,
+                    key: CLOSED_ALARM_KEY.to_string(),
+                    level: CLOSED_ALARM_LEVEL.to_string(),
+                    source: ALARM_SOURCE.to_string(),
+                    message: message.to_string(),
+                    ts,
+                });
+            }
+            Ok(crate::db::alarms::FireOutcome::Capped) => {
+                // 基数上限拒新键（同 lua 面护栏语义）：仅 warn，下拍重试。
+                tracing::warn!(
+                    "[history] 引擎僵尸告警拒存:活跃告警达基数上限{}(运维清除后恢复)",
+                    crate::db::alarms::ALARM_MAX_KEYS
+                );
+            }
+            Err(e) => tracing::warn!("[history] 引擎僵尸告警fire失败(本拍跳过): {e}"),
+        }
+    }
+}
+
 /// 常驻判定任务（lib.rs 引擎在场时启动；照 `log_cleanup::spawn_cleanup_task`
 /// 先例：child token 随进程退、interval Skip 漏拍不补偿——漏拍只影响该拍
 /// 增量并入下一拍窗口，判定语义不变）。
@@ -166,12 +245,18 @@ pub(crate) fn spawn_drop_alarm_task(
     let token = shutdown.child_token();
     tokio::spawn(async move {
         let mut watch = DropAlarmWatch::default();
+        let closed = ClosedAlarmWatch;
         let mut interval = tokio::time::interval(Duration::from_secs(PERIOD_SECS));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             tokio::select! {
                 _ = token.cancelled() => break,
-                _ = interval.tick() => watch.tick(&stats, &lux, &bus).await,
+                // 同拍串行两看护（5s 周期/挂载条件均同，合一任务省一份常驻
+                // 开销；drop 的差分基线与 closed 的锁存读互不干扰）。
+                _ = interval.tick() => {
+                    watch.tick(&stats, &lux, &bus).await;
+                    closed.tick(&stats, &lux, &bus).await;
+                }
             }
         }
     });
@@ -385,6 +470,94 @@ mod tests {
         let items = alarms::list(&c).await.unwrap();
         assert_eq!(items.len(), 1, "清除后仍超阈应重新告警");
         assert_eq!(items[0].count, 1, "新活动期 count 重开（fire 语义=新键）");
+        let frame = rx.try_recv().expect("重新 fire 应再发 SSE Fire 帧");
+        assert!(matches!(
+            frame,
+            EventPayload::Alarm {
+                action: AlarmAction::Fire,
+                ..
+            }
+        ));
+    }
+
+    // ---- 5. closed_latched 引擎僵尸告警（Task A/#3：writer.rs TODO 收口） ----
+
+    /// 未置位无告警；置位 → error 级系统告警（key/level/source/count=1/
+    /// 中文文案含"僵尸"与"重启"）+ SSE Fire 帧；同活动期（键未清除）下一拍
+    /// 不重复（count 不递增、SSE 不重发）；人工清除后锁存位仍置位 → 下一拍
+    /// 重新 fire（新活动期 count 重开=1——closed_latched 永不复位，持续
+    /// 故障持续可见）。
+    #[tokio::test]
+    async fn closed_latched_fires_error_alarm_with_debounce_and_rearm() {
+        let c = test_client("closed").await;
+        let (bus, mut rx) = bus_with_sub();
+        let stats = HistoryStats::default();
+        let w = ClosedAlarmWatch;
+
+        // 未置位：无告警（正常态不得误报）
+        w.tick(&stats, &c, &bus).await;
+        assert!(
+            alarms::list(&c).await.unwrap().is_empty(),
+            "closed_latched 未置位不得告警"
+        );
+
+        // 置位 → error 级系统告警
+        stats.closed_latched.store(true, Ordering::SeqCst);
+        w.tick(&stats, &c, &bus).await;
+        let items = alarms::list(&c).await.unwrap();
+        assert_eq!(items.len(), 1, "锁存位置位应产生一条活跃告警");
+        let it = &items[0];
+        assert_eq!(it.key, CLOSED_ALARM_KEY, "告警键必须是系统内建僵尸键");
+        assert_eq!(
+            it.level, "error",
+            "引擎僵尸是 error 级（比 drop 告警的 warn 更高——数据将全丢）"
+        );
+        assert_eq!(it.source, "rsiot", "source 由宿主填（网关自身）");
+        assert_eq!(it.count, 1, "活动期首 fire count=1");
+        assert!(
+            it.message.contains("僵尸") && it.message.contains("重启"),
+            "告警文案应携带僵尸态与重启指引（中文）：{}",
+            it.message
+        );
+
+        // SSE：恰一条 Fire 帧，字段对齐
+        let frame = rx
+            .try_recv()
+            .expect("僵尸 fire 应 publish 一条 SSE Fire 帧");
+        match frame {
+            EventPayload::Alarm {
+                action,
+                key,
+                level,
+                source,
+                message,
+                ts,
+            } => {
+                assert!(matches!(action, AlarmAction::Fire), "应为 Fire 动作");
+                assert_eq!(key, CLOSED_ALARM_KEY);
+                assert_eq!(level, "error");
+                assert_eq!(source, "rsiot");
+                assert_eq!(message, it.message, "SSE 文案与 lux 落库文案一致");
+                assert!(!ts.is_empty());
+            }
+            other => panic!("应为 Alarm 帧，实得 {other:?}"),
+        }
+
+        // 去抖：同活动期（键未清除）下一拍仍置位——不重复 fire
+        w.tick(&stats, &c, &bus).await;
+        let items = alarms::list(&c).await.unwrap();
+        assert_eq!(items.len(), 1, "同活动期不得新增告警条目");
+        assert_eq!(items[0].count, 1, "同活动期去抖——count 不递增（不刷）");
+        assert!(rx.try_recv().is_err(), "同活动期去抖——SSE 不重发 Fire 帧");
+
+        // 人工清除 → 活动期结束；锁存位仍置位 → 下一拍重新 fire（count 重开）
+        alarms::clear(&c, CLOSED_ALARM_KEY).await.unwrap();
+        assert!(alarms::list(&c).await.unwrap().is_empty());
+        w.tick(&stats, &c, &bus).await;
+        let items = alarms::list(&c).await.unwrap();
+        assert_eq!(items.len(), 1, "清除后仍置位应重新告警（引擎确实还僵尸着）");
+        assert_eq!(items[0].count, 1, "新活动期 count 重开（fire 语义=新键）");
+        assert_eq!(items[0].level, "error");
         let frame = rx.try_recv().expect("重新 fire 应再发 SSE Fire 帧");
         assert!(matches!(
             frame,
