@@ -267,7 +267,7 @@ Commit：tsink `feat(storage): cardinality_limit 运行期热更新`；rs-iot `f
 - **N1｜kill -9 后首次重启 init_failed（os error 3）**：✅ **已修复**（2026-08-30 N1 专项，tsink commits 000a94a+bdce995，分支并入 master 9a292e1）。根因：compaction 替换先删源段目录，registry catalog 校验链读段根遇 PATH_NOT_FOUND 裸 Io 上抛——运行期 flush worker 报错与恢复期 init_failed 同一机制。修复：catalog 构建对段根消失跳过+WARN（侧车仅校验缓存，跳过保守安全）；open/hydrate/flush 全链 IO 带 IoWithPath。T21 实弹验证：kill -9 → **一次重启成功** + 数据零丢失。
 - **N2｜T20 后段 dropped 5.5M→7.43M**：归因升级为 N4（见下），同一机制。
 - **N3｜T20 期间 flush worker 再报错一次**：N1 根因覆盖（catalog 校验链），已随 N1 修复。
-- **N4｜WAL 高水位推进跟不上高吞吐写入**（2026-08-30 T21 新发现，**未修**）：T21a 100K pts/s 下 WAL 2GB 上限打满（wal_disk 桶 49151 拒批 → channel 满丢）；T21b 调 8GB 后窗口内未触顶，但 kill -9 重启回放 2.5GB 后 **WAL 不截断反涨至 3.3GB**——checkpoint 推进速率不足，长跑必然触顶。后续任务：tsink 侧 checkpoint/WAL 截断推进机制专项剖析。
+- **N4｜WAL 高水位推进跟不上高吞吐写入**：✅ **已修复**（2026-08-30 N4 专项，tsink commit 5e6885c）。根因：WAL 空间回收唯一路径是全有或全无的 `reset_if_current_highwater_at_most`（flush 快照后零新 append 才回收——持续写入下条件永不满足），与 catalog/seal/N1 无关。修复：新增 `reclaim_covered_prefix` 按 checkpoint 前缀删整段 + flush 管线挂接 + 回放终点回收。rs-iot 100K pts/s 实测：WAL 50-170MB 锯齿有界（修复前 4 分钟涨满 2GB）、169.8→46.5MB 回收实弹执行、wal_disk 拒批归零、kill -9 后 **25 秒 ready**（此前 2.5GB WAL 回放 4.5 分钟）、数据 38/38 零丢失。残留边界（未修，登记）：blob lane 启用但永无 blob 数据的部署重启仍全量回放（floor=0 保守口径）。
 
 ## 五-B、T21 终局复测（2026-08-30，N1 修复 + writer_threads=4 + chunk_points=512 + wal_size_limit_mb=8192）
 
