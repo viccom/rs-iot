@@ -7,7 +7,8 @@
 //!   即入表；`mark` 每调用 +1，tick 间多次事件天然 coalesce（连接只看落后与否）。
 //! - **DEL 也是 key 事件**：版本 bump 后消费方 HGETALL 得空 map → `diff_scope`
 //!   自然出 removed（等价原轮询语义，P9）；版本表不删项。
-//! - **epoch 重同步**：订阅 Lagged（丢事件）→ epoch+1，持有旧 epoch 的连接
+//! - **epoch 重同步**：订阅 Lagged（丢事件）→ 重铺（先排空 + 退避闸门
+//!   管控，Task 15 防自放大风暴）时 epoch+1，持有旧 epoch 的连接
 //!   `dirty_since` 得 `Dirty::Full`，全量重读后自行重建游标（P7）。
 //!
 //! 本模块无条件编译（服务常驻构造、零副作用）；poll 模式下编排层不 spawn
@@ -16,7 +17,7 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, warn};
@@ -190,6 +191,20 @@ impl RtdataWatchService {
         }
     }
 
+    /// Lagged 重铺（Task 15③ 解耦）：epoch+1 与 KEYS 铺底成对执行，铺底
+    /// spawn 出去——`KEYS rtdata:*` 10 万 key 扫描若在消费循环内 await，
+    /// await 期间通道无人消费（watch_loop 饥饿 → 再 Lagged 是自放大风暴
+    /// 根源一环）；spawn 后调用点立即回到 select! 继续消费。spawn 的表写
+    /// 与 mark 同锁临界区天然互斥，重铺频率由 LaggedGate 退避闸门约束。
+    /// bump 在 spawn 前同步执行：即使铺底延后，重铺时刻之前的所有游标
+    /// 已判 `Dirty::Full`（正确性不依赖铺底完成时序）。
+    fn resync_lagged(self: &Arc<Self>, client: &lux::EmbeddedClient) {
+        self.bump_epoch();
+        let svc = Arc::clone(self);
+        let c = client.clone();
+        tokio::spawn(async move { svc.backfill_keys(&c).await });
+    }
+
     /// spawn 监督消费循环（M4）：消费循环本体在 [`Self::watch_loop`]，外层
     /// [`supervise`] 兜 task panic——recv Err 三分类（Lagged/Closed/Restart）
     /// 只覆盖消息层失败，task 自身 panic（未来临界区引入 unwrap/锁中毒等）
@@ -222,9 +237,12 @@ impl RtdataWatchService {
     /// 订阅、RAII 退订——drop 即 kunsub；不能走 RESP `cmd("KSUB")`，lux 显式拦截）。
     ///
     /// 退出与重建（P7"Lagged/退订异常 → epoch+1"兑现）：token 取消或订阅
-    /// Closed（lux 关闭，重建无意义）→ 退订结束；Lagged → `bump_epoch` +
-    /// 重铺 KEYS 后原地继续；**其余异常 → 退订重建**——epoch+1 强制连接全量
-    /// 重读、重铺 KEYS 补注册断订期间设备、退避防 tight loop 后重建订阅。
+    /// Closed（lux 关闭，重建无意义）→ 退订结束；Lagged → **先排空 + 退避
+    /// 闸门管控的重铺**（Task 15：排空防"边处理边再满"，闸门把重铺钉死在
+    /// 最小间隔之上并指数退避，铺底 spawn 出去不占消费——10 万设备压测
+    /// 实锤 Lagged 无退避重铺是自放大风暴的放大器）后原地继续；**其余异常
+    /// → 退订重建**——epoch+1 强制连接全量重读、重铺 KEYS 补注册断订期间
+    /// 设备、退避防 tight loop 后重建订阅。
     /// 静默退出会让版本表停更，所有 ksub 连接冻结在旧值（审查 High#2）。
     async fn watch_loop(self: Arc<Self>, client: lux::EmbeddedClient, token: CancellationToken) {
         self.backfill_keys(&client).await;
@@ -245,9 +263,34 @@ impl RtdataWatchService {
             // 消费式置位（写在 if 后防死赋值）：本轮起恒 bump2——初代迭代
             // 的 false 来自下方初值，启动铺底在前无丢事件窗口。
             need_rebump = true;
+            // Task 15②：Lagged 重铺退避闸门 + 窗口到期计时（随订阅生命
+            // 周期——Restart 重建后重新起算，Restart 自带 1s 退避不变）。
+            let mut lagged_gate =
+                LaggedGate::new(LAGGED_RESYNC_MIN_INTERVAL, LAGGED_RESYNC_MAX_INTERVAL);
+            let mut lagged_deadline: Option<Instant> = None;
             loop {
                 tokio::select! {
                     _ = token.cancelled() => break 'subscribe,
+                    // Task 15②：退避窗口到期——pending 则补一次重铺（窗口
+                    // 指数放大）；窗口内其余分支照常消费，通道不积压。无
+                    // deadline 时 pending 永不完成（分支条件已挡）。
+                    _ = async {
+                        match lagged_deadline {
+                            Some(d) => tokio::time::sleep_until(
+                                tokio::time::Instant::from_std(d),
+                            )
+                            .await,
+                            None => std::future::pending::<()>().await,
+                        }
+                    }, if lagged_deadline.is_some() => {
+                        if lagged_gate.on_window_expired(Instant::now()) {
+                            warn!(
+                                "[rtdataWatch] 退避窗口到期且有 pending Lagged，epoch+1 全量重同步 + 重铺 KEYS（spawn）"
+                            );
+                            self.resync_lagged(&client);
+                        }
+                        lagged_deadline = None;
+                    }
                     r = sub.recv() => match r {
                         Ok(msg) => {
                             if matches!(msg.kind, lux::EmbeddedMessageKind::KeyEvent) {
@@ -260,11 +303,27 @@ impl RtdataWatchService {
                         }
                         Err(e) => match classify_failure(&e) {
                             SubFailureAction::ContinueLagged(skipped) => {
-                                warn!(
-                                    "[rtdataWatch] 订阅滞后丢 {skipped} 事件，epoch+1 全量重同步并重铺 KEYS"
-                                );
-                                self.bump_epoch();
-                                self.backfill_keys(&client).await;
+                                // Task 15①：先排空通道现存积压（丢弃——正确性
+                                // 由重铺时 epoch+1 的全连接 Full 重读兜底），防
+                                // 重铺/退避期间"边处理边再满"直喂下一次 Lagged。
+                                let drained = drain_subscription(&mut sub);
+                                // Task 15②/③：退避闸门裁决——立即重铺（spawn
+                                // 出去不占消费）或窗口内只记 pending 到期统一
+                                // 重铺一次。
+                                match lagged_gate.on_lagged(Instant::now()) {
+                                    LaggedDecision::ResyncNow => {
+                                        warn!(
+                                            "[rtdataWatch] 订阅滞后丢 {skipped} 事件（排空 {drained} 积压），epoch+1 全量重同步 + 重铺 KEYS（spawn）"
+                                        );
+                                        self.resync_lagged(&client);
+                                    }
+                                    LaggedDecision::Deferred(deadline) => {
+                                        lagged_deadline = Some(deadline);
+                                        warn!(
+                                            "[rtdataWatch] 订阅滞后丢 {skipped} 事件（排空 {drained} 积压）——退避窗口内只记 pending，到期统一重铺"
+                                        );
+                                    }
+                                }
                             }
                             SubFailureAction::Exit => {
                                 warn!("[rtdataWatch] 订阅已关闭，watcher 退出");
@@ -301,6 +360,22 @@ impl RtdataWatchService {
 const RESTART_BACKOFF: Duration = Duration::from_secs(1);
 #[cfg(test)]
 const RESTART_BACKOFF: Duration = Duration::from_millis(50);
+
+/// Lagged 重铺退避（Task 15②）：最小间隔 / 连续退避封顶。10 万设备
+/// 100K pts/s 压测实锤自放大风暴（21s 内 6 次 Lagged，N=14~1366）——每次
+/// 重铺的 epoch+1 令全部 SSE 连接 Dirty::Full 全量重读打满 runtime，
+/// watch_loop 更饿 → 更快 Lagged → 再重铺；重铺节奏被钉死在
+/// ≥MIN_INTERVAL 且连续 Lagged 指数退避（MIN→×2→…封顶 MAX）后风暴链
+/// 断开，丢事件正确性不变（重铺时 epoch+1 兜底）。测试档缩短同
+/// RESTART_BACKOFF 惯例。
+#[cfg(not(test))]
+const LAGGED_RESYNC_MIN_INTERVAL: Duration = Duration::from_secs(5);
+#[cfg(test)]
+const LAGGED_RESYNC_MIN_INTERVAL: Duration = Duration::from_millis(80);
+#[cfg(not(test))]
+const LAGGED_RESYNC_MAX_INTERVAL: Duration = Duration::from_secs(60);
+#[cfg(test)]
+const LAGGED_RESYNC_MAX_INTERVAL: Duration = Duration::from_millis(320);
 
 /// 监督循环（M4）：工厂产内层任务；`Ok(())`（token 取消/订阅 Closed）正常
 /// 收尾；`JoinErr`（panic）→ error 日志 + `bump_epoch` 全量重同步 + 退避 +
@@ -341,6 +416,100 @@ fn classify_failure(e: &lux::LuxError) -> SubFailureAction {
         lux::LuxError::SubscriptionLagged(skipped) => SubFailureAction::ContinueLagged(*skipped),
         lux::LuxError::SubscriptionClosed => SubFailureAction::Exit,
         _ => SubFailureAction::Restart,
+    }
+}
+
+/// Lagged 先排空（Task 15①）：try_recv 循环取干通道现存积压，消息丢弃，
+/// 返回排空条数（入日志）。
+///
+/// 丢弃不丢正确性：Lagged 时通道里的事件属已丢批次之后的陈旧积压，随后的
+/// 重铺 epoch+1 使此前所有游标 `Dirty::Full` 全量重读（陈旧积压的信息被
+/// 全量重读覆盖）。不排空的代价：重铺/退避期间通道只进不出，"边处理边
+/// 再满"直接喂下一次 Lagged（broadcast 容量仅 1024，lux 只读不可调）。
+/// 排空途中再遇 Lagged（积压超容量）继续排，计数归下轮日志。
+fn drain_subscription(sub: &mut lux::EmbeddedSubscription) -> u64 {
+    let mut drained = 0u64;
+    loop {
+        match sub.try_recv() {
+            Ok(Some(_)) => drained += 1,
+            Err(lux::LuxError::SubscriptionLagged(_)) => continue,
+            Ok(None) | Err(_) => break,
+        }
+    }
+    drained
+}
+
+/// Lagged 重铺退避闸门（Task 15②，纯状态机——单测锚定 `lagged_gate_*`）。
+///
+/// 风暴链：Lagged → epoch+1+KEYS 重铺 → 全连接 Dirty::Full 全量重读打满
+/// runtime → watch_loop 更饿 → 更快 Lagged → 再重铺。闸门约束重铺
+/// （bump_epoch + KEYS 铺底成对执行）的节奏：
+/// - 首次 / 静默满一个窗口后的 Lagged → 立即重铺，窗口回落 min；
+/// - 窗口内新 Lagged → 只记 pending（到期时刻随裁决返回，供 select! 计时
+///   分支接管），窗口到期统一补一次重铺且窗口翻倍，封顶 max。
+///
+/// 退避窗口内丢事件的正确性兜底不变：重铺时 epoch+1 使此前所有游标
+/// `Dirty::Full` 全量重读。
+#[derive(Debug)]
+struct LaggedGate {
+    /// 最小重铺间隔（立即重铺后启用的窗口）。
+    min: Duration,
+    /// 连续退避封顶。
+    max: Duration,
+    /// 上次重铺时刻（None = 尚未重铺过）。
+    last_resync: Option<Instant>,
+    /// 当前退避窗口（上次重铺后距允许下次重铺的最小间隔）。
+    window: Duration,
+    /// 窗口内收到过新 Lagged（到期需补一次重铺）。
+    pending: bool,
+}
+
+/// 闸门裁决（watch_loop Lagged 分支的处置依据）。
+#[derive(Debug, PartialEq, Eq)]
+enum LaggedDecision {
+    /// 立即重铺（epoch+1 + spawn KEYS 铺底）。
+    ResyncNow,
+    /// 退避窗口内：只记 pending 不重铺；携带窗口到期时刻（select! 计时
+    /// 分支 sleep_until 用）。
+    Deferred(Instant),
+}
+
+impl LaggedGate {
+    fn new(min: Duration, max: Duration) -> Self {
+        Self {
+            min,
+            max,
+            last_resync: None,
+            window: min,
+            pending: false,
+        }
+    }
+
+    /// 收到 Lagged：无重铺历史 / 静默满窗 → 立即重铺（窗口回落 min——新
+    /// 一轮风暴从头计退避）；窗口内 → 只记 pending 并返回到期时刻。
+    fn on_lagged(&mut self, now: Instant) -> LaggedDecision {
+        if let Some(t) = self.last_resync {
+            if now < t + self.window {
+                self.pending = true;
+                return LaggedDecision::Deferred(t + self.window);
+            }
+        }
+        self.pending = false;
+        self.last_resync = Some(now);
+        self.window = self.min;
+        LaggedDecision::ResyncNow
+    }
+
+    /// 退避窗口到期：pending → 补一次重铺且窗口指数放大（×2 封顶 max）；
+    /// 无 pending → 静默。返回是否执行重铺。
+    fn on_window_expired(&mut self, now: Instant) -> bool {
+        if !self.pending {
+            return false;
+        }
+        self.pending = false;
+        self.last_resync = Some(now);
+        self.window = self.window.saturating_mul(2).min(self.max);
+        true
     }
 }
 
@@ -535,6 +704,190 @@ mod tests {
         assert!(
             matches!(svc.dirty_since(&mut old), Dirty::Full),
             "bump 前存量连接游标必须 Full"
+        );
+    }
+
+    // ---------- Task 15：Lagged 去抖+排空+退避 ----------
+
+    /// 单测 lux 基建（照 src/db/rtdata.rs tests 的 start_lux 形态：独立临时
+    /// 目录 + 端口 0，handle RAII 退出）。
+    async fn start_lux(name: &str) -> (lux::ServerHandle, lux::EmbeddedClient) {
+        let dir =
+            std::env::temp_dir().join(format!("rtdata-watch-test-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut sc = lux::ServerConfig::default();
+        sc.port = 0; // OS 分配空闲端口，避免与运行中 rs-iot/redis 冲突
+        sc.data_dir = dir.to_str().unwrap().to_string();
+        sc.storage = lux::StorageConfig {
+            mode: lux::StorageMode::Tiered,
+            dir: sc.data_dir.clone(),
+        };
+        sc.save_interval = Duration::from_secs(60);
+        let h = lux::run_with_config(sc).await.unwrap();
+        let c = h.client();
+        (h, c)
+    }
+
+    /// 红测②（先排空）：3 个 key 事件积压后 `drain_subscription` 排干通道
+    /// ——后续新事件直达 recv 而非排在陈旧积压后（防"边处理边再满"：重铺
+    /// /退避期间通道持续被消费，不积压到下一次 Lagged）。
+    #[tokio::test]
+    async fn lagged_drain_empties_backlog_new_events_reachable() {
+        let (_h, lux) = start_lux("lagged-drain").await;
+        let mut sub = lux.ksubscribe("rtdata:*");
+        // 3 次 HSET → 3 个 key 事件（每命令恰一个，经 lux 内部 key 事件
+        // 环路异步投递——轮询排空等投递到齐，不用固定 sleep）。
+        for i in 0..3u32 {
+            lux.execute("HSET", &[&format!("rtdata:d{i}"), "f", "1"])
+                .await
+                .unwrap();
+        }
+        let mut drained = 0u64;
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while drained < 3 {
+            drained += drain_subscription(&mut sub);
+            assert!(
+                Instant::now() < deadline,
+                "2s 内应投递并排空 3 个事件，实际 {drained}"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        // 无新事件再排：0（通道确已排干）
+        assert_eq!(drain_subscription(&mut sub), 0, "排空后通道无积压");
+        // 新事件不被积压挡路：HSET 新 key 后 recv 直达新事件——若仍有积压，
+        // broadcast 保序，recv 会先吐陈旧的 d0/d1/d2。
+        lux.execute("HSET", &["rtdata:d_new", "f", "1"])
+            .await
+            .unwrap();
+        let msg = tokio::time::timeout(Duration::from_secs(1), sub.recv())
+            .await
+            .expect("排空后新事件 1s 内可达")
+            .unwrap();
+        assert_eq!(
+            msg.channel, "rtdata:d_new",
+            "recv 见到的应是新事件而非陈旧积压"
+        );
+    }
+
+    /// 红测③（重铺解耦）：`resync_lagged` 立即返回——epoch+1 同步生效
+    /// （退避期间丢事件的正确性兜底），KEYS 铺底 spawn 出去不占消费循环，
+    /// 异步完成后把 lux 存量设备补入版本表。
+    #[tokio::test]
+    async fn lagged_resync_bumps_now_and_backfills_spawned() {
+        let (_h, lux) = start_lux("lagged-resync").await;
+        lux.execute("HSET", &["rtdata:devX", "f", "1"])
+            .await
+            .unwrap();
+        let svc = Arc::new(RtdataWatchService::new());
+        let e0 = svc.epoch();
+        // 立即返回（不 await KEYS）——调用点随即回到消费循环
+        svc.resync_lagged(&lux);
+        assert_eq!(
+            svc.epoch(),
+            e0 + 1,
+            "重铺时 epoch+1 同步生效（重铺前所有游标 Full 兜底）"
+        );
+        // spawn 的铺底异步完成：devX 入表（版本 0，幂等不占事件版本号）
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while svc.device_count() < 1 {
+            assert!(
+                Instant::now() < deadline,
+                "spawn 的 KEYS 铺底 2s 内应完成，device_count={}",
+                svc.device_count()
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert_eq!(svc.version("devX"), Some(0), "铺底新设备入表版本 0");
+    }
+
+    /// 红测①（闸门去抖）：连续两次 Lagged（间隔 < 最小间隔）只允许**一次**
+    /// 重铺——第二次必须 Deferred（进退避等待，只记 pending），到期时刻 =
+    /// 上次重铺 + 当前窗口。自放大风暴链：每次重铺 → epoch+1 → 全连接
+    /// Dirty::Full 全量重读打满 runtime → watch_loop 更饿 → 更快 Lagged →
+    /// 再重铺……闸门把重铺频率钉死在最小间隔之上，从源头切断。
+    #[test]
+    fn lagged_gate_consecutive_lagged_within_min_interval_defers_second() {
+        let min = Duration::from_secs(5);
+        let max = Duration::from_secs(60);
+        let mut gate = LaggedGate::new(min, max);
+        let t0 = Instant::now();
+        assert_eq!(
+            gate.on_lagged(t0),
+            LaggedDecision::ResyncNow,
+            "首次 Lagged（无重铺历史）立即重铺"
+        );
+        // 第二次 Lagged：距上次重铺 2.5s < min 5s → 不得再重铺
+        match gate.on_lagged(t0 + min / 2) {
+            LaggedDecision::Deferred(deadline) => assert_eq!(
+                deadline,
+                t0 + min,
+                "退避到期 = 上次重铺 + 当前窗口（首次重铺后窗口为 min）"
+            ),
+            other => panic!("窗口内第二次 Lagged 必须退避等待（只记 pending）: {other:?}"),
+        }
+    }
+
+    /// 闸门指数退避全生命周期：窗口内 Lagged → pending；到期补一次重铺且
+    /// 窗口翻倍（min→2min→…封顶 max）；封顶后不再涨；静默满一个窗口后的
+    /// 新 Lagged 立即重铺并回落 min 档；无 pending 到期不重铺。
+    #[test]
+    fn lagged_gate_pending_expiry_escalates_caps_and_resets() {
+        let min = Duration::from_secs(1);
+        let max = Duration::from_secs(4);
+        let mut gate = LaggedGate::new(min, max);
+        let t0 = Instant::now();
+
+        // 第 1 轮：立即重铺（窗口 min=1s）→ 窗口内 Lagged → 到期补铺（窗口 2s）
+        assert_eq!(gate.on_lagged(t0), LaggedDecision::ResyncNow);
+        assert_eq!(
+            gate.on_lagged(t0 + min / 2),
+            LaggedDecision::Deferred(t0 + min)
+        );
+        assert!(gate.on_window_expired(t0 + min), "pending 到期须补一次重铺");
+
+        // 第 2 轮（窗口 2s）：窗口 1s 处 Lagged → 到期 t0+3s → 窗口 4s
+        assert_eq!(
+            gate.on_lagged(t0 + min + min),
+            LaggedDecision::Deferred(t0 + 3 * min),
+            "连续退避窗口翻倍 1s→2s"
+        );
+        assert!(gate.on_window_expired(t0 + 3 * min));
+
+        // 第 3 轮（窗口 4s=max）：到期 t0+7s → 窗口 min(8s, max)=4s 封顶
+        assert_eq!(
+            gate.on_lagged(t0 + 4 * min),
+            LaggedDecision::Deferred(t0 + 7 * min)
+        );
+        assert!(gate.on_window_expired(t0 + 7 * min));
+
+        // 第 4 轮：封顶后窗口仍 4s（不再翻倍）
+        assert_eq!(
+            gate.on_lagged(t0 + 8 * min),
+            LaggedDecision::Deferred(t0 + 11 * min),
+            "窗口封顶 max 后不再增长"
+        );
+        assert!(gate.on_window_expired(t0 + 11 * min));
+
+        // 静默满一个窗口（t0+11s+4s=t0+15s）后新 Lagged → 立即重铺，回落 min
+        assert_eq!(
+            gate.on_lagged(t0 + 16 * min),
+            LaggedDecision::ResyncNow,
+            "静默满窗后档位回落，新 Lagged 立即重铺"
+        );
+        assert_eq!(
+            gate.on_lagged(t0 + 16 * min + min / 2),
+            LaggedDecision::Deferred(t0 + 17 * min),
+            "回落后窗口重新为 min"
+        );
+
+        // 清 pending：静默满窗（t0+17s）后的新 Lagged 立即重铺，pending 随之清空
+        assert_eq!(gate.on_lagged(t0 + 18 * min), LaggedDecision::ResyncNow);
+
+        // 无 pending 的到期：静默，不重铺
+        assert!(
+            !gate.on_window_expired(t0 + 20 * min),
+            "无 pending 到期不得重铺"
         );
     }
 
