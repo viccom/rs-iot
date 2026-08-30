@@ -36,6 +36,9 @@ pub async fn reload(c: &EmbeddedClient) -> Result<HashMap<String, TagProps>, RsI
     let map = crate::model::effective::effective_all(&models, &devs);
     *cell().write().unwrap_or_else(|p| p.into_inner()) = Arc::new(map.clone());
     crate::model::discovery::retain_modeled(&map);
+    // Task 19（R4）：白名单变更联动 cardinality 只放大热重校准
+    //（模式同 retain_modeled；feature off / 显式配置时 no-op）。
+    crate::history::on_effective_reloaded(&map);
     Ok(map)
 }
 

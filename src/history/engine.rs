@@ -7,7 +7,7 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use tsink::{
@@ -65,11 +65,59 @@ impl std::ops::Deref for StorageHandle {
 /// 空表/全 false 兜底 `≥1`（D6）。整数运算 saturating（H4 双保险：校验后
 /// 输入域理论不可达溢出）。
 ///
-/// 仅在启动时刻校准一次，运行期开白名单不重算——超限行为是 tsink 侧
-/// `CardinalityLimitExceeded` 拒新 series（计划已知边界 R4，重算留 Phase 3）。
+/// 启动时校准一次；运行期白名单变更后经 [`reconcile_cardinality`] **只放大**
+/// 热重校准（Task 19，R4 收口——原"仅启动一次"使空库启动 + 运行期建模的
+/// 写入全部被 `CardinalityLimitExceeded` 拒直到重启，2026-08-29 压测实锤）。
 pub fn auto_cardinality(effective: &HashMap<String, TagProps>) -> usize {
     let whitelisted = effective.values().filter(|props| props.history).count();
     whitelisted.saturating_mul(12).div_ceil(10).max(1)
+}
+
+/// cardinality 热重校准注册点（Task 19）：auto 校准模式的引擎在
+/// [`maybe_init`] 成功后把 storage 句柄注册到此（cache.rs `reload` 尾部经
+/// [`crate::history::on_effective_reloaded`] 联动，模式同
+/// `model::cache` 的进程级 `OnceLock` cell）。
+static CARDINALITY_RECONCILER: OnceLock<Mutex<Option<CardinalityReconciler>>> = OnceLock::new();
+
+fn reconciler_cell() -> &'static Mutex<Option<CardinalityReconciler>> {
+    CARDINALITY_RECONCILER.get_or_init(|| Mutex::new(None))
+}
+
+/// 热重校准状态（engine 侧自持，零 tsink 面改动）。
+struct CardinalityReconciler {
+    /// tsink 存储句柄（clone 共享同一 Arc；引擎 close 后残留联动是无害的
+    /// 原子写——storage 已入 StorageClosed 可观测态）。
+    storage: StorageHandle,
+    /// 已下发引擎的 limit（只放大基线）。
+    applied: usize,
+}
+
+/// 注册热重校准（[`maybe_init_impl`] 成功路径调用；**仅 auto 模式**——
+/// `cardinality_limit>0` 显式配置是运维硬上限，不参与运行期重校准）。
+/// 后注册者接管（进程正常单引擎；测试进程多引擎时最后一个存活者生效，
+/// 前序引擎 close 后的残留联动是句柄上的无害原子写）。
+fn register_cardinality_reconciler(storage: StorageHandle, applied: usize) {
+    *reconciler_cell().lock().unwrap_or_else(|p| p.into_inner()) =
+        Some(CardinalityReconciler { storage, applied });
+}
+
+/// 白名单变更后 cardinality 只放大热重校准（Task 19，R4）：
+/// 重算 [`auto_cardinality`]，**仅当大于已下发值**时调 tsink
+/// `set_cardinality_limit`（立即生效，后续新 series 创建判定按批快照）。
+///
+/// 只放大不缩小：白名单缩小由 fan_out L3 过滤天然生效（history!=true 的
+/// tag 不再产生新点），缩 limit 反而会使已存在 series 删除后不可重建，
+/// 无收益有风险。无注册者（feature off / 显式配置 / init 失败）时 no-op。
+pub(crate) fn reconcile_cardinality(effective: &HashMap<String, TagProps>) {
+    let mut cell = reconciler_cell().lock().unwrap_or_else(|p| p.into_inner());
+    let Some(reconciler) = cell.as_mut() else {
+        return;
+    };
+    let want = auto_cardinality(effective);
+    if want > reconciler.applied {
+        reconciler.storage.set_cardinality_limit(want);
+        reconciler.applied = want;
+    }
 }
 
 /// 按配置组装 tsink 内嵌存储（D6 资源边界，组装项与顺序照计划速查表）。
@@ -399,6 +447,11 @@ fn maybe_init_impl(
         auto_cardinality(effective)
     };
     Some(build_storage(cfg, cardinality).and_then(|storage| {
+        // Task 19（R4）：auto 校准模式注册运行期热重校准（显式配置=运维
+        // 硬上限，不注册——重校准不得绕过显式上限；init 初值即只放大基线）。
+        if cfg.cardinality_limit == 0 {
+            register_cardinality_reconciler(storage.clone(), cardinality);
+        }
         // engine 内部接线（Task 5）：storage clone 给 writer（共享同一 Arc），
         // handle/join 存入 engine——编排层经 `handle()` 取 clone，不经返回值。
         // spawn 失败（M3/P8：线程创建资源耗尽）串化进既有 init_failed Err

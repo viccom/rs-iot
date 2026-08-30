@@ -25,6 +25,23 @@ pub mod writer;
 /// `db::alarms::fire` + SSE Fire 帧（不依赖现场脚本）；只 fire 不自动 clear。
 pub mod alarm;
 
+/// effective 白名单变更联动（Task 19，无条件编译门面防调用点 cfg 散布）：
+/// `model::cache::reload` 成功尾部调用——history feature 开启且引擎为 auto
+/// 校准模式时做 cardinality **只放大**热重校准（R4 收口）；feature off /
+/// 显式配置 / init 失败时 no-op。签名与实现细节见 `engine::reconcile_cardinality`。
+pub fn on_effective_reloaded(
+    effective: &std::collections::HashMap<String, crate::types::TagProps>,
+) {
+    #[cfg(feature = "history")]
+    {
+        engine::reconcile_cardinality(effective);
+    }
+    #[cfg(not(feature = "history"))]
+    {
+        let _ = effective;
+    }
+}
+
 // ---------- 读路径公共类型（Phase 2 Task 1，P1 无条件编译） ----------
 //
 // trait 与类型只依赖 `SampleValue` 等 rs-iot 自有类型（同 1b P6 先例：rows.rs
