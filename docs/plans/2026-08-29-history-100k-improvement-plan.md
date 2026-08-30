@@ -281,6 +281,24 @@ Commit：tsink `feat(storage): cardinality_limit 运行期热更新`；rs-iot `f
 **结论：门禁 ②③④⑥ 达成；Phase 4 十万点容量目标（10 分钟窗口版）收官。遗留 N4（WAL 推进）为长跑 soak 前置必修项；D2 24h soak 待 N4 修复后决策。**
 观察项：RSS 稳态 2.6-3.4GB（预算口径 used 仅 38MB——T7 口径分离后 registry/mmap/identity cache 走 RSS 属预期，10 万 series 部署需按此预留内存）；WAL 回放 2.5GB 耗时 ~4.5 分钟（长 WAL 的恢复时间成本）。
 
+## 五-C、D2 24h soak 结果（2026-08-31，**失败于 8.2h——长跑退化 N5 族，未通过**）
+
+soak 配置同 T21 终局（writer_threads=4 + chunk_points=512 + wal 8GB）。2026-08-30 21:36 启动，2026-08-31 04:46 WAL 触顶 8GB，04:46-05:45 间进程静默死亡（无 panic/无 stopped 日志/无 Windows Application Error/无 WER——死亡方式未决）。
+
+**数据曲线**（591 磁盘样本 + 28 metrics 样本）：
+- `memory_used`（active+sealed）**单调堆积**：299MB → 470MB(3.1h) → 983MB(5.1h) → 1378MB(6.9h)——persist/compaction 吞吐跟不上 seal 速率，sealed 积压；
+- RSS 同步涨至 **13.76GB**（01:45 实测点；机器 63.4GB 物理内存，空闲 28.5GB，非系统 OOM）；
+- 丢弃率非单调恶化：5.8%→35%→46%（3.1h 峰值）→31%（后期 written 回升至 91.6K/s）——吞吐随 compaction 阶段波动；
+- WAL 前缀回收工作 7.17h（89 次回落）→ 04:41 停滞（回收依赖段持久化，persist 停则回收停）→ 5 分钟涨满 8GB → wal_disk 拒批；
+- 段数据 9.1GB/10.1h（261KB/s 均速）；errors=0、series=100001 全程正确。
+
+**N5 族登记（长跑退化，专项排查）**：
+- **N5a（核心）**：sealed chunk 积压——persist/compaction 处理速率 < seal 速率（100K pts/s × chunk_points=512），积压单调涨，是内存/WAL/死亡三连锁的第一因；10 分钟窗口测不出；
+- N5b：WAL 回收依赖段持久化，持久化停滞则回收连锁停滞（5 分钟涨满 8GB 的放大器）；
+- N5c：进程静默死亡方式未决（候选：大分配失败 fastfail abort / 外部终止；OS 无取证）。
+
+**判定**：Phase 4 门禁 ⑦（24h soak）**未通过**；T21 十分钟窗口的全部结论不受影响（容量/正确性/恢复已独立验证）。soak 复跑前置 = N5a 修复。工件：soak_samples.log / soak_metrics.log / logs（现场冻结保留）。
+
 ## 六、风险与回滚
 
 - **T1 单公式改动**：理论风险是"防 head 无限膨胀的预算防线弱化"——由增量记账+提交后强制执行兜底（`ingest_pipeline.rs:95-106`）；若复测出现真 OOM，回滚公式或 chunk_points 调小双保险。
