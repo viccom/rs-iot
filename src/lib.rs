@@ -360,6 +360,10 @@ pub async fn run_app_with_shutdown(
             client.clone(),
             event_bus.clone(),
             shutdown.child_token(),
+            // Task B/#4：告警阈值配置化（[history].alarm_drop_*，默认
+            // 10/s、1% = T18 原常量零漂移）
+            cfg.history.alarm_drop_rate_per_sec,
+            cfg.history.alarm_drop_ratio,
         );
     }
     let pipeline_token = shutdown.child_token();

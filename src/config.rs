@@ -247,6 +247,22 @@ pub struct HistoryConfig {
     /// 同一 writer(稳定 hash),死区/lane/乱序状态机的单写者全序保持;每分片
     /// 独立有界 channel(容量 = channel_capacity÷N 向上取整)。压测建议 4
     pub writer_threads: usize,
+    /// sysstatus history.health degrading 档阈值(Task B/#4,T17 配置化):
+    /// 累计占比 dropped/(sent+dropped) **严格大于**此值转 degrading。
+    /// (0,1] 且须 < [`Self::health_dropping_ratio`];默认 0.005(=T17 原常量,
+    /// serde default 零漂移)。不支持 0 禁用(errors>0 降档独立于占比,
+    /// 恒 ok 会掩盖错误面)
+    pub health_degrading_ratio: f64,
+    /// sysstatus history.health dropping 档阈值(Task B/#4,T17 配置化):
+    /// 累计占比严格大于此值转 dropping(最高档优先)。(0,1];默认 0.05
+    pub health_dropping_ratio: f64,
+    /// 丢弃告警速率阈值(行/s,严格大于;Task B/#4,T18 配置化):与
+    /// [`Self::alarm_drop_ratio`] 双条件均须满足才 fire。≥0;默认 10.0
+    /// (=T18 原常量)。0 合法=只按占比判(小部署免速率门槛)
+    pub alarm_drop_rate_per_sec: f64,
+    /// 丢弃告警窗口占比阈值(严格大于;Task B/#4,T18 配置化):
+    /// delta_dropped/(delta_dropped+delta_sent) > 此值。(0,1];默认 0.01
+    pub alarm_drop_ratio: f64,
 }
 
 impl Default for HistoryConfig {
@@ -265,6 +281,11 @@ impl Default for HistoryConfig {
             chunk_points: 0,
             partition_secs: 0,
             writer_threads: 1,
+            // Task B/#4：默认值 = T17/T18 原硬编码常量（serde default 零漂移）
+            health_degrading_ratio: 0.005,
+            health_dropping_ratio: 0.05,
+            alarm_drop_rate_per_sec: 10.0,
+            alarm_drop_ratio: 0.01,
         }
     }
 }
@@ -344,6 +365,40 @@ impl HistoryConfig {
             return Err(format!(
                 "writer_threads 必须在 1..=64（1=单写线程零回归），实际 {}",
                 self.writer_threads
+            ));
+        }
+        // Task B/#4（阈值配置化）：health 两键 (0,1] 且 degrading < dropping
+        // （档位有序——相等会使三档退化为两档，拒绝）；alarm rate ≥ 0
+        // （0 合法=只按占比判）、ratio (0,1]。均不支持 0 禁用判档（errors>0
+        // 降档独立于占比，恒 ok 会掩盖错误面）
+        if self.health_degrading_ratio <= 0.0 || self.health_degrading_ratio > 1.0 {
+            return Err(format!(
+                "health_degrading_ratio 必须在 (0, 1]，实际 {}",
+                self.health_degrading_ratio
+            ));
+        }
+        if self.health_dropping_ratio <= 0.0 || self.health_dropping_ratio > 1.0 {
+            return Err(format!(
+                "health_dropping_ratio 必须在 (0, 1]，实际 {}",
+                self.health_dropping_ratio
+            ));
+        }
+        if self.health_degrading_ratio >= self.health_dropping_ratio {
+            return Err(format!(
+                "health_degrading_ratio ({}) 必须小于 health_dropping_ratio ({})（档位有序）",
+                self.health_degrading_ratio, self.health_dropping_ratio
+            ));
+        }
+        if self.alarm_drop_rate_per_sec < 0.0 {
+            return Err(format!(
+                "alarm_drop_rate_per_sec 必须 ≥ 0（0=只按占比判），实际 {}",
+                self.alarm_drop_rate_per_sec
+            ));
+        }
+        if self.alarm_drop_ratio <= 0.0 || self.alarm_drop_ratio > 1.0 {
+            return Err(format!(
+                "alarm_drop_ratio 必须在 (0, 1]，实际 {}",
+                self.alarm_drop_ratio
             ));
         }
         Ok(())
@@ -655,6 +710,87 @@ writer_threads = 4"#,
         assert_eq!(h.partition_secs, 0);
         // T14：writer_threads 缺省走 Default 1（单写线程，行为与现状一致）
         assert_eq!(h.writer_threads, 1);
+    }
+
+    /// Task B/#4：健康档位/告警阈值四键 roundtrip——显式配置覆盖默认；
+    /// 缺省四键走 Default **零漂移**（与 T17/T18 硬编码常量一致：
+    /// 0.005 / 0.05 / 10.0 / 0.01）。
+    #[test]
+    fn history_config_threshold_keys_roundtrip() {
+        let cfg: AppConfig = toml::from_str(
+            r#"[history]
+enabled = true
+health_degrading_ratio = 0.001
+health_dropping_ratio = 0.02
+alarm_drop_rate_per_sec = 50.0
+alarm_drop_ratio = 0.05"#,
+        )
+        .unwrap();
+        let h = cfg.history;
+        assert_eq!(h.health_degrading_ratio, 0.001);
+        assert_eq!(h.health_dropping_ratio, 0.02);
+        assert_eq!(h.alarm_drop_rate_per_sec, 50.0);
+        assert_eq!(h.alarm_drop_ratio, 0.05);
+
+        // 缺省四键走 Default（serde default 保持现行为零漂移）
+        let h = toml::from_str::<AppConfig>("[history]\nenabled = true\n")
+            .unwrap()
+            .history;
+        assert_eq!(h.health_degrading_ratio, 0.005, "默认=T17 常量 0.5%");
+        assert_eq!(h.health_dropping_ratio, 0.05, "默认=T17 常量 5%");
+        assert_eq!(h.alarm_drop_rate_per_sec, 10.0, "默认=T18 常量 10/s");
+        assert_eq!(h.alarm_drop_ratio, 0.01, "默认=T18 常量 1%");
+    }
+
+    /// Task B/#4：阈值边界校验——health 两键 (0,1] 且 degrading < dropping
+    /// （档位有序）；alarm rate ≥ 0（0 合法=只按占比判）、ratio (0,1]。
+    /// 0 无"禁用判档"语义（errors>0 降档独立于占比，恒 ok 会掩盖错误面）。
+    #[test]
+    fn history_config_validate_thresholds() {
+        let base = HistoryConfig::default();
+        assert_eq!(base.validate(), Ok(()), "默认阈值必须合法");
+
+        // health_degrading_ratio：0 / >1 / ≥dropping（档位失序）拒绝
+        let mut c = base.clone();
+        c.health_degrading_ratio = 0.0;
+        assert!(c.validate().is_err(), "degrading=0 必须拒绝");
+        let mut c = base.clone();
+        c.health_degrading_ratio = 1.5;
+        assert!(c.validate().is_err(), "degrading>1 必须拒绝");
+        // health_dropping_ratio：0 / >1 拒绝
+        let mut c = base.clone();
+        c.health_dropping_ratio = 0.0;
+        assert!(c.validate().is_err(), "dropping=0 必须拒绝");
+        let mut c = base.clone();
+        c.health_dropping_ratio = 1.01;
+        assert!(c.validate().is_err(), "dropping>1 必须拒绝");
+        // 档位有序：degrading ≥ dropping 拒绝（相等也拒——三档退化为两档）
+        let mut c = base.clone();
+        c.health_degrading_ratio = 0.05;
+        assert!(c.validate().is_err(), "degrading ≥ dropping 必须拒绝");
+
+        // alarm_drop_rate_per_sec：<0 拒绝（0 合法）；alarm_drop_ratio：
+        // 0 / >1 拒绝
+        let mut c = base.clone();
+        c.alarm_drop_rate_per_sec = -1.0;
+        assert!(c.validate().is_err(), "rate<0 必须拒绝");
+        let mut c = base.clone();
+        c.alarm_drop_ratio = 0.0;
+        assert!(c.validate().is_err(), "ratio=0 必须拒绝");
+        let mut c = base.clone();
+        c.alarm_drop_ratio = 1.5;
+        assert!(c.validate().is_err(), "ratio>1 必须拒绝");
+
+        // 上确界/下确界合法：dropping=1、ratio=1、rate=0
+        let mut c = base.clone();
+        c.health_dropping_ratio = 1.0;
+        assert_eq!(c.validate(), Ok(()), "dropping 上确界 1 合法");
+        let mut c = base.clone();
+        c.alarm_drop_ratio = 1.0;
+        assert_eq!(c.validate(), Ok(()), "ratio 上确界 1 合法");
+        let mut c = base.clone();
+        c.alarm_drop_rate_per_sec = 0.0;
+        assert_eq!(c.validate(), Ok(()), "rate=0 合法（只按占比判）");
     }
 
     /// [history] 边界校验拒绝（H4）：≥4 类非法值逐一 Err——零值破坏语义

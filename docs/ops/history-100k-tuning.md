@@ -41,10 +41,10 @@ partition_secs = 0              # 默认 1h，一般无需调
 
 ## 三、观测与判读
 
-- **sysstatus**：`history.health` 三态（`ok` / `degrading`：dropped 累计占比 >0.5% 或 errors>0 / `dropping`：>5%）+ `degraded`（引擎 Closed 锁存，配一次性 ERROR 日志）。
+- **sysstatus**：`history.health` 三态（`ok` / `degrading`：dropped 累计占比 >0.5% 或 errors>0 / `dropping`：>5%；两阈值为 `[history].health_degrading_ratio`/`health_dropping_ratio` 默认值，可配——小部署可收紧 degrading 提前降档预警，Task B/#4）+ `degraded`（引擎 Closed 锁存，配一次性 ERROR 日志与 `rsiot.history_closed` error 级内建告警）。
 - **selfMonitor**（devid=rsiot，每 5s 入 rtdata）：`history_dropped_total / history_errors_total / history_written_total` 可直接图表化。
 - **/metrics 关键 family**：`rs_iot_history_*`（sent/written/dropped/errors 分桶/series/内存 5 分量/admission 预估与缺口）；tsink 侧 `prefix_reclaims_total` 持续增长、`prefix_reclaim_errors_total` 恒 0 为 WAL 回收健康。
-- **内建告警**（T18）：dropped 速率 >10/s 且窗口占比 >1% 时 fire `rsiot.history_drop`（warn 级，同活动期去抖，人工确认清除后仍超阈会重新告警）。
+- **内建告警**（T18）：dropped 速率 >10/s 且窗口占比 >1% 时 fire `rsiot.history_drop`（warn 级，同活动期去抖，人工确认清除后仍超阈会重新告警）。阈值为 `[history].alarm_drop_rate_per_sec`/`alarm_drop_ratio` 默认值，可配（Task B/#4）——小部署（50/100 pts/s 级）建议 `alarm_drop_rate_per_sec` 收到 5 以下，否则丢一半也够不着速率门槛。
 - **admission 拒批判读**：`rs_iot_history_admission_last_estimate_bytes` 大而 `memory_active_sealed_bytes` 小 = 预估虚高（理论已修，若再现报障）；active_sealed/registry 逼近预算 = 真用满。
 
 ## 四、容量数学

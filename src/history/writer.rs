@@ -388,8 +388,9 @@ impl Writer {
     /// 意味着引擎已关停/僵尸，归档链路失效且不再自愈（常规关停序是排空
     /// flush 先于 close，不经此路径，正常关停不误报）。db::alarms::fire
     /// 需要 lux 句柄而 writer 是独立 std 线程不可达——告警消费走
-    /// `HistoryStats.closed_latched` → sysstatus `degraded` 上行（TODO:
-    /// 告警事件接入 telemetry/sysstatus 读侧 fire 通道）。
+    /// `HistoryStats.closed_latched` 读侧：sysstatus `degraded` 字段 +
+    /// `alarm::ClosedAlarmWatch` 周期 fire `rsiot.history_closed` error 级
+    /// 系统告警（Task A/#3 收口本 TODO）。
     /// 多写者（T14）：`closed_latched` 是原子且首增判定基于 kind 槽
     /// fetch_add 的 prev 值——并发首增只有一个观察者，一次性 ERROR
     /// 语义天然多写者安全。
