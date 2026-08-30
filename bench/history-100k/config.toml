@@ -1,0 +1,53 @@
+# rs-iot history 100k-tag benchmark service config.
+#
+# Usage:
+#   target/release/rs-iot --config bench/history-100k/config.toml
+#
+# NOTE: the `history` cargo feature is NOT in the default feature set
+# (Cargo.toml [features]). The release binary must be built with:
+#   cargo build --release --features history
+# otherwise the history engine stays disabled and /api/v1/history returns 503
+# with reason "feature_not_compiled".
+#
+# Field names verified against src/config.rs (AppConfig / LuxConfig /
+# MqttConfig / PipelineConfig / HistoryConfig / LogConfig).
+
+api_port = 8791
+jwt_secret = "bench100k-secret-0123456789abcdef"
+
+[lux]
+port = 6391
+bind_host = "127.0.0.1"
+data_dir = "E:/Rs_Codes/rs-iot/bench/history-100k/data/lux"
+save_interval_secs = 60
+
+[pipeline]
+# 0 = auto (min(cpu, 8)) workers.
+workers = 0
+
+[mqtt]
+# Empty host = do NOT auto-generate the default luaNorth north-bound instance.
+host = ""
+
+[history]
+enabled = true
+data_dir = "E:/Rs_Codes/rs-iot/bench/history-100k/data/history"
+memory_limit_mb = 2048
+# 0 = auto-calibrate from effective() history=true tag count * 1.2.
+cardinality_limit = 0
+retention_days = 1
+# >0 = Periodic WAL sync (ms); 0 would be PerAppend strict mode.
+wal_sync_ms = 500
+wal_size_limit_mb = 2048
+channel_capacity = 262144
+batch_max_rows = 16384
+close_timeout_secs = 30
+# T14: N writer threads with series-affinity sharding (default 1).
+writer_threads = 4
+
+[log]
+dir = "E:/Rs_Codes/rs-iot/bench/history-100k/logs"
+level = "info"
+max_days = 7
+# 0 = no size-based purge.
+max_size_mb = 0
