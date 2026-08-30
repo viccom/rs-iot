@@ -171,16 +171,48 @@ impl HistoryStats {
     }
 }
 
+/// series 分片路由（T14）：对 (devid, tag) 二元组做 FNV-1a 64 位散布——
+/// 长度前缀注入使 ("a","bc") 与 ("ab","c") 字节流不同（二元组语义，任一
+/// 维折叠都会碰撞）；FNV-1a 常数无随机种子，同 series 恒同分片（亲和的
+/// 根基：死区/lane/乱序状态机的单写者全序），散布对高基数 series 域近似
+/// 均匀。`shards<=1` 恒 0（单分片=单写线程现状）。
+pub(crate) fn shard_route(devid: &str, tag: &str, shards: usize) -> usize {
+    if shards <= 1 {
+        return 0;
+    }
+    /// FNV-1a 64 位标准素数。
+    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+    /// FNV-1a 64 位 offset basis。
+    const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    fn mix(h: &mut u64, bytes: &[u8]) {
+        for &b in bytes {
+            *h ^= u64::from(b);
+            *h = h.wrapping_mul(FNV_PRIME);
+        }
+    }
+    let mut h = FNV_OFFSET;
+    mix(&mut h, &(devid.len() as u64).to_le_bytes());
+    mix(&mut h, devid.as_bytes());
+    mix(&mut h, &(tag.len() as u64).to_le_bytes());
+    mix(&mut h, tag.as_bytes());
+    (h % shards as u64) as usize
+}
+
 /// fan-out 发送句柄：pipeline 侧持有，clone 语义与 tokio mpsc Sender 一致。
 ///
 /// `send` 是 `try_send` 直通——有界 channel 满即丢（D3），绝不阻塞采集热路径。
+/// T14 多写线程分片：句柄持有**每分片**一个 channel 发送端，`send` 按
+/// [`shard_route`] 把行路由到其 series 的亲和分片（同 series 恒同 writer）；
+/// 满即丢按**被路由分片**的容量计。
 ///
 /// `Clone` 语义与 tokio mpsc `Sender` 一致（Task 5：engine 持原件、`handle()`
-/// clone 交给 `HostContext.history`，pipeline 侧 clone 随 worker fan-out）。
+/// clone 交给 `HostContext.history`，pipeline 侧 clone 随 worker fan-out）——
+/// clone 复制整个分片面，任一 clone 存活则全部分片保持连接。
 #[derive(Debug, Clone)]
 pub struct HistoryHandle {
-    /// 有界 channel 发送端（drop 即触发 writer 排空退出）。
-    tx: mpsc::Sender<HistoryRow>,
+    /// 每分片有界 channel 发送端（分片数 = writer_threads，启动时固定；
+    /// 全部 clone drop 才触发对应 writer 排空退出）。
+    txs: Vec<mpsc::Sender<HistoryRow>>,
     /// 旁路计数共享句柄。
     pub stats: Arc<HistoryStats>,
 }
@@ -196,9 +228,9 @@ pub enum SendFail {
 }
 
 impl HistoryHandle {
-    /// 组装句柄（tx 与 stats 由 spawn_writer 成对创建）。
-    pub fn new(tx: mpsc::Sender<HistoryRow>, stats: Arc<HistoryStats>) -> Self {
-        Self { tx, stats }
+    /// 组装句柄（txs 与 stats 由 spawn_writer 成对创建；分片数 = txs.len()）。
+    pub fn new(txs: Vec<mpsc::Sender<HistoryRow>>, stats: Arc<HistoryStats>) -> Self {
+        Self { txs, stats }
     }
 
     /// 旁路计数引用。
@@ -206,23 +238,27 @@ impl HistoryHandle {
         &self.stats
     }
 
-    /// 发送一行（`try_send` 直通，失败原因折叠为 [`SendFail`]）：
-    /// 满即丢由调用方计数（fan_out 内置，独立调用方自行处理 `Err`）。
+    /// 发送一行（series 亲和路由 + `try_send` 直通，失败原因折叠为
+    /// [`SendFail`]）：路由到 `(devid, tag)` 的亲和分片，满即丢由调用方
+    /// 计数（fan_out 内置，独立调用方自行处理 `Err`）。
     pub fn send(&self, row: HistoryRow) -> Result<(), SendFail> {
-        self.tx.try_send(row).map_err(|e| match e {
+        let shard = shard_route(&row.devid, &row.tag, self.txs.len());
+        self.txs[shard].try_send(row).map_err(|e| match e {
             mpsc::error::TrySendError::Full(_) => SendFail::Full,
             mpsc::error::TrySendError::Closed(_) => SendFail::Closed,
         })
     }
 
-    /// channel 是否已满（P11 饱和快速路径）：剩余容量为 0 即满。
+    /// channel 是否已满（P11 饱和快速路径）：**全部分片**剩余容量为 0 才算
+    /// 满——单片满不算（其它 series 的路由片仍有容量，短路不得误丢）；
+    /// 单分片（writer_threads=1）退化为单 channel 语义（现状）。
     ///
     /// 语义：容量探测仅是发送前的**先验短路**——探测与实际 `try_send` 之间
     /// 无锁同步（writer 并发消费会释放容量），结果可能瞬时过时；调用方
     /// （`fan_out`）以满探测先行计 `dropped` 并跳过整行构造，后续行的
     /// `try_send` 仍以自身结果为准。
     pub(crate) fn is_full(&self) -> bool {
-        self.tx.capacity() == 0
+        self.txs.iter().all(|tx| tx.capacity() == 0)
     }
 }
 
@@ -255,7 +291,9 @@ pub fn fan_out(samples: &[Sample], effective: &HashMap<String, TagProps>, h: &Hi
         .unwrap_or(0);
     for sample in samples {
         for (tag, value) in &sample.values {
-            // P11 饱和快速路径：满即丢先行，白名单判定/行构造整体短路
+            // P11 饱和快速路径：满即丢先行（T14：全部分片皆满才短路——单片
+            // 满由 send 的路由 try_send 结果计 dropped），白名单判定/行构造
+            // 整体短路
             if h.is_full() {
                 dropped += 1;
                 continue;
@@ -401,7 +439,7 @@ mod tests {
     #[test]
     fn fan_out_whitelist_only() {
         let (tx, mut rx) = mpsc::channel(64);
-        let handle = HistoryHandle::new(tx, fresh_stats());
+        let handle = HistoryHandle::new(vec![tx], fresh_stats());
 
         let ts_a = now_secs();
         let ts_b = ts_a + 1;
@@ -454,7 +492,7 @@ mod tests {
     #[test]
     fn fan_out_tag_key_matching() {
         let (tx, mut rx) = mpsc::channel(64);
-        let handle = HistoryHandle::new(tx, fresh_stats());
+        let handle = HistoryHandle::new(vec![tx], fresh_stats());
 
         // 语义锚点：types::tag_key 对已含 devid 的 tag 原样返回
         assert_eq!(tag_key("dev1", "dev1.temp"), "dev1.temp");
@@ -497,7 +535,7 @@ mod tests {
         // 红阶段构造缺陷修复(非断言,绿阶段代理显式报告):下方预填需继续用 tx,
         // 而 new(tx) 按值移动——改传 tx.clone()(同一 channel,容量语义不变),
         // 使构造与断言意图一致。断言零改动。
-        let handle = HistoryHandle::new(tx.clone(), fresh_stats());
+        let handle = HistoryHandle::new(vec![tx.clone()], fresh_stats());
 
         // 预填占满容量（空 channel 上 try_send 必成功）
         tx.try_send(HistoryRow {
@@ -551,7 +589,7 @@ mod tests {
     #[test]
     fn fan_out_empty_tag_skipped() {
         let (tx, mut rx) = mpsc::channel(64);
-        let handle = HistoryHandle::new(tx, fresh_stats());
+        let handle = HistoryHandle::new(vec![tx], fresh_stats());
 
         let samples = vec![sample(
             "dev1",
@@ -578,7 +616,7 @@ mod tests {
     #[test]
     fn fan_out_saturation_short_circuit() {
         let (tx, mut rx) = mpsc::channel(1);
-        let handle = HistoryHandle::new(tx.clone(), fresh_stats());
+        let handle = HistoryHandle::new(vec![tx.clone()], fresh_stats());
 
         // 预填占满容量（空 channel 上 try_send 必成功）
         tx.try_send(HistoryRow {
@@ -702,7 +740,7 @@ mod tests {
     #[test]
     fn fan_out_timestamp_window_rejects() {
         let (tx, mut rx) = mpsc::channel(64);
-        let handle = HistoryHandle::new(tx, fresh_stats());
+        let handle = HistoryHandle::new(vec![tx], fresh_stats());
 
         let now_s = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -762,7 +800,7 @@ mod tests {
     #[test]
     fn fan_out_oversize_tag_rejected() {
         let (tx, mut rx) = mpsc::channel(64);
-        let handle = HistoryHandle::new(tx, fresh_stats());
+        let handle = HistoryHandle::new(vec![tx], fresh_stats());
 
         let big_tag = "x".repeat(70 * 1024);
         let now = now_secs();
@@ -841,5 +879,147 @@ mod tests {
             9,
             "计数不变量保持：1+5+3"
         );
+    }
+
+    /// T14 分片路由：同 series 恒同分片（确定性）+ 域界内 + 单分片恒 0。
+    #[test]
+    fn shard_route_stable_within_bounds() {
+        for (devid, tag) in [("dev1", "tA"), ("dev2", "temp"), ("", "x"), ("d", "")] {
+            let first = shard_route(devid, tag, 4);
+            // 稳定性：重复调用恒同值（series 亲和的根基）
+            for _ in 0..3 {
+                assert_eq!(
+                    shard_route(devid, tag, 4),
+                    first,
+                    "({devid},{tag}) 路由必须恒定"
+                );
+            }
+            assert!(first < 4, "路由结果必须落在分片域内");
+        }
+        // 单分片（默认 1 写线程）恒路由 0
+        assert_eq!(shard_route("dev1", "tA", 1), 0);
+        assert_eq!(shard_route("任意", "任意", 1), 0);
+    }
+
+    /// T14 路由键是 (devid,tag) 二元组整体：("a","bc") 与 ("ab","c") 的
+    /// 长度前缀注入字节串不同 → 64 分片下必须路由不同——路由只折叠任一维
+    /// （只 hash devid 或只 hash tag）两者必碰撞，本测锚死二元组语义。
+    #[test]
+    fn shard_route_key_is_devid_tag_pair() {
+        assert_ne!(
+            shard_route("a", "bc", 64),
+            shard_route("ab", "c", 64),
+            "(devid,tag) 二元组整体是路由键——任一维折叠都使两 series 碰撞"
+        );
+    }
+
+    /// T14 分片散布：16 series × 4 分片，每片 4 个（FNV-1a 确定性均匀）——
+    /// 路由退化（全落一片/半数片空）必须红。
+    #[test]
+    fn shard_route_spreads_series() {
+        let mut per_shard = [0usize; 4];
+        for i in 0..16 {
+            per_shard[shard_route(&format!("dev{i}"), "tA", 4)] += 1;
+        }
+        assert_eq!(
+            per_shard,
+            [4, 4, 4, 4],
+            "16 series 必须均匀散布 4 分片（每片 4）"
+        );
+    }
+
+    /// T14 分片发送亲和：2 分片 handle 上经 fan_out（生产路径）发 dev1/
+    /// dev2 各 5 行（tag=tA，确定性路由到异片）——每片恰好收到**一个**
+    /// series 的全部行（亲和），两片皆非空，sent==10、dropped==0。
+    #[test]
+    fn handle_sharded_send_affinity() {
+        let (tx0, mut rx0) = mpsc::channel(64);
+        let (tx1, mut rx1) = mpsc::channel(64);
+        let handle = HistoryHandle::new(vec![tx0, tx1], fresh_stats());
+
+        let base = now_secs();
+        let samples: Vec<Sample> = (0..5i64)
+            .flat_map(|i| {
+                vec![
+                    sample(
+                        "dev1",
+                        "hw1",
+                        base + i,
+                        &[("tA", SampleValue::Float(i as f64))],
+                    ),
+                    sample(
+                        "dev2",
+                        "hw1",
+                        base + i,
+                        &[("tA", SampleValue::Float(i as f64))],
+                    ),
+                ]
+            })
+            .collect();
+        let mut effective = HashMap::new();
+        for devid in ["dev1", "dev2"] {
+            effective.insert(
+                tag_key(devid, "tA"),
+                TagProps {
+                    history: true,
+                    ..TagProps::default()
+                },
+            );
+        }
+        fan_out(&samples, &effective, &handle);
+
+        let rows0 = drain(&mut rx0);
+        let rows1 = drain(&mut rx1);
+        assert_eq!(rows0.len() + rows1.len(), 10, "全部 10 行必须送达");
+        assert!(!rows0.is_empty() && !rows1.is_empty(), "两片皆非空（散布）");
+        // 亲和不变量：每片的行全部属于同一 devid（series 域不跨片），
+        // 且两片分属不同 devid（dev1/dev2 确定性异片）
+        let dev0: std::collections::BTreeSet<&str> =
+            rows0.iter().map(|r| r.devid.as_str()).collect();
+        let dev1: std::collections::BTreeSet<&str> =
+            rows1.iter().map(|r| r.devid.as_str()).collect();
+        assert_eq!(dev0.len(), 1, "片 0 只能含一个 series 域（亲和）");
+        assert_eq!(dev1.len(), 1, "片 1 只能含一个 series 域（亲和）");
+        assert_ne!(
+            dev0, dev1,
+            "dev1/dev2 确定性路由异片（fixture 已验 FNV 分布）"
+        );
+        assert_eq!(handle.stats().sent.load(Ordering::SeqCst), 10);
+        assert_eq!(handle.stats().dropped.load(Ordering::SeqCst), 0);
+    }
+
+    /// T14 分片饱和判定：is_full 语义 = **全部**分片皆满——单片满不算满
+    /// （其它 series 路由片未满仍可发，P11 快速路径不得误丢）；两片皆满
+    /// 才短路。N=1 时退化为单 channel 语义（现状）。
+    #[test]
+    fn handle_sharded_is_full_all_shards() {
+        let (tx0, _rx0) = mpsc::channel(1);
+        let (tx1, _rx1) = mpsc::channel(1);
+        let handle = HistoryHandle::new(vec![tx0.clone(), tx1.clone()], fresh_stats());
+
+        assert!(!handle.is_full(), "两片皆空不算满");
+        tx0.try_send(HistoryRow {
+            devid: "dev1".into(),
+            hwid: "hw1".into(),
+            tag: "tA".into(),
+            ts_ms: 1,
+            value: SampleValue::Float(0.0),
+            deadband: None,
+        })
+        .expect("空 channel 预填必须成功");
+        assert!(
+            !handle.is_full(),
+            "单片满不算满——另一片仍有容量，饱和短路不得触发"
+        );
+        tx1.try_send(HistoryRow {
+            devid: "dev2".into(),
+            hwid: "hw1".into(),
+            tag: "tA".into(),
+            ts_ms: 1,
+            value: SampleValue::Float(0.0),
+            deadband: None,
+        })
+        .expect("空 channel 预填必须成功");
+        assert!(handle.is_full(), "两片皆满才算满");
     }
 }

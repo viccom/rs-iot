@@ -1,6 +1,13 @@
-//! 单写线程（Task 4 实现）：8 MiB 栈（D3/陷阱 4）+ 50ms 超时 recv 攒批 +
-//! 批内同 series 同 ts 去重（P2 保后写）+ deadband/last_ts/lane 防混型状态机
-//! （P3/P4/P5）→ tsink insert_rows（D4/D5）。
+//! N 写线程 series 亲和分片（T14，10 万点压测单写天花板突破）：每分片
+//! 一个 std 写线程（8 MiB 栈，D3/陷阱 4）+ 独立有界 channel + 50ms 超时
+//! recv 攒批 + 批内同 series 同 ts 去重（P2 保后写）+ deadband/last_ts/lane
+//! 防混型状态机（P3/P4/P5）→ tsink insert_rows（D4/D5）。
+//!
+//! series 亲和（硬性语义）：路由键 = (devid, tag) 二元组稳定 hash（rows::
+//! `shard_route`），同一 series 恒路由同一 writer——死区/乱序/lane 状态机
+//! 的单写者全序在分片下逐 series 保持；跨 series 无全序（本就无跨 series
+//! 依赖）。`writer_threads=1`（默认）为单写线程，行为与历史单线程实现
+//! 完全一致（零回归）。
 //!
 //! 本文件生产项全部 `#[cfg(feature = "history")]`（mod.rs 的 `pub mod writer;`
 //! 无条件声明，L1 门控落在本文件项级）；`rows` 模块的 `HistoryHandle` 无条件
@@ -9,7 +16,7 @@
 #[cfg(feature = "history")]
 use std::collections::HashMap;
 #[cfg(feature = "history")]
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicUsize, Ordering};
 #[cfg(feature = "history")]
 use std::sync::Arc;
 #[cfg(feature = "history")]
@@ -78,53 +85,101 @@ impl Default for SeriesState {
     }
 }
 
-/// spawn 单写线程并返回发送句柄与线程 join（D3：8 MiB 栈，陷阱 4——默认栈
-/// 不够 tsink 排空/compaction 递归）。
+/// spawn N 写线程（T14：分片数 = `writer_threads`，默认 1 与原单写线程行为
+/// 完全一致）并返回发送句柄与全部线程 join（D3：每线程 8 MiB 栈，陷阱 4
+/// ——默认栈不够 tsink 排空/compaction 递归）。
 ///
-/// 线程创建失败（资源耗尽等）返回 `Err`（M3/P8 fail-soft）：由 engine 侧
-/// 串化进既有 init_failed Err 通道（error! + 引擎 None + 主程序继续），
-/// 不再 `expect` panic 击穿启动序。
+/// 每分片独立有界 channel（容量 = `channel_capacity ÷ 分片数` 向上取整、
+/// 下限 1——总在途行数 ≈ channel_capacity 不随分片膨胀）；全部线程共享
+/// 同一 [`HistoryStats`]（计数全原子，sent/dropped 在 fan_out 侧、written/
+/// deadbanded/... 在各 writer 侧递增，多写者语义不变）。
 ///
-/// 线程内建一次 current_thread runtime 驱动 tokio mpsc 的超时 recv（std
+/// `storage.close()` 选举（tsink close 不幂等）：各线程退出时递减共享剩余
+/// 计数，**最后退出者**恰好一次 close（N=1 时唯一 writer 恒为最后者，
+/// 与原单线程"排空→flush→close"序一致）。
+///
+/// 线程创建失败（资源耗尽等，M3/P8 fail-soft）：置位共享退出信号 → 已起
+/// 线程排空退出（最后者 close）→ 返回 `Err` 由 engine 侧串化进既有
+/// init_failed Err 通道（error! + 引擎 None + 主程序继续），不 panic 击穿
+/// 启动序。
+///
+/// 每线程内建一次 current_thread runtime 驱动 tokio mpsc 的超时 recv（std
 /// thread 无法直接 await）：`timeout(50ms, rx.recv())` 攒批，窗口满
-/// `batch_max_rows` 或超时即 flush；sender 全断（recv None）→ 排空残余 →
-/// 最终 flush → `storage.close()`（tsink close 不幂等，仅此一次）→ 退出。
+/// `batch_max_rows` 或超时即 flush；sender 全断（recv None）或共享退出
+/// 信号置位（engine.close）→ 排空残余 → 最终 flush → close 选举 → 退出。
 #[cfg(feature = "history")]
 pub fn spawn_writer(
     storage: StorageHandle,
     cfg: &HistoryConfig,
-) -> Result<(HistoryHandle, std::thread::JoinHandle<()>), String> {
-    let (tx, rx) = mpsc::channel(cfg.channel_capacity);
-    let stats = Arc::new(HistoryStats::default());
-    let handle = HistoryHandle::new(tx, stats.clone());
+) -> Result<(HistoryHandle, Vec<std::thread::JoinHandle<()>>), String> {
+    // validate 保证 writer_threads ∈ [1,64]；max(1) 防御绕过校验的调用点
+    let shards = cfg.writer_threads.max(1);
+    // 每分片容量：总容量均摊（ceil 保持总在途行数 ≈ channel_capacity）
+    let per_shard_cap = cfg.channel_capacity.div_ceil(shards).max(1);
     let batch_max = cfg.batch_max_rows;
-    let join = std::thread::Builder::new()
-        .stack_size(8 * 1024 * 1024)
-        .name("history-writer".to_owned())
-        .spawn(move || writer_loop(storage, stats, rx, batch_max))
-        .map_err(|e| format!("spawn history writer thread: {e}"))?;
-    Ok((handle, join))
+    let stats = Arc::new(HistoryStats::default());
+    let mut txs = Vec::with_capacity(shards);
+    let mut rxs = Vec::with_capacity(shards);
+    for _ in 0..shards {
+        let (tx, rx) = mpsc::channel(per_shard_cap);
+        txs.push(tx);
+        rxs.push(rx);
+    }
+    let remaining = Arc::new(AtomicUsize::new(shards));
+    let mut joins = Vec::with_capacity(shards);
+    for (i, rx) in rxs.into_iter().enumerate() {
+        let storage_i = storage.clone();
+        let stats_i = stats.clone();
+        let remaining_i = remaining.clone();
+        let spawned = std::thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .name(format!("history-writer-{i}"))
+            .spawn(move || writer_loop(storage_i, stats_i, rx, batch_max, remaining_i));
+        match spawned {
+            Ok(j) => joins.push(j),
+            Err(e) => {
+                // fail-soft teardown：共享退出信号使已起线程在 ≤1 攒批窗内
+                // 排空退出（最后者 close storage），收尸后交 Err 通道；
+                // 未 spawn 分片的 rx 已随 into_iter 迭代器 drop 断开
+                storage.request_writer_shutdown();
+                drop(txs);
+                for j in joins {
+                    let _ = j.join();
+                }
+                return Err(format!("spawn history writer thread {i}: {e}"));
+            }
+        }
+    }
+    Ok((HistoryHandle::new(txs, stats), joins))
 }
 
-/// 写线程主循环（见 [`spawn_writer`] 文档）。
+/// 写线程主循环（见 [`spawn_writer`] 文档）：`remaining_writers` 是 close
+/// 选举计数，由 [`CloseElection`] 守卫持有——任何退出路径（含 panic
+/// unwind）都经守卫 Drop 参与选举。
 #[cfg(feature = "history")]
 fn writer_loop(
     storage: StorageHandle,
     stats: Arc<HistoryStats>,
     mut rx: mpsc::Receiver<HistoryRow>,
     batch_max: usize,
+    remaining_writers: Arc<AtomicUsize>,
 ) {
+    // close 选举守卫最先声明（最后 Drop）：覆盖本函数全部退出路径——
+    // 正常排空退出、运行时构建失败早退、panic unwind。
+    let _election = CloseElection {
+        storage: storage.clone(),
+        remaining: remaining_writers,
+    };
     let rt = match tokio::runtime::Builder::new_current_thread()
         .enable_time()
         .build()
     {
         Ok(rt) => rt,
         Err(e) => {
-            // 运行时构建失败极罕见（资源耗尽）：尽力 close 释放进程锁后放弃。
+            // 运行时构建失败极罕见（资源耗尽）：守卫 Drop 参与选举（最后者
+            // 尽力 close 释放进程锁）后放弃，本分片 channel 残行由满即丢
+            // 计数兜底。
             tracing::error!("[history] writer 运行时构建失败,归档写线程放弃: {e}");
-            if let Err(close_err) = storage.close() {
-                tracing::warn!("[history] writer 放弃路径 close 失败: {close_err}");
-            }
             return;
         }
     };
@@ -144,7 +199,8 @@ fn writer_loop(
     loop {
         // engine.close 的退出信号（Task 5，优先于 recv 检查）：断 sender 不足以
         // 退出——HistoryHandle clone 在 close 后仍可存活（HostContext/测试侧），
-        // 共享 AtomicBool 才是权威关停信号。与 Disconnected 同一收尾路径。
+        // 共享 AtomicBool 才是权威关停信号（全部分片共享同一标志）。与
+        // Disconnected 同一收尾路径。
         if writer.storage.writer_shutdown_requested() {
             while let Ok(row) = rx.try_recv() {
                 push_dedup(&mut buf, &mut dedup, row);
@@ -178,7 +234,8 @@ fn writer_loop(
             }
         }
     }
-    writer.finish();
+    // 正常退出：`_election` 守卫离开作用域时 Drop 递减选举——最后退出者
+    // 恰好一次 storage.close（见 CloseElection 文档）。
 }
 
 /// 批内追加 + 同 series 同 ts 去重（P2 保后写）：命中索引则原地替换
@@ -333,6 +390,9 @@ impl Writer {
     /// 需要 lux 句柄而 writer 是独立 std 线程不可达——告警消费走
     /// `HistoryStats.closed_latched` → sysstatus `degraded` 上行（TODO:
     /// 告警事件接入 telemetry/sysstatus 读侧 fire 通道）。
+    /// 多写者（T14）：`closed_latched` 是原子且首增判定基于 kind 槽
+    /// fetch_add 的 prev 值——并发首增只有一个观察者，一次性 ERROR
+    /// 语义天然多写者安全。
     fn insert(&mut self, rows: Vec<TsinkRow>) {
         let n = rows.len() as u64;
         match self.storage.insert_rows(&rows) {
@@ -359,13 +419,36 @@ impl Writer {
             }
         }
     }
+}
 
-    /// 退出前收尾：最终 flush 已由调用方完成，这里只 close（tsink close 不
-    /// 幂等，进程生命周期内仅此一次）；失败仅 warn——排空尽力，未落盘数据
-    /// 由 WAL 回放兜底。
-    fn finish(&mut self) {
-        if let Err(e) = self.storage.close() {
-            tracing::warn!("[history] writer close 失败(排空已尽力,依赖 WAL 回放兜底): {e}");
+/// close 选举守卫（T14 失败面）：`Drop` 保证 writer **任何**退出路径——
+/// 正常排空、运行时构建失败、甚至 panic unwind——都递减剩余计数并让最后
+/// 退出者恰好一次 `storage.close()`（进程锁不因单线程 panic 永久滞留；
+/// 现状单线程 panic 时 close 被整体跳过，本守卫严格更好）。
+///
+/// 时序保证：各 writer 的最终 flush 先于其选举递减（程序序），最后者
+/// fetch_sub 观察到归零即意味着其余 writer 的 flush 已完成且可见
+/// （SeqCst 全序），close 时无并发 insert 在途——与原单线程
+/// "排空→flush→close"序等价。panic 分片的 channel 随 unwind 断开，后续
+/// 行 `try_send` 得 Closed → fan_out 计 dropped（满即丢计数兜底对齐），
+/// engine close 看门狗 join 该 panicked 线程得 Err 并记 error 日志。
+#[cfg(feature = "history")]
+struct CloseElection {
+    /// tsink 存储句柄（clone，仅用于 close）。
+    storage: StorageHandle,
+    /// 剩余 writer 计数（spawn 时初始化为分片数）。
+    remaining: Arc<AtomicUsize>,
+}
+
+#[cfg(feature = "history")]
+impl Drop for CloseElection {
+    fn drop(&mut self) {
+        if self.remaining.fetch_sub(1, Ordering::SeqCst) == 1 {
+            if let Err(e) = self.storage.close() {
+                tracing::warn!(
+                    "[history] writer 最后退出者 close 失败(排空已尽力,依赖 WAL 回放兜底): {e}"
+                );
+            }
         }
     }
 }
@@ -533,6 +616,14 @@ mod tests {
         join.join().expect("{ctx}: writer 线程 panic 退出");
     }
 
+    /// 多 writer 版 [`join_with_timeout`]（T14）：全部 writer 在时限内逐个
+    /// 排空退出；任一超时/panic 即失败。
+    fn joins_with_timeout(joins: Vec<thread::JoinHandle<()>>, timeout: Duration, ctx: &str) {
+        for (i, join) in joins.into_iter().enumerate() {
+            join_with_timeout(join, timeout, &format!("{ctx}#writer{i}"));
+        }
+    }
+
     /// 从 tsink Value 提取 F64（类型漂移即 panic，带实际值便于定位）。
     fn f64_of(v: &Value) -> f64 {
         match v {
@@ -549,7 +640,7 @@ mod tests {
         let dir = unique_dir("flush");
         let cfg = cfg_with_dir(&dir);
         let storage = build_storage(&cfg, 100).expect("build_storage 必须成功");
-        let (handle, join) =
+        let (handle, joins) =
             spawn_writer(storage, &cfg).expect("测试环境 spawn history writer 线程必须成功");
         let stats = handle.stats.clone();
 
@@ -576,7 +667,7 @@ mod tests {
         );
 
         drop(handle);
-        join_with_timeout(join, Duration::from_secs(10), "writer_flushes_all");
+        joins_with_timeout(joins, Duration::from_secs(10), "writer_flushes_all");
         assert_eq!(
             stats.written.load(Ordering::SeqCst),
             100,
@@ -605,7 +696,7 @@ mod tests {
         let dir = unique_dir("deadband");
         let cfg = cfg_with_dir(&dir);
         let storage = build_storage(&cfg, 8).expect("build_storage 必须成功");
-        let (handle, join) =
+        let (handle, joins) =
             spawn_writer(storage, &cfg).expect("测试环境 spawn history writer 线程必须成功");
         let stats = handle.stats.clone();
 
@@ -633,7 +724,7 @@ mod tests {
         thread::sleep(Duration::from_millis(200));
 
         drop(handle);
-        join_with_timeout(join, Duration::from_secs(10), "writer_deadband_suppresses");
+        joins_with_timeout(joins, Duration::from_secs(10), "writer_deadband_suppresses");
         assert_eq!(stats.written.load(Ordering::SeqCst), 3);
         assert_eq!(stats.deadbanded.load(Ordering::SeqCst), 2);
         assert_eq!(stats.skipped.load(Ordering::SeqCst), 0);
@@ -661,7 +752,7 @@ mod tests {
         let dir = unique_dir("deadband-nonnum");
         let cfg = cfg_with_dir(&dir);
         let storage = build_storage(&cfg, 8).expect("build_storage 必须成功");
-        let (handle, join) =
+        let (handle, joins) =
             spawn_writer(storage, &cfg).expect("测试环境 spawn history writer 线程必须成功");
         let stats = handle.stats.clone();
 
@@ -692,8 +783,8 @@ mod tests {
         thread::sleep(Duration::from_millis(200));
 
         drop(handle);
-        join_with_timeout(
-            join,
+        joins_with_timeout(
+            joins,
             Duration::from_secs(10),
             "writer_deadband_non_numeric_archives",
         );
@@ -725,7 +816,7 @@ mod tests {
         let dir = unique_dir("dedup");
         let cfg = cfg_with_dir(&dir);
         let storage = build_storage(&cfg, 8).expect("build_storage 必须成功");
-        let (handle, join) =
+        let (handle, joins) =
             spawn_writer(storage, &cfg).expect("测试环境 spawn history writer 线程必须成功");
         let stats = handle.stats.clone();
 
@@ -748,7 +839,7 @@ mod tests {
         thread::sleep(Duration::from_millis(200));
 
         drop(handle);
-        join_with_timeout(join, Duration::from_secs(10), "writer_batch_dedup_same_ts");
+        joins_with_timeout(joins, Duration::from_secs(10), "writer_batch_dedup_same_ts");
         assert_eq!(
             stats.written.load(Ordering::SeqCst),
             1,
@@ -780,7 +871,7 @@ mod tests {
         let dir = unique_dir("lane");
         let cfg = cfg_with_dir(&dir);
         let storage = build_storage(&cfg, 8).expect("build_storage 必须成功");
-        let (handle, join) =
+        let (handle, joins) =
             spawn_writer(storage, &cfg).expect("测试环境 spawn history writer 线程必须成功");
         let stats = handle.stats.clone();
 
@@ -803,7 +894,7 @@ mod tests {
         thread::sleep(Duration::from_millis(200));
 
         drop(handle);
-        join_with_timeout(join, Duration::from_secs(10), "writer_lane_change_drops");
+        joins_with_timeout(joins, Duration::from_secs(10), "writer_lane_change_drops");
         assert_eq!(
             stats.written.load(Ordering::SeqCst),
             1,
@@ -839,7 +930,7 @@ mod tests {
         let dir = unique_dir("fidelity");
         let cfg = cfg_with_dir(&dir);
         let storage = build_storage(&cfg, 8).expect("build_storage 必须成功");
-        let (handle, join) =
+        let (handle, joins) =
             spawn_writer(storage, &cfg).expect("测试环境 spawn history writer 线程必须成功");
         let stats = handle.stats.clone();
 
@@ -862,7 +953,7 @@ mod tests {
         );
 
         drop(handle);
-        join_with_timeout(join, Duration::from_secs(10), "writer_type_fidelity");
+        joins_with_timeout(joins, Duration::from_secs(10), "writer_type_fidelity");
         assert_eq!(stats.written.load(Ordering::SeqCst), 4);
 
         let reopened = build_storage(&cfg, 8).expect("writer close 后同目录重开必须成功");
@@ -950,7 +1041,7 @@ mod tests {
         let dir = unique_dir("deadband-eval");
         let cfg = cfg_with_dir(&dir);
         let storage = build_storage(&cfg, 8).expect("build_storage 必须成功");
-        let (handle, join) =
+        let (handle, joins) =
             spawn_writer(storage, &cfg).expect("测试环境 spawn history writer 线程必须成功");
         let stats = handle.stats.clone();
 
@@ -987,8 +1078,8 @@ mod tests {
         thread::sleep(Duration::from_millis(200));
 
         drop(handle);
-        join_with_timeout(
-            join,
+        joins_with_timeout(
+            joins,
             Duration::from_secs(10),
             "writer_deadband_evaluated_counted",
         );
@@ -1020,7 +1111,7 @@ mod tests {
         let dir = unique_dir("err-kind-card");
         let cfg = cfg_with_dir(&dir);
         let storage = build_storage(&cfg, 1).expect("build_storage 必须成功");
-        let (handle, join) =
+        let (handle, joins) =
             spawn_writer(storage, &cfg).expect("测试环境 spawn history writer 线程必须成功");
         let stats = handle.stats.clone();
 
@@ -1046,8 +1137,8 @@ mod tests {
         );
 
         drop(handle);
-        join_with_timeout(
-            join,
+        joins_with_timeout(
+            joins,
             Duration::from_secs(10),
             "writer_error_kind_cardinality",
         );
@@ -1080,7 +1171,7 @@ mod tests {
         let dir = unique_dir("nonfinite");
         let cfg = cfg_with_dir(&dir);
         let storage = build_storage(&cfg, 8).expect("build_storage 必须成功");
-        let (handle, join) =
+        let (handle, joins) =
             spawn_writer(storage, &cfg).expect("测试环境 spawn history writer 线程必须成功");
         let stats = handle.stats.clone();
 
@@ -1109,8 +1200,8 @@ mod tests {
         thread::sleep(Duration::from_millis(200));
 
         drop(handle);
-        join_with_timeout(
-            join,
+        joins_with_timeout(
+            joins,
             Duration::from_secs(10),
             "writer_nonfinite_rejected_deadband_not_poisoned",
         );
@@ -1148,7 +1239,7 @@ mod tests {
         let dir = unique_dir("dup-ts");
         let cfg = cfg_with_dir(&dir);
         let storage = build_storage(&cfg, 8).expect("build_storage 必须成功");
-        let (handle, join) =
+        let (handle, joins) =
             spawn_writer(storage, &cfg).expect("测试环境 spawn history writer 线程必须成功");
         let stats = handle.stats.clone();
 
@@ -1180,8 +1271,8 @@ mod tests {
         thread::sleep(Duration::from_millis(200));
 
         drop(handle);
-        join_with_timeout(
-            join,
+        joins_with_timeout(
+            joins,
             Duration::from_secs(10),
             "writer_cross_batch_dup_ts_counted",
         );
@@ -1221,7 +1312,7 @@ mod tests {
         let dir = unique_dir("wrap-dup");
         let cfg = cfg_with_dir(&dir);
         let storage = build_storage(&cfg, 8).expect("build_storage 必须成功");
-        let (handle, join) =
+        let (handle, joins) =
             spawn_writer(storage, &cfg).expect("测试环境 spawn history writer 线程必须成功");
         let stats = handle.stats.clone();
 
@@ -1255,8 +1346,8 @@ mod tests {
         }
 
         drop(handle);
-        join_with_timeout(
-            join,
+        joins_with_timeout(
+            joins,
             Duration::from_secs(10),
             "writer_cross_batch_wraparound_dup_ts_recheck",
         );
@@ -1292,7 +1383,7 @@ mod tests {
         let dir = unique_dir("stale-ts");
         let cfg = cfg_with_dir(&dir);
         let storage = build_storage(&cfg, 8).expect("build_storage 必须成功");
-        let (handle, join) =
+        let (handle, joins) =
             spawn_writer(storage, &cfg).expect("测试环境 spawn history writer 线程必须成功");
         let stats = handle.stats.clone();
 
@@ -1319,8 +1410,8 @@ mod tests {
         thread::sleep(Duration::from_millis(200));
 
         drop(handle);
-        join_with_timeout(
-            join,
+        joins_with_timeout(
+            joins,
             Duration::from_secs(10),
             "writer_stale_older_ts_dropped_semantics",
         );
@@ -1348,7 +1439,7 @@ mod tests {
         storage
             .close()
             .expect("预 close：使 insert 恒返 StorageClosed");
-        let (handle, join) =
+        let (handle, joins) =
             spawn_writer(storage, &cfg).expect("测试环境 spawn history writer 线程必须成功");
         let stats = handle.stats.clone();
 
@@ -1385,8 +1476,8 @@ mod tests {
         );
 
         drop(handle);
-        join_with_timeout(
-            join,
+        joins_with_timeout(
+            joins,
             Duration::from_secs(10),
             "writer_closed_error_latches_degraded",
         );
@@ -1404,7 +1495,7 @@ mod tests {
         let dir = unique_dir("key-sep");
         let cfg = cfg_with_dir(&dir);
         let storage = build_storage(&cfg, 8).expect("build_storage 必须成功");
-        let (handle, join) =
+        let (handle, joins) =
             spawn_writer(storage, &cfg).expect("测试环境 spawn history writer 线程必须成功");
         let stats = handle.stats.clone();
 
@@ -1440,8 +1531,8 @@ mod tests {
         thread::sleep(Duration::from_millis(200));
 
         drop(handle);
-        join_with_timeout(
-            join,
+        joins_with_timeout(
+            joins,
             Duration::from_secs(10),
             "writer_dedup_key_separation_devid_tag",
         );
@@ -1478,6 +1569,228 @@ mod tests {
                 Value::F64(want),
                 "({dev},{tag}) 值不得串台——键二维分离"
             );
+        }
+        reopened.close().expect("重开实例 close");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// T14 测试配置工厂：默认值 + data_dir + writer_threads=N。
+    fn cfg_n_writers(dir: &Path, n: usize) -> HistoryConfig {
+        HistoryConfig {
+            data_dir: dir.to_string_lossy().into_owned(),
+            writer_threads: n,
+            ..HistoryConfig::default()
+        }
+    }
+
+    /// 20. N=2 分片亲和（T14 红测1 的 writer 级观测面）：writer_threads=2
+    ///     下同 series 同 ts 两行同批连发——亲和保证两行路由进**同一**
+    ///     writer 的同一 50ms 攒批窗，批内去重生效：written==1 且落盘单点
+    ///     value==2.0（后写胜出）。若亲和破坏（两行路由异 writer），两
+    ///     writer 各自放行 → written==2 双点——本测即 series 亲和的语义锁。
+    #[test]
+    fn writer_n2_shard_affinity_same_series_dedup() {
+        let dir = unique_dir("n2-affinity");
+        let cfg = cfg_n_writers(&dir, 2);
+        let storage = build_storage(&cfg, 8).expect("build_storage 必须成功");
+        let (handle, joins) =
+            spawn_writer(storage, &cfg).expect("测试环境 spawn history writer 线程必须成功");
+        let stats = handle.stats.clone();
+
+        let ts = now_ms();
+        handle
+            .send(row("m", ts, SampleValue::Float(1.0), None))
+            .expect("send 必须成功");
+        handle
+            .send(row("m", ts, SampleValue::Float(2.0), None))
+            .expect("send 必须成功");
+
+        assert!(
+            poll_until(Duration::from_secs(5), || {
+                stats.written.load(Ordering::SeqCst) >= 1
+            }),
+            "written 应至少达 1，实际 {}",
+            stats.written.load(Ordering::SeqCst)
+        );
+        thread::sleep(Duration::from_millis(200));
+
+        drop(handle);
+        joins_with_timeout(joins, Duration::from_secs(10), "writer_n2_shard_affinity");
+        assert_eq!(
+            stats.written.load(Ordering::SeqCst),
+            1,
+            "亲和下同 series 同 ts 两行必须同 writer 批内去重（written 只计 1）——\
+             written==2 即亲和破坏（两行路由异 writer 各自落盘）"
+        );
+
+        let reopened = build_storage(&cfg, 8).expect("全部 writer close 后同目录重开必须成功");
+        let pts = reopened
+            .select("m", &series_labels(), 0, i64::MAX)
+            .expect("重开后 select 必须成功");
+        assert_eq!(pts.len(), 1, "该 ts 必须单点（双点即亲和破坏）");
+        assert_eq!(pts[0].timestamp, ts, "ts 精确回读");
+        assert_eq!(pts[0].value, Value::F64(2.0), "保后写：value 必须是 2.0");
+        reopened.close().expect("重开实例 close");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 21. N=2 语义保持（T14 红测2）：死区/跨批同 ts 跳过/乱序丢弃在分片
+    ///     下依旧 per-series 单写者全序——三 series（temp/dup/stale，可能
+    ///     分属不同 writer）各自的状态机跨批记忆不受分片影响：
+    ///     temp db=1.0 五点（0.4/0.8/1.5/2.0/2.6）→ written 3/deadbanded 2/
+    ///     evaluated 5；dup 跨批同 ts → dup_ts_skipped 1；stale 乱序更旧 →
+    ///     stale_ts_dropped 1。最终 written==5（3+1+1）。
+    #[test]
+    fn writer_n2_semantics_preserved() {
+        let dir = unique_dir("n2-semantics");
+        let cfg = cfg_n_writers(&dir, 2);
+        let storage = build_storage(&cfg, 8).expect("build_storage 必须成功");
+        let (handle, joins) =
+            spawn_writer(storage, &cfg).expect("测试环境 spawn history writer 线程必须成功");
+        let stats = handle.stats.clone();
+
+        // 阶段 A：死区状态机（series temp，0.4/0.8/1.5/2.0/2.6，db=1.0）
+        let base = now_ms();
+        for (i, v) in [0.4f64, 0.8, 1.5, 2.0, 2.6].into_iter().enumerate() {
+            handle
+                .send(row(
+                    "temp",
+                    base + i as i64,
+                    SampleValue::Float(v),
+                    Some(1.0),
+                ))
+                .expect("send 必须成功");
+        }
+        assert!(
+            poll_until(Duration::from_secs(5), || {
+                stats.written.load(Ordering::SeqCst) == 3
+                    && stats.deadbanded.load(Ordering::SeqCst) == 2
+            }),
+            "死区判定应得 written=3/deadbanded=2，实际 written={} deadbanded={}",
+            stats.written.load(Ordering::SeqCst),
+            stats.deadbanded.load(Ordering::SeqCst)
+        );
+
+        // 阶段 B：跨批同 ts 跳过（series dup）——首笔先落盘（written→4），
+        // 跨攒批窗后同 ts 第二笔 → dup_ts_skipped==1
+        let ts_dup = base + 10_000;
+        handle
+            .send(row("dup", ts_dup, SampleValue::Float(1.0), None))
+            .expect("send 必须成功");
+        assert!(
+            poll_until(Duration::from_secs(5), || {
+                stats.written.load(Ordering::SeqCst) == 4
+            }),
+            "dup 首笔应先落盘 written=4，实际 {}",
+            stats.written.load(Ordering::SeqCst)
+        );
+        thread::sleep(Duration::from_millis(200));
+        handle
+            .send(row("dup", ts_dup, SampleValue::Float(2.0), None))
+            .expect("send 必须成功");
+        assert!(
+            poll_until(Duration::from_secs(5), || {
+                stats.dup_ts_skipped.load(Ordering::SeqCst) == 1
+            }),
+            "跨批同 ts 第二笔应计 dup_ts_skipped=1，实际 {}",
+            stats.dup_ts_skipped.load(Ordering::SeqCst)
+        );
+
+        // 阶段 C：乱序更旧丢弃（series stale）——t5 落盘（written→5）后
+        // 更旧 t3 → stale_ts_dropped==1
+        handle
+            .send(row("stale", base + 5000, SampleValue::Float(5.0), None))
+            .expect("send 必须成功");
+        assert!(
+            poll_until(Duration::from_secs(5), || {
+                stats.written.load(Ordering::SeqCst) == 5
+            }),
+            "stale t5 应先落盘 written=5，实际 {}",
+            stats.written.load(Ordering::SeqCst)
+        );
+        thread::sleep(Duration::from_millis(200));
+        handle
+            .send(row("stale", base + 3000, SampleValue::Float(3.0), None))
+            .expect("send 必须成功");
+        assert!(
+            poll_until(Duration::from_secs(5), || {
+                stats.stale_ts_dropped.load(Ordering::SeqCst) == 1
+            }),
+            "更旧 t3 应计 stale_ts_dropped=1，实际 {}",
+            stats.stale_ts_dropped.load(Ordering::SeqCst)
+        );
+        thread::sleep(Duration::from_millis(200));
+
+        drop(handle);
+        joins_with_timeout(joins, Duration::from_secs(10), "writer_n2_semantics");
+        assert_eq!(
+            stats.written.load(Ordering::SeqCst),
+            5,
+            "3(temp)+1(dup)+1(stale)"
+        );
+        assert_eq!(stats.deadbanded.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            stats.deadband_evaluated.load(Ordering::SeqCst),
+            5,
+            "temp 五点全计入 evaluated（含被抑制的 0.8/2.0）"
+        );
+        assert_eq!(stats.dup_ts_skipped.load(Ordering::SeqCst), 1);
+        assert_eq!(stats.stale_ts_dropped.load(Ordering::SeqCst), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 22. N=2 close 排空（T14 红测3 的 writer 面）：发两 series 行 →
+    ///     drop 唯一 sender → 两个 writer 均在时限内排空退出（Disconnected
+    ///     路径，join 不挂）；最后退出的 writer 恰好一次 storage.close——
+    ///     同目录重开成功即进程锁已释放；行守恒 written==2。
+    #[test]
+    fn writer_n2_close_drains_all() {
+        let dir = unique_dir("n2-close");
+        let cfg = cfg_n_writers(&dir, 2);
+        let storage = build_storage(&cfg, 8).expect("build_storage 必须成功");
+        let (handle, joins) =
+            spawn_writer(storage, &cfg).expect("测试环境 spawn history writer 线程必须成功");
+        assert_eq!(joins.len(), 2, "writer_threads=2 必须 spawn 两个写线程");
+        let stats = handle.stats.clone();
+
+        let ts = now_ms();
+        // dev1/dev2 同 tag 确定性路由异片（rows.rs handle_sharded_send_affinity
+        // 同款 fixture），两 writer 各写一行
+        for devid in ["dev1", "dev2"] {
+            handle
+                .send(HistoryRow {
+                    devid: devid.into(),
+                    hwid: "hw1".into(),
+                    tag: "tA".into(),
+                    ts_ms: ts,
+                    value: SampleValue::Float(1.0),
+                    deadband: None,
+                })
+                .expect("send 必须成功");
+        }
+        assert!(
+            poll_until(Duration::from_secs(5), || {
+                stats.written.load(Ordering::SeqCst) == 2
+            }),
+            "两 series 各一行应全档 written=2，实际 written={} dropped={}",
+            stats.written.load(Ordering::SeqCst),
+            stats.dropped.load(Ordering::SeqCst)
+        );
+
+        drop(handle);
+        joins_with_timeout(joins, Duration::from_secs(10), "writer_n2_close_drains_all");
+
+        let reopened = build_storage(&cfg, 8).expect("全部 writer 退出+close 后同目录重开必须成功");
+        for devid in ["dev1", "dev2"] {
+            let pts = reopened
+                .select(
+                    "tA",
+                    &[Label::new("devid", devid), Label::new("hwid", "hw1")],
+                    0,
+                    i64::MAX,
+                )
+                .expect("重开后 select 必须成功");
+            assert_eq!(pts.len(), 1, "({devid},tA) 应恰单点");
         }
         reopened.close().expect("重开实例 close");
         let _ = std::fs::remove_dir_all(&dir);

@@ -122,6 +122,14 @@ pub fn build_storage(cfg: &HistoryConfig, cardinality: usize) -> TResult<Storage
     if cfg.partition_secs > 0 {
         builder = builder.with_partition_duration(Duration::from_secs(cfg.partition_secs));
     }
+    // T14（10 万点压测单写天花板）：writer_threads>1 分片写时，把 tsink
+    // 写并发信号量对齐分片数——insert_rows 每调用占 1 permit（默认 permit
+    // 数=CPU 核数，tsink storage.rs with_max_writers 语义），多 writer 并发
+    // insert 的准入并发度与实际写线程数一致；close/snapshot 的 acquire_all
+    // 也随之只需收齐 N 个 permit。=1 时不透传（保持现状零回归）。
+    if cfg.writer_threads > 1 {
+        builder = builder.with_max_writers(cfg.writer_threads);
+    }
     builder
         .build()
         .map(|storage| StorageHandle {
@@ -328,14 +336,17 @@ fn value_to_sample(v: &Value) -> SampleValue {
 /// 漏调时由 tsink 最后一个 `Arc` drop 的 best-effort close 兜底。
 #[derive(Debug)]
 pub struct HistoryEngine {
-    /// tsink 存储句柄（与 writer 线程共享同一 Arc clone；writer 正常退出路径
-    /// 自行 close，close 后本句柄进入 StorageClosed 可观测态）。
+    /// tsink 存储句柄（与全部 writer 线程共享同一 Arc clone；writer 正常
+    /// 退出路径自行 close 选举（T14：最后退出者恰好一次），close 后本句柄
+    /// 进入 StorageClosed 可观测态）。
     storage: StorageHandle,
-    /// writer 发送句柄原件：`handle()` 从此 clone；`close` 时 take 并 drop
-    /// （断 sender → writer 排空 + 最终 flush + storage.close()）。
+    /// writer 发送句柄原件（T14：分片面，每分片一个 channel）：`handle()`
+    /// 从此 clone；`close` 时 take 并 drop（断 sender → 各 writer 排空 +
+    /// 最终 flush + close 选举）。
     handle: Option<HistoryHandle>,
-    /// writer 线程 join 句柄（`close` 时取出 join，带超时看门狗防挂死）。
-    writer_join: Option<std::thread::JoinHandle<()>>,
+    /// 全部 writer 线程 join 句柄（T14：writer_threads 个；`close` 时取出，
+    /// 单看门狗串行 join 全部，带超时防挂死）。
+    writer_joins: Option<Vec<std::thread::JoinHandle<()>>>,
     /// 幂等 close 标志：置位后二次 `close` 为 no-op（tsink 的 close 本身不幂等）。
     closed: bool,
 }
@@ -392,12 +403,12 @@ fn maybe_init_impl(
         // handle/join 存入 engine——编排层经 `handle()` 取 clone，不经返回值。
         // spawn 失败（M3/P8：线程创建资源耗尽）串化进既有 init_failed Err
         // 通道（error! + 引擎 None + 主程序继续），不再 panic 击穿启动序。
-        let (handle, writer_join) =
+        let (handle, writer_joins) =
             spawn_writer(storage.clone(), cfg).map_err(RsIotError::HistoryEngine)?;
         Ok(HistoryEngine {
             storage,
             handle: Some(handle),
-            writer_join: Some(writer_join),
+            writer_joins: Some(writer_joins),
             closed: false,
         })
     }))
@@ -442,14 +453,16 @@ impl HistoryEngine {
     /// 关闭引擎（幂等，D10）：`closed` 标志保证二次调用 no-op——tsink 的
     /// `close()` 本身不幂等（二次返 `StorageClosed`），本包装屏蔽该差异。
     ///
-    /// 排空序：置位共享退出信号 + take 并 drop `handle`（writer 在 ≤1 个攒批
-    /// 窗内排空残余 + 最终 flush + `storage.close()`，进程锁随之释放——clone
-    /// 存活也不阻塞退出，见 [`StorageHandle`] 文档）→ join **带超时看门狗**
-    /// （std JoinHandle 无 join_timeout，以辅助线程包 join + `recv_timeout`
-    /// 实现）；超时仅 `warn!` 放弃等待（线程脱落，进程将退可接受），未落盘
-    /// 数据由 WAL 回放兜底——关停路径不因归档失败中断主序。writer 正常路径
-    /// 毫秒级完成，返回后 `storage()` 的写入即以 `StorageClosed` 被拒（排空
-    /// 已发生）。
+    /// 排空序（T14 多 writer 扩展）：置位共享退出信号 + take 并 drop
+    /// `handle`（**全部** writer 在 ≤1 个攒批窗内排空残余 + 最终 flush；
+    /// 最后退出者经 close 选举恰好一次 `storage.close()`，进程锁随之释放
+    /// ——clone 存活也不阻塞退出，见 [`StorageHandle`] 文档）→ join **全部**
+    /// writer，**单看门狗**包串行 join + `recv_timeout`（超时预算覆盖全部
+    /// 线程）；超时仅 `warn!` 放弃等待（线程脱落，进程将退可接受），未落盘
+    /// 数据由 WAL 回放兜底——关停路径不因归档失败中断主序。任一 writer
+    /// panic 时 join 得 Err 只记日志不二次传播（守卫 Drop 仍参与 close
+    /// 选举，进程锁不滞留）。writer 正常路径毫秒级完成，返回后
+    /// `storage()` 的写入即以 `StorageClosed` 被拒（排空已发生）。
     pub fn close(&mut self, timeout: Duration) {
         if self.closed {
             return;
@@ -457,32 +470,36 @@ impl HistoryEngine {
         self.closed = true;
         // 退出信号先行：`HistoryHandle` clone 在 close 后仍可存活（HostContext/
         // 测试侧），断 sender 不足以让 writer 退出——置位共享标志（≤1 攒批窗
-        // 生效），再断 engine 侧 sender。
+        // 生效，全部 writer 共享同一标志），再断 engine 侧 sender。
         self.storage.request_writer_shutdown();
         self.handle = None;
-        let join = match self.writer_join.take() {
-            Some(j) => j,
+        let joins = match self.writer_joins.take() {
+            Some(js) => js,
             None => return,
         };
-        // join 看门狗：辅助线程包 join，主线程 recv_timeout 等待；超时则辅助
-        // 线程脱落（不 join 它——它还阻塞在被放弃的 join 上）。writer panic
-        // 只记日志不二次传播（关停路径 fail-soft，WAL 回放兜底）。
+        // join 看门狗：辅助线程串行 join 全部 writer，主线程 recv_timeout
+        // 总预算等待；超时则辅助线程脱落（不 join 它——它还阻塞在被放弃的
+        // join 上）。writer panic 只记日志不二次传播（关停路径 fail-soft，
+        // WAL 回放兜底）。
         let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
         let watcher = std::thread::spawn(move || {
-            if let Err(panic) = join.join() {
-                tracing::error!("[history] writer 线程 panic 退出(排空未完成): {panic:?}");
+            for join in joins {
+                if let Err(panic) = join.join() {
+                    tracing::error!("[history] writer 线程 panic 退出(排空未完成): {panic:?}");
+                }
             }
             let _ = done_tx.send(());
         });
         match done_rx.recv_timeout(timeout) {
             Ok(()) => {
-                // writer 已排空并 close 完毕；watcher 发信后即返回，join 它回收。
+                // 全部 writer 已排空，最后退出者已完成 close（进程锁已释放）；
+                // watcher 发信后即返回，join 它回收。
                 let _ = watcher.join();
-                tracing::info!("[history] writer 排空完成,存储已 close(进程锁已释放)");
+                tracing::info!("[history] 全部 writer 排空完成,存储已 close(进程锁已释放)");
             }
             Err(_) => {
                 tracing::warn!(
-                    "[history] close 超时({timeout:?})放弃,WAL 回放兜底(writer 线程脱落)"
+                    "[history] close 超时({timeout:?})放弃,WAL 回放兜底(部分 writer 线程脱落)"
                 );
             }
         }
@@ -1109,5 +1126,72 @@ mod tests {
         storage_p1.close().expect("close 释放进程锁");
         let _ = std::fs::remove_dir_all(&dir_default);
         let _ = std::fs::remove_dir_all(&dir_p1);
+    }
+
+    /// 14. N=2 多 writer close 排空（T14）：writer_threads=2 下 maybe_init →
+    ///     经 handle 发行 → close(timeout) 必须 join 全部 writer 并等待最后
+    ///     writer 完成 storage.close——断言面：close 在超时前返回、重开同
+    ///     目录成功（进程锁已释放）、close 后 insert 以 StorageClosed 被拒。
+    #[test]
+    fn engine_n2_close_drains_all_writers() {
+        let dir = unique_dir("n2-close");
+        let cfg = HistoryConfig {
+            enabled: true,
+            cardinality_limit: 8,
+            writer_threads: 2,
+            ..cfg_with_dir(&dir)
+        };
+
+        let mut engine = maybe_init(&cfg, &HashMap::new())
+            .expect("enabled=true 必须返回 Some")
+            .expect("临时目录上引擎初始化必须成功");
+        let handle = engine.handle().expect("writer 存活时 handle 必须有值");
+
+        let base = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock after unix epoch")
+            .as_millis() as i64;
+        for devid in ["dev1", "dev2"] {
+            handle
+                .send(crate::history::rows::HistoryRow {
+                    devid: devid.into(),
+                    hwid: "hw1".into(),
+                    tag: "tA".into(),
+                    ts_ms: base,
+                    value: crate::types::SampleValue::Float(1.0),
+                    deadband: None,
+                })
+                .expect("send 必须成功");
+        }
+        // 轮询两行落盘（两 series 分属两 writer）
+        let stats = handle.stats.clone();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while stats.written.load(std::sync::atomic::Ordering::SeqCst) < 2
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(
+            stats.written.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "两 series 各一行应全档（两 writer 并行）"
+        );
+
+        // close 排空：join 全部 writer + 最后 writer close storage（释放锁）
+        engine.close(Duration::from_secs(cfg.close_timeout_secs));
+        let res = engine.storage().insert_rows(&[Row::with_labels(
+            "m_after",
+            series_labels(),
+            DataPoint::new(TS_MS + 9, 9.0f64),
+        )]);
+        assert!(
+            matches!(res, Err(tsink::TsinkError::StorageClosed)),
+            "close 后 insert 必须以 StorageClosed 失败（storage 已被最后 writer close）"
+        );
+
+        // 重开同目录成功 = 全部 writer 已退出且进程锁已释放
+        let reopened = build_storage(&cfg, 8).expect("close 后同目录重开必须成功");
+        reopened.close().expect("重开实例 close");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

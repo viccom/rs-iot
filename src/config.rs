@@ -242,6 +242,11 @@ pub struct HistoryConfig {
     /// `with_partition_duration`。窗口越小 head 越早 seal(内存回收越快),
     /// 但乱序跨窗写入受 tsink max_active_partition_heads_per_series 约束
     pub partition_secs: u64,
+    /// 写线程数(T14,10 万点压测)。1=单写线程(行为与现状完全一致,零回归);
+    /// n>1 启用 N 写线程 series 亲和分片:同一 series(devid+tag)恒定路由到
+    /// 同一 writer(稳定 hash),死区/lane/乱序状态机的单写者全序保持;每分片
+    /// 独立有界 channel(容量 = channel_capacity÷N 向上取整)。压测建议 4
+    pub writer_threads: usize,
 }
 
 impl Default for HistoryConfig {
@@ -259,6 +264,7 @@ impl Default for HistoryConfig {
             close_timeout_secs: 15,
             chunk_points: 0,
             partition_secs: 0,
+            writer_threads: 1,
         }
     }
 }
@@ -330,6 +336,14 @@ impl HistoryConfig {
             return Err(format!(
                 "partition_secs 必须在 0..={MAX_PARTITION_SECS}（0=引擎默认 3600s），实际 {}",
                 self.partition_secs
+            ));
+        }
+        // T14：writer_threads 下界 1（单写线程，0 无 auto 语义）；上界 64——
+        // 每线程 8MiB 栈，64×8MiB=512MiB 已是荒谬配置，显式拒绝防误配
+        if self.writer_threads < 1 || self.writer_threads > 64 {
+            return Err(format!(
+                "writer_threads 必须在 1..=64（1=单写线程零回归），实际 {}",
+                self.writer_threads
             ));
         }
         Ok(())
@@ -588,7 +602,8 @@ channel_capacity = 1024
 batch_max_rows = 4096
 close_timeout_secs = 30
 chunk_points = 512
-partition_secs = 1800"#,
+partition_secs = 1800
+writer_threads = 4"#,
         )
         .unwrap();
         let h = cfg.history;
@@ -605,6 +620,8 @@ partition_secs = 1800"#,
         // T9：两新键显式配置覆盖默认 0（透传 tsink builder）
         assert_eq!(h.chunk_points, 512);
         assert_eq!(h.partition_secs, 1800);
+        // T14：writer_threads 显式 4 覆盖默认 1（N 写线程 series 亲和分片）
+        assert_eq!(h.writer_threads, 4);
     }
 
     /// 无 [history] 节（有最小其他内容）：解析成功，history 走 Default
@@ -636,6 +653,8 @@ partition_secs = 1800"#,
         // partial-default 契约覆盖两新键：只设 enabled，新键仍走 Default 0
         assert_eq!(h.chunk_points, 0);
         assert_eq!(h.partition_secs, 0);
+        // T14：writer_threads 缺省走 Default 1（单写线程，行为与现状一致）
+        assert_eq!(h.writer_threads, 1);
     }
 
     /// [history] 边界校验拒绝（H4）：≥4 类非法值逐一 Err——零值破坏语义
@@ -675,6 +694,15 @@ partition_secs = 1800"#,
         let mut c = base.clone();
         c.partition_secs = MAX_PARTITION_SECS + 1;
         assert!(c.validate().is_err(), "partition_secs>36500 天必须拒绝");
+
+        // T14 负路径：writer_threads=0（单写线程是下确界，0 无"auto"语义）
+        // 与 >64（8MiB 栈/线程 ×64=512MiB 已是荒谬配置）必须拒绝
+        let mut c = base.clone();
+        c.writer_threads = 0;
+        assert!(c.validate().is_err(), "writer_threads=0 必须拒绝");
+        let mut c = base.clone();
+        c.writer_threads = 65;
+        assert!(c.validate().is_err(), "writer_threads=65 必须拒绝");
     }
 
     /// [history] 边界校验接受（H4）：默认值、各字段上下确界与 0 哨兵语义
@@ -696,6 +724,8 @@ partition_secs = 1800"#,
             // partition_secs 上界 = 36500 天（retention 上界）秒数
             chunk_points: 65_535,
             partition_secs: MAX_PARTITION_SECS,
+            // T14 上确界：writer_threads=64（最大分片数）
+            writer_threads: 64,
             ..HistoryConfig::default()
         };
         assert_eq!(c.validate(), Ok(()), "上下确界组合必须合法");
