@@ -659,3 +659,104 @@ async fn sysstatus_history_degraded_reflects_closed_latch() {
 
     common::stop_lux(handle).await;
 }
+
+/// GET /sysstatus 一次并取 history 子树（health 三档/并存用例共用的读手）。
+async fn get_history_block(app: &axum::Router, token: &str) -> serde_json::Value {
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/v1/sysstatus")
+                .header(header::AUTHORIZATION, token)
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("call app");
+    assert_eq!(resp.status(), StatusCode::OK);
+    body_json(resp).await["history"].clone()
+}
+
+/// /sysstatus history.health 三档（Task 17，累计占比口径）：占比 =
+/// dropped/(sent+dropped)——ok（≤0.5% 且 errors==0）/ degrading（>0.5% 或
+/// errors>0）/ dropping（>5%）。同一 stats 对象逐步改计数复读锁档。
+#[tokio::test]
+async fn sysstatus_history_health_three_tiers() {
+    let stats = Arc::new(HistoryStats::default());
+    let (app, handle, _client) = test_app(Some(stats.clone()), Arc::from("ok"), None).await;
+    let token = login_token(&app).await;
+
+    // ok：sent=1000、dropped=0、errors=0
+    stats.sent.store(1000, Ordering::Relaxed);
+    let hist = get_history_block(&app, &token).await;
+    assert_eq!(hist["health"], "ok", "零丢弃零错误 → ok");
+
+    // degrading：dropped=10 → 10/1010 ≈ 0.99%（>0.5%，≤5%）
+    stats.dropped.store(10, Ordering::Relaxed);
+    let hist = get_history_block(&app, &token).await;
+    assert_eq!(
+        hist["health"], "degrading",
+        "占比 ~0.99% > 0.5% → degrading"
+    );
+
+    // dropping：dropped=100 → 100/1100 ≈ 9.09%（>5%）
+    stats.dropped.store(100, Ordering::Relaxed);
+    let hist = get_history_block(&app, &token).await;
+    assert_eq!(hist["health"], "dropping", "占比 ~9.09% > 5% → dropping");
+
+    // errors>0 且占比归零 → degrading（错误触发下限档）
+    stats.dropped.store(0, Ordering::Relaxed);
+    stats.errors.store(1, Ordering::Relaxed);
+    let hist = get_history_block(&app, &token).await;
+    assert_eq!(hist["health"], "degrading", "errors>0 零占比 → degrading");
+
+    common::stop_lux(handle).await;
+}
+
+/// degraded 与 health 并存（Task 17）：`degraded`（closed_latched 引擎僵尸
+/// 锁存位）与 `health`（占比判档）语义分离不 overload——closed_latched 的
+/// 置位路径（record_error_rows）必然同时计入 errors → health 自然至少
+/// degrading，无需在 health 内特判 degraded。
+#[tokio::test]
+async fn sysstatus_history_health_degraded_coexists() {
+    let stats = Arc::new(HistoryStats::default());
+    stats.sent.store(1000, Ordering::Relaxed);
+    stats.errors.store(3, Ordering::Relaxed);
+    let (app, handle, _client) = test_app(Some(stats.clone()), Arc::from("ok"), None).await;
+    let token = login_token(&app).await;
+
+    // 未锁存：degraded=false，health 按 errors 判 degrading
+    let hist = get_history_block(&app, &token).await;
+    assert_eq!(hist["degraded"], false);
+    assert_eq!(hist["health"], "degrading", "errors=3 → health=degrading");
+
+    // 锁存后：degraded=true 上行，health 判档不动（仍按占比/errors 独立计算）
+    stats.closed_latched.store(true, Ordering::SeqCst);
+    let hist = get_history_block(&app, &token).await;
+    assert_eq!(hist["degraded"], true, "僵尸锁存位照常上行");
+    assert_eq!(
+        hist["health"], "degrading",
+        "health 不被 degraded overload——保持占比/errors 口径独立判档"
+    );
+
+    common::stop_lux(handle).await;
+}
+
+/// engine 缺席（stats=None + engine="disabled"）：`health` 键整体省略
+///（对齐 stats=null 的省略语义——无引擎无判档依据，不出误导性 "ok"）。
+#[tokio::test]
+async fn sysstatus_history_health_absent_when_engine_missing() {
+    let (app, handle, _client) = test_app(None, Arc::from("disabled"), None).await;
+    let token = login_token(&app).await;
+
+    let hist = get_history_block(&app, &token).await;
+    assert_eq!(hist["engine"], "disabled");
+    assert!(
+        hist.get("health").is_none(),
+        "stats=None 时 health 键必须整体省略，实际: {}",
+        hist["health"]
+    );
+
+    common::stop_lux(handle).await;
+}
