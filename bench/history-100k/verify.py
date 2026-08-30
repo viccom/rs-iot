@@ -171,7 +171,11 @@ def check_conservation(cli: Client, c: Case) -> None:
                  "rs_iot_history_nonfinite_skipped_total",
                  "rs_iot_history_dup_ts_skipped_total",
                  "rs_iot_history_stale_ts_dropped_total"))
-    accounted = written + deadbanded + dropped + errors + extra
+    # Consumption-side conservation: rows that entered the bounded channel
+    # (sent) must be accounted for by the writer's outcomes. `dropped` is the
+    # fan-out overflow side (rows that never entered the channel) and is
+    # reported informationally, NOT part of this ledger.
+    accounted = written + deadbanded + errors + extra
     diff = sent - accounted
     tol = sent * CONSERVATION_TOL
     skipped = m.get("rs_iot_history_skipped_total", 0.0)
@@ -179,10 +183,11 @@ def check_conservation(cli: Client, c: Case) -> None:
     part2 = skipped >= 1
     status = PASS if (part1 and part2) else FAIL
     c.done(status,
-           f"sent={int(sent)} accounted={int(accounted)} "
+           f"sent={int(sent)} consumed={int(accounted)} "
            f"(written={int(written)} deadbanded={int(deadbanded)} "
-           f"dropped={int(dropped)} errors={int(errors)} extra={int(extra)}) "
-           f"diff={int(diff)} tol={int(tol)}; skipped={int(skipped)} (expect >=1)")
+           f"errors={int(errors)} extra={int(extra)}) "
+           f"diff={int(diff)} tol={int(tol)}; "
+           f"[info] dropped={int(dropped)} skipped={int(skipped)} (outlet side, expect >=1)")
 
 
 def check_raw(cli: Client, c: Case, start: int, end: int) -> None:
