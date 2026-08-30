@@ -348,6 +348,20 @@ pub async fn run_app_with_shutdown(
     let history_engine_state = parts.state;
     let history_reader = parts.reader;
     let history_telemetry = parts.telemetry;
+    // 内建丢弃水位告警（Task 18，P6 收官）：引擎在场才起——engine=None
+    //（feature off / L2 disabled / init_failed）时 dropped 恒 0，判定无意义，
+    // 不 spawn（最小面）。独立任务而非 pipeline worker 上下文：worker 是 N 路
+    // 并发数据面热循环（周期判定会 N 份各自触发），也不借 selfMonitor 周期
+    //（用户可调上报节拍，告警节拍是基础设施关注点）；照 log_cleanup 先例
+    // child token 随进程退。
+    if let Some(stats) = history_stats.clone() {
+        history::alarm::spawn_drop_alarm_task(
+            stats,
+            client.clone(),
+            event_bus.clone(),
+            shutdown.child_token(),
+        );
+    }
     let pipeline_token = shutdown.child_token();
     let pipeline_handle = tokio::spawn(pipeline::run(
         ctx.clone(),

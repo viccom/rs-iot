@@ -21,6 +21,10 @@ pub use rows::{fan_out, HistoryHandle};
 /// 单写线程：recv 攒批 + deadband/去重/防混型 → tsink insert_rows（D3/D4/D5）。
 pub mod writer;
 
+/// 丢弃水位内建告警（Task 18，P6）：周期差分 dropped/sent → 双条件判定 →
+/// `db::alarms::fire` + SSE Fire 帧（不依赖现场脚本）；只 fire 不自动 clear。
+pub mod alarm;
+
 // ---------- 读路径公共类型（Phase 2 Task 1，P1 无条件编译） ----------
 //
 // trait 与类型只依赖 `SampleValue` 等 rs-iot 自有类型（同 1b P6 先例：rows.rs
