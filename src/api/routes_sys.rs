@@ -13,39 +13,41 @@ pub async fn sysinfo(State(st): State<AppState>) -> Json<serde_json::Value> {
     Json(serde_json::json!({"hwid": st.hwid, "version": st.version}))
 }
 
-// ---- history.health 三档判档（Task 17，P6 告警面前置） ----
+// ---- history.health 三档判档（Task 17，P6 告警面前置；Task B/#4 阈值配置化） ----
 
-/// degrading 阈值：累计 dropped/(sent+dropped) 占比 > 0.5%（严格大于）。
-/// 常量先行便于后续配置化（挂 HistoryConfig）。
-const HISTORY_DEGRADING_RATIO: f64 = 0.005;
-/// dropping 阈值：累计占比 > 5%（严格大于）。
-const HISTORY_DROPPING_RATIO: f64 = 0.05;
-
-/// 历史链三档健康判定（纯函数，单测锁边界）。
+/// 历史链三档健康判定（纯函数，单测锁边界；阈值自 `[history]`
+/// `health_degrading_ratio`/`health_dropping_ratio` 注入——sysstatus
+/// handler 经 `st.config.history` 传参，默认 0.5% / 5%）。
 ///
 /// 口径：**累计占比** dropped/(sent+dropped)——sysstatus 是无状态 handler，
 /// 手头只有一次计数器快照，占比口径简单可解释（自进程启动以来的丢弃面）；
 /// 速率口径需要快照两次求差，复杂度不匹配观测面。分母 0（未发送未丢弃）
 /// 占比取 0——无数据不算异常。
 ///
-/// 档位：ok（占比 ≤0.5% 且 errors==0）/ degrading（占比 >0.5% **或**
-/// errors>0——写错误行存在即降档）/ dropping（占比 >5%，最高档优先）。
-/// `errors` 只触发 degrading 下限不抬档：档位语义锚"丢弃面大小"，错误
-/// 面另有 errors/errors_by_kind 字段呈现。
+/// 档位：ok（占比 ≤degrading 且 errors==0）/ degrading（占比 >degrading
+/// **或** errors>0——写错误行存在即降档）/ dropping（占比 >dropping，最高
+/// 档优先）。`errors` 只触发 degrading 下限不抬档：档位语义锚"丢弃面大小"，
+/// 错误面另有 errors/errors_by_kind 字段呈现。
 ///
 /// 与 `degraded`（closed_latched 引擎僵尸锁存位）**并存不 overload**：
 /// 置位路径 `record_error_rows` 必然同时计入 errors → health 自然至少
 /// degrading，无需特判；degraded 语义（引擎死亡）独立上行。
-fn history_health(dropped: u64, sent: u64, errors: u64) -> &'static str {
+fn history_health(
+    dropped: u64,
+    sent: u64,
+    errors: u64,
+    degrading_ratio: f64,
+    dropping_ratio: f64,
+) -> &'static str {
     let denom = dropped + sent;
     let ratio = if denom > 0 {
         dropped as f64 / denom as f64
     } else {
         0.0
     };
-    if ratio > HISTORY_DROPPING_RATIO {
+    if ratio > dropping_ratio {
         "dropping"
-    } else if ratio > HISTORY_DEGRADING_RATIO || errors > 0 {
+    } else if ratio > degrading_ratio || errors > 0 {
         "degrading"
     } else {
         "ok"
@@ -102,9 +104,17 @@ pub async fn sysstatus(State(st): State<AppState>) -> Json<serde_json::Value> {
                 // 一次为真永不复位）——静态三态仍报 "ok"，运行态异常由此可见。
                 "degraded": h.closed_latched.load(std::sync::atomic::Ordering::Relaxed),
                 // Task 17 三档：累计占比口径（dropped/(sent+dropped)，见
-                // history_health）；与 degraded 并存不 overload（引擎缺席的
+                // history_health）；阈值 Task B/#4 配置化——handler 从
+                // st.config.history 直读（AppState 已持有只读 Arc<AppConfig>，
+                // 零新增传递面）；与 degraded 并存不 overload（引擎缺席的
                 // None 分支整体省略 health，同 stats=null 省略语义）。
-                "health": history_health(dropped, sent, errors),
+                "health": history_health(
+                    dropped,
+                    sent,
+                    errors,
+                    st.config.history.health_degrading_ratio,
+                    st.config.history.health_dropping_ratio,
+                ),
                 "memory_used_bytes": snap.memory_used_bytes,
                 "memory_budget_bytes": snap.memory_budget_bytes,
                 "series": snap.series,
@@ -355,41 +365,95 @@ port = 1883
         assert_eq!(v["jwt_secret"], "***");
     }
 
-    // ---- Task 17：history.health 三档判档（累计占比口径，纯函数） ----
+    // ---- Task 17：history.health 三档判档（累计占比口径，纯函数；
+    //     Task B/#4 起阈值参数化，既有断言以默认阈值为基线不变） ----
 
     /// 三档语义：ok（占比 ≤0.5% 且 errors==0）/ degrading（占比 >0.5% 或
     /// errors>0）/ dropping（占比 >5%）。占比 = dropped/(sent+dropped) 累计值
     /// ——无状态 handler 只有一次计数器快照，累计口径简单可解释。
     #[test]
     fn history_health_three_tiers() {
+        let d = crate::config::HistoryConfig::default();
+        let hh = |dropped, sent, errors| {
+            history_health(
+                dropped,
+                sent,
+                errors,
+                d.health_degrading_ratio,
+                d.health_dropping_ratio,
+            )
+        };
         // ok：0% 丢弃且无错误
-        assert_eq!(history_health(0, 1000, 0), "ok");
+        assert_eq!(hh(0, 1000, 0), "ok");
         // degrading：1%（10/1000）落在 (0.5%, 5%]
-        assert_eq!(history_health(10, 990, 0), "degrading");
+        assert_eq!(hh(10, 990, 0), "degrading");
         // dropping：10%（100/1000）> 5%
-        assert_eq!(history_health(100, 900, 0), "dropping");
+        assert_eq!(hh(100, 900, 0), "dropping");
         // errors>0 即至少 degrading（零丢弃也降档）
-        assert_eq!(history_health(0, 1000, 1), "degrading");
+        assert_eq!(hh(0, 1000, 1), "degrading");
         // errors 只触发 degrading 下限，不抬档到 dropping（档位由占比决定）
-        assert_eq!(history_health(0, 1000, 999), "degrading");
+        assert_eq!(hh(0, 1000, 999), "degrading");
         // 分母 0（未发送未丢弃）：占比 0 → ok；有 errors 仍 degrading
-        assert_eq!(history_health(0, 0, 0), "ok");
-        assert_eq!(history_health(0, 0, 7), "degrading");
+        assert_eq!(hh(0, 0, 0), "ok");
+        assert_eq!(hh(0, 0, 7), "degrading");
         // 全丢（sent=0）：占比 100% → dropping
-        assert_eq!(history_health(50, 0, 0), "dropping");
+        assert_eq!(hh(50, 0, 0), "dropping");
     }
 
     /// 阈值边界（严格 >）：恰 0.5% 不算 degrading、恰 5% 不算 dropping
     ///（5/1000 与 50/1000 的 f64 商与字面常量同为最近舍入双精度，判定确定）。
     #[test]
     fn history_health_boundaries_strict_gt() {
-        assert_eq!(history_health(5, 995, 0), "ok", "恰 0.5%：不 > 阈 → ok");
-        assert_eq!(history_health(6, 994, 0), "degrading", "0.6% > 0.5%");
+        let d = crate::config::HistoryConfig::default();
+        let hh = |dropped, sent, errors| {
+            history_health(
+                dropped,
+                sent,
+                errors,
+                d.health_degrading_ratio,
+                d.health_dropping_ratio,
+            )
+        };
+        assert_eq!(hh(5, 995, 0), "ok", "恰 0.5%：不 > 阈 → ok");
+        assert_eq!(hh(6, 994, 0), "degrading", "0.6% > 0.5%");
         assert_eq!(
-            history_health(50, 950, 0),
+            hh(50, 950, 0),
             "degrading",
             "恰 5%：不 > 阈 → 停在 degrading"
         );
-        assert_eq!(history_health(51, 949, 0), "dropping", "5.1% > 5%");
+        assert_eq!(hh(51, 949, 0), "dropping", "5.1% > 5%");
+    }
+
+    /// Task B/#4：自定义阈值判档——阈值从 HistoryConfig 传入（sysstatus
+    /// handler 同源接线 `st.config.history`）。degrading 收紧到 0.001 时
+    /// 0.5% 占比（默认阈下恰不越界为 ok）转 degrading；dropping 收紧到
+    /// 0.02 时 5% 占比直接 dropping。
+    #[test]
+    fn history_health_custom_thresholds() {
+        let d = crate::config::HistoryConfig::default();
+        // 默认阈：50/(50+9950)=0.5% 恰不 > 0.005 → ok（基线对照）
+        assert_eq!(
+            history_health(
+                50,
+                9_950,
+                0,
+                d.health_degrading_ratio,
+                d.health_dropping_ratio
+            ),
+            "ok",
+            "默认阈下恰 0.5% → ok"
+        );
+        // degrading=0.001：0.5% > 0.1% → degrading
+        assert_eq!(
+            history_health(50, 9_950, 0, 0.001, d.health_dropping_ratio),
+            "degrading",
+            "degrading=0.001 时 0.5% 占比转 degrading"
+        );
+        // dropping=0.02：5% 占比（50/1000）> 2% → dropping
+        assert_eq!(
+            history_health(50, 950, 0, d.health_degrading_ratio, 0.02),
+            "dropping",
+            "dropping=0.02 时 5% 占比直接 dropping"
+        );
     }
 }

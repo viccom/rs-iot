@@ -7,10 +7,11 @@
 //!
 //! - **判定**：5s 周期快照 `dropped`/`sent` 累计值，相邻差分得本窗口增量；
 //!   **双条件**（严格大于，均须满足）——速率 `delta_dropped > 10/s` 且窗口占比
-//!   `delta_dropped/(delta_dropped+delta_sent) > 1%`。单速率阈值在部署规模间
-//!   两头失准（小部署 50/100 pts/s 丢一半也够不着 100/s 门槛；100K 场景
-//!   0.1% 噪声反而触发）；单占比在小流量上分子噪声抖动（偶发 5/50=10%）。
-//!   双条件 = 绝对量下限 + 相对量显著性，两面兼顾。
+//!   `delta_dropped/(delta_dropped+delta_sent) > 1%`（默认值；Task B/#4 起
+//!   经 `[history].alarm_drop_rate_per_sec`/`alarm_drop_ratio` 可配）。
+//!   单速率阈值在部署规模间两头失准（小部署 50/100 pts/s 丢一半也够不着
+//!   100/s 门槛；100K 场景 0.1% 噪声反而触发）；单占比在小流量上分子噪声
+//!   抖动（偶发 5/50=10%）。双条件 = 绝对量下限 + 相对量显著性，两面兼顾。
 //! - **动作**：`tracing::warn!`（非 error——error 级属僵尸告警）+
 //!   [`crate::db::alarms::fire`]（level=warn，source 由宿主填，
 //!   对齐 lua fire_event 惯例）+ EventBus SSE Fire 帧。
@@ -31,8 +32,9 @@
 //!   selfMonitor 周期（那是用户可调的上报节拍 1-3600s，告警节拍是基础设施
 //!   关注点，解耦）。engine=None（feature off/init_failed）时 `dropped`
 //!   恒 0 判定无意义，spawn 点直接不启动（最小面）。
-//! - 周期与阈值先常量后配置（计划 Task 18 约定；Task B/#4 阈值配置化）；
-//!   lux 故障 fail-soft：去抖查询/fire 失败仅 warn 本拍跳过，下一拍重试。
+//! - 周期保持常量、阈值已配置化（Task B/#4：`[history].alarm_drop_*` /
+//!   `health_*_ratio`，serde default 与原常量零漂移）；lux 故障 fail-soft：
+//!   去抖查询/fire 失败仅 warn 本拍跳过，下一拍重试。
 
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -55,41 +57,70 @@ const ALARM_SOURCE: &str = "rsiot";
 /// 判定周期（秒）：对齐 selfMonitor 默认上报周期 5s——足够平滑单批脉冲、
 /// 检测延迟 ≤2 拍（10s），与平台侧图表粒度同拍。
 const PERIOD_SECS: u64 = 5;
-/// 速率下限（行/s，严格大于）：绝对量门槛——测试环境 10/s 级丢弃也该知道。
-const RATE_FLOOR_PER_SEC: u64 = 10;
-/// 窗口占比阈值（严格大于）：相对量门槛——介于 sysstatus 三态 degrading
-/// （>0.5%，T17）与 dropping（>5%）之间的"值得推人告知"线；累计口径归
-/// T17，本处用窗口口径（恢复后不因陈旧累计误判新活动）。
-const RATIO_THRESHOLD: f64 = 0.01;
 
-/// 双条件判定（纯函数，period_secs 供测试注入语义化速率门槛）：
-/// 速率 `delta_dropped > RATE_FLOOR_PER_SEC × period_secs`（整数域严格大于）
-/// **且**窗口占比 `delta_dropped / (delta_dropped + delta_sent) >
-/// RATIO_THRESHOLD`。
-fn exceeds(delta_dropped: u64, delta_sent: u64, period_secs: u64) -> bool {
+/// 双条件判定（纯函数，period_secs 供测试注入语义化速率门槛；阈值
+/// rate_per_sec/ratio 由调用方注入——运行时来自 `[history]`
+/// `alarm_drop_rate_per_sec`/`alarm_drop_ratio`，默认 10/s、1%）：
+/// 速率 `delta_dropped > rate_per_sec × period_secs`（严格大于）**且**
+/// 窗口占比 `delta_dropped / (delta_dropped + delta_sent) > ratio`。
+fn exceeds(
+    delta_dropped: u64,
+    delta_sent: u64,
+    period_secs: u64,
+    rate_per_sec: f64,
+    ratio: f64,
+) -> bool {
     if period_secs == 0 {
         return false;
     }
-    // 速率下限（整数域严格大于，无浮点边界歧义）。
-    if delta_dropped <= RATE_FLOOR_PER_SEC.saturating_mul(period_secs) {
+    // 速率下限（严格大于；f64 域——默认 10.0×5=50.0 精确，与原整数域
+    // 判定零漂移，自定义阈值才有非整粒度）。
+    if (delta_dropped as f64) <= rate_per_sec * (period_secs as f64) {
         return false;
     }
-    // 窗口占比（严格大于）：此处 delta_dropped ≥ 51 且 total ≥ delta_dropped，
-    // 分母恒非零。
+    // 窗口占比（严格大于）：此处已过速率门槛（delta_dropped > 0），分母
+    // 恒非零。
     let total = delta_dropped + delta_sent;
-    delta_dropped as f64 / total as f64 > RATIO_THRESHOLD
+    delta_dropped as f64 / total as f64 > ratio
 }
 
-/// 丢弃水位看护：持有上一拍累计快照，`tick` 差分判定。
+/// 丢弃水位看护：持有上一拍累计快照与判定阈值，`tick` 差分判定。
 ///
-/// 单实例由 spawn 任务独占（无并发面）；测试直接构造驱动多拍。
-#[derive(Debug, Default)]
+/// 单实例由 spawn 任务独占（无并发面）；测试直接构造驱动多拍（`new`
+/// 注入自定义阈值，[`Default`] 取 [`crate::config::HistoryConfig::default`]
+/// 同源默认——零漂移基线）。
+#[derive(Debug)]
 pub(crate) struct DropAlarmWatch {
     /// 上一拍 (dropped, sent) 累计快照；None = 首拍建基线不判定。
     prev: Option<(u64, u64)>,
+    /// 速率阈值（行/s，严格大于；Task B/#4 自 `[history]` 注入）。
+    rate_per_sec: f64,
+    /// 窗口占比阈值（严格大于；Task B/#4 自 `[history]` 注入）。
+    ratio: f64,
+}
+
+impl Default for DropAlarmWatch {
+    fn default() -> Self {
+        // 默认阈值与 HistoryConfig 同源（serde default 零漂移）
+        let h = crate::config::HistoryConfig::default();
+        Self {
+            prev: None,
+            rate_per_sec: h.alarm_drop_rate_per_sec,
+            ratio: h.alarm_drop_ratio,
+        }
+    }
 }
 
 impl DropAlarmWatch {
+    /// 自定义阈值构造（spawn 侧从 `cfg.history` 传参；测试注入收紧阈）。
+    pub(crate) fn new(rate_per_sec: f64, ratio: f64) -> Self {
+        Self {
+            prev: None,
+            rate_per_sec,
+            ratio,
+        }
+    }
+
     /// 一拍判定：快照差分 → 超阈且非活动期 → warn 日志 + lux fire + SSE。
     ///
     /// 首拍仅建基线（进程刚起无历史增量可判，也不对"存在累计值"本身告警
@@ -108,7 +139,13 @@ impl DropAlarmWatch {
         // 计数器进程内单调；saturating 防御性回卷（外部不可能，代价为零）。
         let delta_dropped = dropped.saturating_sub(prev_dropped);
         let delta_sent = sent.saturating_sub(prev_sent);
-        if !exceeds(delta_dropped, delta_sent, PERIOD_SECS) {
+        if !exceeds(
+            delta_dropped,
+            delta_sent,
+            PERIOD_SECS,
+            self.rate_per_sec,
+            self.ratio,
+        ) {
             return;
         }
         // 去抖：活动期判据 = lux 键存在性。键在（上次 fire 未被人工清除）
@@ -235,16 +272,20 @@ impl ClosedAlarmWatch {
 
 /// 常驻判定任务（lib.rs 引擎在场时启动；照 `log_cleanup::spawn_cleanup_task`
 /// 先例：child token 随进程退、interval Skip 漏拍不补偿——漏拍只影响该拍
-/// 增量并入下一拍窗口，判定语义不变）。
+/// 增量并入下一拍窗口，判定语义不变）。阈值自 `cfg.[history]`
+/// `alarm_drop_rate_per_sec`/`alarm_drop_ratio` 传入（Task B/#4 配置化）。
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn spawn_drop_alarm_task(
     stats: Arc<HistoryStats>,
     lux: EmbeddedClient,
     bus: EventBus,
     shutdown: CancellationToken,
+    rate_per_sec: f64,
+    ratio: f64,
 ) {
     let token = shutdown.child_token();
     tokio::spawn(async move {
-        let mut watch = DropAlarmWatch::default();
+        let mut watch = DropAlarmWatch::new(rate_per_sec, ratio);
         let closed = ClosedAlarmWatch;
         let mut interval = tokio::time::interval(Duration::from_secs(PERIOD_SECS));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -307,23 +348,35 @@ mod tests {
     /// 的最小组合（51 行/5s=10.2/s 且 51/5051≈1.01%）→ true；任一不过
     /// （速率边界恰 50=10×5 / 只过速率 60/10060≈0.6% / 只过占比 30/1000=3%
     /// 但 6/s / 占比恰 1% 边界 100/10000）→ false；零增量与零周期 → false。
+    /// Task B/#4：阈值参数化后以默认阈（HistoryConfig::default）为基线，
+    /// 断言语义零漂移（自定义阈见 exceeds_custom_thresholds）。
     #[test]
     fn exceeds_dual_condition_boundaries() {
+        let d = crate::config::HistoryConfig::default();
+        let ex = |dropped, sent, secs| {
+            exceeds(
+                dropped,
+                sent,
+                secs,
+                d.alarm_drop_rate_per_sec,
+                d.alarm_drop_ratio,
+            )
+        };
         // 双双越过
-        assert!(exceeds(600, 10_000, 5), "120/s 且 5.66% 应告警");
+        assert!(ex(600, 10_000, 5), "120/s 且 5.66% 应告警");
         // 刚过双门槛的最小组合（钉死两侧严格大于）
-        assert!(exceeds(51, 5_000, 5), "10.2/s 且 1.01% 应告警");
+        assert!(ex(51, 5_000, 5), "10.2/s 且 1.01% 应告警");
         // 速率边界：恰 50 = 10×5 严格大于不满足
-        assert!(!exceeds(50, 0, 5), "恰 10/s 不告警（严格大于）");
+        assert!(!ex(50, 0, 5), "恰 10/s 不告警（严格大于）");
         // 只过速率：占比 0.597% < 1%
-        assert!(!exceeds(60, 10_000, 5), "速率过而占比不过不告警");
+        assert!(!ex(60, 10_000, 5), "速率过而占比不过不告警");
         // 只过占比：30/1000=3% 但速率 6/s
-        assert!(!exceeds(30, 970, 5), "占比过而速率不过不告警");
+        assert!(!ex(30, 970, 5), "占比过而速率不过不告警");
         // 占比恰 1% 边界（100/10000）：严格大于不满足
-        assert!(!exceeds(100, 9_900, 5), "恰 1% 不告警（严格大于）");
+        assert!(!ex(100, 9_900, 5), "恰 1% 不告警（严格大于）");
         // 零增量 / 零周期
-        assert!(!exceeds(0, 0, 5));
-        assert!(!exceeds(600, 10_000, 0), "零周期不判定");
+        assert!(!ex(0, 0, 5));
+        assert!(!ex(600, 10_000, 0), "零周期不判定");
     }
 
     // ---- 2. 红测2：低于阈值 / 首拍基线 / 计数回卷防御 → 无告警 ----
@@ -363,6 +416,7 @@ mod tests {
         // → 增量饱和 0，不告警不 panic（夹具取高于现值的快照，钉 saturating 路径）
         let mut w2 = DropAlarmWatch {
             prev: Some((2_000_000, 300_000)),
+            ..DropAlarmWatch::default()
         };
         w2.tick(&stats, &c, &bus).await;
         assert!(alarms::list(&c).await.unwrap().is_empty());
@@ -566,5 +620,69 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    // ---- 6. 阈值配置化（Task B/#4：spawn 侧从 cfg.[history] 注入） ----
+
+    /// 自定义阈值判定（纯函数）：默认阈下恰 10/s（50 行/5s）不告警，
+    /// rate=5 时同增量越阈；恰 1% 占比默认不告警，ratio=0.005 时越阈。
+    #[test]
+    fn exceeds_custom_thresholds() {
+        let d = crate::config::HistoryConfig::default();
+        // 默认阈：50 行/5s 恰 10/s（严格大于不满足）→ false（基线对照）
+        assert!(!exceeds(
+            50,
+            0,
+            5,
+            d.alarm_drop_rate_per_sec,
+            d.alarm_drop_ratio
+        ));
+        // rate 收紧到 5/s：10/s > 5/s 且占比 100% > 1% → true
+        assert!(
+            exceeds(50, 0, 5, 5.0, d.alarm_drop_ratio),
+            "rate=5/s 时恰 10/s 应越阈"
+        );
+        // 默认阈：100/10000 恰 1%（严格大于不满足，20/s 已过速率）→ false
+        assert!(!exceeds(
+            100,
+            9_900,
+            5,
+            d.alarm_drop_rate_per_sec,
+            d.alarm_drop_ratio
+        ));
+        // ratio 收紧到 0.5%：1% > 0.5% 且 20/s > 10/s → true
+        assert!(
+            exceeds(100, 9_900, 5, d.alarm_drop_rate_per_sec, 0.005),
+            "ratio=0.005 时恰 1% 应越阈"
+        );
+    }
+
+    /// watch 构造注入自定义阈值：rate=5/s 时 50 行/5s（默认阈下不告警的
+    /// 同增量）经 lux fire 落库——spawn 侧从 cfg.[history] 传参同源。
+    #[tokio::test]
+    async fn drop_watch_fires_with_custom_rate_threshold() {
+        let c = test_client("custom-rate").await;
+        let (bus, _rx) = bus_with_sub();
+        let stats = HistoryStats::default();
+
+        // 默认阈：50 行/5s 恰 10/s 不告警（基线对照）
+        let mut w = DropAlarmWatch::default();
+        w.tick(&stats, &c, &bus).await;
+        bump(&stats, 50, 0);
+        w.tick(&stats, &c, &bus).await;
+        assert!(
+            alarms::list(&c).await.unwrap().is_empty(),
+            "默认阈下恰 10/s 不告警"
+        );
+
+        // 自定义 rate=5：同样增量越阈 fire
+        let mut w2 = DropAlarmWatch::new(5.0, 0.01);
+        w2.tick(&stats, &c, &bus).await;
+        bump(&stats, 50, 0);
+        w2.tick(&stats, &c, &bus).await;
+        let items = alarms::list(&c).await.unwrap();
+        assert_eq!(items.len(), 1, "自定义 rate=5/s 时 10/s 越阈应告警");
+        assert_eq!(items[0].key, ALARM_KEY);
+        assert_eq!(items[0].level, "warn");
     }
 }
