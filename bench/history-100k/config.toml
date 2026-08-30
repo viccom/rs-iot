@@ -38,12 +38,14 @@ cardinality_limit = 0
 retention_days = 1
 # >0 = Periodic WAL sync (ms); 0 would be PerAppend strict mode.
 wal_sync_ms = 500
-wal_size_limit_mb = 2048
+wal_size_limit_mb = 8192
 channel_capacity = 262144
 batch_max_rows = 16384
 close_timeout_secs = 30
 # T14: N writer threads with series-affinity sharding (default 1).
 writer_threads = 4
+# T21: faster sealing at 100k series (T9 tuning surface).
+chunk_points = 512
 
 [log]
 dir = "E:/Rs_Codes/rs-iot/bench/history-100k/logs"

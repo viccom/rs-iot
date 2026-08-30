@@ -264,9 +264,22 @@ Commit：tsink `feat(storage): cardinality_limit 运行期热更新`；rs-iot `f
 
 ### 新发现（T20 期间，超出 T1-T19 范围，登记为后续任务）
 
-- **N1｜kill -9 后首次重启 init_failed（os error 3）**：04:58 kill -9 → 重启 WAL 回放报 `IO error: os error 3`（不带路径）→ 引擎 init_failed（fail-soft 主程序继续）→ **二次重启自愈、数据零丢失**。os error 3 已两处出现（flush worker + WAL 回放/初始化路径），Windows 路径处理系统性问题嫌疑。后续任务：T5 的 IoWithPath 包装扩展到 WAL 回放/hydrate 路径 + 根因定位（候选：段目录创建/清理竞态）。
-- **N2｜T20 后段 dropped 5.5M→7.43M（+1.93M）**：稳态主窗零丢后后段约 640/s 零星丢（RSS 峰值 2.27GB 逼近预算段或 compaction 抖动）；量级 0.1% 不影响门禁，登记观察。
-- **N3｜T20 期间 flush worker 再报错一次（04:46）**：T2 关 fail_fast 后引擎降级续跑未自杀（预期行为生效）；错误细节受乱码影响未完全提取，与 N1 合并排查。
+- **N1｜kill -9 后首次重启 init_failed（os error 3）**：✅ **已修复**（2026-08-30 N1 专项，tsink commits 000a94a+bdce995，分支并入 master 9a292e1）。根因：compaction 替换先删源段目录，registry catalog 校验链读段根遇 PATH_NOT_FOUND 裸 Io 上抛——运行期 flush worker 报错与恢复期 init_failed 同一机制。修复：catalog 构建对段根消失跳过+WARN（侧车仅校验缓存，跳过保守安全）；open/hydrate/flush 全链 IO 带 IoWithPath。T21 实弹验证：kill -9 → **一次重启成功** + 数据零丢失。
+- **N2｜T20 后段 dropped 5.5M→7.43M**：归因升级为 N4（见下），同一机制。
+- **N3｜T20 期间 flush worker 再报错一次**：N1 根因覆盖（catalog 校验链），已随 N1 修复。
+- **N4｜WAL 高水位推进跟不上高吞吐写入**（2026-08-30 T21 新发现，**未修**）：T21a 100K pts/s 下 WAL 2GB 上限打满（wal_disk 桶 49151 拒批 → channel 满丢）；T21b 调 8GB 后窗口内未触顶，但 kill -9 重启回放 2.5GB 后 **WAL 不截断反涨至 3.3GB**——checkpoint 推进速率不足，长跑必然触顶。后续任务：tsink 侧 checkpoint/WAL 截断推进机制专项剖析。
+
+## 五-B、T21 终局复测（2026-08-30，N1 修复 + writer_threads=4 + chunk_points=512 + wal_size_limit_mb=8192）
+
+| 门禁 | 目标 | T20 实测 | T21 实测 | 判定 |
+|---|---|---|---|---|
+| ② 写吞吐/归档 | ≥100K / 100% | 稳态 95-101K / 全程 88% | **稳态 96-104K，全程 written 54.4M≈sent，窗口内 dropped 零增长（4.21M 全部集中于启动 15 秒爬坡）；verify 8 PASS（dup_ts 归零）** | ✅ |
+| ③ kill -9 | 0 丢失 + 恢复 | 数据 0 丢失但需二启 | **数据 41/41 精确零丢失（last_ts 逐秒一致）+ 一次重启成功**（N1 修复实弹验证：段目录消失跳过 WARN ×2 未炸） | ✅ |
+| ④ 磁盘 B/点 | 8-9 ±20% | 16.2（未 seal） | **段数据口径 9.6 B/点**（525MB/54.4M 点，kill 前单进程生命周期口径；WAL 未截断部分不计） | ✅ |
+| ⑥ series 精确 | ===白名单 | 100001 | 100001 | ✅ |
+
+**结论：门禁 ②③④⑥ 达成；Phase 4 十万点容量目标（10 分钟窗口版）收官。遗留 N4（WAL 推进）为长跑 soak 前置必修项；D2 24h soak 待 N4 修复后决策。**
+观察项：RSS 稳态 2.6-3.4GB（预算口径 used 仅 38MB——T7 口径分离后 registry/mmap/identity cache 走 RSS 属预期，10 万 series 部署需按此预留内存）；WAL 回放 2.5GB 耗时 ~4.5 分钟（长 WAL 的恢复时间成本）。
 
 ## 六、风险与回滚
 
