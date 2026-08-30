@@ -333,8 +333,13 @@ pub(crate) struct TelemetrySnapshot {
     pub(crate) memory_used_bytes: u64,
     /// 内存预算字节（D6 `memory_limit_mb` 换算）。
     pub(crate) memory_budget_bytes: u64,
-    /// series 数（`list_metrics().len()` 官方口径）。
+    /// series 数（tsink registry 原子口径，近似——与 list_metrics 物化口径
+    /// 可能有 rollup/未剪枝死 series 差异）。
     pub(crate) series: u64,
+    /// 内存五分量（Task 6：区分 admission 误拒时"预估虚高"vs"真用满"）。
+    pub(crate) memory_components: crate::history::MemoryComponents,
+    /// admission 缺口（Task 6：最近一次内存预算拒绝的预估与缺口）。
+    pub(crate) admission: crate::history::AdmissionMemoryGap,
 }
 
 /// 历史旁路计数器（七计数器 + H1/M11 拒收与跳过计数）+ Phase 3 治理七 family
@@ -432,7 +437,7 @@ pub(crate) fn render_history(
         ),
         (
             "rs_iot_history_series",
-            "历史引擎 series 数(list_metrics 官方口径)",
+            "历史引擎 series 数(registry 原子口径,近似)",
             t.series.to_string(),
         ),
         (
@@ -445,10 +450,65 @@ pub(crate) fn render_history(
             "历史引擎内存预算字节(D6 memory_limit)",
             t.memory_budget_bytes.to_string(),
         ),
+        // Task 6（2026-08-29 压测观测缺口）：内存五分量——两个总量指标无法
+        // 区分 admission 误拒时"预估虚高"与"真用满"；分量口径与 tsink
+        // MemoryObservabilitySnapshot 对齐（Task 7 预算口径调整后 used 与
+        // 分量的包含关系可能变化,分量读数本身稳定）。
+        (
+            "rs_iot_history_memory_registry_bytes",
+            "历史引擎 series registry 字典内存字节(tsink registry 分量)",
+            t.memory_components.registry_bytes.to_string(),
+        ),
+        (
+            "rs_iot_history_memory_metadata_bytes",
+            "历史引擎元数据缓存/簿记内存字节(tsink metadata_cache 分量:pending series+可见性摘要+watermarks)",
+            t.memory_components.metadata_cache_bytes.to_string(),
+        ),
+        (
+            "rs_iot_history_memory_persisted_index_bytes",
+            "历史引擎持久化索引常驻内存字节(chunk refs/时间戳索引/postings)",
+            t.memory_components.persisted_index_bytes.to_string(),
+        ),
+        (
+            "rs_iot_history_memory_persisted_mmap_bytes",
+            "历史引擎持久化段 mmap 映射字节(页缓存 RSS 口径,随归档增长)",
+            t.memory_components.persisted_mmap_bytes.to_string(),
+        ),
+        (
+            "rs_iot_history_memory_active_sealed_bytes",
+            "历史引擎 active head+sealed chunk 热数据字节",
+            t.memory_components.active_and_sealed_bytes.to_string(),
+        ),
+        // Task 6：admission 缺口——estimate 大而分量小=预估虚高,active+
+        // sealed/registry 逼近预算=真用满;从未拒绝时三读数为 0。
+        (
+            "rs_iot_history_admission_last_estimate_bytes",
+            "历史引擎最近一次内存预算拒绝的批预估增量字节(used+estimate=错误串 required)",
+            t.admission.last_estimate_bytes.to_string(),
+        ),
+        (
+            "rs_iot_history_admission_shortfall_bytes",
+            "历史引擎最近一次内存预算拒绝的缺口字节(required-budget)",
+            t.admission.last_shortfall_bytes.to_string(),
+        ),
     ] {
         family_header(&mut s, name, help, "gauge");
         metric_line(&mut s, name, "", &val);
     }
+
+    // admission 拒绝累计（Task 6）：counter 语义,持续增长即事故进行中。
+    family_header(
+        &mut s,
+        "rs_iot_history_admission_rejections_total",
+        "历史引擎内存预算 admission 拒绝累计次数",
+        "counter",
+    );
+    metric_line(
+        &mut s,
+        "rs_iot_history_admission_rejections_total",
+        "",
+        &t.admission.rejections_total.to_string(),
+    );
 
     // 死区评估计数与削减率（P2：分子分母同源同点计数；ratio 口径明写
     // suppressed/evaluated，R8——Phase 4 门禁"削减率 ≥50%"直接对表）。
@@ -716,23 +776,36 @@ mod tests {
     }
 
     #[test]
-    fn render_history_nineteen_families_with_values() {
+    fn render_history_family_count_and_values() {
         let out = render_history(
             &history_stats(),
             &TelemetrySnapshot {
                 memory_used_bytes: 111,
                 memory_budget_bytes: 268_435_456,
                 series: 7,
+                memory_components: crate::history::MemoryComponents {
+                    registry_bytes: 1_000,
+                    metadata_cache_bytes: 2_000,
+                    persisted_index_bytes: 3_000,
+                    persisted_mmap_bytes: 4_000,
+                    active_and_sealed_bytes: 5_000,
+                },
+                admission: crate::history::AdmissionMemoryGap {
+                    rejections_total: 2,
+                    last_estimate_bytes: 6_000,
+                    last_shortfall_bytes: 7_000,
+                },
             },
             1,
         );
-        // 恰好 19 个 family:8 既有+新增 counter(nonfinite_skipped/dup_ts_skipped/
+        // 恰好 27 个 family:8 既有+新增 counter(nonfinite_skipped/dup_ts_skipped/
         // stale_ts_dropped/ts_rejected/len_rejected)+ 7 治理(四水位 gauge + 死区评估 counter +
-        // 削减率 gauge + 写错误五桶 labeled counter)
+        // 削减率 gauge + 写错误五桶 labeled counter)+ 8 观测扩展(五内存分量 gauge +
+        // admission 拒绝 counter + 预估/缺口 gauge)
         assert_eq!(
             out.lines().filter(|l| l.starts_with("# TYPE ")).count(),
-            19,
-            "history 应输出 19 个 metric family"
+            27,
+            "history 应输出 27 个 metric family"
         );
         // 每个 family:HELP/TYPE 头 + 数值行
         for (name, val) in [
@@ -758,6 +831,86 @@ mod tests {
                 "{name} 缺 TYPE counter 头"
             );
             assert!(out.contains(&format!("{name} {val}")), "{name} 缺数值行");
+        }
+    }
+
+    /// 内存分量与 admission 缺口 family（Task 6，2026-08-29 压测观测缺口）：
+    /// 五分量 gauge + admission 拒绝 counter + 预估/缺口 gauge，数值逐一取自
+    /// telemetry 快照（防串位：五分量互异千位值）。
+    #[test]
+    fn render_history_memory_component_and_admission_families() {
+        let out = render_history(
+            &history_stats(),
+            &TelemetrySnapshot {
+                memory_used_bytes: 111,
+                memory_budget_bytes: 268_435_456,
+                series: 7,
+                memory_components: crate::history::MemoryComponents {
+                    registry_bytes: 1_000,
+                    metadata_cache_bytes: 2_000,
+                    persisted_index_bytes: 3_000,
+                    persisted_mmap_bytes: 4_000,
+                    active_and_sealed_bytes: 5_000,
+                },
+                admission: crate::history::AdmissionMemoryGap {
+                    rejections_total: 2,
+                    last_estimate_bytes: 6_000,
+                    last_shortfall_bytes: 7_000,
+                },
+            },
+            1,
+        );
+        for (name, ty, line) in [
+            (
+                "rs_iot_history_memory_registry_bytes",
+                "gauge",
+                "rs_iot_history_memory_registry_bytes 1000",
+            ),
+            (
+                "rs_iot_history_memory_metadata_bytes",
+                "gauge",
+                "rs_iot_history_memory_metadata_bytes 2000",
+            ),
+            (
+                "rs_iot_history_memory_persisted_index_bytes",
+                "gauge",
+                "rs_iot_history_memory_persisted_index_bytes 3000",
+            ),
+            (
+                "rs_iot_history_memory_persisted_mmap_bytes",
+                "gauge",
+                "rs_iot_history_memory_persisted_mmap_bytes 4000",
+            ),
+            (
+                "rs_iot_history_memory_active_sealed_bytes",
+                "gauge",
+                "rs_iot_history_memory_active_sealed_bytes 5000",
+            ),
+            (
+                "rs_iot_history_admission_rejections_total",
+                "counter",
+                "rs_iot_history_admission_rejections_total 2",
+            ),
+            (
+                "rs_iot_history_admission_last_estimate_bytes",
+                "gauge",
+                "rs_iot_history_admission_last_estimate_bytes 6000",
+            ),
+            (
+                "rs_iot_history_admission_shortfall_bytes",
+                "gauge",
+                "rs_iot_history_admission_shortfall_bytes 7000",
+            ),
+        ] {
+            assert!(
+                out.contains(&format!("# HELP {name} ")),
+                "{name} HELP 行缺失:\n{out}"
+            );
+            assert!(
+                out.contains(&format!("# TYPE {name} {ty}")),
+                "{name} TYPE 行缺失(期望 {ty}):\n{out}"
+            );
+            assert!(out.contains(line), "数值行缺失(期望 \"{line}\"):\n{out}");
         }
     }
 

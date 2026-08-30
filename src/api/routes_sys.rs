@@ -13,6 +13,45 @@ pub async fn sysinfo(State(st): State<AppState>) -> Json<serde_json::Value> {
     Json(serde_json::json!({"hwid": st.hwid, "version": st.version}))
 }
 
+// ---- history.health 三档判档（Task 17，P6 告警面前置） ----
+
+/// degrading 阈值：累计 dropped/(sent+dropped) 占比 > 0.5%（严格大于）。
+/// 常量先行便于后续配置化（挂 HistoryConfig）。
+const HISTORY_DEGRADING_RATIO: f64 = 0.005;
+/// dropping 阈值：累计占比 > 5%（严格大于）。
+const HISTORY_DROPPING_RATIO: f64 = 0.05;
+
+/// 历史链三档健康判定（纯函数，单测锁边界）。
+///
+/// 口径：**累计占比** dropped/(sent+dropped)——sysstatus 是无状态 handler，
+/// 手头只有一次计数器快照，占比口径简单可解释（自进程启动以来的丢弃面）；
+/// 速率口径需要快照两次求差，复杂度不匹配观测面。分母 0（未发送未丢弃）
+/// 占比取 0——无数据不算异常。
+///
+/// 档位：ok（占比 ≤0.5% 且 errors==0）/ degrading（占比 >0.5% **或**
+/// errors>0——写错误行存在即降档）/ dropping（占比 >5%，最高档优先）。
+/// `errors` 只触发 degrading 下限不抬档：档位语义锚"丢弃面大小"，错误
+/// 面另有 errors/errors_by_kind 字段呈现。
+///
+/// 与 `degraded`（closed_latched 引擎僵尸锁存位）**并存不 overload**：
+/// 置位路径 `record_error_rows` 必然同时计入 errors → health 自然至少
+/// degrading，无需特判；degraded 语义（引擎死亡）独立上行。
+fn history_health(dropped: u64, sent: u64, errors: u64) -> &'static str {
+    let denom = dropped + sent;
+    let ratio = if denom > 0 {
+        dropped as f64 / denom as f64
+    } else {
+        0.0
+    };
+    if ratio > HISTORY_DROPPING_RATIO {
+        "dropping"
+    } else if ratio > HISTORY_DEGRADING_RATIO || errors > 0 {
+        "degrading"
+    } else {
+        "ok"
+    }
+}
+
 pub async fn sysstatus(State(st): State<AppState>) -> Json<serde_json::Value> {
     let dbsize = match st.lux.execute_value("DBSIZE", &[]).await {
         Ok(EmbeddedValue::Int(n)) => n,
@@ -26,6 +65,9 @@ pub async fn sysstatus(State(st): State<AppState>) -> Json<serde_json::Value> {
     // deadband_evaluated/errors_by_kind 仅 ok 态输出——非 ok 整体省略
     // （省略语义而非 null，与 stats 的 null 语义区分）。ratio 口径与
     // /metrics 一致（P2：suppressed/evaluated，分母 0 时 0）。
+    // P4 运行态上行：`degraded` = writer 错误路径锁存的 closed_latched
+    // （Closed 桶首增——引擎僵尸/关停），与静态三态 `engine` 分离——旧字段
+    // 语义不动（前端兼容），新增字段纯增量。
     let history = match &st.history_stats {
         Some(h) => {
             let snap = history_telemetry_snapshot(&st).await;
@@ -48,10 +90,21 @@ pub async fn sysstatus(State(st): State<AppState>) -> Json<serde_json::Value> {
                     serde_json::json!(h.error_rows_of(kind)),
                 );
             }
+            // 三档判档入参与 stats 块同源同拍（一次快照，health 与 stats 口径一致）。
+            let dropped = h.dropped.load(std::sync::atomic::Ordering::Relaxed);
+            let sent = h.sent.load(std::sync::atomic::Ordering::Relaxed);
+            let errors = h.errors.load(std::sync::atomic::Ordering::Relaxed);
             serde_json::json!({
                 "feature": cfg!(feature = "history"),
                 "enabled": st.config.history.enabled,
                 "engine": st.history_engine_state.as_ref(),
+                // P4 僵尸上行：Closed 桶首增锁存（引擎僵尸/关停时 writer 置位，
+                // 一次为真永不复位）——静态三态仍报 "ok"，运行态异常由此可见。
+                "degraded": h.closed_latched.load(std::sync::atomic::Ordering::Relaxed),
+                // Task 17 三档：累计占比口径（dropped/(sent+dropped)，见
+                // history_health）；与 degraded 并存不 overload（引擎缺席的
+                // None 分支整体省略 health，同 stats=null 省略语义）。
+                "health": history_health(dropped, sent, errors),
                 "memory_used_bytes": snap.memory_used_bytes,
                 "memory_budget_bytes": snap.memory_budget_bytes,
                 "series": snap.series,
@@ -61,9 +114,9 @@ pub async fn sysstatus(State(st): State<AppState>) -> Json<serde_json::Value> {
                     "ratio": ratio,
                 },
                 "stats": {
-                    "sent": h.sent.load(std::sync::atomic::Ordering::Relaxed),
+                    "sent": sent,
                     "written": h.written.load(std::sync::atomic::Ordering::Relaxed),
-                    "dropped": h.dropped.load(std::sync::atomic::Ordering::Relaxed),
+                    "dropped": dropped,
                     "deadbanded": h.deadbanded.load(std::sync::atomic::Ordering::Relaxed),
                     "deadband_evaluated": evaluated,
                     "skipped": h.skipped.load(std::sync::atomic::Ordering::Relaxed),
@@ -83,7 +136,7 @@ pub async fn sysstatus(State(st): State<AppState>) -> Json<serde_json::Value> {
                     "len_rejected": h
                         .len_rejected
                         .load(std::sync::atomic::Ordering::Relaxed),
-                    "errors": h.errors.load(std::sync::atomic::Ordering::Relaxed),
+                    "errors": errors,
                     "errors_by_kind": serde_json::Value::Object(errors_by_kind),
                 },
             })
@@ -300,5 +353,43 @@ port = 1883
         let cfg = AppConfig::default(); // mqtt.username/password 默认 None
         let v = redact_config(&cfg);
         assert_eq!(v["jwt_secret"], "***");
+    }
+
+    // ---- Task 17：history.health 三档判档（累计占比口径，纯函数） ----
+
+    /// 三档语义：ok（占比 ≤0.5% 且 errors==0）/ degrading（占比 >0.5% 或
+    /// errors>0）/ dropping（占比 >5%）。占比 = dropped/(sent+dropped) 累计值
+    /// ——无状态 handler 只有一次计数器快照，累计口径简单可解释。
+    #[test]
+    fn history_health_three_tiers() {
+        // ok：0% 丢弃且无错误
+        assert_eq!(history_health(0, 1000, 0), "ok");
+        // degrading：1%（10/1000）落在 (0.5%, 5%]
+        assert_eq!(history_health(10, 990, 0), "degrading");
+        // dropping：10%（100/1000）> 5%
+        assert_eq!(history_health(100, 900, 0), "dropping");
+        // errors>0 即至少 degrading（零丢弃也降档）
+        assert_eq!(history_health(0, 1000, 1), "degrading");
+        // errors 只触发 degrading 下限，不抬档到 dropping（档位由占比决定）
+        assert_eq!(history_health(0, 1000, 999), "degrading");
+        // 分母 0（未发送未丢弃）：占比 0 → ok；有 errors 仍 degrading
+        assert_eq!(history_health(0, 0, 0), "ok");
+        assert_eq!(history_health(0, 0, 7), "degrading");
+        // 全丢（sent=0）：占比 100% → dropping
+        assert_eq!(history_health(50, 0, 0), "dropping");
+    }
+
+    /// 阈值边界（严格 >）：恰 0.5% 不算 degrading、恰 5% 不算 dropping
+    ///（5/1000 与 50/1000 的 f64 商与字面常量同为最近舍入双精度，判定确定）。
+    #[test]
+    fn history_health_boundaries_strict_gt() {
+        assert_eq!(history_health(5, 995, 0), "ok", "恰 0.5%：不 > 阈 → ok");
+        assert_eq!(history_health(6, 994, 0), "degrading", "0.6% > 0.5%");
+        assert_eq!(
+            history_health(50, 950, 0),
+            "degrading",
+            "恰 5%：不 > 阈 → 停在 degrading"
+        );
+        assert_eq!(history_health(51, 949, 0), "dropping", "5.1% > 5%");
     }
 }

@@ -47,7 +47,8 @@ fn preset_stats() -> Arc<HistoryStats> {
 }
 
 /// 固定读数的假 telemetry（used=111 / budget=256MiB / series=7——互异且
-/// budget 字面即 268435456，断言防串位）。
+/// budget 字面即 268435456，断言防串位；Task 6 扩：内存五分量与 admission
+/// 缺口固定读数，同样互异防串位）。
 struct FakeTelemetry;
 
 impl rs_iot::history::HistoryTelemetry for FakeTelemetry {
@@ -59,6 +60,22 @@ impl rs_iot::history::HistoryTelemetry for FakeTelemetry {
     }
     fn series_count(&self) -> u64 {
         7
+    }
+    fn memory_components(&self) -> rs_iot::history::MemoryComponents {
+        rs_iot::history::MemoryComponents {
+            registry_bytes: 1_000,
+            metadata_cache_bytes: 2_000,
+            persisted_index_bytes: 3_000,
+            persisted_mmap_bytes: 4_000,
+            active_and_sealed_bytes: 5_000,
+        }
+    }
+    fn admission_memory_gap(&self) -> rs_iot::history::AdmissionMemoryGap {
+        rs_iot::history::AdmissionMemoryGap {
+            rejections_total: 2,
+            last_estimate_bytes: 6_000,
+            last_shortfall_bytes: 7_000,
+        }
     }
 }
 
@@ -360,8 +377,8 @@ async fn metrics_history_governance_families() {
     assert_eq!(resp.status(), StatusCode::OK, "/metrics 免 JWT");
     let body = body_text(resp).await;
 
-    // 六个无 label family：HELP/TYPE 头 + 精确数值行
-    let gov_families: [(&str, &str, &str); 6] = [
+    // 十四个无 label family：HELP/TYPE 头 + 精确数值行
+    let gov_families: [(&str, &str, &str); 14] = [
         (
             "rs_iot_history_archived_tags",
             "gauge",
@@ -387,6 +404,48 @@ async fn metrics_history_governance_families() {
             "rs_iot_history_deadband_reduction_ratio",
             "gauge",
             "rs_iot_history_deadband_reduction_ratio 0.625",
+        ),
+        // Task 6 内存分量 gauge（FakeTelemetry 固定读数，互异千位值防串位）
+        (
+            "rs_iot_history_memory_registry_bytes",
+            "gauge",
+            "rs_iot_history_memory_registry_bytes 1000",
+        ),
+        (
+            "rs_iot_history_memory_metadata_bytes",
+            "gauge",
+            "rs_iot_history_memory_metadata_bytes 2000",
+        ),
+        (
+            "rs_iot_history_memory_persisted_index_bytes",
+            "gauge",
+            "rs_iot_history_memory_persisted_index_bytes 3000",
+        ),
+        (
+            "rs_iot_history_memory_persisted_mmap_bytes",
+            "gauge",
+            "rs_iot_history_memory_persisted_mmap_bytes 4000",
+        ),
+        (
+            "rs_iot_history_memory_active_sealed_bytes",
+            "gauge",
+            "rs_iot_history_memory_active_sealed_bytes 5000",
+        ),
+        // Task 6 admission 缺口（拒绝 counter + 预估/缺口 gauge）
+        (
+            "rs_iot_history_admission_rejections_total",
+            "counter",
+            "rs_iot_history_admission_rejections_total 2",
+        ),
+        (
+            "rs_iot_history_admission_last_estimate_bytes",
+            "gauge",
+            "rs_iot_history_admission_last_estimate_bytes 6000",
+        ),
+        (
+            "rs_iot_history_admission_shortfall_bytes",
+            "gauge",
+            "rs_iot_history_admission_shortfall_bytes 7000",
         ),
     ];
     for (name, ty, line) in gov_families {
@@ -455,6 +514,15 @@ async fn metrics_history_governance_omitted_when_not_ok() {
         "rs_iot_history_deadband_evaluated_total",
         "rs_iot_history_deadband_reduction_ratio",
         "rs_iot_history_write_errors_total",
+        // Task 6：内存分量与 admission 缺口 family 同缺席语义
+        "rs_iot_history_memory_registry_bytes",
+        "rs_iot_history_memory_metadata_bytes",
+        "rs_iot_history_memory_persisted_index_bytes",
+        "rs_iot_history_memory_persisted_mmap_bytes",
+        "rs_iot_history_memory_active_sealed_bytes",
+        "rs_iot_history_admission_rejections_total",
+        "rs_iot_history_admission_last_estimate_bytes",
+        "rs_iot_history_admission_shortfall_bytes",
     ];
     for name in new_families {
         assert!(
@@ -542,6 +610,152 @@ async fn sysstatus_history_governance_fields() {
             "other": 5,
         }),
         "五桶键集与值精确(整对象等值)"
+    );
+
+    common::stop_lux(handle).await;
+}
+
+/// /sysstatus 运行态上行（P4 僵尸告警）：history 块新增 `degraded` 字段反映
+/// writer 错误路径锁存的 `closed_latched`（Closed 桶首增——引擎僵尸/关停）。
+/// 同一 stats 对象先读（未锁存 degraded=false）、置位后再读（degraded=true），
+/// 锁死「静态三态 `engine` 与运行态 `degraded` 分离」：旧字段语义不动（前端
+/// 兼容，engine 仍报 ok），新增字段纯增量。
+#[tokio::test]
+async fn sysstatus_history_degraded_reflects_closed_latch() {
+    let stats = preset_stats();
+    let (app, handle, _client) = test_app(Some(stats.clone()), Arc::from("ok"), None).await;
+    let token = login_token(&app).await;
+
+    let get_hist = |app: axum::Router, token: String| async move {
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/v1/sysstatus")
+                    .header(header::AUTHORIZATION, &token)
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("call app");
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        json["history"].clone()
+    };
+
+    // 未锁存：degraded=false，engine 旧三态字段不动
+    let hist = get_hist(app.clone(), token.clone()).await;
+    assert_eq!(hist["degraded"], false, "未锁存 degraded 必须 false");
+    assert_eq!(hist["engine"], "ok", "旧字段语义不动");
+
+    // writer 错误路径置位锁存（模拟 Closed 桶首增）→ degraded=true 上行
+    stats.closed_latched.store(true, Ordering::SeqCst);
+    let hist = get_hist(app, token).await;
+    assert_eq!(
+        hist["degraded"], true,
+        "closed_latched 置位必须上行 degraded=true（引擎僵尸不再 sysstatus 报 ok 无异常）"
+    );
+    assert_eq!(hist["engine"], "ok", "engine 静态三态与运行态分离，不联动");
+
+    common::stop_lux(handle).await;
+}
+
+/// GET /sysstatus 一次并取 history 子树（health 三档/并存用例共用的读手）。
+async fn get_history_block(app: &axum::Router, token: &str) -> serde_json::Value {
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/v1/sysstatus")
+                .header(header::AUTHORIZATION, token)
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("call app");
+    assert_eq!(resp.status(), StatusCode::OK);
+    body_json(resp).await["history"].clone()
+}
+
+/// /sysstatus history.health 三档（Task 17，累计占比口径）：占比 =
+/// dropped/(sent+dropped)——ok（≤0.5% 且 errors==0）/ degrading（>0.5% 或
+/// errors>0）/ dropping（>5%）。同一 stats 对象逐步改计数复读锁档。
+#[tokio::test]
+async fn sysstatus_history_health_three_tiers() {
+    let stats = Arc::new(HistoryStats::default());
+    let (app, handle, _client) = test_app(Some(stats.clone()), Arc::from("ok"), None).await;
+    let token = login_token(&app).await;
+
+    // ok：sent=1000、dropped=0、errors=0
+    stats.sent.store(1000, Ordering::Relaxed);
+    let hist = get_history_block(&app, &token).await;
+    assert_eq!(hist["health"], "ok", "零丢弃零错误 → ok");
+
+    // degrading：dropped=10 → 10/1010 ≈ 0.99%（>0.5%，≤5%）
+    stats.dropped.store(10, Ordering::Relaxed);
+    let hist = get_history_block(&app, &token).await;
+    assert_eq!(
+        hist["health"], "degrading",
+        "占比 ~0.99% > 0.5% → degrading"
+    );
+
+    // dropping：dropped=100 → 100/1100 ≈ 9.09%（>5%）
+    stats.dropped.store(100, Ordering::Relaxed);
+    let hist = get_history_block(&app, &token).await;
+    assert_eq!(hist["health"], "dropping", "占比 ~9.09% > 5% → dropping");
+
+    // errors>0 且占比归零 → degrading（错误触发下限档）
+    stats.dropped.store(0, Ordering::Relaxed);
+    stats.errors.store(1, Ordering::Relaxed);
+    let hist = get_history_block(&app, &token).await;
+    assert_eq!(hist["health"], "degrading", "errors>0 零占比 → degrading");
+
+    common::stop_lux(handle).await;
+}
+
+/// degraded 与 health 并存（Task 17）：`degraded`（closed_latched 引擎僵尸
+/// 锁存位）与 `health`（占比判档）语义分离不 overload——closed_latched 的
+/// 置位路径（record_error_rows）必然同时计入 errors → health 自然至少
+/// degrading，无需在 health 内特判 degraded。
+#[tokio::test]
+async fn sysstatus_history_health_degraded_coexists() {
+    let stats = Arc::new(HistoryStats::default());
+    stats.sent.store(1000, Ordering::Relaxed);
+    stats.errors.store(3, Ordering::Relaxed);
+    let (app, handle, _client) = test_app(Some(stats.clone()), Arc::from("ok"), None).await;
+    let token = login_token(&app).await;
+
+    // 未锁存：degraded=false，health 按 errors 判 degrading
+    let hist = get_history_block(&app, &token).await;
+    assert_eq!(hist["degraded"], false);
+    assert_eq!(hist["health"], "degrading", "errors=3 → health=degrading");
+
+    // 锁存后：degraded=true 上行，health 判档不动（仍按占比/errors 独立计算）
+    stats.closed_latched.store(true, Ordering::SeqCst);
+    let hist = get_history_block(&app, &token).await;
+    assert_eq!(hist["degraded"], true, "僵尸锁存位照常上行");
+    assert_eq!(
+        hist["health"], "degrading",
+        "health 不被 degraded overload——保持占比/errors 口径独立判档"
+    );
+
+    common::stop_lux(handle).await;
+}
+
+/// engine 缺席（stats=None + engine="disabled"）：`health` 键整体省略
+///（对齐 stats=null 的省略语义——无引擎无判档依据，不出误导性 "ok"）。
+#[tokio::test]
+async fn sysstatus_history_health_absent_when_engine_missing() {
+    let (app, handle, _client) = test_app(None, Arc::from("disabled"), None).await;
+    let token = login_token(&app).await;
+
+    let hist = get_history_block(&app, &token).await;
+    assert_eq!(hist["engine"], "disabled");
+    assert!(
+        hist.get("health").is_none(),
+        "stats=None 时 health 键必须整体省略，实际: {}",
+        hist["health"]
     );
 
     common::stop_lux(handle).await;

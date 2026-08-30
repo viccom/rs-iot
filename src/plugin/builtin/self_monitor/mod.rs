@@ -49,6 +49,12 @@ pub(crate) struct SelfObservation {
     pub dbsize: i64,
     pub pipeline_processed: u64,
     pub hub_depth: u64,
+    /// 历史旁路丢弃行数（累计，T16）：HistoryStats.dropped，引擎缺席恒 0。
+    pub history_dropped: u64,
+    /// 历史写错误行数（累计，T16）：HistoryStats.errors，引擎缺席恒 0。
+    pub history_errors: u64,
+    /// 历史写入成功行数（累计，T16）：HistoryStats.written，引擎缺席恒 0。
+    pub history_written: u64,
     /// 可写标签当前值（None = 从未写过，不插键）。
     pub watchdog: Option<i64>,
     pub note: Option<String>,
@@ -97,6 +103,21 @@ pub(crate) fn sys_model() -> crate::model::types::DeviceModel {
             tag("dbsize", "int", "lux 键总数"),
             tag("pipeline_processed_count", "int", "pipeline 累计处理样本"),
             tag("hub_depth_last", "int", "hub 深度最近值"),
+            tag(
+                "history_dropped_total",
+                "int",
+                "历史旁路丢弃行数（累计，引擎缺席恒 0）",
+            ),
+            tag(
+                "history_errors_total",
+                "int",
+                "历史写错误行数（累计，引擎缺席恒 0）",
+            ),
+            tag(
+                "history_written_total",
+                "int",
+                "历史写入成功行数（累计，引擎缺席恒 0）",
+            ),
             tag("watchdog", "int", "看门狗计数（可选）"),
             tag("note", "string", "人工备注（可选）"),
         ],
@@ -162,6 +183,21 @@ pub(crate) fn collect(obs: &SelfObservation) -> BTreeMap<String, SampleValue> {
         Int(obs.pipeline_processed as i64),
     );
     m.insert("hub_depth_last".to_string(), Int(obs.hub_depth as i64));
+    // T16 历史三计数：命名对齐 /metrics 的 rs_iot_history_*_total family——
+    // 上层平台同一指标名跨出口对得上。累计 counter 语义，引擎缺席恒 0
+    //（同 empty_instance_stats_zero 的缺数据=0 口径，只读键集恒定）。
+    m.insert(
+        "history_dropped_total".to_string(),
+        Int(obs.history_dropped as i64),
+    );
+    m.insert(
+        "history_errors_total".to_string(),
+        Int(obs.history_errors as i64),
+    );
+    m.insert(
+        "history_written_total".to_string(),
+        Int(obs.history_written as i64),
+    );
     if let Some(w) = obs.watchdog {
         m.insert("watchdog".to_string(), Int(w));
     }
@@ -524,6 +560,25 @@ fn observe_light(
             .metrics
             .hub_depth_last
             .load(std::sync::atomic::Ordering::Relaxed),
+        // T16 历史三计数：ctx.history（pipeline fan_out 同一共享句柄）的
+        // HistoryStats 原子快照——与 sysstatus//metrics 同源，writer 增量即时
+        // 可见。引擎缺席（feature off/L2 disabled/init_failed fail-soft）时
+        // history=None → 恒 0（缺数据=0，同 dbsize 读失败口径）。
+        history_dropped: ctx
+            .history
+            .as_ref()
+            .map(|h| h.stats.dropped.load(std::sync::atomic::Ordering::Relaxed))
+            .unwrap_or(0),
+        history_errors: ctx
+            .history
+            .as_ref()
+            .map(|h| h.stats.errors.load(std::sync::atomic::Ordering::Relaxed))
+            .unwrap_or(0),
+        history_written: ctx
+            .history
+            .as_ref()
+            .map(|h| h.stats.written.load(std::sync::atomic::Ordering::Relaxed))
+            .unwrap_or(0),
         watchdog,
         note,
     }
@@ -648,6 +703,9 @@ mod tests {
             dbsize: 999,
             pipeline_processed: 8_675_309,
             hub_depth: 3,
+            history_dropped: 6_550_001,
+            history_errors: 42,
+            history_written: 7_512_345,
             watchdog: None,
             note: None,
         }
@@ -655,7 +713,7 @@ mod tests {
 
     #[test]
     fn readonly_tag_set_exact() {
-        // 只读标签清单执行态：键集精确等于 17 名（多/漏都失败，加标签先改这里）。
+        // 只读标签清单执行态：键集精确等于 20 名（多/漏都失败，加标签先改这里）。
         // BTreeMap keys 按字典序，期望 Vec 同序。
         let keys: Vec<_> = collect(&full_obs()).keys().cloned().collect();
         assert_eq!(
@@ -667,6 +725,9 @@ mod tests {
                 "dbsize",
                 "device_count",
                 "healthy",
+                "history_dropped_total",
+                "history_errors_total",
+                "history_written_total",
                 "hub_depth_last",
                 "id",
                 "inst_degraded",
@@ -684,11 +745,11 @@ mod tests {
 
     #[test]
     fn writable_none_omitted() {
-        // watchdog/note 从未写过（None）→ 不插键，总键数=只读 17
+        // watchdog/note 从未写过（None）→ 不插键，总键数=只读 20
         let m = collect(&full_obs());
         assert!(!m.contains_key("watchdog"));
         assert!(!m.contains_key("note"));
-        assert_eq!(m.len(), 17);
+        assert_eq!(m.len(), 20);
     }
 
     #[test]
@@ -703,7 +764,7 @@ mod tests {
             m.get("note"),
             Some(&SampleValue::Str("机房A-1号网关".to_string()))
         );
-        assert_eq!(m.len(), 19);
+        assert_eq!(m.len(), 22);
     }
 
     #[test]
@@ -733,6 +794,9 @@ mod tests {
             "dbsize",
             "pipeline_processed_count",
             "hub_depth_last",
+            "history_dropped_total",
+            "history_errors_total",
+            "history_written_total",
         ] {
             assert!(matches!(m[k], SampleValue::Int(_)), "{k} 应为 Int");
         }
@@ -748,6 +812,10 @@ mod tests {
         assert_eq!(m["dbsize"], SampleValue::Int(999));
         assert_eq!(m["pipeline_processed_count"], SampleValue::Int(8_675_309));
         assert_eq!(m["hub_depth_last"], SampleValue::Int(3));
+        // T16 历史三计数直传（互异值防串位）
+        assert_eq!(m["history_dropped_total"], SampleValue::Int(6_550_001));
+        assert_eq!(m["history_errors_total"], SampleValue::Int(42));
+        assert_eq!(m["history_written_total"], SampleValue::Int(7_512_345));
         assert_eq!(m["cpu_percent"], SampleValue::Float(12.5));
         assert_eq!(m["id"], SampleValue::Str("hw-001".to_string()));
     }
@@ -895,6 +963,66 @@ mod tests {
     fn platform_descriptor_nonempty() {
         // sysinfo 静态函数 + ARCH 恒非空；具体值随环境（此处只验封装非空）
         assert!(!platform().is_empty());
+    }
+
+    // ---- T16：历史三计数的数据源接线（ctx.history → HistoryStats → 观测） ----
+
+    /// 构造注入指定 `ctx.history` 的最小 HostContext（其余槽照运行时形态占位）。
+    fn host_ctx_with_history(
+        lux: lux::EmbeddedClient,
+        history: Option<crate::history::rows::HistoryHandle>,
+    ) -> HostContext {
+        HostContext {
+            lux,
+            hwid: crate::types::Hwid::new("hw-001"),
+            shutdown: CancellationToken::new(),
+            ctl_registry: crate::host::CtlRegistry::new(std::sync::Arc::new(
+                crate::process_metrics::ProcessMetrics::new(),
+            )),
+            bridge_registry: crate::host::BridgeRegistry::new(),
+            metrics: std::sync::Arc::new(crate::process_metrics::ProcessMetrics::new()),
+            trace_registry: crate::io_trace::TraceRegistry::new(),
+            event_tx: crate::event_bus::EventBus::dummy(),
+            history,
+        }
+    }
+
+    /// 假 HistoryStats 注入：observe_light 必须从 `ctx.history` 的共享计数器
+    /// 读 dropped/errors/written（Relaxed 快照）；引擎缺席（history=None）时
+    /// 三观测字段恒 0（计数器语义对齐 empty_instance_stats_zero：缺数据=0
+    /// 而非缺键——只读键集保持恒定 20）。
+    #[tokio::test]
+    async fn observe_light_reads_history_stats() {
+        let c = test_client("hist-stats").await;
+        let (tx, _rx) = tokio::sync::mpsc::channel(4);
+        let stats = std::sync::Arc::new(crate::history::rows::HistoryStats::default());
+        stats
+            .dropped
+            .store(6_550_001, std::sync::atomic::Ordering::Relaxed);
+        stats.errors.store(42, std::sync::atomic::Ordering::Relaxed);
+        stats
+            .written
+            .store(7_512_345, std::sync::atomic::Ordering::Relaxed);
+        let handle = crate::history::rows::HistoryHandle::new(vec![tx], stats);
+
+        let ctx = host_ctx_with_history(c.clone(), Some(handle));
+        let obs = observe_light(&ctx, &Aggregates::default(), None, None);
+        assert_eq!(
+            obs.history_dropped, 6_550_001,
+            "dropped 必须来自 ctx.history.stats"
+        );
+        assert_eq!(obs.history_errors, 42, "errors 必须来自 ctx.history.stats");
+        assert_eq!(
+            obs.history_written, 7_512_345,
+            "written 必须来自 ctx.history.stats"
+        );
+
+        let ctx = host_ctx_with_history(c, None);
+        let obs = observe_light(&ctx, &Aggregates::default(), None, None);
+        assert_eq!(
+            (obs.history_dropped, obs.history_errors, obs.history_written),
+            (0, 0, 0)
+        );
     }
 
     // ---- instance_health 口径（配置白名单）----
