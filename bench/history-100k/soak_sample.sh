@@ -1,12 +1,19 @@
 #!/usr/bin/env bash
-# Soak sampler (24h): every 60s disk sizes, every 15min metrics snapshot.
+# N5 retest sampler: every 60s disk sizes + L0/L1/L2 segment counts + WAL file
+# count + RSS; every 15min metrics snapshot.
 cd /e/Rs_Codes/rs-iot/bench/history-100k
+SEGS=data/history/lane_numeric/segments
 i=0
 while true; do
   ts=$(date +%s)
   wal=$(du -sk data/history/wal 2>/dev/null | cut -f1)
-  segs=$(du -sk data/history/lane_numeric 2>/dev/null | cut -f1)
-  echo "$ts wal=$wal segs=$segs" >> soak_samples.log
+  segkb=$(du -sk data/history/lane_numeric 2>/dev/null | cut -f1)
+  l0=$(find $SEGS/L0 -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l)
+  l1=$(find $SEGS/L1 -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l)
+  l2=$(find $SEGS/L2 -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l)
+  walfiles=$(find data/history/wal -name "*.log" 2>/dev/null | wc -l)
+  rss=$(powershell -NoProfile -Command "[Math]::Round((Get-Process rs-iot -ErrorAction SilentlyContinue).WS/1MB,0)" 2>/dev/null | tr -d '\r')
+  echo "$ts wal=$wal walfiles=$walfiles segs=$segkb L0=$l0 L1=$l1 L2=$l2 rssMB=$rss" >> soak_samples.log
   if [ $((i % 15)) -eq 0 ]; then
     {
       curl -s -m 60 http://127.0.0.1:8791/metrics \

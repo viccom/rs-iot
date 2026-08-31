@@ -299,6 +299,21 @@ soak 配置同 T21 终局（writer_threads=4 + chunk_points=512 + wal 8GB）。2
 
 **判定**：Phase 4 门禁 ⑦（24h soak）**未通过**；T21 十分钟窗口的全部结论不受影响（容量/正确性/恢复已独立验证）。soak 复跑前置 = N5a 修复。工件：soak_samples.log / soak_metrics.log / logs（现场冻结保留）。
 
+## 五-D、N5 修复与两轮复验（2026-08-31，**N5 三连锁消除获证；N5c 结案=环境 commit 耗尽；新发现 N6/mmap 并已修复**）
+
+**N5 修复**（tsink `n5-sealed-backlog` 分支 5 commit，1283 全绿）：`121d967` 轮转反饥饿 / `ca60c8b` 选窗只加载窗口段（5.8GB→10MB）/ `c7c4016` 锁临界区缩至 marker（persist 阻塞 5.03s→0.04s，死亡链切断，顺带修复三个既存交接竞态 120 连跑验证）/ `45e6d26` L0 分片（1M 点/段，durable 全分片后推进）/ `8bff576` 输出段预算解耦。执行决策记录 `docs/decisions/2026-08-31-n5-longrun-degradation-fixes.md`。
+
+**复验第 1 轮**（tmux 载体）：2h49m 时服务+采样器随 tmux server 崩溃双亡（日志止于正常 WAL 回收 INFO）；死前指标全绿。
+**复验第 2 轮**（独立进程载体）：**7h25m 全程三连锁消除获证**（L1 峰值 8 vs 事故 4640；memory_used 稳定 341-370MB vs 事故单调涨 1378MB；L2 稳步压实；errors=0）——后同样静默死亡。
+
+**N5c 结案（铁证）**：Windows System 事件 2004 三次记录 rs-iot commit 25.7/27.4/29.2GB——**段文件映射驻留随段数据单调涨 → 系统 commit limit 耗尽（WSL vmmem 竞争 12-14GB）→ Windows 终止最大 commit 进程**。三次死亡时刻与事件精确吻合。非代码缺陷，但暴露资源治理缺口。**真相修正**：Windows 上 tsink 段 "mmap" 实为堆驻留（`Box<[u8]>` 读入，绕开 Windows 映射锁目录）——commit 涨即全部活跃段字节堆驻留。
+
+**新发现并修复**：
+- **N6（L0 消费瓶颈）**：复验 2 全程 L0 单调涨 5→580（~130 段/h）——L0→L1 消费（8 段/5s 节拍）跟不上分片后产出；传导致 WAL 水位抬升（710MB 上探）。修复 `bfdc4b1`：一拍 drain 消化到水位 + 2s 时间预算让出 + 积压自适应 park（5s→1s）+ 每 lane 独立预算防饿死；理论消化 4800 段/h vs 产出 324 段/h（14× 余量），预期 L0 稳态 0-4 振荡。
+- **mmap 驻留治理（N5c 资源面根治）**：修复 `84ae44f`：`SegmentMapRegistry` 全局预算（默认 4GiB，builder 可配）+ LRU 淘汰 + 按需 remap（读路径透明）+ 替换/重建同临界区释放——commit/RSS 主分量有界。rs-iot HistoryConfig 接线留后续小任务。
+
+tsink 分支累计 7 commit（1294 全绿）。**第 3 轮复验启动前置就绪**（目标：L0 稳态个位数 + RSS/commit 有界平台 + 更长存活）。
+
 ## 六、风险与回滚
 
 - **T1 单公式改动**：理论风险是"防 head 无限膨胀的预算防线弱化"——由增量记账+提交后强制执行兜底（`ingest_pipeline.rs:95-106`）；若复测出现真 OOM，回滚公式或 chunk_points 调小双保险。
