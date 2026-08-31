@@ -314,6 +314,27 @@ soak 配置同 T21 终局（writer_threads=4 + chunk_points=512 + wal 8GB）。2
 
 tsink 分支累计 7 commit（1294 全绿）。**第 3 轮复验启动前置就绪**（目标：L0 稳态个位数 + RSS/commit 有界平台 + 更长存活）。
 
+## 五-E、第 3 轮复验结果（2026-09-01，6h07m 提前收口——N6/mmap 均部分生效未根治，第二轮治理立项）
+
+载体：独立 Hidden 进程（PowerShell Start-Process），T0=00:30:45，06:31 优雅停服（手动）。**提前收口原因**：① 每小时监控 cron 实际处于 paused 态（10:30 自动收口不会触发，放任则无限跑）；② 5h25m 已触发双预警（L0 破百单调 + RSS 破 15GB 线），结论已明，继续跑边际价值低且有再次 commit 耗尽风险。
+
+**四目标判定**：
+- **N6（L0 有界）✗ 部分生效未根治**：L0 全程单调 0→177（均值 ~29 段/h，晚窗 05:55 129 → 06:30 177 约 +48/h）；修复前 130 段/h 至 580@8h——速率降至约 1/4~1/2 但仍无界，外推 ~7h 破 200 判定线。根因：2s drain 预算内实际窗合并数不足（实测消化 ~270-300 段/h vs 产出 324 段/h）。
+- **mmap 驻留治理（RSS 有界）✗ 部分生效未根治**：RSS 单调涨至峰值 16,435MB（6.1h；~5.4h 破 15GB 告警线）；RSS/段数据比值 3.5→1.7 持续降（payload 预算工作），但 persisted index 常驻结构（chunk refs/时间戳索引/postings，每段一份；L2=1330，+218 段/h）不在治理范围，叠加后仍无界。
+- **WAL 锯齿回归 ✓**：峰值 990MB 锯齿有界（<8192MB 上限的 12%；复验 2 上探 710MB，形态均为锯齿非触顶）。
+- **进程存活 ✓（6h 窗口）**：16.4GB RSS 下无 System 2004；但 6h 手动停未覆盖复验 2 的 7h25m 死亡窗口，存活结论部分成立。
+
+**正确性全绿**：errors=0 全程、series=100001、L1 峰值 ≤8（N5 修复保持）、memory_used 290→539MB 稳定、守恒闭合（生产 100K/s = sent 68.1K/s + dropped 31.9K/s，channel 满丢为既定背压行为，同 T21b）。
+
+**新登记 N7（优雅关停在大积压规模下退化）**：CTRL_BREAK 停服时 `[history] close 超时(30s)放弃,WAL 回放兜底(部分 writer 线程脱落)`——数据安全（WAL 有界 990MB）但下次启动需回放而变慢；T21b 短窗关停仅 80ms，规模放大后 close_timeout_secs=30 不足。
+
+**第二轮治理立项（tsink `n5-sealed-backlog` 分支续作，接 §五-D 7 commit 之后）**：
+- **R2-1 L0 再提速**：drain 预算/选窗合并数提升（窗口 16/32 或预算加长），稳态消化需 >324 段/h 且有余量（当前实际仅 ~270-300）；
+- **R2-2 persisted index 驻留有界化**：chunk refs/时间戳索引/postings 每段一份的常驻内存纳入 SegmentMapRegistry 同款预算治理或惰性化；
+- **R2-3 N7 收尾（小项）**：close_timeout 调大或 drain-then-close 改进。
+
+工件：`soak_r3_samples.log` / `soak_r3_metrics.log`（归档改名）/ `r3_metrics_final.txt`（停服前 /metrics 快照）/ `logs/rs-iot.log.2026-08-31`（UTC 命名，含关停尾证）。
+
 ## 六、风险与回滚
 
 - **T1 单公式改动**：理论风险是"防 head 无限膨胀的预算防线弱化"——由增量记账+提交后强制执行兜底（`ingest_pipeline.rs:95-106`）；若复测出现真 OOM，回滚公式或 chunk_points 调小双保险。
