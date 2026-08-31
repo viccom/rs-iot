@@ -41,7 +41,9 @@ wal_sync_ms = 500
 wal_size_limit_mb = 8192
 channel_capacity = 262144
 batch_max_rows = 16384
-close_timeout_secs = 30
+# N7 (round-3): 30s insufficient at multi-hour backlog scale - close degrades
+# to WAL-replay fallback (safe but slower next-boot recovery). 120s per ops doc.
+close_timeout_secs = 120
 # T14: N writer threads with series-affinity sharding (default 1).
 writer_threads = 4
 # T21: faster sealing at 100k series (T9 tuning surface).

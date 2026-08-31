@@ -16,7 +16,7 @@ wal_sync_ms = 500               # Periodic 档：kill -9 最多丢 500ms 内未 
 wal_size_limit_mb = 8192        # ≥2× 稳态 WAL 水位（N4 修复后 WAL 有界锯齿，见 §五）
 channel_capacity = 262144       # 4 writer 下每分片 65536
 batch_max_rows = 16384
-close_timeout_secs = 30
+close_timeout_secs = 120         # 大积压规模长跑建议 ≥120（见 §五"优雅关停"）；短窗/小部署 30 够
 writer_threads = 4              # T14：series 亲和分片；默认 1，10 万点建议 4
 chunk_points = 512              # T9/T21：加速 seal，降低 active 内存与预估
 partition_secs = 0              # 默认 1h，一般无需调
@@ -57,7 +57,7 @@ partition_secs = 0              # 默认 1h，一般无需调
 
 - **冷启动爬坡**：启动后 ~15 秒内 writer 排空未满速，此间有少量 dropped（T21b 实测 4.2M，全程占比 ~7%）；属冷启动特征，稳态零丢。接受不了再立项优化（identity cache 预热）。
 - **kill -9 恢复**：N1/N4 修复后**一次重启成功**，恢复时间 ≈ WAL 稳态水位回放（实测 ~25 秒 @百MB 级 WAL）；数据零丢失（Periodic 500ms 档最多丢强杀前 500ms 尾部）。
-- **优雅关停**：close 排空默认 30s 看门狗超时（可配）；健康引擎实测 80ms 完成排空。
+- **优雅关停**：close 排空有看门狗超时（`close_timeout_secs`，默认 30s）。短窗健康引擎实测 80ms 完成；但**大积压规模长跑会超时退化**——第 3 轮复验（N7，6h @100K pts/s）30s 超时后放弃等待、部分 writer 线程脱落，退 WAL 回放兜底（数据安全，代价是下次启动多回放 ~1GB WAL、恢复变慢）。**长跑/大积压部署建议 `close_timeout_secs ≥ 120`**；tsink 侧 drain-then-close 改进登记为后续小项。
 - **已知边界**（低风险登记）：blob lane 启用但永无 blob 数据的部署，重启仍全量回放（tsink floor=0 保守口径）；`/metrics` 在 10 万 series 下 0.3s（T4 O(1) 化后正常）。
 - **部署顺序**：建模（devmodel/devreg/inst）与启动顺序已无约束（T19 热校准兜底）；历史数据目录需独占（.tsink.lock 进程锁）。
 
