@@ -370,6 +370,19 @@ tsink 分支累计 7 commit（1294 全绿）。**第 3 轮复验启动前置就�
 
 工件：`r5_t0.txt` / `r5_metrics_final.txt` / `soak_r5_samples.log` / `soak_r5_metrics.log`。
 
+## 五-H、24h soak 第 3 次失败 + N8 登记（2026-09-01 深夜，**flush worker×compaction 替换竞态——代码 bug，第四轮阻塞项**）
+
+soak24（合并态 `6a76597`，T0=21:21:58，109K/s 零丢起跑）在 **T+1.5h 死亡螺旋**：
+- **N8 主证据**：`ERROR Background worker execution failed worker="flush" IoWithPath NotFound …/L0/seg-…（系统找不到指定的路径）`——flush 管线访问的 L0 段目录**已被 compaction 替换删除**（两者对账竞态），自 14:52Z 起每数分钟一发；
+- **连锁**：flush worker 反复失败 → sealed 无法持久化 → memory_used 顶满 2GB 预算 → `insert_rows 失败: Memory budget exceeded`（fail-soft 整批丢，errors_total 0→86.5K，**历史首次非零**）→ written 塌至 2.7K/s、dropped 77K/s；WAL 回收停滞 → **7.46GB/115 文件**逼近 8192 上限；L0=78、RSS 9.6-10GB；
+- **可复现性**：r5 末窗口（T+127m written 7.3K/s）当时误归因关停瞬态，实为同一 bug 起始——**T+1.5h 复现锚点**；
+- **恢复放大器**：同数据目录重启 → 7.4GB WAL 回放致 REST **8 分钟+未就绪**（WS 11.2GB 持续涨=在回放，bootstrap 期 compaction 重试段 id WARN）——T20 恢复基线"百 MB WAL 25s 就绪"线性外推本次 ~30min；**故障点 WAL 越大恢复越久，N8 与恢复时长互为放大**；
+- **门禁 ⑦ 第 3 次失败**——本次是代码 bug 而非调参；前三轮的结构性成果（L0 有界/RSS 治理/吞吐恢复）在 T+1.5h 前全部成立。
+
+**N8 立项（第四轮阻塞项，优先级高于 P3 水位粗判/方案C）**：定位 flush 管线（catalog refresh/verify/known-diff 对账）与 compaction 替换的竞态窗口（候选暴露源：T1 8M 段使替换事件更重 / T2 窗口 16 / 或首次到达该段规模 L2≈134）；修复合并后重跑 soak。**风险登记**：tsink master `6a76597` 含 N8（未发布、无现场部署，修复后补推）。
+
+工件：`soak24_t0.txt` / `soak24_metrics_n8.txt`（故障瞬间快照）/ `soak24_samples.log` / `soak24_metrics.log` / `logs/rs-iot.log.2026-09-01`（含 7 条 NotFound ERROR + budget exceeded WARN 链）/ `data/history` 现场保留供诊断。
+
 ## 六、风险与回滚
 
 - **T1 单公式改动**：理论风险是"防 head 无限膨胀的预算防线弱化"——由增量记账+提交后强制执行兜底（`ingest_pipeline.rs:95-106`）；若复测出现真 OOM，回滚公式或 chunk_points 调小双保险。
