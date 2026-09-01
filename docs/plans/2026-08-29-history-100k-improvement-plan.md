@@ -352,6 +352,24 @@ tsink 分支累计 7 commit（1294 全绿）。**第 3 轮复验启动前置就�
 
 工件：`r4b_t0.txt` / `r4b_metrics_final.txt` / `soak_r4b_samples.log` / `soak_r4b_metrics.log`（归档改名）。
 
+## 五-G、第三轮治理复验（2026-09-01 晚，**chunk 直通——吞吐恢复获证 80.3K（前 36 分钟 100K/零丢），N7/RSS 界定留 24h soak**）
+
+**实施**（tsink 分支续 2 commit，门禁 1309/0）：`05377a8` 直通快速路径（`try_pass_through_series_chunks`：非重叠 chunk 免解码物化/堆合并/重编码原样发射；五回退——时间重叠（谓词逐字对齐 analysis.rs:62）/tombstone/retention/超 cap/空载荷；clone 钩实证 emit 零 clone）+ `a5f613d` 直通统计进 CompactionRunStats/observability。
+
+**第 5 轮 bench（2h05m 满窗）判据**：
+- **吞吐 ✓✓**：均值 **80.3K/s**（written 610.7M/2h）；**前 36 分钟 99-101K/s + dropped=0**（摄入侧满速直写，直通把 compaction 锁持有成本打到不可见）；36min 后间歇停摆窗（一半窗口 100K/0 丢、一半 40-75K 带 25-50K 丢），累积丢占比 19.8%；对比 r4b 45.1K / r3 67.8K；
+- **L0 有界 ✓**：全程振荡 0-29（前 2/3 ≤7，尾段 14-26 缓抬），无 r3 式单调失控；
+- **RSS 界定未决**：峰 9540MB @2h 末仍在缓爬（+37MB/min 尾段斜率；吞吐翻倍带动全链水位，r4b 平台 5.9GB 是 45K 吞吐下的）——**24h soak 判**；
+- **WAL 边际**：峰 1.14GB（判据线 1GB 超出 14%，上限 8192 的 14%，无 wal_disk 拒批）；
+- **N7 ✗**：close 仍打满 120s 退 WAL 回放（数据安全，恢复变慢）；
+- 正确性：errors=0、series=100001、守恒闭合（sent+dropped=100.5K/s）。
+
+**残差机制判定**：间歇停摆窗与 L0 尾段缓抬同源——维护拍全量扫（sealed 淘汰/budget_enforcement 遍历全 series×chunk_refs，随累积状态线性变长，即旧账 P3 前置）+ L1→L2 8M×4 段 IO pass（直通后纯 IO 但每 pass 仍写 ~250MB）。**第四轮候选**（按预期收益排序）：P3 水位粗判消全量扫 / 方案 C 两头免 zstd / close 排空改进（N7 正解）/ rs-iot HistoryConfig 接新旋钮。
+
+**Task 5 触发条件达成**（用户裁决 A 的口径="吞吐恢复后合并+24h soak"）：合并推送 tsink 16 commit → 24h soak（门禁 ⑦ 最终判定，兼判 RSS 界定与 N7 长时行为）。
+
+工件：`r5_t0.txt` / `r5_metrics_final.txt` / `soak_r5_samples.log` / `soak_r5_metrics.log`。
+
 ## 六、风险与回滚
 
 - **T1 单公式改动**：理论风险是"防 head 无限膨胀的预算防线弱化"——由增量记账+提交后强制执行兜底（`ingest_pipeline.rs:95-106`）；若复测出现真 OOM，回滚公式或 chunk_points 调小双保险。
