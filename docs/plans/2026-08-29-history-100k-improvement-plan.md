@@ -335,6 +335,23 @@ tsink 分支累计 7 commit（1294 全绿）。**第 3 轮复验启动前置就�
 
 工件：`soak_r3_samples.log` / `soak_r3_metrics.log`（归档改名）/ `r3_metrics_final.txt`（停服前 /metrics 快照）/ `logs/rs-iot.log.2026-08-31`（UTC 命名，含关停尾证）。
 
+## 五-F、第二轮治理复验（2026-09-01，**r4a 塌方→二分回退 T3→r4b：结构性目标强通过，吞吐残差 30% 留给第三轮**）
+
+**r4a（全栈 T1-T6 首跑）**：T+75s 健康 55K/s → T+2~16min insert 塌方至瞬时 **848/s**（dropped 99.5K/s，channel 满=tsink insert 停摆）；带数据重启 25-30K/s 无健康期（T+2min 谷 2.2K）；CPU 1.44 核单热线程；close 120s 排不掉。证据 `r4_collapse_metrics.txt`。
+
+**二分定位（4 轮构建×同协议，T+4min written）**：T1 单独 51.7K↑健康 / T1+T2 43.7K→稳定 / T1+T2+**T3 20.0K↓塌方** / T1..T5 24.7K↓ / 全栈 848/s。**罪魁=T3（drain 预算 2s→10s+park 1s→250ms）**：compaction_lock 近连续持有（每 10-20s 只放 250ms）→ persisted-refresh/maintenance 门饿死 → flush/编目连坐 writer。T6（时间戳索引 LRU）无罪，T1 主收益完好。回退 `62ade1c`（预算/park 恢复 r3 节拍，注释记录实证）。
+
+**r4b（全栈+62ade1c，2h05m 满窗）四判据**：
+- **L0 有界 ✓✓**：全程 max=15 振荡（r3 同窗单调爬至 164+）；L2=60@2h vs r3 同刻 503（**8.4× 段数收敛**，"8进8出"根治实证）；
+- **RSS 有界 ✓**：~T+45m 起平台化 4.8-5.9GB（max 5911MB），r3 同刻 9514MB 且单调（6h 将至 16.4GB）——**mmap+index 治理达成有界平台**；
+- **WAL ✓**：max 366MB 锯齿；
+- **吞吐 ✗**：均值 **45.1K/s**（窗口间 24-63K 振荡），r3 同窗 62-83K——**30% 回归**；dropped 占比 55% vs r3 31%；
+- **N7 ✗**：close 仍打满 120s（writer 间歇卡 insert 未消）。
+
+**残差机制（第三轮立项依据）**：T1 治了 L0→L1 的"8进8出"，但把跑步机推到 L1→L2——L1 段 8M 点×count trigger 4 = **32M 点/次的单体 pass**（无段数收敛的纯重写），叠加 T2 的 16M 点 L0 pass：pass 数少了但**单次锁持有时长 4-8×**，writer 饿死占空比 = 吞吐差。r3 每点数据同样流经两级重写（3× 写放大相同），差在 pass 单体度。结构性正解 = 登记项"合并 chunk 直通"（非重叠 chunk 免解码重编码，pass 变 IO 拷贝）与/或 compaction 锁范围收缩。
+
+工件：`r4b_t0.txt` / `r4b_metrics_final.txt` / `soak_r4b_samples.log` / `soak_r4b_metrics.log`（归档改名）。
+
 ## 六、风险与回滚
 
 - **T1 单公式改动**：理论风险是"防 head 无限膨胀的预算防线弱化"——由增量记账+提交后强制执行兜底（`ingest_pipeline.rs:95-106`）；若复测出现真 OOM，回滚公式或 chunk_points 调小双保险。
