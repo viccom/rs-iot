@@ -79,7 +79,8 @@ match load_segment_index(root) {
 
 ## 登记后续（不因 N8 修复消项）
 
-P3 水位粗判消维护拍全量扫 / 方案 C 两头免 zstd / N7 close 排空改进 / rs-iot HistoryConfig 接 tsink 旋钮与 flush 计数 / 大 WAL 回放提速（恢复时长∝WAL 体量）。
+- **N9（2026-09-02 4a 实测新登记）**：回放"已打满 8GB WAL"时 commit 非线性冲 38.27GB 致系统虚拟内存耗尽死亡（System 事件 2004 实锤，启动 52s 内；对照：昨夜旧二进制回放 7.4GB WAL 峰值仅 ~13.7GB——非线性放大待查）。触发条件=N8 造成的 WAL 打满，N8 修复后正常运行不会进入该场景——列纵深防御项；故障数据目录现场保留供排查。
+- P3 水位粗判消维护拍全量扫 / 方案 C 两头免 zstd / N7 close 排空改进 / rs-iot HistoryConfig 接 tsink 旋钮与 flush 计数 / 大 WAL 回放提速（恢复时长∝WAL 体量，与 N9 同族）。
 
 ## 风险与回滚
 
