@@ -383,6 +383,19 @@ soak24（合并态 `6a76597`，T0=21:21:58，109K/s 零丢起跑）在 **T+1.5h 
 
 工件：`soak24_t0.txt` / `soak24_metrics_n8.txt`（故障瞬间快照）/ `soak24_samples.log` / `soak24_metrics.log` / `logs/rs-iot.log.2026-09-01`（含 7 条 NotFound ERROR + budget exceeded WARN 链）/ `data/history` 现场保留供诊断。
 
+## 五-I、第四轮：N8 修复与 r6 复验（2026-09-02，**竞态 11 次命中全被消化，修复获证；吞吐 91.7K 创全程新高；门禁⑦第 4 次 soak 解锁**）
+
+**修复**（tsink master 直补丁 2 commit，1312/0 全绿）：`66bb3a5` verify 容忍语义（NotFound 持 `segment_replacement_gate` 复查确认根消失→WARN+跳过该发布根+置脏对账，不 rollback 不失败；持久化责任已转移给替换输出；真损坏仍 rollback——变体 C 护栏）+ `7f16d59` 观测计数 `replaced_published_roots_total`。红测试复现生产同签名（os error 3）；根因链/暴露源/时序图全锚定（诊断报告内联于第四轮计划 §〇）。
+
+**r6 复验（2h05m，判据全过）**：
+- **N8 修复获证 ✓✓**：`ERROR-count: 0` 全程、errors_total=0 全程；**`replaced by compaction before verify` WARN 命中 11 次**——竞态在同等负载下发生 11 次全部被容忍语义消化（soak24 同负载 1 次即死亡螺旋）；
+- **吞吐 ✓**：均值 **91.7K/s**（written 660.3M/2h；r5 80.3K/r4b 45.1K/r3 67.8K——新高）；dropped 累计占比 21.8%（间歇停摆窗仍在，P3 旧账）；
+- **有界保持 ✓**：L0 max=39 振荡、WAL max 1.12GB 锯齿、RSS max 9.4GB（与 r5 同轨迹，界定仍留 soak）；
+- **N7 ✗（既有账）**：close 仍 120s 超时退 WAL 回放；
+- **4a 恢复验证衍生 N9**（登记）：回放满 8GB WAL 时 commit 非线性冲 38GB 致死（事件 2004；触发条件=N8 造成的 WAL 打满，修复后不进入该场景）。
+
+**结论**：N8 闭环；soak 第 4 次解锁（门禁 ⑦ 最终判定：RSS 界定 + 24h 存活 + 丢占比演化）。工件：`r6_t0.txt` / `r6_metrics_final.txt` / `soak_r6_samples.log` / `soak_r6_metrics.log`。
+
 ## 六、风险与回滚
 
 - **T1 单公式改动**：理论风险是"防 head 无限膨胀的预算防线弱化"——由增量记账+提交后强制执行兜底（`ingest_pipeline.rs:95-106`）；若复测出现真 OOM，回滚公式或 chunk_points 调小双保险。
