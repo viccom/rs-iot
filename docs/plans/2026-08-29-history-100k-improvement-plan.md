@@ -405,6 +405,19 @@ soak24（合并态 `6a76597`，T0=21:21:58，109K/s 零丢起跑）在 **T+1.5h 
 
 **第五轮立项（唯一主攻）**：P3 水位粗判——`write_memory.rs:229` 与 `budget_enforcement/context.rs` 的维护拍全 series×chunk_refs 遍历改为水位粗判，消长窗积压（L0 斜率 +45→190/h 的根因）。工件：`soak24b_t0.txt` / `soak24b_samples.log` / `soak24b_metrics.log` / 探针链存档（3h×7）。
 
+## 五-K、第五轮：P3 水位粗判实施与 r7 复验（2026-09-03/04，**部分生效——停摆窗大减但 L0 斜率仅降四成，S6 记账重算确认为残余主体**）
+
+**实施**（tsink master 三 commit，门禁 1314/0）：`2bf1687` Cut0 去重双份逐出实现（-110 行，行为等价）/ `e10de8a` Cut1 纯水位谓词（红测试实证旧内容比对在 compaction 边界改写后 sealed 永驻的泄漏方向；去 S1/S2 的 persisted_index 全程读锁）/ `50ba2a5` Cut2 水位推进 debug_assert 护栏（子代理发现 PersistedChunkRef.sequence 与内存分配域是两个独立单调域，护栏改域内等价——勘察级修正）。
+
+**r7 复验（6h05m）判据**：
+- **吞吐 ✓**：瞬时窗 97.3K（T+3h，零丢）/88.6K（T+6h）；均值 75.4K（1.65B 点）；dropped 累计 24.7%（r6 21.8%/soak24b 27.9%——但停摆窗深度大减：3h 探针窗 dropped=0）；
+- **errors ✓**：0 全程；
+- **L0 斜率 △ 未达判据**：44@3h（基线 43 持平）→ 129-144@6h（基线 178，降 28%）；3-6h 窗斜率 +28/h（基线 +45/h，降 ~40%）——**未达 ≤1/4 目标**；
+- RSS max 10.5GB / WAL max 1.72GB / L2=250@6h：与基线同界；
+- **判定：P3 部分生效**。残余 L0 斜率的主体指向 **S6 记账全量重算**（每次成功 persist 全量走 ~百万级 refs，随段数线性——计划已登记的同曲线第二贡献者）；次因候选 L1→L2 IO pass 几何。
+
+**第六轮立项（S6，先于 soak 第 5 次）**：`refresh_memory_usage` 增量化/采样化——避免明知 L0 会以 ~28/h 爬到 ~670 还烧 24h soak。工件：`r7_t0.txt` / `r7_metrics_final.txt` / `soak_r7_samples.log` / `soak_r7_metrics.log`。
+
 ## 六、风险与回滚
 
 - **T1 单公式改动**：理论风险是"防 head 无限膨胀的预算防线弱化"——由增量记账+提交后强制执行兜底（`ingest_pipeline.rs:95-106`）；若复测出现真 OOM，回滚公式或 chunk_points 调小双保险。
