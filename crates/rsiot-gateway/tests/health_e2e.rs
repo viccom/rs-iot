@@ -36,6 +36,7 @@ fn test_state(rsiot_base: String, serve_base: String) -> Arc<GwState> {
         jwt_secret: "test-secret".into(),
         serve_token: "tok".into(),
         reasonix: Default::default(),
+        hmi_dist: None,
     };
     Arc::new(GwState::from_config(&cfg).expect("state"))
 }

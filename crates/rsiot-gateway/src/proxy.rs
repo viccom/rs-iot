@@ -35,6 +35,9 @@ pub struct GwState {
     pub jwt_secret: Arc<String>,
     /// 供应商管理段（home_dir/warden；空 home_dir = 未启用，端点返 503）。
     pub reasonix: crate::config::ReasonixCfg,
+    /// agent-hmi 前端静态产物目录（可选）：Some 时 build_router 挂 `/hmi`
+    ///（文件系统 serve + SPA fallback，见 `static_assets::hmi_router`）。
+    pub hmi_dist: Option<std::path::PathBuf>,
 }
 
 impl GwState {
@@ -53,6 +56,7 @@ impl GwState {
             serve_token: Arc::new(cfg.serve_token.clone()),
             jwt_secret: Arc::new(cfg.jwt_secret.clone()),
             reasonix: cfg.reasonix.clone(),
+            hmi_dist: cfg.hmi_dist.clone(),
         })
     }
 }

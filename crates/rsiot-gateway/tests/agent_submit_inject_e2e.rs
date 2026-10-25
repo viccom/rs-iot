@@ -38,6 +38,7 @@ fn test_state(serve_base: String) -> Arc<GwState> {
         jwt_secret: "test-secret".into(),
         serve_token: "mock-serve-token".into(),
         reasonix: Default::default(),
+        hmi_dist: None,
     };
     Arc::new(GwState::from_config(&cfg).expect("build state"))
 }

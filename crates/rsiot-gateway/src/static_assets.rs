@@ -10,7 +10,9 @@ use axum::body::Body;
 use axum::http::header;
 use axum::http::{HeaderValue, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
+use axum::Router;
 use rust_embed::RustEmbed;
+use tower_http::services::ServeDir;
 
 /// 嵌入 frontend/dist 构建产物。
 ///
@@ -53,5 +55,42 @@ pub async fn serve(uri: Uri) -> Response {
                 .unwrap(),
             None => (StatusCode::NOT_FOUND, "frontend not built").into_response(),
         }
+    }
+}
+
+// ---------- /hmi agent-hmi 静态服务（可配 hmi_dist 时挂载，W2 集成） ----------
+
+/// `/hmi` 前缀静态服务：**运行时文件系统** serve（tower-http `ServeDir`）。
+///
+/// 与上方 rust-embed 主前端刻意不同：agent-hmi dist 与 gateway 二进制独立
+/// 部署演进（更新 HMI 不重编 gateway），故不嵌入。SPA 启发式与 `serve` 同款：
+/// 未命中且路径含点 = 静态资源缺失 404；不含点 = 回 index.html（history 路由
+/// 由 agent-hmi 前端接管）。未配置 hmi_dist 时 app.rs 不挂本服务。
+pub fn hmi_router(dist: std::path::PathBuf) -> Router {
+    let index_root = dist.clone();
+    // 用 .fallback 而非 .not_found_service：后者把回退包进 SetStatus(404)——
+    // SPA 路由会拿到 404 状态 + index.html 体（浏览器能渲染但 fetch/ok 判断、
+    // PWA 可安装性全坏）。主前端 `serve` 的 SPA 回退是 200，本服务对齐。
+    let dir = ServeDir::new(dist).fallback(Router::new().fallback(axum::routing::any(
+        move |uri: Uri| {
+            let root = index_root.clone();
+            async move { hmi_spa_fallback(root, uri).await }
+        },
+    )));
+    Router::new().fallback_service(dir)
+}
+
+/// SPA 回退（ServeDir 未命中时调用，uri 已被 nest 剥掉 `/hmi` 前缀）：
+/// 路径含点 → 404（防 HTML 被当 .js/.css 解析，同 `serve` 注释）；否则回 index.html。
+async fn hmi_spa_fallback(dist: std::path::PathBuf, uri: Uri) -> Response {
+    if uri.path().contains('.') {
+        return (StatusCode::NOT_FOUND, "not found").into_response();
+    }
+    match tokio::fs::read(dist.join("index.html")).await {
+        Ok(bytes) => Response::builder()
+            .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
+            .body(Body::from(bytes))
+            .unwrap(),
+        Err(_) => (StatusCode::NOT_FOUND, "hmi index.html not found").into_response(),
     }
 }

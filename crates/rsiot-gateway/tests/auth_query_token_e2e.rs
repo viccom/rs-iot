@@ -43,6 +43,7 @@ fn test_state() -> Arc<GwState> {
         jwt_secret: "test-secret".into(),
         serve_token: "unused".into(),
         reasonix: Default::default(),
+        hmi_dist: None,
     };
     Arc::new(GwState::from_config(&cfg).expect("build state"))
 }

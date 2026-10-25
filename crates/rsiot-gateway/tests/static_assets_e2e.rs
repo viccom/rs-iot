@@ -34,6 +34,7 @@ fn test_state() -> Arc<GwState> {
         jwt_secret: "s".into(),
         serve_token: "t".into(),
         reasonix: Default::default(),
+        hmi_dist: None,
     };
     Arc::new(GwState::from_config(&cfg).expect("state"))
 }
@@ -107,6 +108,7 @@ async fn api_route_not_shadowed_by_fallback() {
         jwt_secret: "s".into(),
         serve_token: "t".into(),
         reasonix: Default::default(),
+        hmi_dist: None,
     };
     let st = Arc::new(GwState::from_config(&cfg).expect("state"));
     let gw = spawn(build_router(st)).await;

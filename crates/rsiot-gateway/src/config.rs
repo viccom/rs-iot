@@ -9,9 +9,12 @@
 //! serve_base = "http://127.0.0.1:8787"
 //! jwt_secret = "<与 rs-iot 同值>"
 //! serve_token = "<reasonix serve --auth token>"
+//! # agent-hmi 前端静态产物目录（可选）：配置后 /hmi 前缀文件系统 serve 该目录
+//! # hmi_dist = "/opt/rs-iot/hmi-dist"
 //! ```
 
 use serde::Deserialize;
+use std::path::PathBuf;
 
 /// 供应商管理段（可选）：指向 reasonix 的 REASONIX_HOME 与 warden。
 /// 缺省（空 home_dir）时 /api/agent/providers* 返 503（现场未启用该能力）。
@@ -60,6 +63,13 @@ pub struct GwConfig {
     /// 供应商管理段（可选）。
     #[serde(default)]
     pub reasonix: ReasonixCfg,
+    /// agent-hmi 前端静态产物目录（可选，W2 集成）：配置后 `/hmi` 前缀以
+    /// tower-http ServeDir 从该目录**运行时文件系统** serve（非 rust-embed——
+    /// agent-hmi dist 与 gateway 二进制独立部署演进），未命中无扩展名路径回
+    /// index.html（SPA fallback，启发式同 `static_assets::serve`）。
+    /// 未配置则不挂 `/hmi`（落到既有静态 fallback）。
+    #[serde(default)]
+    pub hmi_dist: Option<PathBuf>,
 }
 
 impl GwConfig {
@@ -87,6 +97,23 @@ serve_token = "tok"
         assert_eq!(c.listen, "0.0.0.0:8080");
         assert_eq!(c.rsiot_base, "http://127.0.0.1:8790");
         assert_eq!(c.serve_token, "tok");
+        // hmi_dist 可选：缺省 None（不挂 /hmi）。
+        assert_eq!(c.hmi_dist, None);
+    }
+
+    /// hmi_dist 可选配置：给了路径就解析为 Some（/hmi 挂载开关）。
+    #[test]
+    fn parses_optional_hmi_dist() {
+        let s = r#"
+listen = "0.0.0.0:8080"
+rsiot_base = "http://127.0.0.1:8790"
+serve_base = "http://127.0.0.1:8787"
+jwt_secret = "secret"
+serve_token = "tok"
+hmi_dist = "/opt/rs-iot/hmi-dist"
+"#;
+        let c = GwConfig::parse(s).unwrap();
+        assert_eq!(c.hmi_dist, Some(PathBuf::from("/opt/rs-iot/hmi-dist")));
     }
 
     /// 缺失字段报错（不静默 Default——gateway 配置错不能隐式放行）。

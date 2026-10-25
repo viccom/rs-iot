@@ -97,6 +97,7 @@ async fn query_token_forwarded_as_authorization() {
         jwt_secret: "test-secret".into(),
         serve_token: "unused".into(),
         reasonix: Default::default(),
+        hmi_dist: None,
     };
     let gw = spawn_axum(build_router(Arc::new(
         GwState::from_config(&cfg).expect("state"),
@@ -146,6 +147,7 @@ async fn invalid_query_token_blocked_at_gateway() {
         jwt_secret: "test-secret".into(),
         serve_token: "unused".into(),
         reasonix: Default::default(),
+        hmi_dist: None,
     };
     let gw = spawn_axum(build_router(Arc::new(
         GwState::from_config(&cfg).expect("state"),

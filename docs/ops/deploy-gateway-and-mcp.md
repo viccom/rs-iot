@@ -31,6 +31,13 @@ serve_token = "<reasonix serve --auth token，见下节>"
 
 > **jwt_secret 必须与 rs-iot 同值**（层1 复用 JWT，gateway 颁的 token 直通 rs-iot，见选型报告 §四层1）。
 
+可选：`hmi_dist = "/opt/rs-iot/hmi-dist"`（agent-hmi Web HMI 前端静态产物目录，W2 集成）。
+配置后 gateway 在 `/hmi` 前缀**运行时文件系统** serve 该目录（tower-http ServeDir，非 rust-embed
+——agent-hmi dist 与 gateway 二进制独立部署演进，更新 HMI 不需重编 gateway）；未命中的无扩展名
+路径回 `index.html`（SPA fallback），带扩展名未命中 404。未配置则不挂 `/hmi`。`/hmi` 非
+`/api/` 前缀，免 JWT（同主前端，登录页要先加载）。agent-hmi 的画面/主题数据经
+`/api/rsiot/api/v1/screens|themes` 反代到 rs-iot（rest-api.md §4.19）。
+
 ### Windows Service
 
 ```powershell
