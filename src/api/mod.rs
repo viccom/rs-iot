@@ -25,6 +25,7 @@ pub mod routes_history;
 pub mod routes_inst;
 pub mod routes_logs;
 pub mod routes_lua;
+pub mod routes_meta;
 pub mod routes_metrics;
 pub mod routes_model;
 pub mod routes_rtdata;
@@ -218,6 +219,22 @@ pub fn build_router(state: AppState) -> axum::Router {
             get(routes_trace::list)
                 .post(routes_trace::start)
                 .delete(routes_trace::stop),
+        )
+        // agent-hmi 画面/主题文档存储（W2 集成：纯存储无 schema 校验，边界与
+        // 契约见 routes_meta.rs / rest-api.md §4.19；默认 JWT 保护）
+        .route("/api/v1/screens", get(routes_meta::screens_list))
+        .route(
+            "/api/v1/screens/{id}",
+            get(routes_meta::screens_get)
+                .put(routes_meta::screens_put)
+                .delete(routes_meta::screens_delete),
+        )
+        .route("/api/v1/themes", get(routes_meta::themes_list))
+        .route(
+            "/api/v1/themes/{id}",
+            get(routes_meta::themes_get)
+                .put(routes_meta::themes_put)
+                .delete(routes_meta::themes_delete),
         )
         // 实时数据查询
         .route("/api/v1/rtdatas", get(routes_rtdata::rtdatas))

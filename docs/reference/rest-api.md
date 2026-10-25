@@ -503,6 +503,34 @@ curl -s -H "Authorization: $TOKEN" \
 # → {"dev_id":"devA","tag":"temp","points":[{"ts":1756080000,"value":23.4},{"ts":1756080300,"value":23.6}...],"count":288}
 ```
 
+### 4.19 agent-hmi 画面/主题存储（`routes_meta.rs`，lux Hash `screen:{id}` / `theme:{id}`）
+
+两资源同构（screens/themes 各五端点），供 agent-hmi（Web HMI 编辑器）持久化画面文档与主题文档。
+
+| Method | Path | Body | 成功响应 |
+|---|---|---|---|
+| GET | `/api/v1/screens` | — | `{"screens":["a","b",...]}`（id 升序；lux `KEYS screen:*` 去前缀排序） |
+| GET | `/api/v1/screens/{id}` | — | `{"id":"a","doc":{...}}`；不存在 `404 {"error":"not found"}` |
+| PUT | `/api/v1/screens/{id}` | doc 全量 JSON | `{"status":"ok"}` |
+| DELETE | `/api/v1/screens/{id}` | — | `{"status":"ok"}`（幂等，不存在也 ok） |
+| GET/PUT/DELETE | `/api/v1/themes[/{id}]` | 同上 | `{"themes":[...]}` / `{"id","doc"}` / `{"status":"ok"}` |
+
+- **lux 键**：每 id 一个 Hash——key `screen:{id}`（或 `theme:{id}`），field `doc` → 完整 JSON 文本**原样存储**（不做规范化重序列化），GET 时 parse 后原样返回
+- **id 约束**：`^[a-z0-9][a-z0-9-]{0,63}$`，不匹配 `PUT` 返回 `400 {"error":"invalid id"}`
+- **大小钳制**：body ≤ 131072 字节，超出 `413 {"error":"payload too large"}`
+- **JSON 语法**：body 须为合法 JSON（`400 {"error":"invalid json"}`），仅存储完整性防御
+- **与 agent-hmi 的分工边界**：rs-iot **只做存储，不做 schema 内容校验**——画面/主题文档的合法性（组件引用、绑定、主题变量等）由 agent-hmi 侧 G1 门禁负责；服务端校验止于 id 词法 / 大小 / JSON 语法三层
+- agent-hmi 前端静态产物由 rsiot-gateway `/hmi` 前缀提供（可配 `hmi_dist`，文件系统 serve + SPA fallback，见 `docs/ops/deploy-gateway-and-mcp.md`），经 `/api/rsiot` 反代调用本组端点
+
+```bash
+# 存画面
+curl -s -XPUT -H "Authorization: $TOKEN" -H 'Content-Type: application/json' \
+  http://localhost:8790/api/v1/screens/overview -d '{"name":"总览","widgets":[]}'
+# → {"status":"ok"}
+curl -s -H "Authorization: $TOKEN" http://localhost:8790/api/v1/screens
+# → {"screens":["overview"]}
+```
+
 ## 5. 数据模型（`src/types.rs`）
 
 ```
