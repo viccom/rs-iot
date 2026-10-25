@@ -18,3 +18,6 @@ __pycache__/
 .zcode/
 field-kit-dist/
 field-kit-dist.zip
+# 内置 mqttPub 兼容脚本落盘（宿主首次启动写出的运行时产物，源在
+# src/plugin/builtin/lua_north/compat.rs 的 COMPAT_SCRIPT 内嵌常量，已存在不覆盖）
+/scripts/_builtin-north-compat/
