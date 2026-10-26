@@ -1,117 +1,143 @@
-//! 脚本热加载监听（spec §5.3）：notify-debouncer-mini 监听 `scripts/<name>/`，
-//! 去抖 200ms → 改动经 `reload_tx` 通知主循环（`Evt::Reload` → `reload_vm`）。
+//! 脚本热加载监听（spec §5.3）：notify 原生 watcher 监听 `scripts/<name>/`，
+//! **写类事件**（Modify/Create/Remove）去抖 200ms → `reload_tx` 通知主循环
+//! （`Evt::Reload` → `reload_vm`）。
+//!
+//! **为何不用 notify-debouncer-mini**（2026-10-26 热加载风暴实证）：mini 0.7 有意丢弃
+//! 事件类别（`DebouncedEventKind` 仅 Any/AnyContinuous），而 notify 8 的 inotify 订阅
+//! 掩码（0xfee）含 IN_OPEN——`load_main` 每次 reload 都要**读** main.lua，读取产生的
+//! OPEN/ACCESS 事件被当作改动回灌，形成「reload → 读脚本 → IN_OPEN → 再 reload」
+//! 自激风暴：实测 4.2 万次/日/实例 + 日志洪水，且 VM 级替换反复清空脚本全局状态
+//! （luaTransform 累加器 Frozen 在 base+单次增量）。本文件改用原生事件 +
+//! `is_write_event` 过滤 + select! 尾沿去抖，类别在源头被滤掉，风暴不可能成立。
 //!
 //! 另有全局 `_lib/` watcher（T10/Q15，[`spawn_global_lib_watcher`]）：站点共享库
 //! 变更影响**所有** luaClient 实例 → 进程级单例，Recursive 监听 `scripts/_lib/`，
 //! 去抖后全实例 reload（`reload::reload_all_lua_instances`）。
 //!
 //! watcher 为 tokio task，随实例 `CancellationToken` 终止（实例 stop → `token.cancel()`
-//! → task 退出 → `Debouncer` drop 停止监听），不泄漏；runtime shutdown 时 task 被 abort，
-//! 无需 `std::thread`。Windows notify 偶有事件丢失（spec §18 ReadDirectoryChangesW），
-//! 去抖 + M7 REST 手动 reload 兜底。
+//! → task 退出 → `RecommendedWatcher` drop 停止监听），不泄漏；runtime shutdown 时
+//! task 被 abort，无需 `std::thread`。Windows notify 偶有事件丢失（spec §18
+//! ReadDirectoryChangesW），去抖 + M7 REST 手动 reload 兜底。
 
 use std::path::PathBuf;
 use std::time::Duration;
+use notify::Watcher as _;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-/// 启动热加载监听 task：监听 `script_dir` 改动，去抖 200ms → `reload_tx.send(())`。
+/// 去抖窗口（改动静默 200ms 后放行——尾沿去抖，连续写自动顺延）。
+const DEBOUNCE: Duration = Duration::from_millis(200);
+
+/// 写类事件判定：只放行内容/名称/元数据变更。Access（open/read/close）是 `load_main`
+/// 读 main.lua 自身产生的（notify 8 订阅掩码含 IN_OPEN），放行即自激 reload 风暴；
+/// Other（未知类别）宁漏勿误——漏靠 REST 手动 reload 兜底，误则是 VM 状态清零。
+fn is_write_event(ev: &notify::Event) -> bool {
+    matches!(
+        ev.kind,
+        notify::EventKind::Modify(_) | notify::EventKind::Create(_) | notify::EventKind::Remove(_)
+    )
+}
+
+/// 启动热加载监听 task：监听 `script_dir`，**写类事件**去抖 200ms → `reload_tx.send(())`。
 ///
 /// watcher 为 tokio task，监听 `token`：实例 stop（`token.cancel()`）时 task 退出，
-/// `Debouncer` drop 停止监听——修复此前 `std::thread` + `loop { sleep }` 在 stop/start
-/// 循环中累积 watcher 线程泄漏的问题。runtime shutdown 时 tokio 直接 abort task（不依赖
-/// cancel，对「忘记调 `token.cancel()`」的测试/退出场景更健壮）。失败仅 warn（监听不到
-/// 不致命，靠 M7 REST 手动 reload 兜底）。
+/// `RecommendedWatcher` drop 停止监听。失败仅 warn（监听不到不致命，靠 M7 REST 手动
+/// reload 兜底）。
 ///
-/// `Debouncer<RecommendedWatcher>: Send` 已核实（notify-debouncer-mini 0.7 auto trait），
-/// 可 `move` 进要求 `Future: Send` 的 `tokio::spawn` task。
+/// notify 回调在 watcher 内部线程触发 → `blocking_send` 合法（非 async 上下文）；
+/// `RecommendedWatcher: Send` 已核实（notify 8 auto trait），可 move 进 tokio task。
 pub(crate) fn spawn_watcher(
     script_dir: PathBuf,
     reload_tx: mpsc::Sender<()>,
     token: CancellationToken,
 ) {
-    tokio::spawn(async move {
-        // 同步创建 debouncer（一次性开销；对标 reload_vm 内 load_main 的同步 fs 模式）。
-        // 回调在 debouncer 内部线程触发 → blocking_send 合法（非 async 上下文）。
-        let mut debouncer = match notify_debouncer_mini::new_debouncer(
-            Duration::from_millis(200),
-            move |_evs: notify_debouncer_mini::DebounceEventResult| {
-                // 任何改动事件（去抖后）→ 通知主循环 reload。
-                // reload_tx drop（主循环退出）时 blocking_send 失败 → 无副作用。
-                let _ = reload_tx.blocking_send(());
-            },
-        ) {
-            Ok(d) => d,
-            Err(e) => {
-                tracing::warn!("[luaClient] 热加载 watcher 启动失败：{e}");
-                return;
-            }
-        };
-        if let Err(e) = debouncer
-            .watcher()
-            .watch(&script_dir, notify::RecursiveMode::NonRecursive)
-        {
-            tracing::warn!("[luaClient] 热加载 watch {script_dir:?} 失败：{e}");
-            return;
-        }
-        // 保 debouncer 活 + 响应取消；sleep 仅占位（select! 主要等 token.cancelled）。
-        // 返回 → debouncer drop → 停止监听 → task 结束。
-        loop {
-            tokio::select! {
-                _ = token.cancelled() => break,
-                _ = tokio::time::sleep(Duration::from_secs(3600)) => {}
-            }
-        }
-    });
+    tokio::spawn(watch_debounce_loop(
+        script_dir,
+        notify::RecursiveMode::NonRecursive,
+        false,
+        reload_tx,
+        token,
+        "luaClient",
+    ));
 }
 
 /// 全局 `_lib/` 站点共享库 watcher 底层（T10/Q15）：Recursive 监听 `lib_dir`
 /// （`scripts/_lib/`——共享库按 `<org>/<...>/` 分多级子目录，须递归），去抖 200ms →
 /// `reload_tx`。channel 出口（无 lux/mgr 依赖），可测核心。
 ///
-/// 与 per-instance [`spawn_watcher`] 的差异：① `Recursive`（多级子目录）；
-/// ② watch 前自建 `lib_dir`——站点尚无共享库时 `_lib/` 不存在，notify watch 直接
-/// 失败且此后保存也不触发，先建空目录（无害）保证 watch 成立。`_lib/` 运行中被整
-/// 目录删除的极端场景不恢复（快照由 REST 版本管理兜底）。
+/// watch 前自建 `lib_dir`——站点尚无共享库时 `_lib/` 不存在，notify watch 直接失败且
+/// 此后保存也不触发，先建空目录（无害）保证 watch 成立。`_lib/` 运行中被整目录删除
+/// 的极端场景不恢复（快照由 REST 版本管理兜底）。
 pub(crate) fn spawn_lib_watcher(
     lib_dir: PathBuf,
     reload_tx: mpsc::Sender<()>,
     token: CancellationToken,
 ) {
-    tokio::spawn(async move {
-        if let Err(e) = std::fs::create_dir_all(&lib_dir) {
+    tokio::spawn(watch_debounce_loop(
+        lib_dir,
+        notify::RecursiveMode::Recursive,
+        true,
+        reload_tx,
+        token,
+        "lua",
+    ));
+}
+
+/// 两个 watcher 的共用主体：建 watcher → 注册监听 → 事件过滤 + 尾沿去抖循环。
+/// `ensure_dir`（仅 _lib）= watch 前自建目录；`tag` = 日志前缀（luaClient/_lib）。
+async fn watch_debounce_loop(
+    dir: PathBuf,
+    mode: notify::RecursiveMode,
+    ensure_dir: bool,
+    reload_tx: mpsc::Sender<()>,
+    token: CancellationToken,
+    tag: &str,
+) {
+    if ensure_dir {
+        if let Err(e) = std::fs::create_dir_all(&dir) {
             tracing::warn!("[lua] _lib 目录创建失败，全局 watcher 未启动：{e}");
             return;
         }
-        let mut debouncer = match notify_debouncer_mini::new_debouncer(
-            Duration::from_millis(200),
-            move |_evs: notify_debouncer_mini::DebounceEventResult| {
-                // 任何改动事件（去抖后）→ 通知 reload；tx drop（下游退出）时无副作用。
-                let _ = reload_tx.blocking_send(());
-            },
-        ) {
-            Ok(d) => d,
-            Err(e) => {
-                tracing::warn!("[lua] _lib watcher 启动失败：{e}");
-                return;
-            }
-        };
-        if let Err(e) = debouncer
-            .watcher()
-            .watch(&lib_dir, notify::RecursiveMode::Recursive)
-        {
-            tracing::warn!("[lua] _lib watch {lib_dir:?} 失败：{e}");
+    }
+    let (ev_tx, mut ev_rx) = mpsc::channel::<notify::Result<notify::Event>>(64);
+    let mut watcher = match notify::recommended_watcher(move |res| {
+        // notify 回调线程 → blocking_send 合法（非 async 上下文）。
+        // reload_tx drop（主循环退出）时 blocking_send 失败 → 无副作用。
+        let _ = ev_tx.blocking_send(res);
+    }) {
+        Ok(w) => w,
+        Err(e) => {
+            tracing::warn!("[{tag}] 热加载 watcher 启动失败：{e}");
             return;
         }
-        tracing::info!("[lua] _lib 全局 watcher 启动（{lib_dir:?}，Recursive）");
-        // 保 debouncer 活 + 响应取消（同 spawn_watcher）。
-        loop {
-            tokio::select! {
-                _ = token.cancelled() => break,
-                _ = tokio::time::sleep(Duration::from_secs(3600)) => {}
+    };
+    if let Err(e) = watcher.watch(&dir, mode) {
+        tracing::warn!("[{tag}] 热加载 watch {dir:?} 失败：{e}");
+        return;
+    }
+    if ensure_dir {
+        tracing::info!("[lua] _lib 全局 watcher 启动（{dir:?}，Recursive）");
+    }
+    let mut pending = false;
+    loop {
+        tokio::select! {
+            _ = token.cancelled() => break,
+            r = ev_rx.recv() => match r {
+                Some(Ok(ev)) => {
+                    if is_write_event(&ev) {
+                        pending = true; // 尾沿去抖：新写事件不断 → 顺延到静默 200ms
+                    }
+                }
+                Some(Err(e)) => tracing::warn!("[{tag}] watch 事件错误：{e}"),
+                None => break, // watcher 侧 channel 关闭
+            },
+            _ = tokio::time::sleep(DEBOUNCE), if pending => {
+                // async 上下文 → 必须 .await（blocking_send 仅限 notify 回调线程）
+                let _ = reload_tx.send(()).await;
+                pending = false;
             }
         }
-    });
+    }
 }
 
 /// `_lib/` 全局 watcher 组合入口（Q15，计划 T10）：变更（去抖后）→
@@ -208,6 +234,41 @@ mod tests {
         assert!(
             matches!(r, Ok(None)),
             "应随 token.cancel 退出（tx drop → recv None），实得 {r:?}"
+        );
+    }
+
+    /// 热加载风暴回归（2026-10-26 实证）：**读取**监听目录内文件不得触发 reload
+    /// （notify 8 掩码含 IN_OPEN，load_main 读 main.lua 的 open/access 事件曾被当作
+    /// 改动 → 「reload→读→再 reload」自激 4.2 万次/日/实例）；**写入**仍须触发。
+    #[tokio::test]
+    async fn watcher_ignores_reads_notifies_on_write() {
+        let dir = fresh_dir("readstorm");
+        std::fs::create_dir_all(&dir).unwrap();
+        let main = dir.join("main.lua");
+        std::fs::write(&main, "st = {}\nfunction on_timer() end").unwrap();
+        let (tx, mut rx) = mpsc::channel::<()>(8);
+        let token = CancellationToken::new();
+        spawn_watcher(dir.clone(), tx, token.clone());
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        // 读风暴：50 次读（远超真实 load_main 频率）→ 去抖窗口内不得有通知
+        for _ in 0..50 {
+            let _ = std::fs::read(&main).unwrap();
+        }
+        let quiet = tokio::time::timeout(Duration::from_millis(1500), rx.recv()).await;
+        assert!(
+            matches!(quiet, Err(_)),
+            "读取事件不得触发 reload（自激风暴回归），实得 {quiet:?}"
+        );
+
+        // 写入：仍须去抖后通知
+        std::fs::write(&main, "st = {}\nfunction on_timer() end\n-- v2").unwrap();
+        let r = tokio::time::timeout(Duration::from_secs(5), rx.recv()).await;
+        token.cancel();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            matches!(r, Ok(Some(()))),
+            "写入应触发 reload 通知，实得 {r:?}"
         );
     }
 }
