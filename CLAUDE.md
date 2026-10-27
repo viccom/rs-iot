@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 轻量跨平台工业 IoT 边缘框架（Rust），Go 项目 Lite_IOT（本机 `D:\Go_Codes\Lite_IOT`，对标参考实现）的 Rust 重写与增强。内嵌 lux 作为进程内 Redis 兼容数据库（RESP :6390 + Tiered WAL 持久化）——lux 为**同级目录** `../lux` 的 path 依赖，新机器需先按 `docs/ops/lux-upstream-sync-strategy.md` §一.5 恢复（clone 官方 + 从私人 fork 拉补丁）。
 
-**Cargo workspace 结构**（2026-08 起，AI Agent 集成项目引入）：根 `rs-iot` crate（主程序，工业数采核心）+ `crates/rsiot-mcp`（reasonix `[[plugins]]` 子进程，MCP 工具→rs-iot REST 翻译层，照 dbx-mcp 范本）+ `crates/rsiot-gateway`（v3 独立 API Gateway，纯反代 rs-iot+reasonix serve，见 `docs/designs/2026-08-11-ai-agent-integration-v3-design.md`）。**三 crate 解耦**：核心数据流（pipeline/lux/采集）只在主 crate，AI 集成全部在子 crate——改子 crate 零影响主 crate（194 单测验证）。改子 crate：`cargo build -p rsiot-mcp` / `-p rsiot-gateway`。
+**Cargo workspace 结构**（2026-08 起，AI Agent 集成项目引入）：根 `rs-iot` crate（主程序，工业数采核心）+ `crates/rsiot-mcp`（reasonix `[[plugins]]` 子进程，MCP 工具→rs-iot REST 翻译层，照 dbx-mcp 范本）+ `crates/rsiot-gateway`（v3 独立 API Gateway，纯反代 rs-iot+reasonix serve，见 `docs/designs/2026-08-11-ai-agent-integration-v3-design.md`）。**三 crate 解耦**：核心数据流（pipeline/lux/采集）只在主 crate，AI 集成全部在子 crate——改子 crate 零影响主 crate（子 crate 均不依赖主 crate，`Cargo.toml` 可验）。改子 crate：`cargo build -p rsiot-mcp` / `-p rsiot-gateway`。
 
 **数据流（hub 模式 + 双总线）**——这是理解全项目的关键。**两条总线**：数据上行（采集→入库）+ 控制下行（写命令→设备）：
 
@@ -23,7 +23,7 @@ POST /api/v1/command/send ─┼─► CtlRegistry.try_send(64) ──► 实例
 
 - **南向采集与北向发布完全解耦**：pipeline 只写 lux rtdata，北向 `luaNorth`（mqtt-north 角色，`[mqtt]` 配置自动生成默认实例 mqtt-pub-default）独立周期从 lux 抽取发布（pull 模式）。lux rtdata 是唯一数据交汇点（single source of truth）。
 - **写命令多源统一**：MQTT / REST / 未来北向服务器都是写入口，都经 `CtlRegistry`（`src/host.rs`，`try_send` 非阻塞，channel 满丢弃——对标 Go 版 default）路由到实例 `cmd_rx`。REST 入口 `InstanceManager::send_ctl`（`src/plugin/instance.rs`）封装，实例未注册返回 404。
-- **单 Source 启停不影响管道**（共享 hub，pipeline dispatcher+N worker 消费者侧 fan-out；各 Source 独立 `CancellationToken`）。worker 数 `[pipeline] workers`（0=auto min(cpu,8)），采集 ticker jitter 错峰（`plugin::ticker::phase_ms` FNV-1a 确定性相位，削每秒脉冲）。50万点/秒入库（端到端 bench ~2.6M 点/秒，见 `examples/bench_pipeline_e2e.rs`）。
+- **单 Source 启停不影响管道**（共享 hub，pipeline dispatcher+N worker 消费者侧 fan-out；各 Source 独立 `CancellationToken`）。worker 数 `[pipeline] workers`（0=auto min(cpu,8)），采集 ticker jitter 错峰（`crate::ticker::phase_ms` FNV-1a 确定性相位，削每秒脉冲）。50万点/秒入库（端到端 bench ~2.6M 点/秒，见 `examples/bench_pipeline_e2e.rs`）。
 - **外部插件 bridge（sidecarClient，M7）**：任意语言（C/Go/Python/Java…）的外部进程作为南向 Source 接入——TCP 连 bridge（`config.bridge`，默认 :8781，`enable=false` 默认零影响），acceptor 校验 token（lux `ext_tokens` 的 `hmac_sha256` 比对）后按 inst_id 分发到实例 task；外部 `DataUp`→`Sample`→hub（与内置 Source 同构），写命令经 `cmd_rx`→`Command` 帧→外部→`CommandAck`。**外部=纯运行时**（配置/数据/状态全在 rs-iot，本地仅缓存数据待补传），**lux 不对暴露**（方案 C：外部只连 bridge，认证/授权集中 rs-iot）。`InstConfig.host_kind=External` 标记 + 准入约束（token 只对 External 签发）。协议见 `docs/reference/external-plugin-protocol.md`，Python 样例 `examples/ext-plugin-python/`。
 - 架构原则（分层 + 双总线 + 横向扩展边界）见下文「架构原则」节。
 
@@ -37,8 +37,8 @@ POST /api/v1/command/send ─┼─► CtlRegistry.try_send(64) ──► 实例
 
 | crate | 职责 | 现状 |
 |---|---|---|
-| `crates/rsiot-mcp` | reasonix `[[plugins]]` spawn 的 stdio 子进程，把 MCP 工具调用翻译成 rs-iot loopback REST（照 dbx-mcp 范本：rmcp 2.2 + `#[tool]` 宏 + WebBackend JWT）。`server.rs` 声明 10 工具（含 query percent-encode 输入边界防护），`backend.rs` 调 REST | 10 工具完成（list_devices/read_tags/get_status/list_instances/get_recent_logs/send_device_command/start_instance/stop_instance/save_lua_script/get_config）+ risk 三档框架（CriticalWrite 关键设备禁写 P1 后置）+ query encode 单测；24 单测全绿 |
-| `crates/rsiot-gateway` | v3 独立 API Gateway，纯反代 rs-iot:8790 + reasonix serve:8787（`docs/decisions/2026-08-12-gateway-tech-selection.md`：axum 0.8 + reqwest 手写）。`proxy.rs` `forward()` 裸字节流透传（**不用** axum Sse/Event）+ rsiot 凭证转换（query token→Authorization）+ token 防泄漏，`auth.rs` 层1 JWT（复用主 crate jwt_secret） | B1 全完成（SSE 裸透传 + serve cookie 注入 + health 聚合 + rsiot 鉴权转发）；rust-embed 静态前端嵌入 + SPA fallback；25 单测全绿。剩余：OS 服务化 |
+| `crates/rsiot-mcp` | reasonix `[[plugins]]` spawn 的 stdio 子进程，把 MCP 工具调用翻译成 rs-iot loopback REST（照 dbx-mcp 范本：rmcp 2.2 + `#[tool]` 宏 + WebBackend JWT）。`server.rs` 声明 25 工具（含 query percent-encode 输入边界防护），`backend.rs` 调 REST | 25 工具完成（list_devices/read_tags/get_status/list_instances/get_recent_logs/send_device_command/start_instance/stop_instance/save_lua_script/get_config）+ risk 三档框架（CriticalWrite 关键设备禁写 P1 后置）+ query encode 单测；48 单测全绿 |
+| `crates/rsiot-gateway` | v3 独立 API Gateway，纯反代 rs-iot:8790 + reasonix serve:8787（`docs/decisions/2026-08-12-gateway-tech-selection.md`：axum 0.8 + reqwest 手写）。`proxy.rs` `forward()` 裸字节流透传（**不用** axum Sse/Event）+ rsiot 凭证转换（query token→Authorization）+ token 防泄漏，`auth.rs` 层1 JWT（复用主 crate jwt_secret） | B1 全完成（SSE 裸透传 + serve cookie 注入 + health 聚合 + rsiot 鉴权转发）；rust-embed 静态前端嵌入 + SPA fallback；37 单测全绿。剩余：OS 服务化 |
 
 子 crate 与主 crate 的耦合边界：gateway 只透传主 crate REST（零改动）；rsiot-mcp 调主 crate REST，主 crate 已补 2 端点（`POST /api/v1/lua/script/save` 路径白名单 + `GET /api/v1/config` 脱敏，属主 crate 自身能力补全，已实现）。
 
@@ -77,7 +77,7 @@ cargo build -j 2 -p rsiot-gateway      # 只编 gateway 子 crate
 cargo build -j 2 --release             # release（lto=thin + strip）
 cargo test -j 2                        # 全量（CI 用 --all-targets）
 cargo test -j 2 <name>                 # 单个测试（如 cargo test hwid）
-cargo clippy -j 2 --workspace --all-targets -- -D warnings   # CI 门槛，全 workspace 零警告
+cargo clippy -j 2 --workspace --all-targets -- -D warnings   # 全 workspace（含两个子 crate）
 cargo fmt --all --check                # 格式检查
 cargo doc -j 2 --no-deps               # 文档（RUSTFLAGS=-D warnings 下零警告）
 cargo audit                            # 依赖安全（CI 中 continue-on-error：传递依赖 rustls advisory 已知）
@@ -114,11 +114,14 @@ cd frontend && npm run test      # 前端单测（vitest，加 -- --run 单次�
 
 ### Feature 裁剪（内置协议可选）
 
-`opcua` / `modbus` / `s7` / `eip` 四个南向协议插件是**可选 Cargo feature，默认全开**（向后兼容）。现场可按需裁剪——减二进制体积、省系统依赖（如不跑 Modbus RTU 的 Linux 机器可不装 `libudev-dev`）：
+默认编译面（2026-08-26 用户裁决，见 decisions/2026-08-26-default-compile-surface.md）：
+**默认 = `lua` + `lua-http` + `opcua` + `modbus`**；`s7`/`eip`/`transform`/`history` **出默认**，需显式 `--features`。
+未编译某协议时建该 `app_code` 实例返回 "source plugin not found"（优雅降级，非崩溃）。现场可按需裁剪——减二进制体积、省系统依赖（如不跑 Modbus RTU 的 Linux 机器可不装 `libudev-dev`）：
 
 ```bash
 cargo build --no-default-features --features lua                     # 最小现场（仅 lua 脚本采集）
 cargo build --no-default-features --features "lua,modbus,opcua"      # 选装部分协议
+cargo build --features "s7,eip"                                      # 加装西门子/AB（出默认，需显式）
 ```
 
 关掉某协议后，配置该 `app_code` 建实例会返回 `"config error: source plugin not found"`（`find_source` 优雅降级，非崩溃）。`tokio-serial` 因 lua 串口 IO 依赖而**保持无条件**（不随 `modbus` gate）。CI `minimal` job 守护裁剪组合可编译 + 优雅降级测试（`tests/feature_gate_e2e.rs`）。详见 `docs/decisions/2026-08-07-feature-gating-protocols.md`。注意：`eip`（rust-ethernet-ip）要求 **rustc ≥ 1.96**（workspace MSRV 随之提升）。
@@ -143,11 +146,17 @@ cargo build --no-default-features --features "lua,modbus,opcua"      # 选装部
 - **注释用中文**（代码与文档一致），doc 注释必须完整——`missing_docs` 是 warn，库公开项都要有 `//!`/`///`。
 - **错误处理**：库公开 API 统一返回 `Result<_, RsIotError>`（`TResult`），新错误来源在 `error.rs` 加 `#[from]` 变体；`#[non_exhaustive]` 保证新增变体不破坏下游 match。binary 层（main/run/service）才用 anyhow 聚合。
 - **newtype ID**：`Hwid`/`InstId`/`UserId`/`PluginName` 隔离不同语义的字符串 ID，在 `types.rs` 用 `impl_string_newtype!` 宏统一实现 `From`/`AsRef`/`Display`；新 ID 直接套用该宏。
-- **`#[expect(...)]` 而非 `#[allow(...)]`**：如 `api/mod.rs:9`、`host.rs:62`——lint 不再触发时编译器会提示移除，杜绝永久豁免。`#![allow(dead_code)]` 全局豁免已于 2026-08 治理移除（当前代码零 dead code）；新增代码若短暂存在未用项，用 `#[expect(dead_code)]` + 注释，勿恢复全局 allow。
+- **`#[expect(...)]` 而非 `#[allow(...)]`**：如 `api/mod.rs:9`、`host.rs:62`——lint 不再触发时编译器会提示移除，杜绝永久豁免。`#![allow(dead_code)]` 全局豁免已于 2026-08 治理移除（存量 lua_core 有 16 处 `#[allow(dead_code)]`（预留未接线，待接线后转 expect））；新增代码若短暂存在未用项，用 `#[expect(dead_code)]` + 注释，勿恢复全局 allow。
 - **日志**：`tracing`，关键入口函数加 `#[tracing::instrument(skip(...), fields(...))]`；插件 task 用 `[dataSim]`/`[pipeline]`/`[mqtt]` 前缀便于过滤。模块内错误用 `tracing::warn!` 不 panic（如 pipeline 写库失败、mqtt 连接错误均降级继续）。
 - **插件扩展**：实现 `Source`/`Sink`/`Processor` trait，在文件底部 `inventory::submit!` 静态注册（`registry.rs` 的 `SourceEntry { name, create }`）；插件配置从 `InstConfig::app_config`（任意 JSON）自行解析（参考 datasim 的 `period` 字段）。
 - **异步生命周期**：所有长驻 task 用 `CancellationToken`（`shutdown.child_token()`）退出，`tokio::select!` 中监听；启停 Source 由 `InstanceManager` 统一管（DashMap 状态表 + JoinHandle，stop 3s 超时）。
-- **数据流边界**：南向产出只推 `mpsc::Sender<Sample>`（hub）；实例间命令走 `CtlRegistry::send`（非阻塞 `try_send`，channel 满丢弃——对标 Go 版 default 语义，勿改阻塞）。
+- **数据流边界**：南向产出推**宿主注入的 `SampleSender`**（`Deref` 到 `mpsc::Sender<Sample>`，转发前登记 dev2inst 归属；**禁止自建裸 hub sender**）；实例间命令走 `CtlRegistry::send`（非阻塞 `try_send`，channel 满丢弃——对标 Go 版 default 语义，勿改阻塞）。
+- **channel 容量原则**：数据面发送端可 `await` → 有界（hub 512、worker 256）；控制面 `try_send`
+  → 有界且满丢计数（CtlRegistry 64）；仅 notify 回调线程允许 unbounded 并须在注释写明理由
+  （唯一现存例外：`hotload.rs` 事件管道）。
+- **进程级单例（OnceLock）登记制**：新增 `OnceLock` 单例须在 `docs/architecture.md` §四登记，
+  并说明测试间是否需复位（现有 5 处：model/cache、model/discovery、history/engine、
+  db/secrets、process_metrics）。
 
 ## 验证规则
 
@@ -164,7 +173,7 @@ cargo build --no-default-features --features "lua,modbus,opcua"      # 选装部
 ## 常见流程
 
 - **新增 API 路由**：在 `src/api/` 加 `routes_*.rs` handler → `api/mod.rs` `build_router` 注册路由 → 需要免鉴权则在 `auth.rs` `PUBLIC_PATHS` 加白名单（默认全部要 JWT 或 `X-Access-Key`）→ DTO 与 state 从 `AppState`（lux client + mgr + hwid + jwt_secret）取。
-- **新增 lux Hash 表/字段**：先更新 `db/identity.rs:3-11` 的清单注释 → 读写逻辑放对应模块（用户→routes_user、实例→routes_inst、rtdata→`db/rtdata.rs`）→ 初始数据在 `identity::bootstrap` 幂等写入（用 `HEXISTS` 判断，不覆盖已有记录）。
+- **新增 lux Hash 表/字段**：先更新 `db/identity.rs:3-20` 的清单注释 → 读写逻辑放对应模块（用户→routes_user、实例→routes_inst、rtdata→`db/rtdata.rs`）→ 初始数据在 `identity::bootstrap` 幂等写入（用 `HEXISTS` 判断，不覆盖已有记录）。
 - **新增南向/北向插件**：`plugin/builtin/` 新文件实现 trait + `inventory::submit!` 注册 → `types::InstConfig` 的 `app_code` 字符串匹配注册表名 → 默认数据流靠 `lib.rs` 的 demo config（`try_start_from_lux` 读到 `instances` 表 autoStart 实例则优先拉起）。
 - **新增外部南向插件**（任意语言）：外部进程实现 bridge 协议（`docs/reference/external-plugin-protocol.md`）→ rs-iot 侧 REST 建实例 `app_code="sidecarClient"` + `host_kind="external"` + `app_config{heartbeat_timeout_secs?}` + devices（`routes_inst::set` 自动签发 token 返回明文一次）→ `startinst`（注册 slot 等外部接入）→ 外部进程连 bridge 报到。无需改 rs-iot 代码（外部协议地址语义由外部自解，rs-iot 透传 children）。
 - **新增写命令入口**：调 `InstanceManager::send_ctl(inst, CtlMessage)`（经 `CtlRegistry` 路由到实例 `cmd_rx`，未注册返回 `false`）。现有入口：MQTT `<hwid>/command`（阶段 B 起经 luaNorth 兼容脚本 `down()` → `ctx:send_command`；进程内订阅路由在 `lua_north/`）、REST `POST /api/v1/command/send`（`routes_command.rs`）。写命令 `data` 字段格式由各南向插件 `handle_write` 自定（opcua `{node_id,value,opc_type}`、modbus `{address,value}`）。
@@ -189,9 +198,9 @@ cargo build --no-default-features --features "lua,modbus,opcua"      # 选装部
 
 ## 安全边界
 
-- **`data/`、`target/`、`*.log` 已被 .gitignore 忽略，不要提交**；`data/` 含 lux 快照 + WAL，删除即丢数据。
+- **`data/`、`target/`、`logs/`、`*.log`、`pki/` 已被 .gitignore 忽略，不要提交**；**`gateway.toml` / `gateway.toml.bak` / `config.toml` 含 jwt_secret 与 serve_token，禁止提交真实值**；`data/` 含 lux 快照 + WAL，删除即丢数据。
 - **`jwt_secret` 与 `MqttConfig::username/password` 不得写真实凭据进仓库**：config.toml 中 jwt_secret 是开发默认值（与 Lite_IOT 对齐），生产部署必须换；mqtt 公共 broker 仅开发验证用。
-- **lux 只 bind loopback**（`db/mod.rs` 中 `bind_host` 默认 127.0.0.1 + `require_auth=false`）。若要远程暴露 RESP，必须先开 `password` + `require_auth`——这是认证边界，改动需显式确认。
+- **lux 只 bind loopback**（`db/mod.rs` 中 `bind_host` 默认 127.0.0.1 + `require_auth=false`）。若要远程暴露 RESP，必须设 `[lux] password`（`require_auth` 由代码按 password 有无自动派生，无配置项）——这是认证边界，改动需显式确认。
 - **`db::shutdown_lux` 必须先 SAVE 再 `shutdown_and_wait`**：lux 的 shutdown 默认不落盘（Memory 模式丢数据、Tiered 模式 WAL 不截断）。Tiered 下 `save_interval_secs` 也不能为 0（WAL 无限增长）。改 lux 交互代码时必须守住这两条。
 - **外部插件 bridge 安全**：bridge `bind_host` 默认 `127.0.0.1`（同机零暴露），跨机部署显式改 `0.0.0.0` 且 token 强制（acceptor 每连接校验，不可关）。外部插件 token 明文仅建实例时返回一次（存 `hmac_sha256` hash 于 `ext_tokens`），删实例自动清除——不得写真实 token 进 config.toml/日志。lux 永不对外部暴露（方案 C），外部只连 bridge。PoC 不上 TLS（局域网信任），跨机敏感场景 TLS 后置。
 - 输出信息：`hwid`（每机唯一标识）可在日志/API 中正常出现；不输出 bcrypt 哈希、JWT token 明文、lux `passwords` 表内容。

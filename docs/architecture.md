@@ -57,7 +57,7 @@ POST /api/v1/command/send ─┼─► CtlRegistry.try_send(64) ─► 实例 So
 - `tsink = { path = "../tsink_fork", optional = true }` — 历史时序存储（Phase 1b）同为**同级目录** path 依赖：clone `https://github.com/viccom/tsink` 到同级 `../tsink_fork` 并 checkout tag `rs-iot-1b-baseline`（@ 277e744，基线 pin）。仅 feature `history` 引入——`--features history` 缺它**不编译**；默认/裁剪构建（feature off）**不需要**该目录。
 - **lux 上游同步**：rs-iot 非 lux 维护方（无 PR 权限），以"克隆官方源 + 本地小补丁"跟随上游；同步流程、rebase 冲突决策、风险点与应急恢复见 `docs/ops/lux-upstream-sync-strategy.md`。
 - `D:\Go_Codes\Lite_IOT` — 对标参考实现，新功能常按"Lite_IOT 的 X 模块"定位。
-- 端口：lux RESP 6390（避开本机 redis 6379）、REST 8780（config.toml 中 8780 被占用临时改 8790）、MQTT 公共 broker broker.emqx.io:1883（开发验证用）。
+- 端口：lux RESP 6390（避开本机 redis 6379）、REST 8790、MQTT 公共 broker broker.emqx.io:1883（开发验证用）。
 - 日志：`tracing` + `tracing-subscriber` + `tracing-appender`（tokio-rs 官方）。终端输出始终开启；**`[log].dir` 默认 `./logs`（开箱即落盘，M3）**，daily 轮转 `rs-iot.log.YYYY-MM-DD` + **保留期清理**（`max_days` 默认 7 按天删旧 / `max_size_mb` 默认 0 不限，>0 按总大小删最旧；cleanup task 启动跑一次 + 每 1h，跳过当天活动日志）。**退出 flush**（`init_tracing` 返回 `WorkerGuard`，main/service 持有到退出 drop；service `process::exit` 前显式 drop）。级别优先 `RUST_LOG`，缺省 `[log].level`（默认 info）；显式 `dir=""` 关闭文件层。opcua/modbus 采集/连接/读写均有 `[opcuaClient]`/`[modbusClient]` 前缀日志。
 
 ## 四、架构审查结论（2026-10-27，四路并行深查）
@@ -69,7 +69,7 @@ POST /api/v1/command/send ─┼─► CtlRegistry.try_send(64) ─► 实例 So
 - **双总线降维**：N 协议 × M 出口 的 N×M 耦合收敛为 N+M；
 - **channel 背压全显式**：hub 512（send 背压）/ CtlRegistry 64（try_send 满丢+计数）/ event broadcast 256（Lagged 自弃）/ history 有界（满即丢+计数）；
 - **大文件带大测试**：`writer.rs`/`contract.rs`/`modbus_client` 约一半行数是内联测试，生产段 unwrap/expect 全库仅 26 处；
-- **共享状态克制**：`Arc<Mutex>` 全库 4 处，`HostContext` 9 字段全为无状态工具句柄。
+- **共享状态克制**：生产段 `Arc<Mutex>` 1 处、`Mutex` 12 处（多为 `OnceLock<Mutex<…>>` 单例），`HostContext` 9 字段全为无状态工具句柄。
 
 已知技术债（P2，按改进价值排序）：
 1. **api 层承担了本应属领域服务的厚度**：Lua 脚本资产存储（`routes_lua.rs` ~500 行业务逻辑）、
@@ -80,4 +80,4 @@ POST /api/v1/command/send ─┼─► CtlRegistry.try_send(64) ─► 实例 So
    不在 HostContext/AppState 里，模块图不可见；
 4. `db/dev_registry.rs` 命名错位（管 `dev2inst` 归属表而非 `devreg` 设备注册表）。
 
-> 完整审查报告（含证据链与逐条复验）见会话记录；修复跟踪见 `CLAUDE.md`「已知技术债」指针。
+> 完整审查报告（含证据链与逐条复验）见会话记录；修复跟踪见本文件 §四 技术债清单；门禁见 `just check` / `just check-ws`。

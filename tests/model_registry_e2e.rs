@@ -671,6 +671,9 @@ async fn discoveries_api_requires_jwt() {
     common::stop_lux(handle).await;
 }
 
+// 与其它测试文件并行时偶发失败（本文件独立跑 3/3 稳定）：发现引擎是**进程级 OnceLock
+// 单例**（`model/discovery.rs:73 ENGINE`），同进程内多测试共享 discoveries 队列；
+// 单独运行稳定。`just test` 串行化整个 e2e 目标即可规避（cargo test 默认按文件并行）。
 #[tokio::test]
 async fn discovery_list_sorted_by_count_and_filtered_by_dev() {
     let (app, handle) = test_app("m4-disc-list").await;

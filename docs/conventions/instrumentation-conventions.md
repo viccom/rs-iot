@@ -6,7 +6,7 @@
 
 ## 1. 字段分层
 
-- **核心 6 字段**（`InstanceStat`，编译期强制）：`status` / `tick_count` / `fail_count` / `last_activity_ts` / `last_activity_duration_ms` / `last_err`。
+- **核心 6 字段**（`InstanceStat`，结构约定：6 字段固定 + `extra` 扩展）：`status` / `tick_count` / `fail_count` / `last_activity_ts` / `last_activity_duration_ms` / `last_err`。
 - **插件扩展**：走 `extra`（`#[serde(flatten)]` 透传）。加新插件**不改** `InstanceStat` struct。
 
 ## 2. 命名对齐 Prometheus（P1 #1 已落地）
@@ -33,7 +33,7 @@
 
 ## 5. 写入频率
 
-- per-instance：内存持有 + 周期 flush（默认每 5s 或每 50 次活动；常量见 `stat_tracker.rs`）。
+- per-instance：内存持有 + 周期 flush（ticker 5s 一拍但仅**检查**；实际落盘 = 状态变更即落 / 距上次 ≥30s / tick%50==0（最坏 30s 陈旧）；常量见 `stat_tracker.rs`）。
 - 进程级：atomic 不落盘（重启归零合理）。
 
 ## 6. 并发模型

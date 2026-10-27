@@ -112,12 +112,18 @@
 
 ## 8. 校验（scripts/check_docs.py）
 
-`python scripts/check_docs.py`（仓库根执行，CI `docs` job 强制）校验：
+`python3 scripts/check_docs.py`（仓库根执行，CI `docs` job 强制）校验：
 
-1. docs/ 全部文档（索引除外）必有头部状态块；designs/decisions 状态词受控；
-2. `implemented` / `partially-implemented` 必填 **实施** + **代码** 字段，部分实施必列 **遗留**；
-3. designs/decisions 每篇在 `docs/README.md` 登记，且索引行状态标记与头部一致；
-4. 全部 git 跟踪 md 的相对链接目标存在。
+1. docs/ 全部文档（索引除外）必有头部状态块；designs/decisions 状态词受控
+   （implemented / partially-implemented / accepted / in-review / draft / **superseded**）；
+2. `implemented` / `partially-implemented` / `superseded` 必填 **实施** + **代码** 字段；
+   部分实施必列 **遗留**，superseded 必填 **取代者** 指针；
+3. designs/decisions/guides/reference/ops 每篇在 `docs/README.md` 有**独立索引行**（表格行以文件名链接单元格开头），designs/decisions 另校验状态标记与头部一致；`ops/releases/`
+   为不可变发布档案，豁免索引与状态词（但仍须状态块）；
+4. 全部 git 跟踪 md 的相对链接目标存在；
+5. **正文反引号内的 `src|tests|crates|frontend/src` 路径必须真实存在**（跨仓 tsink/lux、
+   上游 crate、显式标注"已删除/已退役"、计划稿候选路径豁免——按**同行**判定）；
+6. **`docs/plans/` 不得存在**（2026-10-27 已并入 `designs/`；新计划放 designs + 日期前缀）。
 
 改文档后本地先跑一遍再提交；CI 红了按报错逐条修（规范 §3/§4/§5）。
 

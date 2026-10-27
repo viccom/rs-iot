@@ -10,10 +10,16 @@ set shell := ["bash", "-c"]
 default:
     @just check
 
-# 全套：格式 + 文档 + lint 双档 + 单测
+# 全套：格式 + 文档 + lint 三档（含 workspace）+ 单测 + s7/eip 显式档
 [group('quality')]
-check: fmt docs lint test
+check: fmt docs lint test check-s7-eip
     @echo "✅ rs-iot 本地门禁全过"
+
+# 全 workspace 门禁（含 crates/rsiot-mcp 与 crates/rsiot-gateway）
+[group('quality')]
+check-ws:
+    cargo clippy --workspace --all-targets -- -D warnings
+    cargo test --workspace --lib
 
 [group('quality')]
 fmt:
@@ -30,6 +36,8 @@ docs:
 lint:
     @echo "── clippy 默认档（default = lua,lua-http,opcua,modbus）──"
     cargo clippy --all-targets -- -D warnings
+    @echo "── clippy 子 crate（--workspace）──"
+    cargo clippy --workspace --all-targets -- -D warnings
     @echo "── clippy 最小裁剪档（--no-default-features --features lua）──"
     cargo clippy --no-default-features --features lua --all-targets -- -D warnings
     @echo "── clippy all-features（history 依赖 tsink；stub 环境自动跳过）──"
@@ -43,9 +51,10 @@ lint:
 [group('quality')]
 test:
     cargo test --lib
-    cargo test --tests --no-default-features --features lua
+    # e2e 目标串行（部分用例依赖进程级 OnceLock 单例，跨文件并行会互相污染）
+    cargo test --tests --no-default-features --features lua -- --test-threads=4
 
-# 目标机器常用：协议裁剪档（s7/eip，非默认但 ADR 要求有门禁）
+# s7/eip 显式启用档（非默认 feature，ADR default-compile-surface 要求有门禁）
 [group('quality')]
 check-s7-eip:
     cargo test --features "s7,eip" --test s7_e2e --test eip_client_e2e --test feature_gate_e2e
