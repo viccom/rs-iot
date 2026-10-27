@@ -516,9 +516,10 @@ curl -s -H "Authorization: $TOKEN" \
 | GET/PUT/DELETE | `/api/v1/themes[/{id}]` | 同上 | `{"themes":[...]}` / `{"id","doc"}` / `{"status":"ok"}` |
 
 - **lux 键**：每 id 一个 Hash——key `screen:{id}`（或 `theme:{id}`），field `doc` → 完整 JSON 文本**原样存储**（不做规范化重序列化），GET 时 parse 后原样返回
-- **id 约束**：`^[a-z0-9][a-z0-9-]{0,63}$`，不匹配 `PUT` 返回 `400 {"error":"invalid id"}`
+- **id 约束**：`^[a-z0-9][a-z0-9-]{0,63}$`，不匹配 `PUT`/`DELETE` 返回 `400 {"error":"invalid id"}`
 - **大小钳制**：body ≤ 131072 字节，超出 `413 {"error":"payload too large"}`
 - **JSON 语法**：body 须为合法 JSON（`400 {"error":"invalid json"}`），仅存储完整性防御
+- **lux 故障**：PUT/DELETE 写失败（磁盘满/WAL 等）返回 `500 {"error":"<lux 错误>"}`，不静默报 ok
 - **与 agent-hmi 的分工边界**：rs-iot **只做存储，不做 schema 内容校验**——画面/主题文档的合法性（组件引用、绑定、主题变量等）由 agent-hmi 侧 G1 门禁负责；服务端校验止于 id 词法 / 大小 / JSON 语法三层
 - agent-hmi 前端静态产物由 rsiot-gateway `/hmi` 前缀提供（可配 `hmi_dist`，文件系统 serve + SPA fallback，见 `docs/ops/deploy-gateway-and-mcp.md`），经 `/api/rsiot` 反代调用本组端点
 

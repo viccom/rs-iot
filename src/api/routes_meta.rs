@@ -143,20 +143,28 @@ async fn put(st: &AppState, kind: &MetaKind, id: &str, body: &[u8]) -> Response 
     }
     // validate_put 已保证 UTF-8 合法（serde_json 拒绝非法 UTF-8），lossy 仅兜底。
     let raw = String::from_utf8_lossy(body);
-    let _ = st
+    // lux 写失败（磁盘满/WAL 等）必须 500——吞错报 ok 是静默数据丢失（审查
+    // 2026-10-27）；同 routes_model/routes_alarm 的 Err→500 先例。
+    match st
         .lux
         .execute("HSET", &[&lux_key(kind.key_prefix, id), DOC_FIELD, &raw])
-        .await;
-    Json(serde_json::json!({ "status": "ok" })).into_response()
+        .await
+    {
+        Ok(_) => Json(serde_json::json!({ "status": "ok" })).into_response(),
+        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+    }
 }
 
-/// `DELETE /api/v1/{screens|themes}/:id`：幂等（不存在也 ok）。
+/// `DELETE /api/v1/{screens|themes}/:id`：幂等（不存在也 ok）；id 词法校验与
+/// PUT 对称（非法 id 400，不放行构造越界 lux key）。
 async fn delete(st: &AppState, kind: &MetaKind, id: &str) -> Response {
-    let _ = st
-        .lux
-        .execute("DEL", &[&lux_key(kind.key_prefix, id)])
-        .await;
-    Json(serde_json::json!({ "status": "ok" })).into_response()
+    if !valid_id(id) {
+        return err(StatusCode::BAD_REQUEST, "invalid id");
+    }
+    match st.lux.execute("DEL", &[&lux_key(kind.key_prefix, id)]).await {
+        Ok(_) => Json(serde_json::json!({ "status": "ok" })).into_response(),
+        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+    }
 }
 
 // ---------- 纯函数（单测覆盖） ----------
