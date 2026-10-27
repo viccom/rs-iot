@@ -1,0 +1,7 @@
+# 行尾归一（2026-10-27）：文本文件仓库内与检出一律 LF。
+# 背景：6264555 曾全仓 LF→CRLF（318 文件）后又局部回转，造成 314 CRLF / 少量 LF
+# 混合态——任何编辑器/工具行尾翻转都会产生 whole-file diff 噪音（实例：0074924
+# 的 Cargo.toml 388 行 churn 中 386 行是行尾）。Windows 工作机用
+# `git config core.autocrlf true` 客户端侧适配检出 CRLF。
+# text=auto：git 自动识别二进制并跳过转换，未来引入图片/字体无需改本文件。
+* text=auto eol=lf
