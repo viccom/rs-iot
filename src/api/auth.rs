@@ -77,7 +77,7 @@ pub async fn auth_middleware(State(st): State<AppState>, req: Request, next: Nex
             req.headers()
                 .get(axum::http::header::COOKIE)
                 .and_then(|v| v.to_str().ok())
-                .and_then(|c| c.split("token=").nth(1).and_then(|s| s.split(';').next()))
+                .and_then(cookie_token)
                 .map(|s| s.to_string())
         });
 
@@ -106,4 +106,51 @@ pub struct AuthedUser {
     pub user_id: String,
     /// 认证通道（jwt；accesskey 直通路径不注入本类型）。
     pub via: &'static str,
+}
+
+/// 从 Cookie 头字符串里取 `token=` 对的值（精确名解析）。
+///
+/// 多对 cookie 以 `;` 分隔；名字必须恰为 `token`——`reasonix_token=` 等
+/// 后缀同名的 cookie 不得误当凭证（gateway 反代场景浏览器可能同时带两者）。
+fn cookie_token(cookie_header: &str) -> Option<&str> {
+    cookie_header.split(';').map(str::trim).find_map(|pair| {
+        pair.strip_prefix("token=")
+            .filter(|v| !v.is_empty())
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::cookie_token;
+
+    /// 基本形态：单对 token cookie。
+    #[test]
+    fn single_token_pair() {
+        assert_eq!(cookie_token("token=jwt-abc"), Some("jwt-abc"));
+    }
+
+    /// token 在多对 cookie 中间。
+    #[test]
+    fn token_among_other_pairs() {
+        assert_eq!(
+            cookie_token("theme=dark; token=jwt-abc; density=compact"),
+            Some("jwt-abc")
+        );
+    }
+
+    /// 后缀同名 cookie（如 gateway 注入的 reasonix_token）不得误命中。
+    /// 复现旧实现 `split("token=").nth(1)` 的缺陷：会把 `reasonix_token=x`
+    /// 里的 x 当凭证值。
+    #[test]
+    fn suffix_named_cookie_is_rejected() {
+        assert_eq!(cookie_token("reasonix_token=jwt-abc"), None);
+        assert_eq!(cookie_token("a=1; reasonix_token=jwt-abc; b=2"), None);
+    }
+
+    /// 无 token 对。
+    #[test]
+    fn no_token_pair() {
+        assert_eq!(cookie_token("theme=dark"), None);
+        assert_eq!(cookie_token(""), None);
+    }
 }

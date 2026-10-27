@@ -58,8 +58,9 @@ pub fn verify_token(token: &str, secret: &str) -> Option<String> {
 ///
 /// 放行 PUBLIC_PATHS；其余按以下顺序取 token 验证，失败 401：
 /// 1. `Authorization: Bearer <jwt>`（REST / fetch 用）。
-/// 2. URL query `?token=<jwt>`（EventSource 用——标准 EventSource API 不能设 header，
-///    监控 SSE / AI 面板 SSE 必须经 query 传凭证）。
+/// 2. URL query `?token=<jwt>`（EventSource 兼容通道——标准 API 不能设 header）。
+/// 3. `Cookie: token=<jwt>`（统一会话主通道：rs-iot login 下发 HttpOnly cookie，
+///    浏览器对同源 REST 与 EventSource 自动携带，两套 SPA 共享登录态）。
 ///
 /// 状态类型 `Arc<GwState>`（与 build_router 的 with_state 对齐）。
 pub async fn auth_middleware(State(st): State<Arc<GwState>>, req: Request, next: Next) -> Response {
@@ -78,6 +79,19 @@ pub async fn auth_middleware(State(st): State<Arc<GwState>>, req: Request, next:
                 q.split('&')
                     .find_map(|kv| kv.strip_prefix("token=").map(|s| s.to_string()))
             })
+        })
+        .or_else(|| {
+            // Cookie 精确名解析：`;` 分割后逐对 trim 再匹配 `token=` 前缀，
+            // `reasonix_token=` 等后缀同名的 cookie 不得误当凭证。
+            req.headers()
+                .get_all(axum::http::header::COOKIE)
+                .iter()
+                .find_map(|v| {
+                    let v = v.to_str().ok()?;
+                    v.split(';')
+                        .map(str::trim)
+                        .find_map(|pair| pair.strip_prefix("token=").map(|t| t.to_string()))
+                })
         });
     match token {
         Some(t) => match verify_token(&t, st.jwt_secret.as_str()) {

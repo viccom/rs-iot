@@ -62,6 +62,43 @@ async fn login_forwards_to_rsiot_and_returns_token() {
     assert_eq!(resp["token"], "jwt-from-rsiot");
 }
 
+/// login 透传 rs-iot 的 Set-Cookie（统一会话）：rs-iot 登录成功会下发
+/// `token=<jwt>; HttpOnly`，浏览器后续 REST/SSE 自动携带。gateway 若在此丢头，
+/// 两套同源 SPA 就无法共享登录态（这正是改造前 `routes_gw.rs` 只重建 content-type 的坑）。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn login_relays_upstream_set_cookie() {
+    // mock rs-iot: 登录返 {token} + Set-Cookie（模拟 rs-iot routes_user.rs 行为）。
+    let mock_rsiot = spawn_axum(Router::new().route(
+        "/api/v1/user/login",
+        post(|| async {
+            (
+                [(axum::http::header::SET_COOKIE, "token=jwt-from-rsiot; Path=/; HttpOnly; Max-Age=86400")],
+                Json(serde_json::json!({"status":"ok","token":"jwt-from-rsiot"})),
+            )
+        }),
+    ))
+    .await;
+
+    let gw = spawn_axum(build_router(test_state(mock_rsiot))).await;
+
+    let resp = reqwest::Client::new()
+        .post(format!("{gw}/api/gw/login"))
+        .json(&serde_json::json!({"user_id":"admin","pass":"admin"}))
+        .send()
+        .await
+        .expect("request");
+    let cookies: Vec<&str> = resp
+        .headers()
+        .get_all(axum::http::header::SET_COOKIE)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .collect();
+    assert!(
+        cookies.iter().any(|c| c.starts_with("token=jwt-from-rsiot") && c.contains("HttpOnly")),
+        "upstream Set-Cookie must be relayed, got: {cookies:?}"
+    );
+}
+
 /// login 免 JWT（PUBLIC_PATHS）——不带 Authorization 头也能访问。
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn login_is_public_no_jwt_required() {

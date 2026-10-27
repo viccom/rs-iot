@@ -77,11 +77,22 @@ pub async fn login(State(st): State<Arc<GwState>>, Json(req): Json<LoginReq>) ->
         Err(_) => return (StatusCode::BAD_GATEWAY, "rs-iot unreachable").into_response(),
     };
     let status = resp.status();
+    // 透传 rs-iot 的 Set-Cookie（统一会话）：rs-iot login 下发 HttpOnly
+    // `token=<jwt>`，两套同源 SPA 靠它共享登录态。须在 `text()` 消费 resp 前取出。
+    let set_cookies: Vec<String> = resp
+        .headers()
+        .get_all(axum::http::header::SET_COOKIE)
+        .iter()
+        .filter_map(|v| v.to_str().ok().map(|s| s.to_string()))
+        .collect();
     let text = resp.text().await.unwrap_or_default();
-    // 透传 rs-iot 响应（含 {token, user} 或错误）。
-    Response::builder()
+    // 透传 rs-iot 响应（含 {token, user} 或错误）。Builder::header 对 Set-Cookie
+    // 是 append 语义，多条 cookie 逐个追加。
+    let mut builder = Response::builder()
         .status(status)
-        .header("content-type", "application/json")
-        .body(Body::from(text))
-        .unwrap()
+        .header("content-type", "application/json");
+    for c in &set_cookies {
+        builder = builder.header(axum::http::header::SET_COOKIE, c.as_str());
+    }
+    builder.body(Body::from(text)).unwrap()
 }

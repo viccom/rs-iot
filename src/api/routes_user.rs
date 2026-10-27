@@ -185,9 +185,12 @@ pub async fn login(State(st): State<AppState>, Json(req): Json<LoginReq>) -> Res
         "user": user,
     }))
     .into_response();
-    // 会话 cookie 有效期 1 天（具名常量，审计 B6）。
+    // 会话 cookie 有效期 1 天（具名常量，审计 B6）。SameSite=Lax：统一会话后
+    // cookie 是主凭证，Lax 挡跨站 POST 携带（CSRF 基线）；LAN http 不加 Secure。
     const SESSION_COOKIE_MAX_AGE_SECS: u64 = 86_400;
-    let cookie = format!("token={token}; Path=/; HttpOnly; Max-Age={SESSION_COOKIE_MAX_AGE_SECS}");
+    let cookie = format!(
+        "token={token}; Path=/; HttpOnly; Max-Age={SESSION_COOKIE_MAX_AGE_SECS}; SameSite=Lax"
+    );
     if let Ok(v) = cookie.parse() {
         resp.headers_mut().insert(axum::http::header::SET_COOKIE, v);
     }
@@ -196,7 +199,7 @@ pub async fn login(State(st): State<AppState>, Json(req): Json<LoginReq>) -> Res
 
 pub async fn logout() -> Response {
     let mut resp = Json(serde_json::json!({"status": "ok"})).into_response();
-    let expired = "token=; Path=/; HttpOnly; Max-Age=0";
+    let expired = "token=; Path=/; HttpOnly; Max-Age=0; SameSite=Lax";
     if let Ok(v) = expired.parse() {
         resp.headers_mut().insert(axum::http::header::SET_COOKIE, v);
     }
