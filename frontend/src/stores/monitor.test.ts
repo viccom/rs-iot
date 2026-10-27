@@ -169,7 +169,8 @@ describe('monitor store', () => {
     s.start()
     expect(FakeEventSource.last).not.toBeNull()
     expect(FakeEventSource.last!.url).toContain('/api/rsiot/api/v1/events')
-    expect(FakeEventSource.last!.url).toContain('token=tok-abc')
+    // 统一会话后 SSE 鉴权走同源 cookie，URL 不再携带 token。
+    expect(FakeEventSource.last!.url).not.toContain('token=')
     // M3 改动：start() 只订 rtdata,state（log/packet 移到诊断 Tab 手动订阅）。
     expect(FakeEventSource.last!.url).toContain('types=rtdata,state')
     expect(FakeEventSource.last!.url).not.toContain('log')

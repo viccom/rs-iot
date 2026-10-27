@@ -245,8 +245,9 @@ describe('agent store', () => {
       constructor(_url: string) {}
       close() {}
     }
-    // localStorage 桩（auth store 初始化读 token，同 monitor.test.ts 模式）
-    const ls: Record<string, string> = { rsiot_token: 't' }
+    // localStorage 桩（auth store 初始化读 token，同 monitor.test.ts 模式；
+    // 键为统一会话键 webhmi_token）
+    const ls: Record<string, string> = { webhmi_token: 't' }
     ;(globalThis as { localStorage?: Storage }).localStorage = {
       getItem: (k: string) => ls[k] ?? null,
       setItem: (k: string, v: string) => { ls[k] = v },

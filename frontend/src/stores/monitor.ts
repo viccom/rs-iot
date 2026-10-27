@@ -480,9 +480,7 @@ export const useMonitorStore = defineStore('monitor', () => {
     if (logSse) return
     const tok = useAuthStore().token
     if (isPreviewAuthToken(tok)) { logSubscribed.value = true; return }
-    logSse = new EventSource(
-      `/api/rsiot/api/v1/events?types=log,state&token=${encodeURIComponent(tok)}`,
-    )
+    logSse = new EventSource(`/api/rsiot/api/v1/events?types=log,state`)
     logSse.addEventListener('log', e => safe(() => onLog(JSON.parse((e as MessageEvent).data) as LogEntry)))
     logSse.addEventListener('state', e => safe(() => onState(JSON.parse((e as MessageEvent).data) as StateEvent)))
     logSse.onopen = () => { logSubscribed.value = true }
@@ -505,9 +503,7 @@ export const useMonitorStore = defineStore('monitor', () => {
     if (selectedInstance.value) await startPacketTrace(60)
     const tok = useAuthStore().token
     if (isPreviewAuthToken(tok)) { packetSubscribed.value = true; return }
-    packetSse = new EventSource(
-      `/api/rsiot/api/v1/events?types=packet&token=${encodeURIComponent(tok)}`,
-    )
+    packetSse = new EventSource(`/api/rsiot/api/v1/events?types=packet`)
     packetSse.addEventListener('packet', e => safe(() => onPacket(JSON.parse((e as MessageEvent).data) as PacketEntry)))
     packetSse.onopen = () => { packetSubscribed.value = true }
     packetSse.onerror = () => { /* 浏览器自动重连 */ }
@@ -554,9 +550,8 @@ export const useMonitorStore = defineStore('monitor', () => {
     }
     // rtdata 变更通知 SSE（订阅 state 用于实例状态联动；alarm 告警默认订阅——运维
     // 刚需，照 rtdata 面板模式不做按需激活；log/packet 不在此订阅）。
-    sse = new EventSource(
-      `/api/rsiot/api/v1/events?types=rtdata,state,alarm&token=${encodeURIComponent(tok)}`,
-    )
+    // 鉴权走同源 HttpOnly cookie（EventSource 自动携带，无须 query token）。
+    sse = new EventSource(`/api/rsiot/api/v1/events?types=rtdata,state,alarm`)
     sse.addEventListener('rtdata', e => safe(() => onRtdataNotify(JSON.parse((e as MessageEvent).data) as RtdataEvent)))
     sse.addEventListener('state', e => safe(() => onState(JSON.parse((e as MessageEvent).data) as StateEvent)))
     sse.addEventListener('alarm', e => safe(() => onAlarm(JSON.parse((e as MessageEvent).data) as AlarmEvent)))

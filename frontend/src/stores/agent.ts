@@ -14,7 +14,6 @@ import type {
   ToolApprovalMode,
   WorkspaceEntry,
 } from '../types'
-import { useAuthStore } from './auth'
 import { useMonitorStore } from './monitor'
 import { api } from '../api/client'
 import { useWorkspaceStore } from './workspace'
@@ -601,9 +600,9 @@ export const useAgentStore = defineStore('agent', () => {
    *  tool 增量挂到它（历史里的 assistant 是已完成步骤，不能当作流式目标）。 */
   async function start() {
     if (sse) stop() // 重入守卫（如重连场景）
-    const tok = useAuthStore().token
     resumedMidTurn = false
-    sse = new EventSource(`/api/agent/events?token=${encodeURIComponent(tok)}`)
+    // 鉴权走同源 HttpOnly cookie（EventSource 自动携带，无须 query token）。
+    sse = new EventSource('/api/agent/events')
     // onmessage 接全部帧（无 event: 头）→ safe 包 parse（畸形帧不让 onmessage 抛错，
     // 抛错后该 listener 被 EventSource 摘除）。parse 必须在 safe thunk 内执行
     // （若作 safe 实参先求值，parse 抛错会绕过 try）——对齐 monitor store 既有约定。

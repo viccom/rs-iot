@@ -74,7 +74,7 @@
   --shell-warning-shadow: 0 16px 32px rgba(221, 134, 47, 0.18);
 }
 
-html[data-theme="dark"] {
+html.dark {
   --color-primary: #72ddff;
   --color-primary-strong: #1fb9ea;
   --color-primary-hover: #a5e9ff;
@@ -157,7 +157,7 @@ html {
   scroll-behavior: smooth;
 }
 
-html[data-theme="dark"] {
+html.dark {
   color-scheme: dark;
 }
 

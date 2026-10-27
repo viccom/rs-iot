@@ -72,7 +72,7 @@ onUnmounted(() => {
 })
 
 async function logout() {
-  auth.clear()
+  await auth.logout()
   await router.push('/login')
 }
 
@@ -131,6 +131,14 @@ function setDensityMode(nextDensity: DensityName) {
           <span class="nav-summary">{{ navItem.summary }}</span>
         </RouterLink>
       </nav>
+
+      <!-- 跨 SPA 入口：组态前端由 gateway 在 /hmi 独立托管（ServeDir），同源整页跳转，
+           会话（HttpOnly cookie + webhmi_* 镜像键）与主题随跳转共享。 -->
+      <a class="nav-item nav-external" href="/hmi/">
+        <span class="nav-index">HMI</span>
+        <span class="nav-title">组态画面</span>
+        <span class="nav-summary">编辑与运行组态画面 →</span>
+      </a>
 
       <section class="sidebar-footer">
         <span>Design Mode</span>
@@ -385,6 +393,12 @@ function setDensityMode(nextDensity: DensityName) {
 .nav-item:hover::after,
 .nav-item.active::after {
   opacity: 1;
+}
+
+/* 跨 SPA 出口条目：虚线边框示意"离开本控制台"（目标由网关独立托管）。 */
+.nav-external {
+  margin-top: 4px;
+  border-style: dashed;
 }
 
 .nav-index {
