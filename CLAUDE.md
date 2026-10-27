@@ -30,6 +30,8 @@ POST /api/v1/command/send ─┼─► CtlRegistry.try_send(64) ──► 实例
 **模块职责**：按数据流顺序的完整表（lib/main/config/host/model/plugin/pipeline/history/transform/db/api/service…）
 **详见 [docs/architecture.md](docs/architecture.md) §二**（含 2026-10-27 架构审查结论与技术债清单）。
 
+**架构优化评估**：9 项议题与实施顺序见 [docs/designs/2026-10-27-architecture-optimization-review.md](docs/designs/2026-10-27-architecture-optimization-review.md)。
+
 **三层速记**：`api/`（28 个 routes + JWT + SSE）· `plugin/`（Source/Sink 契约 + 11 builtin + lua_core）·
 `pipeline.rs`（dispatcher + N worker + 攒批）；数据面与业务域见 `model/`（物模型）· `db/`（lux 封装）· `history/`（旁路）。
 

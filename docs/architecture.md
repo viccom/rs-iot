@@ -81,3 +81,6 @@ POST /api/v1/command/send ─┼─► CtlRegistry.try_send(64) ─► 实例 So
 4. `db/dev_registry.rs` 命名错位（管 `dev2inst` 归属表而非 `devreg` 设备注册表）。
 
 > 完整审查报告（含证据链与逐条复验）见会话记录；修复跟踪见本文件 §四 技术债清单；门禁见 `just check` / `just check-ws`。
+
+**完整优化评估（含 9 项议题的实施顺序、成本与"不建议做"清单）见
+[2026-10-27-architecture-optimization-review.md](designs/2026-10-27-architecture-optimization-review.md)。**
