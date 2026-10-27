@@ -21,3 +21,6 @@ field-kit-dist.zip
 # 内置 mqttPub 兼容脚本落盘（宿主首次启动写出的运行时产物，源在
 # src/plugin/builtin/lua_north/compat.rs 的 COMPAT_SCRIPT 内嵌常量，已存在不覆盖）
 /scripts/_builtin-north-compat/
+
+# 网关本地运行配置备份（含 jwt_secret/serve_token，同 gateway.toml 不得入库）
+gateway.toml.bak
