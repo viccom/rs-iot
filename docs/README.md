@@ -94,6 +94,7 @@
 | [2026-09-02-history-round4-n8-flush-verify-race-plan.md](designs/2026-09-02-history-round4-n8-flush-verify-race-plan.md) | tsink R4：N8 flush verify 对 compaction 替换的容忍语义 | **已实施**（结论见 08-29 总账 §五-I） |
 | [2026-09-03-history-round5-p3-watermark-eviction-plan.md](designs/2026-09-03-history-round5-p3-watermark-eviction-plan.md) | tsink R5：P3 水位粗判（消维护拍全量扫） | **已实施**（结论见 08-29 总账 §五-K） |
 | [2026-10-27-architecture-optimization-review.md](designs/2026-10-27-architecture-optimization-review.md) | 架构优化评估（9 项议题：依赖可复现/丢数据总账/bind 类型化/effective 扇入/热路径/api 分层/协议骨架/配置面/Sample 分配）+ 实施顺序与"不建议做"清单 | 评审 |
+| [2026-10-27-external-plugin-config-push-v3-design.md](designs/2026-10-27-external-plugin-config-push-v3-design.md) | 外部插件配置下发升级（ConfigPush v3）：补 `app_config`/`devices[].bind` 两层下发 + 版本集合协商 + 凭证解析下发 + 不变量与不做什么清单 | 评审 |
 | [2026-08-26-history-phase3-governance-plan.md](designs/2026-08-26-history-phase3-governance-plan.md) | 历史存储 Phase 3 余项收口实施计划（治理 metrics 7 新 family/HistoryTelemetry 内存水位/前端历史查询面板/init_failed+栈溢出双 e2e/浏览器嵌入实测七项+2 bug 修复） | **已实施**（feat/history-phase3，2026-08-26） |
 | [2026-08-27-model-extension-slot-design.md](designs/2026-08-27-model-extension-slot-design.md) | 设备模型域扩展性设计（DeviceModel/TagTemplate 开放扩展槽）：flatten 语义/wire 形态/`x_` 键契约与毕业机制/报警外置与存储梯度定位边界/场景驱动演进路线 | **已实施**（扩展槽+键契约+读透出面：REST 校验/MCP 两读工具/前端只读展示） |
 
