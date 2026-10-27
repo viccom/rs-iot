@@ -436,21 +436,14 @@ pub(crate) fn build_mqtt_options(
 /// （读到 → 明文；未写 → `Ok(None)` 由调用方按认证失败处理，不静默无密码连接；
 /// lux 错误 / ref 非法 → Err）。注意：north 的 password 引用不受实例 `secrets`
 /// 授权清单约束（清单管脚本侧 secret_get；password 是宿主侧连接配置）。
+///
+/// 实现下沉 [`crate::db::secrets::resolve_ref`]——sidecarClient 下发给外部插件的
+/// 连接参数复用同一函数，两处语义不许漂移。
 pub(crate) async fn resolve_password_opt(
     pw: Option<&str>,
     lux: &lux::EmbeddedClient,
 ) -> Result<Option<String>, String> {
-    let Some(p) = pw else {
-        return Ok(None);
-    };
-    let Some(r) = p.strip_prefix(crate::db::secrets::REF_PREFIX) else {
-        return Ok(Some(p.to_string()));
-    };
-    let full = format!("{}{r}", crate::db::secrets::REF_PREFIX);
-    crate::db::secrets::validate_ref(&full).map_err(|e| e.to_string())?;
-    crate::db::secrets::get(lux, &full)
-        .await
-        .map_err(|e| format!("password secret 读取失败：{e}"))
+    crate::db::secrets::resolve_ref(pw, lux).await
 }
 
 // ===== TLS transport 组装（阶段 D H1：凭证明文过网收口）=====

@@ -1,10 +1,14 @@
 # 外部插件配置下发升级设计（ConfigPush v3）
 
-> **状态**：in-review（设计待裁决；无代码改动）
+> **状态**：implemented（批次 1+2 已实施；批次 3 可选未做）
 > **日期**：2026-10-27
+> **实施**：2026-10-27 `f77dc25` 设计入库 → 本 commit 批次 1+2 落地（Go 示例升 v2 / 文档版本修正 / ConfigPush v3 / 版本集合协商 / 凭证解析下发）
+> **代码**：`src/plugin/builtin/sidecar_client/mod.rs`（`build_config_push`/`push_devices`/`push_app_config`/`resolve_app_config_for_push` + `SUPPORTED_VERSIONS`）、`src/db/secrets.rs`（`resolve_ref`）、`src/host.rs`（`BridgeConn`）、`examples/ext-plugin-opcda-go/main.go`
+> **测试**：`tests/sidecar_e2e.rs`（10 用例，含 v3 载荷/v2 兼容/凭证解析/未写入凭证/未知版本拒连）+ `sidecar_client::tests`（14 单测）
+> **遗留**：批次 3（Go 示例升 v3 删连接 flag、前端 `pluginSchemas.ts` 加 sidecarClient 条目）——可选，未做
 > **范围**：sidecarClient bridge 协议配置面——连接参数、设备级绑定参数、凭证、版本协商
-> **依据**：HEAD `b821c9f` 逐行核实；全部行号为实测
-> **关联**：[协议规约 v2](../reference/external-plugin-protocol.md)｜[开发指南](../guides/external-plugin-dev-guide.md)｜[架构优化评估](2026-10-27-architecture-optimization-review.md) §3.3（bind 类型化，本设计的相邻议题）
+> **依据**：设计期基于 HEAD `b821c9f` 逐行核实；实施后行号已随代码变动，功能位置以函数名定位
+> **关联**：[协议规约 v3](../reference/external-plugin-protocol.md)｜[开发指南](../guides/external-plugin-dev-guide.md)｜[架构优化评估](2026-10-27-architecture-optimization-review.md) §3.3（bind 类型化，本设计的相邻议题）
 
 ## 0. 一句话结论
 
@@ -309,7 +313,9 @@ ConfigPush 按客户端版本分支组装：`ver == "2"` 走现有载荷（`:299
 | D4 | v3 是否在 v2 之外**保留** v2 载荷路径 | 保留（I2） | 只发 v3（破坏现有 Python 示例） |
 | D5 | 批次 1 是否先独立合并 | 是（纯 bug 修复，无需等设计裁决） | 与 v3 一起合 |
 
-## 附录 A：本设计引用的全部代码位置
+## 附录 A：本设计引用的代码位置
+
+> 行号为**设计期**（HEAD `b821c9f`）快照；实施后代码已变动（`PROTO_VER` 拆为 `SUPPORTED_VERSIONS`/`CURRENT_VERSION`，ConfigPush 组装抽为 `build_config_push`）。实施后请按函数名定位。
 
 | 位置 | 内容 |
 |---|---|

@@ -90,7 +90,7 @@ curl -s -XPOST http://localhost:8790/api/v1/startinst \
 ### 3.3 外部进程连 bridge 报到
 
 ```
-外部 TCP connect → 发 Hello{inst_id, token, ver:"2"} → 等 HelloAck{ok:true} + ConfigPush{devices}
+外部 TCP connect → 发 Hello{inst_id, token, ver:"3"} → 等 HelloAck{ok:true} + ConfigPush{app_config, devices}
 ```
 
 ## 4. 二进制协议要点
@@ -100,7 +100,7 @@ curl -s -XPOST http://localhost:8790/api/v1/startinst \
 ## 5. 外部进程实现要点
 
 ### 5.1 握手
-- **必须先发 Hello**（带 `inst_id`/`token`/`ver:"2"`），等 `HelloAck{ok:true}` + `ConfigPush`
+- **必须先发 Hello**（带 `inst_id`/`token`/`ver`；新插件用 `"3"`，`"2"` 仍被接受），等 `HelloAck{ok:true}` + `ConfigPush`
 - token 错 / 版本不符 / 实例未启动 / slot 满 → `HelloAck{ok:false, msg}` + 连接关闭
 
 ### 5.2 数据上行（DataUp）
@@ -150,11 +150,24 @@ function main():
             sleep(backoff_next())                 # 指数退避
 ```
 
-## 7. 配置传递约定（ConfigPush 现状）
+## 7. 配置传递约定（ConfigPush v2 / v3）
 
-- 当前 `ConfigPush` **只下发 `devices`**（含 children 的 label/value/type），**不含 `app_config`**
-- 因此协议连接参数（如 OPC DA 的 `prog-id`/`opc-host`、串口波特率等）当前经**外部进程自己的命令行参数 / 配置文件**传入
-- 后续可扩展 `ConfigPush` 含 `app_config`，让连接参数也集中在 rs-iot（需改 `sidecar_client.rs` 序列化，见 [`external-plugin-protocol.md`](../reference/external-plugin-protocol.md)）
+**配置全部集中在 rs-iot**——这是外部插件的定位（"纯运行时"）。外部进程只需
+`--inst` / `--token` / `--bridge-host` / `--bridge-port` 四个接入参数，业务配置
+一律从 ConfigPush 拿。载荷形态由 Hello 的 `ver` 决定：
+
+| 版本 | 载荷 | 适用 |
+|---|---|---|
+| `"2"` | `{inst_id, v:2, devices[{devid, model, tags[{name,type,addr,unit,rw}]}]}` | 存量插件（点表已够用） |
+| `"3"` | v2 + 顶层 `app_config`（连接参数）+ `devices[].bind`（设备级参数） | 需要连接参数/账号/密码/group 的协议 |
+
+- **`app_config`（v3）**：实例配置原样下发，含 OPC DA 的 `prog_id`/`host`/`username`/`password`、Modbus 串口参数等。宿主内部键**不下发**：`secrets`（脚本授权清单）、`heartbeat_timeout_secs`（已由 `HelloAck` 给）。**因此外部进程不再需要自己的配置文件**——删掉那些 `--prog-id` 之类的 flag。
+- **`devices[].bind`（v3）**：设备级协议参数（`BTreeMap<String,String>`），OPC DA 的 group/更新速率、Modbus unit id 都在这里。空则 `{}`。
+- **凭证（v3）**：`app_config.password` 写 `secret:<ref>`，宿主解析成明文后下发（lux `secrets` 表加密存储，管理面 `POST /api/v1/secret/set` 写入）。引用未写入 → 下发 `null`，外部按"无凭证"处理。
+- **版本选择**：新插件用 `"3"`。`"2"` 只在你不需要连接参数时用；两者都会被接受。
+- **配置变更生效**：`stopinst` + `startinst`（外部重连拿新 ConfigPush；不做自动 notify）。
+
+字段逐条说明见 [`external-plugin-protocol.md`](../reference/external-plugin-protocol.md) §9。
 
 ## 8. 调试技巧
 
@@ -169,6 +182,7 @@ function main():
 
 - **token**：创建外部实例时 rs-iot 生成**明文一次**返回，存 `hmac_sha256` hash 于 lux `ext_tokens`（校验用常量时间比对）。删实例自动清除
 - **跨机部署**：token 明文 over TCP；`bind_host=0.0.0.0` 时 token **强制**校验（不可关）。敏感场景加 TLS（后续）
+- **v3 明文凭证过 bridge**：`app_config.password`（含 `secret:` 解析后的明文）随 ConfigPush 下发——token 保护"谁能连"，不保护通道加密。同机默认安全；跨机必须 TLS 或隔离网段
 - **lux 不暴露**：外部永远拿不到 lux 句柄，所有数据经 bridge 透传
 - **勿**把真实 token 写进 config.toml / 日志 / 版本库
 

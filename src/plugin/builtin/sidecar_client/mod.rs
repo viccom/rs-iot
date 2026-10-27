@@ -16,7 +16,7 @@
 //! 详见 `docs/reference/external-plugin-protocol.md`。
 
 use crate::db::ext_token;
-use crate::host::{BridgeRegistry, HostContext};
+use crate::host::{BridgeConn, BridgeRegistry, HostContext};
 use crate::plugin::sample_sender::SampleSender;
 use crate::plugin::traits::Source;
 use crate::types::{CtlMessage, HostKind, InstConfig, Sample, SampleValue};
@@ -44,17 +44,37 @@ const T_COMMAND: u8 = 5;
 const T_COMMAND_ACK: u8 = 6;
 const T_HEARTBEAT: u8 = 7;
 
-/// 协议版本（`Hello.ver`，缺省视为该版本）。M-3 升 v2：v1 外部插件拒连
-/// （版本协商在 acceptor，msg 带升级指引）。
-const PROTO_VER: &str = "2";
+/// 宿主支持的协议版本集合（**集合匹配，非精确匹配**）。
+///
+/// - v2：`devices[{devid, model, tags[]}]`（M-3 模型点表）。
+/// - v3：v2 + 顶层 `app_config`（连接参数）+ `devices[].bind`（设备级协议参数）。
+///
+/// v3 只增字段，v2 客户端忽略未知字段即可兼容——故两者并存，旧客户端不被拒。
+/// 新增版本时只往本表追加，**不移除**（移除即拒连存量外部进程）。
+const SUPPORTED_VERSIONS: &[&str] = &["2", "3"];
+/// 当前版本（新建示例/文档以此为准；仅用于提示文案与测试）。
+const CURRENT_VERSION: &str = "3";
+
+/// `Hello.ver` 缺省值（v2 时代客户端可能不发 ver——按 v2 处理，与协议文档一致）。
+const DEFAULT_VER: &str = "2";
 /// 单帧最大字节数（codec 上限，容纳大配置 push）。
 const MAX_FRAME: usize = 4 * 1024 * 1024;
 /// task 侧心跳超时缺省（`app_config.heartbeat_timeout_secs` 可覆盖）。
 /// 引用 config 单源常量（审计 B6：与 bridge 服务端默认同一来源，防两端漂移）。
 const HB_TIMEOUT_DEFAULT_SECS: u64 = crate::config::DEFAULT_HEARTBEAT_TIMEOUT_SECS;
 
+/// 不下发给外部插件的 `app_config` 键（宿主内部语义）。
+///
+/// - `secrets`：脚本侧 `ctx:secret_get` 授权清单，宿主内部概念；
+/// - `heartbeat_timeout_secs`：已通过 `HelloAck.heartbeat_secs` 下发，重复无意义。
+///
+/// **排除清单而非白名单**：`app_config` 是"任意 JSON，由各插件自行解析"，宿主不该
+/// 理解每个协议的键（OPC DA 的 `prog_id` vs Modbus 的 `serial_port`）。排除清单是
+/// 封闭可审计的；白名单开放且必然遗漏。
+const APP_CONFIG_HOST_KEYS: &[&str] = &["secrets", "heartbeat_timeout_secs"];
+
 fn default_ver() -> String {
-    PROTO_VER.into()
+    DEFAULT_VER.into()
 }
 
 // ---- 外部 → bridge 帧载荷 ----
@@ -191,6 +211,144 @@ fn parse_hb_timeout(app: &serde_json::Value, default: Duration) -> Duration {
         .map_or(default, Duration::from_secs)
 }
 
+/// 设备点表 → ConfigPush `devices[]` 条目（v2/v3 共用；纯函数）。
+///
+/// `tags[].addr` 是装配期 `addr::resolve` 后的绝对地址；纯软 tag（模型 addr=None）
+/// 回退为 tag 名——与 `ExpandedDevice::to_device_spec` 同口径。
+fn push_devices(
+    expanded: &[crate::model::expand::ExpandedDevice],
+    ver: &str,
+) -> Vec<serde_json::Value> {
+    let with_bind = ver == "3";
+    expanded
+        .iter()
+        .map(|ex| {
+            let tags: Vec<serde_json::Value> = ex
+                .model
+                .tags
+                .iter()
+                .map(|t| {
+                    let addr = match &t.addr {
+                        Some(a) => crate::model::addr::resolve(a, &ex.entry.params)
+                            .unwrap_or_else(|_| a.clone()),
+                        None => t.name.clone(), // 纯软 tag：addr=tag 名
+                    };
+                    serde_json::json!({
+                        "name": t.name,
+                        "type": t.data_type,
+                        "addr": addr,
+                        "unit": t.unit,
+                        "rw": if t.rw == crate::model::types::TagRw::R { "r" } else { "rw" },
+                    })
+                })
+                .collect();
+            let mut dev = serde_json::json!({
+                "devid": ex.devid,
+                "model": ex.model.model_id,
+                "tags": tags,
+            });
+            // v3：设备级协议参数（OPC DA group / 更新速率、Modbus unit id 等）原样下发。
+            // 空 bind 也发（{} 而非缺键）——外部按存在性判断能力，形态稳定优于省略。
+            if with_bind {
+                if let Some(obj) = dev.as_object_mut() {
+                    obj.insert("bind".into(), serde_json::json!(ex.bind));
+                }
+            }
+            dev
+        })
+        .collect()
+}
+
+/// `app_config` → 下发给外部插件的视图（v3；纯函数）。
+///
+/// 排除 [`APP_CONFIG_HOST_KEYS`]（宿主内部键），其余原样。非对象（null/标量）→ `{}`，
+/// 降低外部解析分支。**不脱敏**：password 在调用方已解析成明文或字面值——
+/// bridge 通道承载明文凭证是既定取舍（同机默认 bind_host=127.0.0.1；跨机须 TLS）。
+fn push_app_config(app: &serde_json::Value) -> serde_json::Value {
+    let Some(obj) = app.as_object() else {
+        return serde_json::json!({});
+    };
+    let mut out = serde_json::Map::with_capacity(obj.len());
+    for (k, v) in obj {
+        if APP_CONFIG_HOST_KEYS.contains(&k.as_str()) {
+            continue;
+        }
+        out.insert(k.clone(), v.clone());
+    }
+    serde_json::Value::Object(out)
+}
+
+/// 组装 ConfigPush 载荷（纯函数；v2/v3 分支的唯一实现点）。
+///
+/// - v2：`{inst_id, v, devices[]}`——与 M-3 形态逐字节一致（存量外部进程零影响）。
+/// - v3：v2 + `app_config`（已解析凭证）+ `devices[].bind`。
+///
+/// `resolved_app_config` 由调用方传入（已做过 `secret:` 解析），本函数不做 IO。
+fn build_config_push(
+    inst_id: &str,
+    ver: &str,
+    expanded: &[crate::model::expand::ExpandedDevice],
+    resolved_app_config: Option<&serde_json::Value>,
+) -> serde_json::Value {
+    let devices = push_devices(expanded, ver);
+    let v: u8 = ver.parse().unwrap_or(2);
+    let mut out = serde_json::json!({
+        "inst_id": inst_id,
+        "v": v,
+        "devices": devices,
+    });
+    if ver == "3" {
+        if let (Some(obj), Some(app)) = (out.as_object_mut(), resolved_app_config) {
+            obj.insert("app_config".into(), push_app_config(app));
+        }
+    }
+    out
+}
+
+/// 组装 v3 下发的 `app_config`：解析顶层 `password` 的 `secret:` 引用（IO）。
+///
+/// 只处理**顶层 `password` 键**（与 north 的 `NorthCfg.password` 同口径，也是
+/// `redact_inst` 唯一脱敏的键）。其余键原样——嵌套对象里的凭证语义由协议自定，
+/// 宿主不猜。
+///
+/// 失败处理（与 north 一致，不静默降级）：
+/// - ref 非法 / lux 读失败 → warn + 置 `null`（外部收到"无凭证"，连接失败可感知）；
+/// - 在清单但未写入 → `null`（配置了没写值，等同缺失）。
+///
+/// **不因凭证缺失而拒连**：外部插件可能需要重试或降级为匿名，由它自己决定；
+/// 宿主只保证"下发的就是真实可用状态"，不替它做连接决策。
+async fn resolve_app_config_for_push(
+    app: &serde_json::Value,
+    lux: &lux::EmbeddedClient,
+) -> serde_json::Value {
+    let Some(obj) = app.as_object() else {
+        return serde_json::json!({});
+    };
+    let mut out = obj.clone();
+    let pw = out
+        .get("password")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    if let Some(pw) = pw {
+        match crate::db::secrets::resolve_ref(Some(&pw), lux).await {
+            Ok(Some(plain)) => {
+                out.insert("password".into(), serde_json::json!(plain));
+            }
+            Ok(None) => {
+                tracing::warn!(
+                    "[sidecarClient] app_config.password 引用的 secret 未写入——下发 null（外部按无凭证处理）"
+                );
+                out.insert("password".into(), serde_json::Value::Null);
+            }
+            Err(e) => {
+                tracing::warn!("[sidecarClient] app_config.password 解析失败：{e}——下发 null");
+                out.insert("password".into(), serde_json::Value::Null);
+            }
+        }
+    }
+    serde_json::Value::Object(out)
+}
+
 /// 外部插件 bridge 采集插件（无状态工厂标记，每实例 task 内持有自己的连接）。
 #[derive(Debug, Default)]
 pub struct SidecarClient;
@@ -223,9 +381,10 @@ impl Source for SidecarClient {
         );
         let hb_check = hb_timeout / 2;
 
-        // 连接 slot：acceptor 分发来的 TcpStream 经此进入 task。容量 1（外部一次一个连接；
-        // 重连时若 task 未取走上一个，dispatch 报 Full，acceptor 回 ack 让外部稍后重试）。
-        let (slot_tx, mut slot_rx) = mpsc::channel::<TcpStream>(1);
+        // 连接 slot：acceptor 分发来的连接（stream + Hello 版本）经此进入 task。容量 1
+        // （外部一次一个连接；重连时若 task 未取走上一个，dispatch 报 Full，acceptor
+        // 回 ack 让外部稍后重试）。
+        let (slot_tx, mut slot_rx) = mpsc::channel::<BridgeConn>(1);
         ctx.bridge_registry.register(&inst_id, slot_tx);
 
         // observed StatTracker（M4）：外部进程不写 lux，bridge 观察派生指标——
@@ -240,10 +399,10 @@ impl Source for SidecarClient {
         let gate_rejected: std::sync::Arc<std::sync::atomic::AtomicU64> = Default::default();
 
         'outer: loop {
-            let stream = tokio::select! {
+            let (stream, peer_ver) = tokio::select! {
                 _ = token.cancelled() => break 'outer,
                 s = slot_rx.recv() => match s {
-                    Some(s) => s,
+                    Some(c) => (c.stream, c.ver),
                     None => break 'outer,
                 },
             };
@@ -281,8 +440,8 @@ impl Source for SidecarClient {
             {
                 continue;
             }
-            // M-3 模型驱动装配（v2）：绑定展开 → 完整产物（devreg+模型）存会话级
-            // 快照——ConfigPush v2 载荷组装 + DataUp 校验闸共用。展开失败拒连。
+            // M-3 模型驱动装配：绑定展开 → 完整产物（devreg+模型）存会话级快照——
+            // ConfigPush 载荷组装 + DataUp 校验闸共用。展开失败拒连。
             let expanded = match crate::model::expand::expand_devices(&ctx.lux, &inst.devices).await
             {
                 Ok(d) => d,
@@ -293,43 +452,14 @@ impl Source for SidecarClient {
                     continue;
                 }
             };
+            // v3 才需要解析凭证（v2 不下发 app_config——不必为旧客户端读 lux secrets）。
+            let resolved_app = if peer_ver == "3" {
+                Some(resolve_app_config_for_push(&inst.app_config, &ctx.lux).await)
+            } else {
+                None
+            };
+            let cfg = build_config_push(&inst_id, &peer_ver, &expanded, resolved_app.as_ref());
             let expanded = std::sync::Arc::new(expanded);
-            // ConfigPush v2：{inst_id, v:2, devices:[{devid, model, tags:[{name,type,
-            // addr(已解析),unit,rw}]}]}——外部插件按模型点表采集/上报。
-            let push_devices: Vec<serde_json::Value> = expanded
-                .iter()
-                .map(|ex| {
-                    let tags: Vec<serde_json::Value> = ex
-                        .model
-                        .tags
-                        .iter()
-                        .map(|t| {
-                            let addr = match &t.addr {
-                                Some(a) => crate::model::addr::resolve(a, &ex.entry.params)
-                                    .unwrap_or_else(|_| a.clone()),
-                                None => t.name.clone(), // 纯软 tag：addr=tag 名（v1 语义延续）
-                            };
-                            serde_json::json!({
-                                "name": t.name,
-                                "type": t.data_type,
-                                "addr": addr,
-                                "unit": t.unit,
-                                "rw": if t.rw == crate::model::types::TagRw::R { "r" } else { "rw" },
-                            })
-                        })
-                        .collect();
-                    serde_json::json!({
-                        "devid": ex.devid,
-                        "model": ex.model.model_id,
-                        "tags": tags,
-                    })
-                })
-                .collect();
-            let cfg = serde_json::json!({
-                "inst_id": &inst_id,
-                "v": 2,
-                "devices": push_devices,
-            });
             if writer
                 .send(Bytes::from(encode_payload(T_CONFIG_PUSH, &cfg)))
                 .await
@@ -337,7 +467,9 @@ impl Source for SidecarClient {
             {
                 continue;
             }
-            tracing::info!("[sidecarClient] inst {inst_id} external connected, config pushed");
+            tracing::info!(
+                "[sidecarClient] inst {inst_id} external connected (proto v{peer_ver}), config pushed"
+            );
 
             let mut last_hb = Instant::now();
             // 心跳超时检测 ticker(非采集,不接 jitter——jitter 会改变超时判定语义)。
@@ -603,12 +735,12 @@ async fn handle_connect(
             return;
         }
     };
-    if hello.ver != PROTO_VER {
-        // M-3 版本协商：v1 拒连（带升级提示）——外部插件示例已同步 v2。
+    if !SUPPORTED_VERSIONS.contains(&hello.ver.as_str()) {
+        // 版本协商：集合匹配（v2/v3 并存）。不支持的版本带升级提示拒连。
         let msg = format!(
-            "protocol v{} 已停用，请升级到 v{PROTO_VER}（ConfigPush v2 载荷：\
-             devices[].tags[] 为模型点表）",
-            hello.ver
+            "不支持的协议版本 v{}；本宿主支持 {:?}（当前 v{CURRENT_VERSION}）。\
+             v2 载荷：devices[].tags[] 模型点表；v3 追加 app_config 与 devices[].bind",
+            hello.ver, SUPPORTED_VERSIONS
         );
         tracing::warn!("[sidecarClient] {addr} inst {} {msg}", hello.inst_id);
         let p = encode_payload(T_HELLO_ACK, &serde_json::json!({"ok": false, "msg": msg}));
@@ -632,12 +764,16 @@ async fn handle_connect(
         return;
     }
 
-    match registry.try_dispatch(&hello.inst_id, stream) {
+    let conn = BridgeConn {
+        stream,
+        ver: hello.ver,
+    };
+    match registry.try_dispatch(&hello.inst_id, conn) {
         Ok(()) => tracing::info!(
             "[sidecarClient] {addr} inst {} connected, dispatched",
             hello.inst_id
         ),
-        Err((mut s, err)) => {
+        Err((mut c, err)) => {
             tracing::warn!(
                 "[sidecarClient] {addr} inst {} dispatch failed: {err:?}",
                 hello.inst_id
@@ -646,7 +782,7 @@ async fn handle_connect(
                 T_HELLO_ACK,
                 &serde_json::json!({"ok": false, "msg": format!("instance not ready: {err:?}")}),
             );
-            let _ = write_one_frame(&mut s, &p).await;
+            let _ = write_one_frame(&mut c.stream, &p).await;
         }
     }
 }
@@ -730,8 +866,157 @@ mod tests {
     }
 
     #[test]
-    fn hello_ver_defaults_to_proto() {
+    fn hello_ver_missing_falls_back_to_v2() {
+        // 缺 ver → 按 v2 兼容（协议文档 §4「ver 缺失按 v2 处理」；不发 ver 的存量
+        // 客户端不被拒）。与"必填"不同——这是显式裁决，改动须同步协议文档。
         let h: Hello = serde_json::from_str(r#"{"inst_id":"x","token":"t"}"#).unwrap();
-        assert_eq!(h.ver, PROTO_VER);
+        assert_eq!(h.ver, DEFAULT_VER);
+        assert_eq!(h.ver, "2");
+    }
+
+    // ===== 版本协商（集合匹配）=====
+
+    /// v2/v3 并存；v1 与未知版本不在集合内（拒连）。
+    #[test]
+    fn supported_versions_include_v2_and_v3_only() {
+        assert!(
+            SUPPORTED_VERSIONS.contains(&"2"),
+            "v2 必须保留（存量客户端）"
+        );
+        assert!(SUPPORTED_VERSIONS.contains(&"3"), "v3 是当前版本");
+        assert!(!SUPPORTED_VERSIONS.contains(&"1"), "v1 已停用");
+        assert!(!SUPPORTED_VERSIONS.contains(&"4"), "未实现的版本不应放行");
+        assert!(
+            SUPPORTED_VERSIONS.contains(&CURRENT_VERSION),
+            "当前版本须在支持集内"
+        );
+    }
+
+    // ===== ConfigPush 载荷（纯函数）=====
+
+    /// 造一个最小展开产物（1 设备 1 tag，带 bind）。
+    fn expanded_one() -> Vec<crate::model::expand::ExpandedDevice> {
+        use crate::model::types::{DeviceEntry, DeviceModel, TagTemplate};
+        vec![crate::model::expand::ExpandedDevice {
+            devid: "devA".into(),
+            bind: [("group".to_string(), "g1".to_string())].into(),
+            entry: DeviceEntry {
+                devid: "devA".into(),
+                model: "m1".into(),
+                params: [("base".to_string(), "100".to_string())].into(),
+                ..Default::default()
+            },
+            model: DeviceModel {
+                model_id: "m1".into(),
+                tags: vec![TagTemplate {
+                    name: "temp".into(),
+                    data_type: "f32".into(),
+                    addr: Some("holding:{base}:f32".into()),
+                    unit: Some("C".into()),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+        }]
+    }
+
+    /// v2 载荷与 M-3 形态逐字节一致：无 app_config、无 bind、v=2。
+    #[test]
+    fn config_push_v2_shape_unchanged() {
+        let ex = expanded_one();
+        let cfg = build_config_push("inst1", "2", &ex, Some(&serde_json::json!({"a": 1})));
+        assert_eq!(cfg["v"], 2);
+        assert_eq!(cfg["inst_id"], "inst1");
+        assert!(cfg.get("app_config").is_none(), "v2 不下发 app_config");
+        let dev = &cfg["devices"][0];
+        assert_eq!(dev["devid"], "devA");
+        assert_eq!(dev["model"], "m1");
+        assert!(dev.get("bind").is_none(), "v2 不下发 bind");
+        // tags 形态不变（addr 已解析）
+        assert_eq!(dev["tags"][0]["name"], "temp");
+        assert_eq!(dev["tags"][0]["addr"], "holding:100:f32");
+        assert_eq!(dev["tags"][0]["unit"], "C");
+        assert_eq!(dev["tags"][0]["rw"], "r");
+    }
+
+    /// v3 载荷：v2 全部字段不变 + app_config + devices[].bind。
+    #[test]
+    fn config_push_v3_adds_app_config_and_bind() {
+        let ex = expanded_one();
+        let app = serde_json::json!({"prog_id": "Matrikon.OPC.Simulation.1", "password": "pw"});
+        let cfg = build_config_push("inst1", "3", &ex, Some(&app));
+        assert_eq!(cfg["v"], 3);
+        assert_eq!(cfg["app_config"]["prog_id"], "Matrikon.OPC.Simulation.1");
+        assert_eq!(cfg["app_config"]["password"], "pw");
+        // v2 字段一字不改
+        assert_eq!(cfg["devices"][0]["devid"], "devA");
+        assert_eq!(cfg["devices"][0]["tags"][0]["addr"], "holding:100:f32");
+        // v3 新增 bind
+        assert_eq!(cfg["devices"][0]["bind"]["group"], "g1");
+    }
+
+    /// v3 空 bind 也发 `{}`（形态稳定，外部按存在性判断能力）。
+    #[test]
+    fn config_push_v3_empty_bind_still_present() {
+        let mut ex = expanded_one();
+        ex[0].bind.clear();
+        let cfg = build_config_push("i", "3", &ex, Some(&serde_json::json!({})));
+        assert_eq!(cfg["devices"][0]["bind"], serde_json::json!({}));
+    }
+
+    /// app_config 裁剪：宿主内部键排除，其余原样（含未知协议键）。
+    #[test]
+    fn push_app_config_excludes_host_keys_only() {
+        let app = serde_json::json!({
+            "secrets": ["secret:k1"],
+            "heartbeat_timeout_secs": 30,
+            "prog_id": "X",
+            "opc_host": "1.2.3.4",
+            "nested": {"a": 1},
+        });
+        let out = push_app_config(&app);
+        assert!(out.get("secrets").is_none(), "secrets 是宿主内部键");
+        assert!(
+            out.get("heartbeat_timeout_secs").is_none(),
+            "心跳已由 HelloAck 下发"
+        );
+        assert_eq!(out["prog_id"], "X");
+        assert_eq!(out["opc_host"], "1.2.3.4");
+        assert_eq!(out["nested"]["a"], 1, "嵌套对象原样透传");
+    }
+
+    /// 非对象 app_config（null/标量）→ `{}`（外部解析零分支）。
+    #[test]
+    fn push_app_config_non_object_yields_empty() {
+        for v in [serde_json::Value::Null, serde_json::json!(42)] {
+            assert_eq!(push_app_config(&v), serde_json::json!({}));
+        }
+    }
+
+    /// 纯软 tag（模型 addr=None）→ addr 回退 tag 名（与 to_device_spec 同口径）。
+    #[test]
+    fn push_devices_soft_tag_addr_falls_back_to_name() {
+        use crate::model::types::{DeviceEntry, DeviceModel, TagTemplate};
+        let ex = vec![crate::model::expand::ExpandedDevice {
+            devid: "d".into(),
+            bind: Default::default(),
+            entry: DeviceEntry {
+                devid: "d".into(),
+                model: "m".into(),
+                ..Default::default()
+            },
+            model: DeviceModel {
+                model_id: "m".into(),
+                tags: vec![TagTemplate {
+                    name: "soft".into(),
+                    data_type: "float".into(),
+                    addr: None,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+        }];
+        let cfg = build_config_push("i", "2", &ex, None);
+        assert_eq!(cfg["devices"][0]["tags"][0]["addr"], "soft");
     }
 }

@@ -11,7 +11,7 @@
 //	ext-opcda.exe --inst <id> --token <token> --bridge-host 127.0.0.1 --bridge-port 8781 \
 //	  --prog-id Matrikon.OPC.Simulation.1 --opc-host localhost --period 2
 //
-// OPC items 来自 rs-iot ConfigPush（devices[].children[].value = OPC itemID）。
+// OPC items 来自 rs-iot ConfigPush v2（devices[].tags[]：name=上报 tag，addr=OPC itemID）。
 // 写命令 data JSON: {"item":"<itemID>","value":<值>}（值按 item 原生类型自动转换）。
 //
 // 仅 Windows（opcda 依赖 COM）；非 Windows 编译本文件被 build tag 排除。
@@ -44,24 +44,38 @@ const (
 	tHeartbeat  byte = 0x07
 )
 
-const protoVer = "1"
+// 协议版本（bridge 侧精确匹配：v1 已停用，发错版本会被 HelloAck{ok:false} 拒连）。
+const protoVer = "2"
 
-// ConfigPush 结构（bridge → ext）。
+// ConfigPush 结构（bridge → ext，v2 模型点表形态）。
 type configPush struct {
 	InstID  string       `json:"inst_id"`
+	V       int          `json:"v"`
 	Devices []deviceSpec `json:"devices"`
 }
 
+// deviceSpec：v2 的设备条目（devreg 设备 + 模型点表）。
 type deviceSpec struct {
-	Label    string      `json:"label"`
-	Value    string      `json:"value"` // 设备 ID（DataUp 的 devid）
-	Children []childSpec `json:"children"`
+	Devid string    `json:"devid"` // 设备 ID（DataUp 的 devid）
+	Model string    `json:"model"` // 设备模型 id（元数据追溯）
+	Tags  []tagSpec `json:"tags"`  // 模型点表
 }
 
-type childSpec struct {
-	Label string `json:"label"`
-	Value string `json:"value"` // OPC itemID
-	Type  string `json:"type"`
+// tagSpec：模型点表条目。
+type tagSpec struct {
+	Name string  `json:"name"` // 上报 tag（DataUp 的 tag）
+	Type string  `json:"type"` // 值类型
+	Addr *string `json:"addr"` // OPC itemID（已解析绝对地址；纯软 tag 为 tag 名）
+	Unit *string `json:"unit"`
+	Rw   string  `json:"rw"`
+}
+
+// itemID 取 OPC itemID：addr 优先，缺省回退 tag 名。
+func (t tagSpec) itemID() string {
+	if t.Addr != nil && *t.Addr != "" {
+		return *t.Addr
+	}
+	return t.Name
 }
 
 // DataUp（ext → bridge）。
@@ -325,11 +339,11 @@ func (p *plugin) session() error {
 	if err := json.Unmarshal(body, &cfg); err != nil {
 		return fmt.Errorf("解析 ConfigPush: %w", err)
 	}
-	itemIDs, devid := collectItems(cfg)
+	itemIDs, tagNames, devid := collectItems(cfg)
 	if len(itemIDs) == 0 {
-		return fmt.Errorf("ConfigPush 无 items")
+		return fmt.Errorf("ConfigPush 无 tags")
 	}
-	log.Printf("[%s] 配置：devid=%s，%d items", p.instID, devid, len(itemIDs))
+	log.Printf("[%s] 配置 v%d：devid=%s，%d tags", p.instID, cfg.V, devid, len(itemIDs))
 
 	// 4. 连 DA Server + AddItems（每 session 重建：bridge 断 → opcda 断 → 重连同）。
 	server, err := opcda.Connect(p.progID, p.opcHost)
@@ -352,6 +366,7 @@ func (p *plugin) session() error {
 	itemMap := make(map[string]*opcda.OPCItem, len(itemList))
 	handles := make([]uint32, 0, len(itemList))
 	validIDs := make([]string, 0, len(itemList))
+	validTags := make([]string, 0, len(itemList))
 	for i, it := range itemList {
 		if addErrs[i] != nil {
 			log.Printf("[%s] AddItem %s 失败（跳过）: %v", p.instID, itemIDs[i], addErrs[i])
@@ -360,6 +375,7 @@ func (p *plugin) session() error {
 		itemMap[itemIDs[i]] = it
 		handles = append(handles, it.GetServerHandle())
 		validIDs = append(validIDs, itemIDs[i])
+		validTags = append(validTags, tagNames[i])
 	}
 	if len(handles) == 0 {
 		return fmt.Errorf("无有效 item（全部 AddItem 失败）")
@@ -406,7 +422,7 @@ func (p *plugin) session() error {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				collectOnce(p.instID, group, handles, validIDs, devid, write)
+				collectOnce(p.instID, group, handles, validIDs, validTags, devid, write)
 			}
 		}
 	}()
@@ -443,21 +459,28 @@ func (p *plugin) session() error {
 	return ctx.Err()
 }
 
-// collectItems：从 ConfigPush 收集所有 itemID + 第一个 devid。
-func collectItems(cfg configPush) (ids []string, devid string) {
+// collectItems：从 ConfigPush v2 收集 itemID + 对应上报 tag 名 + 第一个 devid。
+//
+// 两者不同源：itemIDs 走 OPC AddItems（addr），tagNames 走 DataUp（name）——
+// bridge 侧校验闸按 name 匹配模型点表，用 addr 上报会被拒。
+func collectItems(cfg configPush) (ids []string, tags []string, devid string) {
 	for _, dev := range cfg.Devices {
 		if devid == "" {
-			devid = dev.Value
+			devid = dev.Devid
 		}
-		for _, ch := range dev.Children {
-			ids = append(ids, ch.Value)
+		for _, t := range dev.Tags {
+			ids = append(ids, t.itemID())
+			tags = append(tags, t.Name)
 		}
 	}
-	return ids, devid
+	return ids, tags, devid
 }
 
 // collectOnce：一次 SyncRead → DataUp。
-func collectOnce(instID string, group *opcda.OPCGroup, handles []uint32, ids []string, devid string, write func(byte, interface{}) error) {
+//
+// ids 是 OPC itemID（读用），tags 是上报 tag 名（bridge 校验闸按模型点表 name 匹配）——
+// 两者一一对应，DataUp 发 tags 而非 ids。
+func collectOnce(instID string, group *opcda.OPCGroup, handles []uint32, ids []string, tags []string, devid string, write func(byte, interface{}) error) {
 	status, errs, err := group.SyncRead(opcda.OPC_DS_CACHE, handles)
 	if err != nil {
 		log.Printf("[%s] SyncRead 失败: %v", instID, err)
@@ -471,7 +494,7 @@ func collectOnce(instID string, group *opcda.OPCGroup, handles []uint32, ids []s
 			continue
 		}
 		samples = append(samples, dataSample{
-			Tag:   ids[i],
+			Tag:   tags[i],
 			Value: opcValueToJSON(st.Value),
 			Ts:    ts,
 		})

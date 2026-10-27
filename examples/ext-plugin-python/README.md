@@ -1,11 +1,11 @@
 # rs-iot 外部插件 Python 样例
 
-sidecarClient bridge 协议 v1 的 Python 参考实现。供 Go/C/Java/Node 等其他语言移植参照。
+sidecarClient bridge 协议 **v2** 的 Python 参考实现（模型点表形态）。供 Go/C/Java/Node 等其他语言移植参照。
 
 ## 能力演示
 
 - ✅ TCP 连接 + Hello 握手 + token 鉴权
-- ✅ 接收 HelloAck + ConfigPush（devices/children）
+- ✅ 接收 HelloAck + ConfigPush（v2：`devices[].tags[]` 模型点表）
 - ✅ 周期模拟采集 → DataUp 上报
 - ✅ 接收写命令 Command → 执行（打印）→ 回 CommandAck
 - ✅ 定时心跳 Heartbeat
@@ -29,7 +29,7 @@ sidecarClient bridge 协议 v1 的 Python 参考实现。供 Go/C/Java/Node 等�
 
 2. 启动 rs-iot：`./target/debug/rs-iot --config config.toml`
 
-3. REST 建外部插件实例（`host_kind=external`），拿一次性返回的 `plugin_token`：
+3. 建设备模型 + 设备（M-2 起实例只写绑定，点表来自模型）：
 
    ```bash
    # 登录拿 JWT
@@ -37,6 +37,22 @@ sidecarClient bridge 协议 v1 的 Python 参考实现。供 Go/C/Java/Node 等�
      -H 'Content-Type: application/json' \
      -d '{"user_id":"admin","pass":"admin"}' | jq -r .token)
 
+   # 模型：两个纯软 tag（addr 省略 = 用 tag 名；本例模拟采集不寻址）
+   curl -s -XPOST http://localhost:8780/api/v1/devmodel/set \
+     -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+     -d '{"model_id":"py_sim","tags":[
+           {"name":"temp","data_type":"f32","unit":"C"},
+           {"name":"humidity","data_type":"f32","unit":"%RH"}]}'
+
+   # 设备
+   curl -s -XPOST http://localhost:8780/api/v1/devreg/set \
+     -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+     -d '{"devid":"devP","model":"py_sim"}'
+   ```
+
+4. REST 建外部插件实例（`host_kind=external`），拿一次性返回的 `plugin_token`：
+
+   ```bash
    # 建实例（注意 host_kind:"external"）→ 响应含 plugin_token（仅此次）
    curl -s -XPOST http://localhost:8780/api/v1/inst/set \
      -H "Authorization: Bearer $TOKEN" \
@@ -49,10 +65,7 @@ sidecarClient bridge 协议 v1 的 Python 参考实现。供 Go/C/Java/Node 等�
          "app_type": "south",
          "host_kind": "external",
          "app_config": {"heartbeat_timeout_secs": 30},
-         "devices": [{"label":"demo","value":"devP","children":[
-           {"label":"温度","value":"temp","type":"float"},
-           {"label":"湿度","value":"humidity","type":"float"}
-         ]}]
+         "devices": [{"devid":"devP","bind":{}}]
        }
      }' | jq .   # → {"status":"ok","plugin_token":"<hex>"}
 

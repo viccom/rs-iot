@@ -80,6 +80,19 @@ pub enum DispatchErr {
     Full,
 }
 
+/// bridge 连接分发单元：裸连接 + 该连接 Hello 声明的协议版本。
+///
+/// 版本随连接一起投递（而非存注册表）——同一实例可先后被不同版本的客户端连接，
+/// 版本是**连接级**属性；sidecarClient task 据此决定 ConfigPush 载荷形态
+/// （v2 = 仅 devices；v3 = + app_config + devices[].bind）。
+#[derive(Debug)]
+pub struct BridgeConn {
+    /// 已通过 token 校验的裸 TCP 连接。
+    pub stream: TcpStream,
+    /// 客户端 Hello 声明的协议版本（已过 `SUPPORTED_VERSIONS` 校验）。
+    pub ver: String,
+}
+
 /// bridge 连接分发注册表：`inst_id` → 连接 slot。
 ///
 /// acceptor 校验外部进程 Hello 后，按 `inst_id` 把裸 `TcpStream` 经此表分发给对应
@@ -87,7 +100,7 @@ pub enum DispatchErr {
 /// task 收到 stream 后自行 `tokio::io::split` + `FramedRead`/`FramedWrite`（codec 在 sidecar_client）。
 #[derive(Clone, Default, Debug)]
 pub struct BridgeRegistry {
-    map: Arc<DashMap<String, mpsc::Sender<TcpStream>>>,
+    map: Arc<DashMap<String, mpsc::Sender<BridgeConn>>>,
 }
 
 impl BridgeRegistry {
@@ -99,7 +112,7 @@ impl BridgeRegistry {
     }
 
     /// 注册实例的连接 slot（sidecarClient task 启动时）。
-    pub fn register(&self, inst: &str, tx: mpsc::Sender<TcpStream>) {
+    pub fn register(&self, inst: &str, tx: mpsc::Sender<BridgeConn>) {
         self.map.insert(inst.to_string(), tx);
     }
 
@@ -117,8 +130,8 @@ impl BridgeRegistry {
     pub fn try_dispatch(
         &self,
         inst: &str,
-        conn: TcpStream,
-    ) -> Result<(), (TcpStream, DispatchErr)> {
+        conn: BridgeConn,
+    ) -> Result<(), (BridgeConn, DispatchErr)> {
         if let Some(slot) = self.map.get(inst) {
             match slot.value().try_send(conn) {
                 Ok(()) => Ok(()),

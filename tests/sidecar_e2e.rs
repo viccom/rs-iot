@@ -16,6 +16,7 @@ use rs_iot::types::{
     AppType, CtlMessage, DeviceSpec, HostKind, InstConfig, InstId, PluginName, Sample,
 };
 use serde_json::json;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -73,6 +74,16 @@ struct Env {
 
 /// 起全套：lux + identity + ctx + InstanceManager + pipeline + bridge acceptor + sidecarClient 实例。
 async fn setup(inst_id: &str, hb_secs: u64) -> Env {
+    setup_with(inst_id, hb_secs, json!({}), BTreeMap::new()).await
+}
+
+/// 同 [`setup`]，但可注入 `app_config` 额外键与设备 `bind`（v3 下发用例）。
+async fn setup_with(
+    inst_id: &str,
+    hb_secs: u64,
+    extra_app: serde_json::Value,
+    bind: BTreeMap<String, String>,
+) -> Env {
     let data_dir = common::test_data_dir(&format!("sidecar-{inst_id}"));
     let (handle, client) = common::start_lux(data_dir.to_str().expect("utf8")).await;
     rs_iot::db::identity::bootstrap(&client)
@@ -134,7 +145,25 @@ async fn setup(inst_id: &str, hb_secs: u64) -> Env {
         }],
     )
     .await;
+    // bind 注入：register_devices_as_models 产出的绑定默认空 bind，v3 用例需要非空。
+    let bindings = if bind.is_empty() {
+        bindings
+    } else {
+        bindings
+            .into_iter()
+            .map(|mut b| {
+                b.bind = bind.clone();
+                b
+            })
+            .collect()
+    };
     // 创建 sidecarClient External 实例 + 签发 token + start。
+    let mut app = json!({"heartbeat_timeout_secs": hb_secs});
+    if let (Some(dst), Some(src)) = (app.as_object_mut(), extra_app.as_object()) {
+        for (k, v) in src {
+            dst.insert(k.clone(), v.clone());
+        }
+    }
     let inst = InstConfig {
         inst_id: inst_id.into(),
         inst_name: "it sidecar".into(),
@@ -142,7 +171,7 @@ async fn setup(inst_id: &str, hb_secs: u64) -> Env {
         app_type: AppType::South,
         auto_start: false,
         // 测试心跳超时（hb_secs 参数化）：默认长超时避免误判，心跳超时用例传小值。
-        app_config: json!({"heartbeat_timeout_secs": hb_secs}),
+        app_config: app,
         devices: bindings,
         host_kind: HostKind::External,
     };
@@ -471,5 +500,212 @@ async fn sidecar_heartbeat_timeout_disconnects() {
     );
 
     drop(writer);
+    teardown(env).await;
+}
+
+// ===== v3：配置下发升级（app_config + bind + 凭证 + 版本协商）=====
+
+/// 握手 + 收 ConfigPush 的通用辅助（返回 (HelloAck, ConfigPush)）。
+async fn handshake(
+    port: u16,
+    inst: &str,
+    token: &str,
+    ver: &str,
+) -> (
+    FramedRead<tokio::io::ReadHalf<tokio::net::TcpStream>, LengthDelimitedCodec>,
+    FramedWrite<tokio::io::WriteHalf<tokio::net::TcpStream>, LengthDelimitedCodec>,
+    serde_json::Value,
+    serde_json::Value,
+) {
+    let stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+        .await
+        .expect("connect");
+    let (r, w) = tokio::io::split(stream);
+    let mut reader = FramedRead::new(r, LengthDelimitedCodec::new());
+    let mut writer = FramedWrite::new(w, LengthDelimitedCodec::new());
+    writer
+        .send(enc(
+            T_HELLO,
+            &json!({"inst_id": inst, "token": token, "ver": ver}),
+        ))
+        .await
+        .expect("send hello");
+    let (t, ack) = read_frame(&mut reader).await.expect("helloack");
+    assert_eq!(t, T_HELLO_ACK);
+    if ack["ok"] != json!(true) {
+        return (reader, writer, ack, serde_json::Value::Null);
+    }
+    let (t, cfg) = read_frame(&mut reader).await.expect("configpush");
+    assert_eq!(t, T_CONFIG_PUSH);
+    (reader, writer, ack, cfg)
+}
+
+/// v3 客户端收到 app_config（宿主内部键已排除）与 devices[].bind。
+#[tokio::test]
+async fn sidecar_v3_pushes_app_config_and_bind() {
+    let mut bind = BTreeMap::new();
+    bind.insert("group".to_string(), "g1".to_string());
+    bind.insert("update_rate".to_string(), "1000".to_string());
+    let env = setup_with(
+        "sc-v3",
+        60,
+        json!({
+            "prog_id": "Matrikon.OPC.Simulation.1",
+            "opc_host": "192.168.1.20",
+            "username": "opcuser",
+            "password": "literal-pw",
+            "secrets": ["secret:should_not_leak"],
+        }),
+        bind,
+    )
+    .await;
+
+    let (_reader, writer, ack, cfg) = handshake(env.port, "sc-v3", &env.token, "3").await;
+    assert_eq!(ack["ok"], json!(true), "v3 应被接受：{ack}");
+
+    assert_eq!(cfg["v"], 3);
+    // app_config 下发（连接参数集中管理的核心）
+    let app = &cfg["app_config"];
+    assert_eq!(app["prog_id"], "Matrikon.OPC.Simulation.1");
+    assert_eq!(app["opc_host"], "192.168.1.20");
+    assert_eq!(app["username"], "opcuser");
+    assert_eq!(app["password"], "literal-pw", "字面值原样下发");
+    // 宿主内部键排除
+    assert!(app.get("secrets").is_none(), "secrets 不下发");
+    assert!(
+        app.get("heartbeat_timeout_secs").is_none(),
+        "心跳已由 HelloAck 下发"
+    );
+    // devices[].bind 下发
+    assert_eq!(cfg["devices"][0]["devid"], "devS");
+    assert_eq!(cfg["devices"][0]["bind"]["group"], "g1");
+    assert_eq!(cfg["devices"][0]["bind"]["update_rate"], "1000");
+    // v2 字段仍在（只增不改）
+    assert_eq!(cfg["devices"][0]["tags"][0]["name"], "temp");
+
+    drop(writer);
+    teardown(env).await;
+}
+
+/// v2 客户端收到 v2 形状（无 app_config、无 bind）——存量外部进程零影响。
+#[tokio::test]
+async fn sidecar_v2_client_still_gets_v2_shape() {
+    let mut bind = BTreeMap::new();
+    bind.insert("group".to_string(), "g1".to_string());
+    let env = setup_with(
+        "sc-v2compat",
+        60,
+        json!({"prog_id": "X", "password": "literal-pw"}),
+        bind,
+    )
+    .await;
+
+    let (_reader, writer, ack, cfg) = handshake(env.port, "sc-v2compat", &env.token, "2").await;
+    assert_eq!(ack["ok"], json!(true), "v2 必须继续被接受");
+
+    assert_eq!(cfg["v"], 2);
+    assert!(cfg.get("app_config").is_none(), "v2 不下发 app_config");
+    assert!(cfg["devices"][0].get("bind").is_none(), "v2 不下发 bind");
+    assert_eq!(cfg["devices"][0]["tags"][0]["name"], "temp");
+
+    drop(writer);
+    teardown(env).await;
+}
+
+/// app_config.password 的 `secret:<ref>` 引用在 v3 下解析成明文。
+#[tokio::test]
+async fn sidecar_v3_resolves_secret_password() {
+    let env = setup_with(
+        "sc-secret",
+        60,
+        json!({"password": "secret:opcda_pw"}),
+        BTreeMap::new(),
+    )
+    .await;
+    // 写入 lux secrets 表（v3 组装期读取）。走 RESP 直写明文——secrets 读取层
+    // 保留旧明文兼容（懒迁移），测试无需触发加密写入路径。
+    env.client
+        .execute("HSET", &["secrets", "secret:opcda_pw", "resolved-plain-pw"])
+        .await
+        .expect("set secret");
+
+    let (_reader, writer, ack, cfg) = handshake(env.port, "sc-secret", &env.token, "3").await;
+    assert_eq!(ack["ok"], json!(true));
+    assert_eq!(
+        cfg["app_config"]["password"], "resolved-plain-pw",
+        "secret: 引用应解析成明文下发"
+    );
+
+    drop(writer);
+    teardown(env).await;
+}
+
+/// `secret:` 引用未写入 → 下发 null（不静默给空串/不拒连），且实例仍可正常采集。
+#[tokio::test]
+async fn sidecar_v3_missing_secret_pushes_null() {
+    let env = setup_with(
+        "sc-nosecret",
+        60,
+        json!({"password": "secret:absent_ref"}),
+        BTreeMap::new(),
+    )
+    .await;
+
+    let (mut reader, mut writer, ack, cfg) =
+        handshake(env.port, "sc-nosecret", &env.token, "3").await;
+    assert_eq!(ack["ok"], json!(true), "凭证缺失不应拒连");
+    assert_eq!(
+        cfg["app_config"]["password"],
+        serde_json::Value::Null,
+        "未写入的 secret 下发 null"
+    );
+
+    // 实例仍能收 DataUp（凭证问题不阻断数据面）。
+    writer
+        .send(enc(
+            T_DATA_UP,
+            &json!({"devid":"devS","samples":[{"tag":"temp","value":1.5,"ts":2000}]}),
+        ))
+        .await
+        .expect("dataup");
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    let cell = hget_cell(&env.client, "rtdata:devS", "devS.temp").await;
+    assert!(cell.contains("1.5"), "凭证缺失不影响数据面，实得 {cell}");
+
+    // 防未用告警：reader 保持到 teardown（会话仍活）。
+    let _ = &mut reader;
+    drop(writer);
+    teardown(env).await;
+}
+
+/// 不支持的版本（v1/v9）→ HelloAck{ok:false} + 消息列出支持集，且不发 ConfigPush。
+#[tokio::test]
+async fn sidecar_unsupported_version_rejected() {
+    let env = setup("sc-ver", 60).await;
+
+    for bad in ["1", "9", "abc"] {
+        let stream = tokio::net::TcpStream::connect(("127.0.0.1", env.port))
+            .await
+            .expect("connect");
+        let (r, w) = tokio::io::split(stream);
+        let mut reader = FramedRead::new(r, LengthDelimitedCodec::new());
+        let mut writer = FramedWrite::new(w, LengthDelimitedCodec::new());
+        writer
+            .send(enc(
+                T_HELLO,
+                &json!({"inst_id": "sc-ver", "token": env.token, "ver": bad}),
+            ))
+            .await
+            .expect("hello");
+        let (t, ack) = read_frame(&mut reader).await.expect("helloack");
+        assert_eq!(t, T_HELLO_ACK);
+        assert_eq!(ack["ok"], json!(false), "版本 {bad} 应被拒：{ack}");
+        let msg = ack["msg"].as_str().unwrap_or("");
+        assert!(msg.contains(bad), "消息应点名被拒版本：{msg}");
+        assert!(msg.contains("\"2\""), "消息应列出支持集：{msg}");
+        assert!(msg.contains("\"3\""), "消息应列出支持集：{msg}");
+        drop(writer);
+    }
+
     teardown(env).await;
 }

@@ -206,6 +206,35 @@ pub(crate) async fn del(c: &EmbeddedClient, r: &str) -> Result<(), RsIotError> {
     Ok(())
 }
 
+/// 解析宿主侧连接凭证（`secret:<ref>` → 明文；字面值原样；None → None）。
+///
+/// 供**宿主内部**消费（luaNorth 的 broker password、sidecarClient 下发给外部插件的
+/// 连接参数）：与脚本侧 `ctx:secret_get` 的授权清单是两条独立通路——清单管脚本
+/// 读什么，本函数管宿主连接用什么，不受 `app_config.secrets` 约束。
+///
+/// 语义（调用方须按此处理）：
+/// - `None` → `Ok(None)`：调用方自行决定无凭证是否合法（north 按认证失败处理，
+///   **不静默无密码连接**）；
+/// - 字面值 → `Ok(Some(字面值))`；
+/// - `secret:<ref>` 且已写入 → `Ok(Some(明文))`；
+/// - `secret:<ref>` 但 lux 无此 ref → `Ok(None)`（配置了但没写值）；
+/// - ref 非法 / lux 读失败 → `Err`。
+///
+/// 明文只在调用方需要建立连接的生命周期内存在，不落日志。
+pub async fn resolve_ref(pw: Option<&str>, lux: &EmbeddedClient) -> Result<Option<String>, String> {
+    let Some(p) = pw else {
+        return Ok(None);
+    };
+    let Some(r) = p.strip_prefix(REF_PREFIX) else {
+        return Ok(Some(p.to_string()));
+    };
+    let full = format!("{REF_PREFIX}{r}");
+    validate_ref(&full).map_err(|e| e.to_string())?;
+    get(lux, &full)
+        .await
+        .map_err(|e| format!("password secret 读取失败：{e}"))
+}
+
 /// HGET/HGETALL 值 → 字符串（Nil/空 → `None`，语义同 `luakv::get`）。
 fn embedded_to_string(v: EmbeddedValue) -> Option<String> {
     match v {

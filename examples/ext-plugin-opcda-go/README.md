@@ -1,6 +1,6 @@
 # rs-iot 外部采集插件：OPC DA（Go）
 
-sidecarClient bridge 协议 v1 的 Go 参考实现，连 OPC DA Server（如 `Matrikon.OPC.Simulation.1`），用 [huskar-t/opcda](https://github.com/huskar-t/opcda) 库（Windows COM）。证明 rs-iot 外部插件体系支持**编译型语言 + 真实工业协议**——OPC DA 是典型"Windows COM、rs-iot 跨平台 Rust"场景，外部 Go 进程在 Windows 跑连 DA Server，经 bridge 把数据交给任意平台的 rs-iot。
+sidecarClient bridge 协议 **v2** 的 Go 参考实现（模型点表形态），连 OPC DA Server（如 `Matrikon.OPC.Simulation.1`），用 [huskar-t/opcda](https://github.com/huskar-t/opcda) 库（Windows COM）。证明 rs-iot 外部插件体系支持**编译型语言 + 真实工业协议**——OPC DA 是典型"Windows COM、rs-iot 跨平台 Rust"场景，外部 Go 进程在 Windows 跑连 DA Server，经 bridge 把数据交给任意平台的 rs-iot。
 
 ## 能力
 
@@ -24,13 +24,48 @@ bind_host = "127.0.0.1"
 port = 8781
 ```
 
-### 2. 建 External 实例（OPC itemIDs 作 `children.value`）
+### 2. 建设备模型 + 设备 + External 实例（OPC itemID 作 tag 的 `addr`）
 
 ```bash
 TOKEN=$(curl -s -XPOST http://localhost:8780/api/v1/user/login \
   -H 'Content-Type: application/json' \
   -d '{"user_id":"admin","pass":"admin"}' | jq -r .token)
 
+# 2a. 建模型（tag.addr = OPC itemID；纯软模型 addr 也可写成 tag 名）
+curl -s -XPOST http://localhost:8780/api/v1/devmodel/set \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{
+    "model_id": "matrikon_sim",
+    "vendor": "Matrikon",
+    "model_no": "OPC.Simulation.1",
+    "tags": [
+      {"name":"bool_val","data_type":"bool","addr":"Random.Boolean"},
+      {"name":"int1","data_type":"i32","addr":"Random.Int1"},
+      {"name":"int2","data_type":"i32","addr":"Random.Int2"},
+      {"name":"int4","data_type":"i32","addr":"Random.Int4"},
+      {"name":"real4","data_type":"f32","addr":"Random.Real4"},
+      {"name":"real8","data_type":"f64","addr":"Random.Real8"},
+      {"name":"str_val","data_type":"string","addr":"Random.String"},
+      {"name":"time_val","data_type":"string","addr":"Random.Time"},
+      {"name":"uint1","data_type":"u8","addr":"Random.UInt1"},
+      {"name":"uint2","data_type":"u16","addr":"Random.UInt2"},
+      {"name":"uint4","data_type":"u32","addr":"Random.UInt4"},
+      {"name":"bb_int1","data_type":"i32","addr":"Bucket Brigade.Int1","rw":"rw"},
+      {"name":"bb_int2","data_type":"i32","addr":"Bucket Brigade.Int2","rw":"rw"},
+      {"name":"bb_int4","data_type":"i32","addr":"Bucket Brigade.Int4","rw":"rw"},
+      {"name":"bb_real4","data_type":"f32","addr":"Bucket Brigade.Real4","rw":"rw"},
+      {"name":"bb_real8","data_type":"f64","addr":"Bucket Brigade.Real8","rw":"rw"},
+      {"name":"bb_str","data_type":"string","addr":"Bucket Brigade.String","rw":"rw"},
+      {"name":"bb_time","data_type":"string","addr":"Bucket Brigade.Time","rw":"rw"}
+    ]
+  }'
+
+# 2b. 建设备（params 按模型 params 齐套；本模型无 params）
+curl -s -XPOST http://localhost:8780/api/v1/devreg/set \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"devid":"devOpc","model":"matrikon_sim","desc":"Matrikon 仿真"}'
+
+# 2c. 建 External 实例（devices 只写绑定；连接参数在 app_config）
 curl -s -XPOST http://localhost:8780/api/v1/inst/set \
   -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
   -d '{
@@ -40,27 +75,13 @@ curl -s -XPOST http://localhost:8780/api/v1/inst/set \
       "app_code": "sidecarClient",
       "app_type": "south",
       "host_kind": "external",
-      "app_config": {"heartbeat_timeout_secs": 30},
-      "devices": [{"label":"matrikon","value":"devOpc","children":[
-        {"label":"Random.Boolean","value":"Random.Boolean","type":"bool"},
-        {"label":"Random.Int1","value":"Random.Int1","type":"int"},
-        {"label":"Random.Int2","value":"Random.Int2","type":"int"},
-        {"label":"Random.Int4","value":"Random.Int4","type":"int"},
-        {"label":"Random.Real4","value":"Random.Real4","type":"float"},
-        {"label":"Random.Real8","value":"Random.Real8","type":"float"},
-        {"label":"Random.String","value":"Random.String","type":"string"},
-        {"label":"Random.Time","value":"Random.Time","type":"time"},
-        {"label":"Random.UInt1","value":"Random.UInt1","type":"int"},
-        {"label":"Random.UInt2","value":"Random.UInt2","type":"int"},
-        {"label":"Random.UInt4","value":"Random.UInt4","type":"int"},
-        {"label":"Bucket Brigade.Int1","value":"Bucket Brigade.Int1","type":"int"},
-        {"label":"Bucket Brigade.Int2","value":"Bucket Brigade.Int2","type":"int"},
-        {"label":"Bucket Brigade.Int4","value":"Bucket Brigade.Int4","type":"int"},
-        {"label":"Bucket Brigade.Real4","value":"Bucket Brigade.Real4","type":"float"},
-        {"label":"Bucket Brigade.Real8","value":"Bucket Brigade.Real8","type":"float"},
-        {"label":"Bucket Brigade.String","value":"Bucket Brigade.String","type":"string"},
-        {"label":"Bucket Brigade.Time","value":"Bucket Brigade.Time","type":"time"}
-      ]}]
+      "app_config": {
+        "heartbeat_timeout_secs": 30,
+        "prog_id": "Matrikon.OPC.Simulation.1",
+        "opc_host": "localhost",
+        "period": 2
+      },
+      "devices": [{"devid": "devOpc", "bind": {"group": "matrikon"}}]
     }
   }' | jq .   # → {"status":"ok","plugin_token":"<hex>"}
 
@@ -69,7 +90,8 @@ curl -s -XPOST http://localhost:8780/api/v1/startinst \
   -d '{"inst_id":"opc1"}'
 ```
 
-> **`children.value` = OPC itemID**（如 `Random.Boolean`）。
+> **`tags[].addr` = OPC itemID**（如 `Random.Boolean`）——bridge 在 ConfigPush 里下发已解析的 `addr`，外部插件直接拿它做 `AddItems`。
+> **上报用 `tags[].name`**（如 `bool_val`）——DataUp 的 `tag` 必须是模型点表名，用 itemID 上报会被校验闸拒收。
 > **Money 类型跳过**：`Random.Money` / `Bucket Brigade.Money` 是 `VT_CY`（currency），opcda 不支持，AddItem 会失败并被插件跳过（warn），不影响其余 item。
 > **Qualities 跳过**：`Random.Qualities` 类型异常，同样容错跳过。
 
@@ -88,8 +110,7 @@ go build -o ext-opcda.exe .
 
 ```bash
 ./ext-opcda.exe --inst opc1 --token <plugin_token> \
-  --bridge-host 127.0.0.1 --bridge-port 8781 \
-  --prog-id Matrikon.OPC.Simulation.1 --opc-host localhost --period 2
+  --bridge-host 127.0.0.1 --bridge-port 8781
 ```
 
 ## 验证
@@ -123,6 +144,14 @@ OPC DA 严格类型（类型不匹配 → `BadTypeMismatch`）。Go 插件按 `i
 
 ## 配置传递说明
 
-- `--prog-id` / `--opc-host` / `--period` 经**命令行参数**传（PoC）。
-- OPC items 来自 rs-iot **ConfigPush**（`children.value`）。
-- 当前 ConfigPush 只下发 devices（不含 app_config），故 DA Server 连接信息走命令行。后续可扩展 ConfigPush 含 app_config，让 prog-id/opc-host 也集中在 rs-iot（需改 `sidecar_client.rs` ConfigPush 序列化，见 `docs/reference/external-plugin-protocol.md`）。
+本示例走 **协议 v2**：只消费 ConfigPush 的 `devices[].tags[]`（`name` 上报 / `addr` 寻址）。
+
+`--prog-id` / `--opc-host` / `--period` 仍是**命令行参数**——v2 不下发 `app_config`。
+若要用**协议 v3** 让连接参数也集中在 rs-iot（`app_config.prog_id` / `opc_host` / `period`，
+密码可写 `secret:<ref>` 由宿主解析），改三处即可：
+
+1. `const protoVer = "3"`
+2. `configPush` struct 加 `AppConfig map[string]any `json:"app_config"``
+3. 从 `cfg.AppConfig` 取 `prog_id` / `opc_host` / `period`，删对应 flag
+
+v3 载荷字段见 `docs/reference/external-plugin-protocol.md` §9.2。
