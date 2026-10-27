@@ -1,8 +1,8 @@
--- 跨回调状态（严格沙箱：全局须显式初始化）
+-- 跨回调状态（严格沙箱：全局须显式初始化）：[dev]=累计流量 m³；.__last=上拍 epoch ms
 st_t = {}
 st_r = {}
 
--- 沙箱无 os 库：ctx:now()=epoch ms（能力卡 L6）。本地小时（东八区）= epoch/3600s 偏移 8h 取模。
+-- 沙箱无 os 库：ctx:now()=epoch ms（能力卡 L6）。本地时刻（东八区）：epoch 分钟 +480 取模 1440。
 local function hour_frac()
   return ((math.floor(ctx:now() / 1000 / 60) + 480) % 1440) / 60 -- 0~24 小数小时
 end
@@ -17,11 +17,16 @@ local function base_flow(h)
 end
 
 function on_timer()
+  -- 积分步长 = 上拍至今实测小时数：与 instance 的 period 配置解耦（改周期不改
+  -- 累计速率）；热加载后首拍 st_t 无 .__last → dt=0 不积分，防跳变。
+  local now = ctx:now()
+  local dt = (now - (st_t.__last or now)) / 1000 / 3600
+  st_t.__last = now
   local h = hour_frac()
   for dev, ph in pairs(PHASE) do
     local inst = base_flow((h + ph) % 24) * (0.85 + 0.3 * math.random())
     local prev = st_t[dev] or BASE_T[dev]
-    local total = prev + inst * 2 / 3600
+    local total = prev + inst * dt
     st_t[dev] = total
     local rev_event = (math.random() < 0.003)
     local rev = (st_r[dev] or 0.0) + (rev_event and 0.0004 or 0)

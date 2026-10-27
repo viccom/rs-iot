@@ -1,7 +1,7 @@
--- 跨回调状态（严格沙箱：全局须显式初始化）
+-- 跨回调状态（严格沙箱：全局须显式初始化）：[dev]=累计电量 kWh；.__last=上拍 epoch ms
 st_e = {}
 
--- 沙箱无 os 库：ctx:now()=epoch ms（能力卡 L6）。本地小时（东八区）= epoch/3600s 偏移 8h 取模。
+-- 沙箱无 os 库：ctx:now()=epoch ms（能力卡 L6）。本地时刻（东八区）：epoch 分钟 +480 取模 1440。
 local function hour_frac()
   return ((math.floor(ctx:now() / 1000 / 60) + 480) % 1440) / 60 -- 0~24 小数小时
 end
@@ -17,12 +17,17 @@ local PHASE = { ["home-meter-e1"] = 0.0, ["home-meter-e2"] = 0.35 }
 local BASE_E = { ["home-meter-e1"] = 12580.0, ["home-meter-e2"] = 13520.0 }
 
 function on_timer()
+  -- 积分步长 = 上拍至今实测小时数：与 instance 的 period 配置解耦（改周期不改
+  -- 累计速率）；热加载后首拍 st_e 无 .__last → dt=0 不积分，防跳变。
+  local now = ctx:now()
+  local dt = (now - (st_e.__last or now)) / 1000 / 3600
+  st_e.__last = now
   local h = hour_frac()
   for dev, ph in pairs(PHASE) do
     local hf = (h + ph) % 24
     local power = math.max(0.05, base_load(hf) * (0.9 + 0.2 * math.random()))
     local prev = st_e[dev] or BASE_E[dev]
-    local e = prev + power * 2 / 3600
+    local e = prev + power * dt
     st_e[dev] = e
     ctx:set_values(dev, {
       voltage = 220 + (math.random() - 0.5) * 6,
