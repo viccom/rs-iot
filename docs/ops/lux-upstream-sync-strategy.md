@@ -84,10 +84,18 @@ git branch -vv          # 看 main 相对 origin/main ahead/behind
 
 | commit | 用途 | 改动文件 | 冲突热点 | 丢弃条件 |
 |---|---|---|---|---|
-| `cc900b5` | mlua 0.10→0.12 对齐 rs-iot | `Cargo.toml`(mlua 版本 1 行) + `Cargo.lock` + `src/lua.rs`(3 处 `String`→`LuaString` + `set_hook` 返回 `Result`) | mlua 版本行、lua.rs API 改名 | 官方 lux 升 mlua ≥ 0.12 |
-| `206bc22` | Windows 测试套件 + WAL truncate 修复 | `src/disk.rs`(`Wal` 加 `path` 字段 + `truncate` 两阶段 reopen) + `tests/common/mod.rs` + `tests/public_api.rs` | `Wal` 结构体字段、`truncate` 方法体 | 官方修了同 bug |
+| `fed8471` | mlua 0.10→0.12 对齐 rs-iot | `Cargo.toml`(mlua 版本 1 行) + `Cargo.lock` + `src/lua.rs`(3 处 `String`→`LuaString` + `set_hook` 返回 `Result`) | mlua 版本行、lua.rs API 改名 | 官方 lux 升 mlua ≥ 0.12 |
+| `f745e5f` | Windows 测试套件修复（**已缩水**） | `tests/common/mod.rs`(`find_lux_binary` 加 `EXE_SUFFIX`) + `tests/public_api.rs`(bind 冲突断言接受 `PermissionDenied`) | `find_lux_binary` 函数体 | 官方处理 exe 后缀 |
 
-**关键**:两个补丁都在 lux **内部**(lua 引擎 / WAL 存储),**完全不碰 rs-iot 耦合面**(`ServerConfig`/`EmbeddedClient`/`EmbeddedValue` 等)。所以补丁本身不会让 rs-iot 代码失效。
+**2026-10-27 升级到 main `759c027`（v0.37.1+9 月加固套件）时的变化**：
+
+- 补丁 2（原 `206bc22`）的 `src/disk.rs` 部分（`Wal` 两阶段 reopen truncate）**已按决策树丢弃**——官方 `replace_with` 用 tmp 文件 + rename 原子替换 + WAL generation 校验，方案更完备地修复了同一 Windows bug。只剩两个测试侧修复。
+- 官方行为收紧（下次同步后若测试爆红，先对照这两条）：
+  1. **`ServerHandle` drop = 发起优雅停机**（`shutdown_tx` watch sender 全部消失即停机信号）——测试 helper"起 lux 只回 client"必须 `std::mem::forget(handle)`（async helper 栈帧随 future 完成销毁，`let _keep = handle` 绑定保活**无效**）；rs-iot 生产代码持有 handle 到 shutdown，不受影响。
+  2. **data_dir 排他锁**——同名目录并发打开直接 `AlreadyExists` 拒启。测试目录须每次调用唯一（pid+nanos）。
+- 依赖对齐：lux 的 `jsonwebtoken` 已切 `aws_lc_rs` feature——rs-iot 侧必须同 feature（两个 provider 并存 → 运行时 panic，jsonwebtoken 10 的二选一约束）。
+
+**关键**:两个补丁都在 lux **内部**(lua 引擎 / 测试基建),**完全不碰 rs-iot 耦合面**(`ServerConfig`/`EmbeddedClient`/`EmbeddedValue` 等)。所以补丁本身不会让 rs-iot 代码失效。
 
 ## 五、同步策略:rebase(非 merge)
 
