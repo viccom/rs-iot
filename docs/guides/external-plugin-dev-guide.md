@@ -163,7 +163,8 @@ function main():
 
 - **`app_config`（v3）**：实例配置原样下发，含 OPC DA 的 `prog_id`/`host`/`username`/`password`、Modbus 串口参数等。宿主内部键**不下发**：`secrets`（脚本授权清单）、`heartbeat_timeout_secs`（已由 `HelloAck` 给）。**因此外部进程不再需要自己的配置文件**——删掉那些 `--prog-id` 之类的 flag。
 - **`devices[].bind`（v3）**：设备级协议参数（`BTreeMap<String,String>`），OPC DA 的 group/更新速率、Modbus unit id 都在这里。空则 `{}`。
-- **凭证（v3）**：`app_config.password` 写 `secret:<ref>`，宿主解析成明文后下发（lux `secrets` 表加密存储，管理面 `POST /api/v1/secret/set` 写入）。引用未写入 → 下发 `null`，外部按"无凭证"处理。
+- **`tags[].unit`（v2/v3）**：effective 值（设备覆盖 ∪ 模板 props.unit ∪ 模板顶层 unit），与 REST `/api/v1/tags` 同口径——设备级覆盖会改变下发值，显式清除（空串）下发 `null`。
+- **凭证（v3）**：`app_config.password` 写 `secret:<ref>`，宿主解析成明文后下发（lux `secrets` 表加密存储，管理面 `POST /api/v1/secret/set` 写入）。引用未写入 → 下发 `null`，外部按"无凭证"处理。**只解析顶层 `password` 一个键**——其他键里的 `secret:` 前缀会原样下发字面量。
 - **版本选择**：新插件用 `"3"`。`"2"` 只在你不需要连接参数时用；两者都会被接受。
 - **配置变更生效**：`stopinst` + `startinst`（外部重连拿新 ConfigPush；不做自动 notify）。
 

@@ -110,6 +110,7 @@ rs-iot 收到写命令（MQTT `<hwid>/command` 或 REST `POST /api/v1/command/se
 - `devid`：设备 ID（`rtdata:<devid>` 的 key，DataUp 的 `devid`）
 - `model`：设备模型 id（元数据追溯）
 - `tags[]`：设备模型点表——`name`（DataUp 的 `tag`）、`type`（值类型）、`addr`（已解析绝对地址或纯软 tag 名）、`unit`（单位，可 null）、`rw`（"r"/"rw"）
+- `unit` 是**effective 值**（设备级覆盖 ∪ 模板 props.unit ∪ 模板顶层 unit），与 REST `/api/v1/tags` 视图同口径——设备覆盖（含显式清除为空串→`null`）对下发生效
 - **外部按 `tags[].name` 采集/上报**（`addr` 供协议寻址参考；外部自有协议解释）
 
 ### 9.2 v3 追加字段（连接参数与设备级绑定）

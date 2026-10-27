@@ -215,6 +215,10 @@ fn parse_hb_timeout(app: &serde_json::Value, default: Duration) -> Duration {
 ///
 /// `tags[].addr` 是装配期 `addr::resolve` 后的绝对地址；纯软 tag（模型 addr=None）
 /// 回退为 tag 名——与 `ExpandedDevice::to_device_spec` 同口径。
+///
+/// `tags[].unit` 取 **effective 值**（`effective_tags`：设备覆盖 ∪ 模板
+/// props.unit ∪ 模板顶层 unit），与 REST `/api/v1/tags` 视图同口径——设备级
+/// 覆盖（含显式清除）必须对外部插件生效，否则同一份配置两个视图不一致。
 fn push_devices(
     expanded: &[crate::model::expand::ExpandedDevice],
     ver: &str,
@@ -223,6 +227,7 @@ fn push_devices(
     expanded
         .iter()
         .map(|ex| {
+            let effective = crate::model::effective::effective_tags(&ex.model, &ex.entry);
             let tags: Vec<serde_json::Value> = ex
                 .model
                 .tags
@@ -233,11 +238,14 @@ fn push_devices(
                             .unwrap_or_else(|_| a.clone()),
                         None => t.name.clone(), // 纯软 tag：addr=tag 名
                     };
+                    // effective_tags 覆盖模型全部 tag（同一函数保证键齐套），
+                    // get 兜底只为防御而非真实缺键。
+                    let unit = effective.get(&t.name).and_then(|p| p.unit.clone());
                     serde_json::json!({
                         "name": t.name,
                         "type": t.data_type,
                         "addr": addr,
-                        "unit": t.unit,
+                        "unit": unit,
                         "rw": if t.rw == crate::model::types::TagRw::R { "r" } else { "rw" },
                     })
                 })
@@ -1018,5 +1026,117 @@ mod tests {
         }];
         let cfg = build_config_push("i", "2", &ex, None);
         assert_eq!(cfg["devices"][0]["tags"][0]["addr"], "soft");
+    }
+
+    /// 下发 unit 取 effective 值（模板 ∪ 设备覆盖），与 REST `/api/v1/tags`
+    /// 同口径——设备级覆盖后外部插件不得仍拿模板值。
+    #[test]
+    fn push_devices_unit_uses_effective_override() {
+        use crate::model::types::{DeviceEntry, DeviceModel, TagOverride, TagTemplate};
+        let ex = vec![crate::model::expand::ExpandedDevice {
+            devid: "d".into(),
+            bind: Default::default(),
+            entry: DeviceEntry {
+                devid: "d".into(),
+                model: "m".into(),
+                overrides: [(
+                    "ua".to_string(),
+                    TagOverride {
+                        unit: Some("kV".into()),
+                        ..Default::default()
+                    },
+                )]
+                .into(),
+                ..Default::default()
+            },
+            model: DeviceModel {
+                model_id: "m".into(),
+                tags: vec![TagTemplate {
+                    name: "ua".into(),
+                    data_type: "f32".into(),
+                    addr: Some("holding:0:f32".into()),
+                    unit: Some("V".into()),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+        }];
+        let cfg = build_config_push("i", "3", &ex, Some(&serde_json::json!({})));
+        assert_eq!(
+            cfg["devices"][0]["tags"][0]["unit"], "kV",
+            "设备覆盖须生效（v2/v3 同口径）"
+        );
+    }
+
+    /// 模板只填 `props.unit`（顶层 unit 空）时同样下发该值——effective 的
+    /// 垫底规则是 props 显式值优先、缺省回落顶层。
+    #[test]
+    fn push_devices_unit_falls_back_to_template_props() {
+        use crate::model::types::{DeviceEntry, DeviceModel, TagTemplate};
+        let ex = vec![crate::model::expand::ExpandedDevice {
+            devid: "d".into(),
+            bind: Default::default(),
+            entry: DeviceEntry {
+                devid: "d".into(),
+                model: "m".into(),
+                ..Default::default()
+            },
+            model: DeviceModel {
+                model_id: "m".into(),
+                tags: vec![TagTemplate {
+                    name: "ua".into(),
+                    data_type: "f32".into(),
+                    addr: Some("holding:0:f32".into()),
+                    unit: None,
+                    props: crate::types::TagProps {
+                        unit: Some("A".into()),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+        }];
+        let cfg = build_config_push("i", "2", &ex, None);
+        assert_eq!(cfg["devices"][0]["tags"][0]["unit"], "A");
+    }
+
+    /// 覆盖为显式清除（空串）→ 下发 null，不回落模板值。
+    #[test]
+    fn push_devices_unit_override_clear_yields_null() {
+        use crate::model::types::{DeviceEntry, DeviceModel, TagOverride, TagTemplate};
+        let ex = vec![crate::model::expand::ExpandedDevice {
+            devid: "d".into(),
+            bind: Default::default(),
+            entry: DeviceEntry {
+                devid: "d".into(),
+                model: "m".into(),
+                overrides: [(
+                    "ua".to_string(),
+                    TagOverride {
+                        unit: Some(String::new()),
+                        ..Default::default()
+                    },
+                )]
+                .into(),
+                ..Default::default()
+            },
+            model: DeviceModel {
+                model_id: "m".into(),
+                tags: vec![TagTemplate {
+                    name: "ua".into(),
+                    data_type: "f32".into(),
+                    addr: Some("holding:0:f32".into()),
+                    unit: Some("V".into()),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+        }];
+        let cfg = build_config_push("i", "2", &ex, None);
+        assert!(
+            cfg["devices"][0]["tags"][0]["unit"].is_null(),
+            "空串=显式清除（effective 语义）"
+        );
     }
 }

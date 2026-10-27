@@ -640,6 +640,49 @@ async fn sidecar_v3_resolves_secret_password() {
     teardown(env).await;
 }
 
+/// 设备级 unit 覆盖经真实 bridge 下发（effective 语义）——与 REST `/api/v1/tags`
+/// 同口径；v2 客户端同样受益（修的是组装侧，不是 v3 新增字段）。
+#[tokio::test]
+async fn sidecar_pushes_effective_unit_override() {
+    let env = setup_with("sc-unit", 60, json!({}), BTreeMap::new()).await;
+
+    // 模型模板单位 V；设备级覆盖成 kV（等价 POST /api/v1/tag/set）。
+    let model_id = "_inline_sc-unit_devS";
+    let mut model = rs_iot::model::store::get_model(&env.client, model_id)
+        .await
+        .expect("get_model")
+        .expect("model 由迁移生成");
+    model.tags[0].unit = Some("V".into());
+    rs_iot::model::store::set_model(&env.client, &model)
+        .await
+        .expect("set_model");
+
+    let mut dev = rs_iot::model::store::get_device(&env.client, "devS")
+        .await
+        .expect("get_device")
+        .expect("devS 在册");
+    dev.overrides.insert(
+        "temp".into(),
+        rs_iot::model::types::TagOverride {
+            unit: Some("kV".into()),
+            ..Default::default()
+        },
+    );
+    rs_iot::model::store::set_device(&env.client, &dev)
+        .await
+        .expect("set_device");
+
+    let (_reader, writer, ack, cfg) = handshake(env.port, "sc-unit", &env.token, "2").await;
+    assert_eq!(ack["ok"], json!(true));
+    assert_eq!(
+        cfg["devices"][0]["tags"][0]["unit"], "kV",
+        "设备覆盖须经 bridge 生效（不是模板值 V）"
+    );
+
+    drop(writer);
+    teardown(env).await;
+}
+
 /// `secret:` 引用未写入 → 下发 null（不静默给空串/不拒连），且实例仍可正常采集。
 #[tokio::test]
 async fn sidecar_v3_missing_secret_pushes_null() {
