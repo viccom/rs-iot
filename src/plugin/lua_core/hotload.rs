@@ -44,8 +44,9 @@ fn is_write_event(ev: &notify::Event) -> bool {
 /// `RecommendedWatcher` drop 停止监听。失败仅 warn（监听不到不致命，靠 M7 REST 手动
 /// reload 兜底）。
 ///
-/// notify 回调在 watcher 内部线程触发 → `blocking_send` 合法（非 async 上下文）；
-/// `RecommendedWatcher: Send` 已核实（notify 8 auto trait），可 move 进 tokio task。
+/// notify 回调在 watcher 内部线程触发（unbounded send 同步入队，见
+/// `watch_debounce_loop`）；`RecommendedWatcher: Send` 已核实（notify 8 auto
+/// trait），可 move 进 tokio task。
 pub(crate) fn spawn_watcher(
     script_dir: PathBuf,
     reload_tx: mpsc::Sender<()>,
@@ -99,11 +100,14 @@ async fn watch_debounce_loop(
             return;
         }
     }
-    let (ev_tx, mut ev_rx) = mpsc::channel::<notify::Result<notify::Event>>(64);
+    // unbounded：notify 回调线程只做入队不阻塞；有界满容时 blocking_send 失败会
+    // 丢事件——突发写（如解压大目录进 _lib）的**末**事件被丢即整轮 reload 漏触发。
+    // fs 事件体量小且瞬时，unbounded 无实际内存风险（审查 2026-10-27）。
+    let (ev_tx, mut ev_rx) = mpsc::unbounded_channel::<notify::Result<notify::Event>>();
     let mut watcher = match notify::recommended_watcher(move |res| {
-        // notify 回调线程 → blocking_send 合法（非 async 上下文）。
-        // reload_tx drop（主循环退出）时 blocking_send 失败 → 无副作用。
-        let _ = ev_tx.blocking_send(res);
+        // notify 回调线程：unbounded send 同步不阻塞；接收端 drop（task 退出）时
+        // 失败 → 无副作用。
+        let _ = ev_tx.send(res);
     }) {
         Ok(w) => w,
         Err(e) => {
@@ -240,6 +244,10 @@ mod tests {
     /// 热加载风暴回归（2026-10-26 实证）：**读取**监听目录内文件不得触发 reload
     /// （notify 8 掩码含 IN_OPEN，load_main 读 main.lua 的 open/access 事件曾被当作
     /// 改动 → 「reload→读→再 reload」自激 4.2 万次/日/实例）；**写入**仍须触发。
+    ///
+    /// 结构（审查 2026-10-27 加固）：先写→等通知证明 watcher 已注册存活，再做读
+    /// 风暴——否则慢机上 spawn 后固定 sleep 可能还没注册完就读完，"读取静默"断言
+    /// 空转通过（没观测到任何事件当然静默）。
     #[tokio::test]
     async fn watcher_ignores_reads_notifies_on_write() {
         let dir = fresh_dir("readstorm");
@@ -249,9 +257,24 @@ mod tests {
         let (tx, mut rx) = mpsc::channel::<()>(8);
         let token = CancellationToken::new();
         spawn_watcher(dir.clone(), tx, token.clone());
-        tokio::time::sleep(Duration::from_millis(300)).await;
 
-        // 读风暴：50 次读（远超真实 load_main 频率）→ 去抖窗口内不得有通知
+        // ① 存活证明：重复写入直至收到通知（容忍注册竞争——慢机上 spawn 后立即
+        // 写可能早于 inotify 注册完成，单次写会漏；收到通知即证明 watcher 在监听
+        // 且写事件被放行，后续"读静默"才不可能是没观测到）。
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        let alive = loop {
+            std::fs::write(&main, "st = {}\nfunction on_timer() end\n-- alive").unwrap();
+            match tokio::time::timeout(Duration::from_secs(2), rx.recv()).await {
+                Ok(Some(())) => break true,
+                Ok(None) => break false, // channel 关闭：watcher task 已退出
+                Err(_) if tokio::time::Instant::now() < deadline => continue,
+                Err(_) => break false,
+            }
+        };
+        assert!(alive, "watcher 存活证明失败：10s 内写入未产生任何通知");
+
+        // ② 读风暴：50 次读（远超真实 load_main 频率）→ 不得有通知。此时 watcher
+        // 已被 ① 证明在监听——静默只能是过滤生效，不可能是"没看见"。
         for _ in 0..50 {
             let _ = std::fs::read(&main).unwrap();
         }
@@ -261,7 +284,7 @@ mod tests {
             "读取事件不得触发 reload（自激风暴回归），实得 {quiet:?}"
         );
 
-        // 写入：仍须去抖后通知
+        // ③ 读风暴后再写：仍须通知（读取未污染 watcher 状态）。
         std::fs::write(&main, "st = {}\nfunction on_timer() end\n-- v2").unwrap();
         let r = tokio::time::timeout(Duration::from_secs(5), rx.recv()).await;
         token.cancel();
