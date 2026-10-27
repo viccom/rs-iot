@@ -54,6 +54,12 @@ pub struct InstanceManager {
     handles: Arc<DashMap<String, InstanceHandle>>,
     /// 实例配置快照（start 时记，stop 保留；/inst/stats 分类数据源）。
     configs: Arc<DashMap<String, InstConfig>>,
+    /// 在飞启动的取消令牌：`claim_starting` 置 Starting 与 `handles.insert` 之间有一个
+    /// await（dev2inst 预登记，每绑定一次 lux 写）。该窗口内并发 `stop` 看不到 handle，
+    /// 旧实现会置 Stopped 并返回成功，而 start 随后继续 insert(Running)——实例照跑但
+    /// stop 已"成功"（僵尸）。stop 取消此令牌，start 在插入前检查并放弃注册。
+    /// 回归锁：`tests/instance_failed_e2e::stop_during_start_never_leaves_zombie`。
+    starting: Arc<DashMap<String, CancellationToken>>,
     /// 所有 Source 输出汇聚点（pipeline 消费 `hub_rx`）。
     hub_tx: mpsc::Sender<Sample>,
 }
@@ -89,6 +95,7 @@ impl InstanceManager {
             states: Arc::new(DashMap::new()),
             handles: Arc::new(DashMap::new()),
             configs: Arc::new(DashMap::new()),
+            starting: Arc::new(DashMap::new()),
             hub_tx,
         }
     }
@@ -118,6 +125,8 @@ impl InstanceManager {
         // （双份采样/CPU 且 instance_info 单行不可见）。Stopped/Failed 放行——
         // stop 后可重启（ed76dc2 语义）。entry 持锁作用域不跨 await。
         claim_starting(&self.states, &id_key)?;
+        let starting_token = CancellationToken::new();
+        self.starting.insert(id_key.clone(), starting_token.clone());
         self.configs.insert(id_key.clone(), inst.clone());
         self.ctx.ctl_registry.register(&id_key, cmd_tx);
         self.emit_state(&id_key, InstState::Starting);
@@ -151,6 +160,14 @@ impl InstanceManager {
 
         let sup_join = self.spawn_supervisor(id_key.clone(), token.clone(), source_join);
 
+        // stop 在 await 窗口内抢占：取消令牌已置 → 放弃注册（supervisor 因 token 已
+        // cancel 不会标 Failed；stop 已置 Stopping/Stopped 并清理）。
+        if starting_token.is_cancelled() {
+            token.cancel();
+            self.starting.remove(&id_key);
+            return Err(RsIotError::InstanceAlreadyRunning(id_key));
+        }
+        self.starting.remove(&id_key);
         self.states.insert(id_key.clone(), InstState::Running);
         self.emit_state(&id_key, InstState::Running);
         self.handles.insert(
@@ -180,8 +197,11 @@ impl InstanceManager {
         let (_sample_tx, sample_rx) = mpsc::channel::<Sample>(64);
         let token = self.ctx.shutdown.child_token();
 
-        // 唯一启动守卫（同 start_source，见其注释）。
+        // 唯一启动守卫（同 start_source，见其注释）。在飞令牌让 stop 可取消尚未
+        // 完成注册的启动（见 starting 字段注释）。
         claim_starting(&self.states, &id_key)?;
+        let starting_token = CancellationToken::new();
+        self.starting.insert(id_key.clone(), starting_token.clone());
         self.configs.insert(id_key.clone(), inst.clone());
         self.ctx.ctl_registry.register(&id_key, cmd_tx);
         self.emit_state(&id_key, InstState::Starting);
@@ -196,6 +216,12 @@ impl InstanceManager {
 
         let sup_join = self.spawn_supervisor(id_key.clone(), token.clone(), sink_join);
 
+        if starting_token.is_cancelled() {
+            token.cancel();
+            self.starting.remove(&id_key);
+            return Err(RsIotError::InstanceAlreadyRunning(id_key));
+        }
+        self.starting.remove(&id_key);
         self.states.insert(id_key.clone(), InstState::Running);
         self.emit_state(&id_key, InstState::Running);
         self.handles.insert(
@@ -220,6 +246,11 @@ impl InstanceManager {
         self.states.insert(inst_id.to_string(), InstState::Stopping);
         self.emit_state(inst_id, InstState::Stopping);
         self.ctx.ctl_registry.unregister(inst_id);
+        // 在飞启动取消：start 尚未 insert handle（await 窗口内），此时 handles.remove
+        // 是空的——取消令牌让 start 在插入前自我放弃，否则实例照跑而 stop 已返回成功。
+        if let Some((_, t)) = self.starting.remove(inst_id) {
+            t.cancel();
+        }
         if let Some((_, h)) = self.handles.remove(inst_id) {
             h.token.cancel();
             match tokio::time::timeout(Duration::from_secs(3), h.join).await {

@@ -56,7 +56,7 @@ POST /api/v1/command/send ─┼─► CtlRegistry.try_send(64) ──► 实例
 
 子 crate 与主 crate 的耦合边界：gateway 只透传主 crate REST（零改动）；rsiot-mcp 调主 crate REST，主 crate 已补 2 端点（`POST /api/v1/lua/script/save` 路径白名单 + `GET /api/v1/config` 脱敏，属主 crate 自身能力补全，已实现）。
 
-**前端工程**（`frontend/`，M1 起）：Vue3 + Vite + TypeScript SPA（工业监控界面 + AI 面板）。`src/views/`：Login 登录 / Overview 总览 / Telemetry 实时遥测（+ 历史趋势面板：HistoryQuery raw+六聚合/手写 SVG min-max 抽稀曲线/503 文案归一，消费 `GET /api/v1/history`；dev_id 随选中设备 chip 预填、tag 挂实时点位 datalist；实时点位表「操作」列行级「趋势」按钮预填直达（ad-hoc trend 惯例，RtdataPanel emit history 事件）——2026-08-26 自模型页迁入，历史查询属监控关注点，模型页回归纯元数据管理；纯函数 `src/lib/historyQuery.ts`）/ Collectors 采集实例 / **DeviceModels 设备模型注册表（四面板：设备模型/设备注册表/标签总览 effective/发现队列）** / Diagnostics 诊断 / Control 控制 / Lua 脚本；复用组件 `src/components/monitor/`（九面板：RtdataPanel/CollectorList/CommandPanel/LogStream/PacketTrace/AlarmPanel/SecretPanel/SystemStatus/InstanceForm）+ `src/components/devmeta/`（ModelForm/DeviceForm 表单 + HistoryQuery 历史查询面板）；基建 `src/api/client.ts` fetch 封装（自动带 JWT、401 区分已登录态 token 失效 vs 登录中业务 401）、`src/stores/`（Pinia：auth/monitor/agent/devreg/lua/secrets/workspace）、`src/router.ts`（history 模式 + 守卫）。**构建产物 `dist/` 经 rust-embed 嵌入 `crates/rsiot-gateway`**（gateway `static_assets.rs` 服务静态资源 + SPA fallback），`dist/` 不入库（`.gitignore`）。dev：`cd frontend && npm run dev`（Vite :5173，proxy `/api` → gateway :8080 同源无 CORS）；build：`npm run build`（产 `dist/` 后重编 gateway 才嵌入新前端）；单测基线 **15 文件 188 测**（`npm run test -- --run`，vitest）。
+**前端工程**（`frontend/`，M1 起）：Vue3 + Vite + TypeScript SPA（工业监控界面 + AI 面板）。`src/views/`：Login 登录 / Overview 总览 / Telemetry 实时遥测（+ 历史趋势面板：HistoryQuery raw+六聚合/手写 SVG min-max 抽稀曲线/503 文案归一，消费 `GET /api/v1/history`；dev_id 随选中设备 chip 预填、tag 挂实时点位 datalist；实时点位表「操作」列行级「趋势」按钮预填直达（ad-hoc trend 惯例，RtdataPanel emit history 事件）——2026-08-26 自模型页迁入，历史查询属监控关注点，模型页回归纯元数据管理；纯函数 `src/lib/historyQuery.ts`）/ Collectors 采集实例 / **DeviceModels 设备模型注册表（四面板：设备模型/设备注册表/标签总览 effective/发现队列）** / Diagnostics 诊断 / Control 控制 / Lua 脚本；复用组件 `src/components/monitor/`（九面板：RtdataPanel/CollectorList/CommandPanel/LogStream/PacketTrace/AlarmPanel/SecretPanel/SystemStatus/InstanceForm）+ `src/components/devmeta/`（ModelForm/DeviceForm 表单 + HistoryQuery 历史查询面板）；基建 `src/api/client.ts` fetch 封装（自动带 JWT、401 区分已登录态 token 失效 vs 登录中业务 401）、`src/stores/`（Pinia：auth/monitor/agent/devreg/lua/secrets/workspace）、`src/router.ts`（history 模式 + 守卫）。**构建产物 `dist/` 经 rust-embed 嵌入 `crates/rsiot-gateway`**（gateway `static_assets.rs` 服务静态资源 + SPA fallback），`dist/` 不入库（`.gitignore`）。dev：`cd frontend && npm run dev`（Vite :5173，proxy `/api` → gateway :8080 同源无 CORS）；build：`npm run build`（产 `dist/` 后重编 gateway 才嵌入新前端）；单测基线 **16 文件 203 测**（`npm run test -- --run`，vitest；2026-10-27 实测）。
 
 **lux Hash 布局**（对标 Lite_IOT `bRedka`，清单见 `src/db/identity.rs` 头注）：
 `users` / `passwords`(bcrypt) / `groups` / `instances` / `devices` / `children` / `accesskey` / `ext_tokens`(外部插件 token: field=instId, value=JSON{token_hash,created_at,enabled}) / `rtdata:<devId>`（field=`<devid>.<tag>`，value=`[ts, localTime, value]` JSON） / `devmodels`（设备模型：field=model_id，value=DeviceModel JSON{params, tags[参数化地址+模板默认 props]}，M-1） / `devreg`（全局设备注册表：field=devid，value=DeviceEntry JSON{model 引用, params, overrides 三态覆盖}；删除级联解绑实例引用+dev2inst+rtdata） / `discoveries`（发现队列：field=tag_key，value=Discovery JSON{devid,tag,first_ts,last_ts,count,sample_value}；M-4 发现引擎出口——pipeline flush 未建模标签 + lua/sidecar 校验闸拒收点登记（D-M4；effective O(1) 比对 + 60s 节流聚合 + LRU 5000 + seen_modeled 随 effective 快照修剪），人工 adopt 一键建模，见 `src/model/discovery.rs`） / `tags`（**已退役 M-4**：Phase 1a 运行时属性卡被 devreg.overrides 吸收（D-M3）；遗留数据经 `GET /api/v1/tags/legacy-export` 只读导出过渡一个版本，见 designs/2026-08-25-device-model-registry-plan.md）。
@@ -86,7 +86,7 @@ rs-iot 是**工业协议网关**：南向 N 种设备协议 × 北向 M 种对�
 | MCP 工具（给 AI agent） | `crates/rsiot-mcp/src/server.rs` 加 `#[tool]` 方法 + 映射主 crate REST | 主 crate 核心数据流/其他工具 |
 | gateway 路由 | `crates/rsiot-gateway` 加路由（不动主 crate） | 主 crate（gateway 视角零改动）|
 
-**低耦合五机制**：① trait 契约（Source/Sink/Processor，框架依赖抽象）② channel 解耦（hub 256 / cmd 64，异步边界 + 背压）③ lux 作进程内数据总线（RESP 契约，上下游无直接引用）④ `inventory` 静态注册（编译期发现，无注册顺序依赖）⑤ `CancellationToken` + `try_send`（独立启停 + 控制面不阻塞数据面）。
+**低耦合五机制**：① trait 契约（Source/Sink/Processor，框架依赖抽象）② channel 解耦（hub 512 / cmd 64，异步边界 + 背压）③ lux 作进程内数据总线（RESP 契约，上下游无直接引用）④ `inventory` 静态注册（编译期发现，无注册顺序依赖）⑤ `CancellationToken` + `try_send`（独立启停 + 控制面不阻塞数据面）。
 
 ## 常用命令
 
@@ -130,7 +130,7 @@ cd frontend && npm run test      # 前端单测（vitest，加 -- --run 单次�
 
 **前端验证规则**（改 frontend/ 后）：
 - `cd frontend && npm run build`（vue-tsc 类型检查 + vite 构建，TS 类型错误会 fail）
-- `cd frontend && npm run test -- --run`（vitest 单测，14 文件 168 测）
+- `cd frontend && npm run test -- --run`（vitest 单测，16 文件 203 测，2026-10-27 实测）
 - 验嵌入：`touch crates/rsiot-gateway/src/static_assets.rs && cargo build -j 2 -p rsiot-gateway`（强制重嵌入）+ 起三件套浏览器验
 - 前端改动**不碰**主 crate / rsiot-mcp（硬约束：gateway 是唯一对接点，经 REST 反代 + rust-embed 静态资源）
 

@@ -1,6 +1,7 @@
 # 决策：设备模型开放扩展槽（DeviceModel/TagTemplate.extra）与键契约
 
 > **状态**：implemented（扩展槽 + `x_` 键契约 + 读透出面同批落地）
+> **实施**：2026-08-27 并入（extra 扩展槽 + x_ 键契约）
 > **日期**：2026-08-27
 > **设计**：[2026-08-27-model-extension-slot-design.md](../designs/2026-08-27-model-extension-slot-design.md)（完整论证与规范性小节）
 > **代码**：`src/model/types.rs`（flatten extra 槽）、`src/model/validate.rs`（键校验）、`src/model/store.rs`（写入口把关）、`crates/rsiot-mcp`（读工具）、`frontend/src/lib/devmeta.ts` + `ModelForm.vue`（只读展示）

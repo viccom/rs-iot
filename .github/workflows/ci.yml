@@ -6,8 +6,21 @@ on:
   pull_request:
 
 env:
-  RUSTFLAGS: -D warnings
+  # 注意：RUSTFLAGS 全仓生效会连带 path 依赖（../lux）的 deprecated 告警一起变错。
+  # 因此警告严格化只在本仓代码上生效：各 job 用 `-- -D warnings`（clippy）而非全局 RUSTFLAGS。
   CARGO_TERM_COLOR: always
+
+# ── 私有 path 依赖前提（2026-10-27 审查 P1 修正说明）────────────────────────
+# rs-iot 依赖两个同级私有库：../lux（必需）与 ../tsink_fork（仅 history feature）。
+# 本 workflow 用 `RUST_DEPS_TOKEN`（org/repo secret）拉取；**秘密未配置时 checkout 会
+# 立即失败并打印本注释指引**——这正是此前的沉默失效点（viccom/lux 在 GitHub 匿名 404，
+# 五个 Rust job 从未跑通过）。
+# 三种部署选择（自行裁决其一，见 CLAUDE.md「CI 私有依赖」节）：
+#   ① 配 RUST_DEPS_TOKEN（repo scope，可读 viccom/lux 与 viccom/tsink）；
+#   ② 把 luc/tsink 镜像到公开托管点，改下面的 repository 字段；
+#   ③ 承认单机开发现实 → 删除 Rust jobs，只保留 docs / frontend / audit
+#      （本地门禁 = `just check`，已覆盖 fmt/docs/lint/test）。
+# 无论选哪种，`docs` 与 `frontend` 两个 job 都不依赖私有库，恒定可跑。
 
 jobs:
   fmt:
@@ -15,16 +28,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       # lux 为 path 依赖（../lux）；CI 一并 checkout（仓库名按实际 GitHub org 调整）
-      - uses: actions/checkout@v4
+      - name: Checkout lux (private path dep)
+        uses: actions/checkout@v4
         with:
           repository: viccom/lux
           path: ../lux
+          token: ${{ secrets.RUST_DEPS_TOKEN }}
       # tsink 为 path 依赖(../tsink_fork);CI 一并 checkout(pin 基线)
-      - uses: actions/checkout@v4
+      - name: Checkout tsink (private path dep, pin baseline)
+        uses: actions/checkout@v4
         with:
           repository: viccom/tsink
           ref: rs-iot-1b-baseline
           path: ../tsink_fork
+          token: ${{ secrets.RUST_DEPS_TOKEN }}
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
@@ -34,16 +51,20 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/checkout@v4
+      - name: Checkout lux (private path dep)
+        uses: actions/checkout@v4
         with:
           repository: viccom/lux
           path: ../lux
+          token: ${{ secrets.RUST_DEPS_TOKEN }}
       # tsink 为 path 依赖(../tsink_fork);CI 一并 checkout(pin 基线)
-      - uses: actions/checkout@v4
+      - name: Checkout tsink (private path dep, pin baseline)
+        uses: actions/checkout@v4
         with:
           repository: viccom/tsink
           ref: rs-iot-1b-baseline
           path: ../tsink_fork
+          token: ${{ secrets.RUST_DEPS_TOKEN }}
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
@@ -51,7 +72,15 @@ jobs:
       - name: Install libudev-dev (Linux)
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libudev-dev
-      - run: cargo clippy --all-targets --all-features -- -D warnings
+      # 全开档
+      - name: clippy (all features)
+        run: cargo clippy --all-targets --all-features -- -D warnings
+      # 默认档（现场默认编译面 = lua,lua-http,opcua,modbus）
+      - name: clippy (default features)
+        run: cargo clippy --all-targets -- -D warnings
+      # 最小裁剪档（lua-only，最小现场）
+      - name: clippy (lua only)
+        run: cargo clippy --no-default-features --features lua --all-targets -- -D warnings
 
   test:
     strategy:
@@ -61,16 +90,20 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/checkout@v4
+      - name: Checkout lux (private path dep)
+        uses: actions/checkout@v4
         with:
           repository: viccom/lux
           path: ../lux
+          token: ${{ secrets.RUST_DEPS_TOKEN }}
       # tsink 为 path 依赖(../tsink_fork);CI 一并 checkout(pin 基线)
-      - uses: actions/checkout@v4
+      - name: Checkout tsink (private path dep, pin baseline)
+        uses: actions/checkout@v4
         with:
           repository: viccom/tsink
           ref: rs-iot-1b-baseline
           path: ../tsink_fork
+          token: ${{ secrets.RUST_DEPS_TOKEN }}
       - uses: dtolnay/rust-toolchain@stable
       - name: Install libudev-dev (Linux)
         if: runner.os == 'Linux'
@@ -83,16 +116,20 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/checkout@v4
+      - name: Checkout lux (private path dep)
+        uses: actions/checkout@v4
         with:
           repository: viccom/lux
           path: ../lux
+          token: ${{ secrets.RUST_DEPS_TOKEN }}
       # tsink 为 path 依赖(../tsink_fork);CI 一并 checkout(pin 基线)
-      - uses: actions/checkout@v4
+      - name: Checkout tsink (private path dep, pin baseline)
+        uses: actions/checkout@v4
         with:
           repository: viccom/tsink
           ref: rs-iot-1b-baseline
           path: ../tsink_fork
+          token: ${{ secrets.RUST_DEPS_TOKEN }}
       - uses: dtolnay/rust-toolchain@stable
       - name: Install libudev-dev (Linux)
         if: runner.os == 'Linux'
@@ -102,26 +139,52 @@ jobs:
       - run: cargo test --no-default-features --features lua
       # modbus 开启 → feature_gate_e2e 被 cfg 跳过；此处仅验证该组合可编译。
       - run: cargo build --no-default-features --features "lua,modbus,opcua"
+      # s7/eip 出默认后的门禁档（ADR default-compile-surface:9 声称的"新增档"，
+      # 此前 ci.yml 中并不存在——审查 P1 补齐）。
+      - name: s7/eip 裁剪档 e2e
+        run: cargo test --features "s7,eip" --test s7_e2e --test eip_client_e2e --test feature_gate_e2e
 
   doc:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/checkout@v4
+      - name: Checkout lux (private path dep)
+        uses: actions/checkout@v4
         with:
           repository: viccom/lux
           path: ../lux
+          token: ${{ secrets.RUST_DEPS_TOKEN }}
       # tsink 为 path 依赖(../tsink_fork);CI 一并 checkout(pin 基线)
-      - uses: actions/checkout@v4
+      - name: Checkout tsink (private path dep, pin baseline)
+        uses: actions/checkout@v4
         with:
           repository: viccom/tsink
           ref: rs-iot-1b-baseline
           path: ../tsink_fork
+          token: ${{ secrets.RUST_DEPS_TOKEN }}
       - uses: dtolnay/rust-toolchain@stable
       - name: Install libudev-dev (Linux)
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libudev-dev
       - run: cargo doc --no-deps --all-features
+
+  frontend:
+    # 前端类型 + 单测 + 构建门禁（审查 P1：rust-embed 产物此前零 CI 覆盖）。
+    # 不依赖 lux/tsink，恒定可执行。
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - run: npm run test -- --run
+      - run: npm run build
 
   docs:
     # 文档体系校验：头部状态块/实施块字段/索引登记与状态对齐/相对链接有效性。

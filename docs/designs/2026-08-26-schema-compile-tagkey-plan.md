@@ -1,6 +1,8 @@
 # C1-C3：schema 默认值单源 / 默认编译面收敛 / tag_key 串扰修复
 
 > **状态**：implemented（2026-08-26 收口；C1-C3 全修，四档门禁全绿）
+> **实施**：2026-08-26 并入（C1-C3，commit 对照见下表）
+> **代码**：Cargo.toml（default 面）+ src/model/（schema 单源）+ src/types.rs（tag_key）
 
 ## 验收记录
 

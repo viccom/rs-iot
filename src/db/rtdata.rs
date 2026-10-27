@@ -40,17 +40,21 @@ pub async fn write(
 /// 故弃 PreparedPipeline，用 B 形态：聚合后逐 devid 一次 execute HSET 多对。
 ///
 /// 同 devid 跨 Sample → 后入覆盖（HSET 多对后值覆盖前值，靠 field 名相同）。
-/// 空批直接返回 Ok(0)。local_time 批内取一次。
+/// 空批直接返回 `Ok(WriteBatchOutcome::default())`。local_time 批内取一次。
 ///
-/// **per-devid 容错（I1）**：单个 devid execute 失败不丢整批剩余——计 n_failed + continue
-/// 后续 devid。返回 `Ok(n_failed)`(0=全成功;>0=部分 devid lux 写失败,调用方记
-/// `pipeline_write_fail_n` + warn)。prep 错(serde_json cell 编码)仍 `?` 传播。
+/// **per-devid 容错（I1）**：单个 devid execute 失败不丢整批剩余——记入 `failed_devids`
+/// + continue 后续 devid。prep 错（serde_json cell 编码）仍 `?` 传播。
+///
+/// **失败集合而非计数**：调用方的旁路消费者（discovery / history / SSE notify）必须
+/// 只消费**真正入库**的样本，否则未写入 lux 的值会进发现队列、归档进 tsink、推给 SSE
+/// （历史与实时分叉，违反"lux rtdata 是唯一数据交汇点"）。故返回失败 devid 集合，
+/// 由 [`WriteBatchOutcome::successful`] 过滤原始样本。
 pub async fn write_batch(
     c: &EmbeddedClient,
     samples: &[crate::types::Sample],
-) -> Result<usize, RsIotError> {
+) -> Result<WriteBatchOutcome, RsIotError> {
     if samples.is_empty() {
-        return Ok(0);
+        return Ok(WriteBatchOutcome::default());
     }
     use std::collections::HashMap;
     let local_time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
@@ -74,8 +78,8 @@ pub async fn write_batch(
         }
     }
     // B 形态（bench 证明最快）：聚合后逐 devid 一次 execute("HSET", 多对 argv)。
-    // per-devid 容错(I1):单个 devid execute 失败不丢整批,计 n_failed + continue。
-    let mut n_failed = 0;
+    // per-devid 容错(I1):单个 devid execute 失败不丢整批,记入失败集 + continue。
+    let mut outcome = WriteBatchOutcome::default();
     for (devid, pairs) in &by_devid {
         let key = format!("rtdata:{devid}");
         let mut argv: Vec<String> = Vec::with_capacity(1 + pairs.len() * 2);
@@ -86,10 +90,44 @@ pub async fn write_batch(
         }
         let argv_ref: Vec<&str> = argv.iter().map(|s| s.as_str()).collect();
         if c.execute("HSET", &argv_ref[..]).await.is_err() {
-            n_failed += 1;
+            outcome.failed_devids.insert((*devid).to_string());
         }
     }
-    Ok(n_failed)
+    Ok(outcome)
+}
+
+/// [`write_batch`] 的结果：失败的 devid 集合（per-devid 容错）。
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct WriteBatchOutcome {
+    /// lux HSET 失败的 devid（这些设备的样本**未入库**）。
+    pub failed_devids: std::collections::HashSet<String>,
+}
+
+impl WriteBatchOutcome {
+    /// 失败 devid 数（既有 `n_failed` 口径，供 metrics/warn）。
+    pub fn n_failed(&self) -> usize {
+        self.failed_devids.len()
+    }
+
+    /// 是否全部成功。
+    pub fn all_ok(&self) -> bool {
+        self.failed_devids.is_empty()
+    }
+
+    /// 从原始样本中筛出**确认入库**的部分（所有权数组）：旁路消费者
+    /// （discovery/history/SSE）只能消费它——未入库的值不得进发现队列/历史归档/推送
+    /// （否则历史与实时分叉）。全部成功时返回完整克隆；调用方可在 `all_ok()` 时
+    /// 走零拷贝借用路径完全跳过本函数。
+    pub fn successful(&self, samples: &[crate::types::Sample]) -> Vec<crate::types::Sample> {
+        if self.failed_devids.is_empty() {
+            return samples.to_vec();
+        }
+        samples
+            .iter()
+            .filter(|s| !self.failed_devids.contains(s.devid.as_str()))
+            .cloned()
+            .collect()
+    }
 }
 
 /// 删除某设备的全部实时数据（`DEL rtdata:<dev_id>` 整个 hash）。
@@ -221,7 +259,35 @@ mod batch_tests {
     #[tokio::test]
     async fn write_batch_empty_noop() {
         let (_h, c) = start_lux("empty").await;
-        write_batch(&c, &[]).await.unwrap(); // 不 panic 不报错
+        let o = write_batch(&c, &[]).await.unwrap(); // 不 panic 不报错
+        assert!(o.all_ok() && o.n_failed() == 0);
+    }
+
+    /// P1 回归锁：失败集合的过滤语义——旁路消费者只能拿到确认入库的样本。
+    /// 构造方式：`successful()` 直接对合成 outcome 断言（lux 无法按 devid 定点注入故障，
+    /// 故在此锁纯函数契约；pipeline 的三个旁路均已改为消费 `written`）。
+    #[test]
+    fn outcome_successful_filters_failed_devids() {
+        let samples = vec![
+            sample("d1", &[("t1", 1.0)]),
+            sample("d2", &[("t1", 2.0)]),
+            sample("d3", &[("t1", 3.0)]),
+        ];
+        let mut o = WriteBatchOutcome::default();
+        o.failed_devids.insert("d2".to_string());
+        assert!(!o.all_ok());
+        assert_eq!(o.n_failed(), 1);
+        let kept_owned = o.successful(&samples);
+        let kept: Vec<&str> = kept_owned.iter().map(|s| s.devid.as_str()).collect();
+        assert_eq!(
+            kept,
+            vec!["d1", "d3"],
+            "失败 devid 的样本必须被过滤（不得进发现/历史/SSE）"
+        );
+        // 全成功：原样全收
+        let ok = WriteBatchOutcome::default();
+        assert!(ok.all_ok());
+        assert_eq!(ok.successful(&samples).len(), 3);
     }
 
     /// 删除设备实时数据（B 修复）：写后 delete_device 应清掉整个 rtdata:<dev> hash，

@@ -19,9 +19,9 @@
 //! task 被 abort，无需 `std::thread`。Windows notify 偶有事件丢失（spec §18
 //! ReadDirectoryChangesW），去抖 + M7 REST 手动 reload 兜底。
 
+use notify::Watcher as _;
 use std::path::PathBuf;
 use std::time::Duration;
-use notify::Watcher as _;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -280,7 +280,7 @@ mod tests {
         }
         let quiet = tokio::time::timeout(Duration::from_millis(1500), rx.recv()).await;
         assert!(
-            matches!(quiet, Err(_)),
+            quiet.is_err(),
             "读取事件不得触发 reload（自激风暴回归），实得 {quiet:?}"
         );
 

@@ -161,7 +161,11 @@ async fn delete(st: &AppState, kind: &MetaKind, id: &str) -> Response {
     if !valid_id(id) {
         return err(StatusCode::BAD_REQUEST, "invalid id");
     }
-    match st.lux.execute("DEL", &[&lux_key(kind.key_prefix, id)]).await {
+    match st
+        .lux
+        .execute("DEL", &[&lux_key(kind.key_prefix, id)])
+        .await
+    {
         Ok(_) => Json(serde_json::json!({ "status": "ok" })).into_response(),
         Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
     }

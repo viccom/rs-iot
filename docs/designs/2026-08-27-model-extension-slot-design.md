@@ -1,6 +1,7 @@
 # 设备模型域扩展性设计（DeviceModel / TagTemplate 开放扩展槽）
 
 > **状态**：implemented（扩展槽 + 键契约于本文档定稿日落地；读透出面同批对齐）
+> **实施**：2026-08-27 并入（model extension slot 决策落地）
 > **日期**：2026-08-27
 > **代码**：`src/model/types.rs`（`DeviceModel.extra` / `TagTemplate.extra`）、`src/model/validate.rs`（键契约校验）、`src/model/store.rs`（写入口把关）
 > **前置**：[2026-08-25-device-model-registry.md](../decisions/2026-08-25-device-model-registry.md)（物模型注册表，D-M1/D-M2）、[2026-08-24-tag-registry-plan.md](2026-08-24-tag-registry-plan.md)（TagProps 起源）

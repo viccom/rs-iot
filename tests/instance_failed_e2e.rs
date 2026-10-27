@@ -241,3 +241,116 @@ async fn stop_unregistered_instance_leaves_no_state() {
 
     common::stop_lux(handle).await;
 }
+
+// ---------- P1 回归锁：start 的 await 窗口内 stop 不得造成"停不掉的实例" ----------
+
+/// mock source：常驻直到 token cancel（用于模拟 start 已完成注册的实例）。
+struct SlowStartSource;
+#[async_trait]
+impl Source for SlowStartSource {
+    fn name(&self) -> &'static str {
+        "__test_slow_start"
+    }
+    async fn run(
+        &self,
+        _ctx: HostContext,
+        _inst: InstConfig,
+        _tx: SampleSender,
+        _cmd_rx: mpsc::Receiver<rs_iot::types::CtlMessage>,
+        token: CancellationToken,
+    ) {
+        token.cancelled().await;
+    }
+}
+inventory::submit!(SourceEntry {
+    name: "__test_slow_start",
+    create: || -> Box<dyn Source> { Box::new(SlowStartSource) },
+});
+
+/// P1 回归：`claim_starting` 置 Starting 与 `handles.insert` 之间有一个 await
+/// （dev_registry::note，每条绑定一次 lux 写）。若此时并发 `stop`：
+/// 旧实现看到 states 有条目（Starting）→ 走 stop 流程 → 但 handles 里还没有 token
+/// → 置 Stopped 并返回成功；start 随后继续 → insert(Running) + handles.insert
+/// → **实例照跑但 stop 已报成功（停不掉）**。
+/// 判据：并发 stop 胜出后，实例终态不得为 Running 且 hub 不得再有采样；
+/// 若 stop 输给了 start（start 先完成注册），则 stop 必须真正停掉它。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn stop_during_start_never_leaves_zombie() {
+    let data_dir = common::test_data_dir("instance_failed_stop_race");
+    let (handle, client) = common::start_lux(data_dir.to_str().expect("utf8")).await;
+    let (hub_tx, mut hub_rx) = mpsc::channel::<Sample>(256);
+    let ctx = HostContext {
+        lux: client.clone(),
+        hwid: Hwid::new("test"),
+        shutdown: CancellationToken::new(),
+        ctl_registry: CtlRegistry::new(std::sync::Arc::new(
+            rs_iot::process_metrics::ProcessMetrics::new(),
+        )),
+        bridge_registry: BridgeRegistry::new(),
+        metrics: std::sync::Arc::new(rs_iot::process_metrics::ProcessMetrics::new()),
+        trace_registry: rs_iot::io_trace::TraceRegistry::new(),
+        event_tx: rs_iot::event_bus::EventBus::dummy(),
+        history: None,
+    };
+    let mgr = std::sync::Arc::new(InstanceManager::new(ctx, hub_tx));
+    // 多设备实例：dev_registry::note 被调用多次 → start 的 await 窗口拉长
+    let mut cfg = inst("race", "__test_slow_start");
+    cfg.devices = (0..24)
+        .map(|i| rs_iot::types::DeviceBinding {
+            devid: format!("race-dev-{i}"),
+            bind: Default::default(),
+        })
+        .collect();
+
+    for round in 0..60 {
+        // 并发：start 与 stop 同刻起跑；stop 在 start 的 await 窗口内抢占
+        let m1 = mgr.clone();
+        let m2 = mgr.clone();
+        let c1 = {
+            let mut c = cfg.clone();
+            c.inst_id = format!("race{round}").into();
+            c
+        };
+        let c2 = c1.clone();
+        let hs = tokio::spawn(async move { m1.start_source(c1).await });
+        // 确定性卡位：等 start 认领 Starting（进入 dev2inst 预登记 await 循环），
+        // 此刻 handles 尚无条目——正是竞态窗口
+        let mut landed = false;
+        for _ in 0..2000 {
+            if mgr.status().get(c2.inst_id.as_ref()).copied() == Some(InstState::Starting) {
+                landed = true;
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(landed, "第 {round} 轮：未观测到 Starting 窗口");
+        let stop_res = m2.stop(c2.inst_id.as_ref()).await;
+        let start_res = hs.await;
+        assert!(stop_res.is_ok(), "第 {round} 轮：stop 不应报错");
+        // 竞态窗口被命中（见上 Starting 卡位）：start 必须放弃注册而不是覆盖终态
+        assert!(
+            matches!(start_res, Ok(Err(_))),
+            "第 {round} 轮：窗口内 start 应放弃注册"
+        );
+        let _ = (stop_res, start_res);
+
+        // 判据：那次并发 stop 若报告成功，实例必须真的停了——不得留 Running 僵尸
+        // （不做二次善后 stop：那会掩盖竞态）
+        let id = format!("race{round}");
+        let st = mgr.status().get(&id).copied();
+        assert_ne!(
+            st,
+            Some(InstState::Running),
+            "第 {round} 轮：并发 stop 后实例仍 Running —— stop 的 await 窗口内认领失效（僵尸实例）"
+        );
+        // hub 不得再有该实例的采样（用 150ms 窗测：僵尸会持续吐数）
+        while hub_rx.try_recv().is_ok() {}
+        let got = tokio::time::timeout(Duration::from_millis(150), hub_rx.recv()).await;
+        assert!(
+            got.is_err(),
+            "第 {round} 轮：stop 后 hub 仍有采样（实例未真正停止）"
+        );
+    }
+
+    common::stop_lux(handle).await;
+}

@@ -53,6 +53,7 @@
 | [2026-08-24-history-storage-tsink-selection.md](decisions/2026-08-24-history-storage-tsink-selection.md) | 历史时序存储选型：tsink 内嵌（fork 自管）+ 独立 server 形态实测对比 + 单机 10 万点位级定位 | 待实施 |
 | [2026-08-25-device-model-registry.md](decisions/2026-08-25-device-model-registry.md) | 设备模型注册表（物模型）：元数据唯一来源原则（宪法级）+ 全局设备实体 + tags 表吸收 + 严格校验 | 已实施 |
 | [2026-08-26-default-compile-surface.md](decisions/2026-08-26-default-compile-surface.md) | 默认编译面收敛：default=[lua,lua-http,opcua,modbus]，s7/eip/transform 显式启用 | 已实施 |
+| [2026-08-31-n5-longrun-degradation-fixes.md](decisions/2026-08-31-n5-longrun-degradation-fixes.md) | 长跑退化 n5 修复决策：长时运行下采集/管道/告警域的退化修复取舍 | 已实施 |
 | [2026-08-27-model-extension-slot.md](decisions/2026-08-27-model-extension-slot.md) | 设备模型开放扩展槽（extra）与 `x_` 键契约：前向兼容信封 + 宿主不解释 + 外置应用定位边界 | 已实施 |
 
 ## designs/ — 设计定稿（怎么做，日期命名）
@@ -82,6 +83,10 @@
 | [2026-08-24-tag-registry-plan.md](designs/2026-08-24-tag-registry-plan.md) | 标签/设备元数据统一存储实施计划（Tag Registry：lux tags 表 + 三路径登记 + REST，历史存储前置地基） | 已实施（tags 表已于 M-4 退役，演进见 [2026-08-25-device-model-registry-plan.md](designs/2026-08-25-device-model-registry-plan.md)） |
 | [2026-08-25-history-write-path-plan.md](designs/2026-08-25-history-write-path-plan.md) | 历史写路径实施计划（Phase 1b：tsink path 依赖/L1-L3 三层开关/engine D6 组装/单写线程 deadband+去重+lane/四门禁 e2e 验收记录） | **已实施**（master aedd1cf，2026-08-25；四门禁全过） |
 | [2026-08-25-history-read-subscribe-plan.md](designs/2026-08-25-history-read-subscribe-plan.md) | 历史读路径+KSUB 订阅升级实施计划（Phase 2：/api/v1/history raw+downsample/503 矩阵/RtdataWatchService dirty-set/双 impl 等价） | **已实施**（feat/history-read-sub，2026-08-25） |
+| [2026-08-26-history-review-fix-plan.md](designs/2026-08-26-history-review-fix-plan.md) | 历史存储 Phase 1/2/3 审查修复计划（High×5 + Medium×11 全修，Low×17 延后登记） | **已实施**（2026-08-26 收口） |
+| [2026-08-26-nonbreaking-quality-batch-plan.md](designs/2026-08-26-nonbreaking-quality-batch-plan.md) | 非破坏性质量修复包（B1-B7，审计后续） | **已实施**（2026-08-26 收口） |
+| [2026-08-26-p0-p1-bugfix-plan.md](designs/2026-08-26-p0-p1-bugfix-plan.md) | P0+P1 九项 BUG 修复计划（P0×1 + P1×8） | **已实施**（2026-08-26 收口） |
+| [2026-08-26-schema-compile-tagkey-plan.md](designs/2026-08-26-schema-compile-tagkey-plan.md) | C1-C3：schema 默认值单源 / 默认编译面收敛 / tag_key 串扰修复 | **已实施**（2026-08-26 收口） |
 | [2026-08-26-history-phase3-governance-plan.md](designs/2026-08-26-history-phase3-governance-plan.md) | 历史存储 Phase 3 余项收口实施计划（治理 metrics 7 新 family/HistoryTelemetry 内存水位/前端历史查询面板/init_failed+栈溢出双 e2e/浏览器嵌入实测七项+2 bug 修复） | **已实施**（feat/history-phase3，2026-08-26） |
 | [2026-08-27-model-extension-slot-design.md](designs/2026-08-27-model-extension-slot-design.md) | 设备模型域扩展性设计（DeviceModel/TagTemplate 开放扩展槽）：flatten 语义/wire 形态/`x_` 键契约与毕业机制/报警外置与存储梯度定位边界/场景驱动演进路线 | **已实施**（扩展槽+键契约+读透出面：REST 校验/MCP 两读工具/前端只读展示） |
 

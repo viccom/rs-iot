@@ -10,6 +10,11 @@
     missing_debug_implementations,
     unreachable_pub
 )]
+// clippy 1.99 新增 lint：async_trait 宏为 async trait 方法生成 `#[must_use]`，而返回类型
+// （Pin<Box<dyn Future>>）本身已是 must_use → 宏展开处必然双标记。触发点在宏生成的
+// 不可编辑代码里，源处无法消除；非本仓代码质量信号。待 async_trait 更新或迁移到原生
+// async fn in trait 后移除本豁免。
+#![allow(clippy::double_must_use)]
 
 pub mod api;
 /// 应用配置（toml 加载，`AppConfig`）。

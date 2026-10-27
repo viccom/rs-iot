@@ -1,5 +1,9 @@
 # 2026-08-31 N5 长跑退化修复的执行决策记录
 
+> **状态**：implemented（2026-08-31 裁决并落地；长跑退化修复批）
+> **实施**：2026-08-31 裁决并落地（长跑退化 n5 修复批）
+> **代码**：见正文各条锚点（采集/管道/告警域）
+
 ## D-N5-1｜锁解耦放大既存竞态的自愈加固（采纳）
 
 - **冲突/风险**：`c7c4016`（compaction_gate 临界区缩至 marker）改变了锁时序，放大 reliability 测试 `flush_pipeline_tolerates_concurrent_compaction_replacement_race` 中既存的同进程交接竞态（旧引擎 zombie 压缩线程 vs 新引擎 bootstrap 扫描），裸奔约 40% 失败率。

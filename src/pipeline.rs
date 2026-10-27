@@ -205,9 +205,10 @@ async fn flush_batch(
     }
     let n = buf.len();
     match db::rtdata::write_batch(lux, buf).await {
-        Ok(n_failed) => {
+        Ok(outcome) => {
             ctx.metrics.pipeline_processed_batch(n);
             ctx.metrics.pipeline_batch();
+            let n_failed = outcome.n_failed();
             if n_failed > 0 {
                 // I1:per-devid 容错,部分 devid 写失败(其余成功,不丢整批)。记失败数 + warn。
                 ctx.metrics.pipeline_write_fail_n(n_failed);
@@ -216,10 +217,21 @@ async fn flush_batch(
                     &format!("write_batch {n_failed} devid 写失败(其余成功)"),
                 );
             }
+            // 旁路消费者只消费**确认入库**的样本（failed_devids 过滤）——未写进 lux 的值
+            // 若继续下传，会进发现队列误报、归档进 tsink 造成历史与实时分叉、推幽灵值给 SSE
+            // （审查 P1：原实现把全量 buf 喂给三个旁路）。全部成功时走零拷贝借用路径。
+            let written_owned;
+            let written: &[Sample] = if outcome.all_ok() {
+                buf
+            } else {
+                written_owned = outcome.successful(buf);
+                &written_owned
+            };
             // 发现引擎出口接线（M-4 T1，决策 D-M3；fail-soft 同 Phase 1a 取舍3）：
             // 未建模 (devid,tag) 进 discoveries 队列——已建模 once-set 命中纯内存，
             // 稳态零 lux 交互；失败仅 warn，next flush 重试。
-            if let Err(e) = model::discovery::note_once(lux, buf, &model::cache::effective()).await
+            if let Err(e) =
+                model::discovery::note_once(lux, written, &model::cache::effective()).await
             {
                 tracing::warn!("[discovery] note_once 失败(下批重试): {e}");
             }
@@ -228,14 +240,14 @@ async fn flush_batch(
             // （feature off / L2 关 / 初始化失败 fail-soft）时零开销，主链路
             // 不受旁路影响。effective 取进程级全局快照（reload/写路径刷新）。
             if let Some(h) = &ctx.history {
-                history::fan_out(buf, &model::cache::effective(), h);
+                history::fan_out(written, &model::cache::effective(), h);
             }
             // rtdata 变更通知（批次级聚合，模块 M2b）：一批一次 publish。
             // 50万点/秒下每点 publish 会爆 SSE——按 dev 聚合带最新值（Q6：前端直用
             // 即时刷新），dev_ids/samples 去重 + 截断 RTDATA_NOTIFY_MAX_DEVS（现场极端
             // 多设备时防 payload 过大，count 仍标真实 Sample 条数总量）。无 SSE 消费者时
             // publish 静默零开销（broadcast 特性）。
-            publish_rtdata_notify(ctx, buf);
+            publish_rtdata_notify(ctx, written);
         }
         Err(e) => {
             // prep 错(serde_json cell 编码等),整批未写。
