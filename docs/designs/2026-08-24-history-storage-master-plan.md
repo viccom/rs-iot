@@ -1,6 +1,10 @@
 # 历史时序存储（tsink 内嵌）总设计与路线图
 
-> **状态**：accepted（Phase 1a 已实施；Phase 1b 待启动）
+> **状态**：partially-implemented（Phase 1a/1b/2/3 与 10 万点四轮治理均已落地；剩余 soak 类验证见 §五 Phase 4）
+> **实施**：2026-08-25 ~ 2026-09-03 分批并入 master（1b `aedd1cf` / 读订阅 `66976d4` / Phase 3 `6e2559d` / 10 万点四轮见 plans 记录）
+> **代码**：`src/history/{mod,rows,writer,engine}.rs` + `src/api/routes_history.rs` + `src/api/rtdata_watch.rs` + `src/api/routes_metrics/`
+> **测试**：`tests/history_{dataflow,write,kill_recovery,read,cardinality_recalib,init_failed,init_stack,visibility}_e2e.rs` + `tests/rtdata_{subscribe,watch}_e2e.rs`
+> **遗留**：Phase 4 长时 soak（24h）未过；tsink fork 侧 backlog 已随 R2-R5 多轮收口，残留项见 `docs/designs/2026-08-29-history-100k-improvement-plan.md` §五-K
 > **日期**：2026-08-24
 > **决策依据**：[2026-08-24-history-storage-tsink-selection.md](../decisions/2026-08-24-history-storage-tsink-selection.md)（选型与定位，含实测数据）
 > **前置已完成**：Phase 1a Tag Registry（**其 tags 表已于设备模型注册表 M-4 退役（2026-08-25），由 devreg.overrides 吸收——见 [2026-08-25-device-model-registry-plan.md](2026-08-25-device-model-registry-plan.md)**。Phase 1b 消费接口不变：归档白名单/死区的读侧 = effective 物化缓存 `src/model/cache.rs::effective()`（模型模板默认 ∪ 设备覆盖三态合并，tag_key 同构）（[2026-08-24-tag-registry-plan.md](2026-08-24-tag-registry-plan.md)，merge bd8e027）——lux `tags` 表、`TagProps{history,deadband,desc,unit,owner_inst}`、`tag_key()` 单一 id 源、三路径登记（配置声明式 `ChildSpec.props` / pipeline 出口 `note_once` / API 人工）、`GET /api/v1/tags`+`tag/set|batch|delete`。**本文是 ADR 权威版本**（tag-registry 计划附录的 D 表摘引自本文，以本文为准）。

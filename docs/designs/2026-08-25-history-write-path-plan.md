@@ -294,7 +294,7 @@ cargo test -j 2 --no-default-features --features lua   # minimal 裁剪回归
 
 ---
 
-## 二、风险与已知边界(执行中遇阻按此裁断,新问题登记 docs/decisions.md)
+## 二、风险与已知边界(执行中遇阻按此裁断,新问题登记 docs/decisions/)
 
 | # | 风险/边界 | 裁断 |
 |---|---|---|

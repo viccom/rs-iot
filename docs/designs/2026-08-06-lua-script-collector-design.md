@@ -1,5 +1,17 @@
 # rs-iot Lua 脚本采集系统 设计文档
 
+> **架构勘误（2026-10-27 审查）**：本文是 lua 子系统**初版设计**（08-06）。其后发生三次架构级演进，
+> 本文的 §4 模块划分 / Cargo feature 片段 / 热加载实现均**已过时**，现行事实以
+> [2026-08-18-lua-script-system-evolution-design.md](2026-08-18-lua-script-system-evolution-design.md) 为准：
+>
+> | 本文写法 | 现行事实 |
+> |---|---|
+> | `src/plugin/builtin/lua_client/{engine,api,script}.rs` | 全部迁至 `src/plugin/lua_core/`（`builtin/lua_client/` 仅余 mod.rs + tests.rs 薄壳） |
+> | 热加载用 `notify-debouncer-mini` | **已弃用**：`hotload.rs:5-9` 记录 mini 0.7 丢弃事件类别的实测缺陷，改自绘 200ms 去抖 + `is_write_event` 过滤（2026-10-26 风暴回归） |
+> | `lua = [mlua, notify, ...]` | `lua = ["dep:mlua","dep:notify","dep:ed25519-dalek"]`；另有 `lua-http` 独立 feature |
+>
+> 保留本文作为历史设计脉络；**不要按本文 §4 找文件或按 feature 片段改 Cargo.toml**。
+
 > 日期：2026-08-06
 > **状态**：implemented（luaClient，README 里程碑 M10）
 > **实施**：2026-08-07 `a9e8e41` 骨架 → 2026-08-10 `9afb74b` 收尾（多设备/热加载/stat/三传输）

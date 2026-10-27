@@ -1,7 +1,7 @@
 # Release Note：Lua 脚本系统 · 阶段 D（安全与告警）
 
 > 日期：2026-08-21
-> **状态**：已发布（worktree `feat/lua-stage-d`，`38a37e4..` 9 task，待合并 master）
+> **状态**：已发布（worktree `feat/lua-stage-d`，`38a37e4..` 9 task，已合并 master）
 > 范围：评估收窄后的 D 阶段全量——安全最小集（M3 实例回显遮蔽 + NorthCfg TLS）/ 告警最小闭环（Q12：fire_event/clear_event + lux alarms + REST/SSE + 前端面板）/ 顺带清偿（B 复审 P3 四项 + tag helper + flaky 加固）/ 串口 open 异步安全 / 源仓 upstream 发布就绪（流程件）
 > 读者：网关运维 + 脚本作者。升级动作集中在「升级必读」，其余为了解性内容。
 

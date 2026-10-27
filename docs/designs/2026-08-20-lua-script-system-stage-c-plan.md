@@ -1,7 +1,7 @@
 # Lua 脚本系统演进 · 阶段 C（数据加工）实施计划
 
 > 日期：2026-08-20
-> **状态**：implemented（2026-08-21 于 worktree `feat/lua-stage-c` 执行完毕，9 task 全落地，待合并 master）
+> **状态**：implemented（2026-08-21 于 worktree `feat/lua-stage-c` 执行完毕，9 task 全落地，已合并 master）
 > **实施**：2026-08-21，9 task（`aac7cb9..` 分支首末：T1 aac7cb9 → T9 本分支末位 commit），全程 worktree 隔离 + task 间审查
 > **代码**：`src/event_bus.rs`（RtdataSample/载荷带值）+ `src/pipeline.rs`（aggregate_rtdata，仅 publish 路径——dispatcher/worker/背压零触碰，diff 留证见文末）+ `src/config.rs`/`src/process_metrics.rs`/`src/api/routes_{events,metrics}/`（容量配置化 + lagged 可观测）+ `src/transform/rhai.rs`/`Cargo.toml`（冻结标注）+ `src/plugin/lua_core/{api,manifest}.rs`（Role::Transform 能力裁剪 + any-of 契约 + self-write tracker）+ `src/plugin/builtin/lua_transform/`（薄壳：mod.rs + config.rs）+ `frontend/`（types/monitor 直用 samples + luaTransform 表单 schema）+ `examples/lua-scripts/agg-filter/`
 > **测试**：`cargo test -p rs-iot --features lua,lua-http -j 4` 全绿（数字见文末核对记录）；lua_transform_e2e 6 例（生命周期/订阅过滤/拒载/自环/跨实例/示例实测）全绿

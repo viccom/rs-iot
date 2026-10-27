@@ -1,7 +1,7 @@
 //! Gateway 配置（TOML）。
 //!
 //! 部署时与 rs-iot 的 config.toml 共存于运行目录。`jwt_secret` 必须与 rs-iot
-//! `[api] jwt_secret` 同值（层1 复用 JWT，见 plan-gateway-tech-selection.md §四层1）。
+//! **顶层** `jwt_secret` 同值（rs-iot 无 `[api]` 表；层1 复用 JWT，见 plan-gateway-tech-selection.md §四层1）。
 //!
 //! ```toml
 //! listen = "0.0.0.0:8080"
@@ -55,7 +55,7 @@ pub struct GwConfig {
     pub rsiot_base: String,
     /// reasonix serve 基址，如 `"http://127.0.0.1:8787"`。
     pub serve_base: String,
-    /// JWT secret（与 rs-iot `[api] jwt_secret` 同值）。层1 复用 rs-iot JWT。
+    /// JWT secret（与 rs-iot config.toml **顶层** `jwt_secret` 同值——rs-iot 无 `[api]` 表）。层1 复用 rs-iot JWT。
     pub jwt_secret: String,
     /// reasonix serve token（伪造 Cookie: reasonix_token 注入，层3）。
     /// 来自 serve 启动 `--auth token --token <值>` 或 `--token-file`。

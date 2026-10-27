@@ -1,5 +1,5 @@
 # rsiot-gateway 配置（开发验证用）。
-# jwt_secret 必须与 rs-iot config.toml [api] jwt_secret 同值（层1 JWT 直通）。
+# jwt_secret 必须与 rs-iot config.toml **顶层** jwt_secret 同值（rs-iot 无 [api] 表；层1 JWT 直通）。
 listen      = "127.0.0.1:8080"            # 浏览器访问入口
 rsiot_base  = "http://127.0.0.1:8790"     # rs-iot 主程序
 serve_base  = "http://127.0.0.1:8787"     # reasonix serve

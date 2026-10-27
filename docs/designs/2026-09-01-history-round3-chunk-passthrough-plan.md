@@ -1,6 +1,9 @@
 # tsink 第三轮治理实施计划（R3：chunk 直通——恢复吞吐 + N7 收口）
 
-> **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
+> **状态**：implemented
+> **实施**：2026-08-29 ~ 09-03 分批（结论并入 2026-08-29 总账 §五-G（chunk 直通））
+> **代码**：tsink fork（`../tsink_fork`）
+> **测试**：tsink fork 侧 `cargo test`；rs-iot 侧 `tests/history_*_e2e.rs`
 
 **Goal:** compaction 合并对"非重叠 chunk"免解码重编码（直通），把 16M/32M 点单体 pass 从 CPU 主导（解码物化+堆合并+重编码）降为 IO/CRC 主导，消除 writer 饿死占空比——恢复吞吐 ≥60K pts/s 并让 close 在 120s 内排空（N7）。
 

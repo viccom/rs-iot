@@ -41,7 +41,7 @@
 | v0.5.1 | 2026-08-20 | 阶段 A 落地后四轮独立审查的修复回填：Windows `:` 段路径逃逸封堵（loader/safe_rel_path）、on_init 纳入回调时长预算（§4.5-1 补全）、批量 reload 改 VM 级（不复活已停实例 + 失败回退旧 VM，Q11 语义对齐）、io_engine on_data 改 try_send+计数（附录 B P3 落地，`dropped_frames`）、pin 默认锁定语义落地（`lua_stdlib_pin` 配置键 + 本地已装版本锁定）、`GET /lua/script` 支持 kind=lib（Q13 读回补全）、`RuntimeDevs`/`lua_value_to_sample` 下沉 lua_core（解除反向依赖）、sync 审计日志（§3.7）、clamp 上限读能力卡（单一事实源）、sync 进程级互斥、模板条目不列入 stdlib 清单；头部实施块与遗留清单更新 |
 | v0.6 | 2026-08-20 | 阶段 B 落地：§5.4 修订（spike-2 实测纠正「AsyncClient 自带 poll task」前提——EventLoop 由调用方轮询为官方预期用法，EventLoop 独立 pump + 内部分路模型成立，迟到 QoS1 补发风险落档）；Q5 契约全项实现（六回调/混合批量/重连必重调 auth/宿主逐条投递）；Q4 secret 链路（lux secrets 表/REST 掩码读+审计/ctx:secret_get 授权清单）；Q19 三薄插件之二 luaNorth 接线 Sink（manifest 多角色契约、register Role 裁剪 C1）；MqttPublisher 无损迁移默认 luaNorth 实例（R5 单通道锁、旧代码删除）；Q8 cloud/ 配方（emqx + onenet token，源仓 1.2.0，hashings 子集在线分发）；Q10 mqtt 透传 backend（io_engine 第四传输）；新增遗留登记见头部（OneNET 真平台现场验收/IO 兜底超时独占/send_command 收紧/hmac 指令成本） |
 | v0.7 | 2026-08-21 | 阶段 C 落地：Q19 三薄插件之三 luaTransform 接线 Source（订阅型，ADR D1——不进 pipeline Processor）；Q6 全项（EventBus Rtdata 载荷带 values：pipeline 按 dev 聚合 + SSE/前端直用，旧字段兼容；subscribe 宿主模式过滤 + 非法 pattern 拒载；on_timer/on_rtdata any-of 契约；自环防护 = api 层 self-write 10s 窗口过滤，e2e 硬性验收实测）；R6 可观测（event_bus_capacity 配置化 + rs_iot_sse_lagged_total）；Q7 rhai 冻结标注（deprecated 不接线不投入，D4）；Role::Transform 能力包裁剪（C1/C3/C5 不注册）；agg-filter 清洗/聚合示例（真实链路 e2e 锁定防漂移）；新增遗留登记见头部（跨源同 tag 静默/reload 不重评估订阅/fan-out 成本/窗口过期边界） |
-| v0.8 | 2026-08-21 | 阶段 D 落地（评估收窄后范围，worktree `feat/lua-stage-d` 待合并）：**M3** 实例 REST 回显遮蔽字面 password + set 回写恢复（`2af6f61`，B 复审遗留勾销）；**H1-TLS** NorthCfg 三键 `tls`/`ca_path`/`insecure_tls`——凭证明文过网收口（`5db2fd8`，缺省零行为变化 + 明文反向锁）；**Q12 告警最小闭环**（独立 spec 简化形态，不建第四角色壳）：EventBus `Alarm` 变体 + lux `alarms` Hash（跨重启保留）+ REST 查询/清除 + SSE `alarm` 帧 + `ctx:fire_event/clear_event` 跨角色注入（C6 全角色）+ 20/s 频控 + 同 key 1s 抖动 + 前端活跃告警面板（`72b0b94`/`e979173`/`b74de2a`）；**清偿批**：B 复审 P3 四项 + `strip_dev_prefix` helper 收拢 + flaky 两处加固（`60fa416`）；**串口 open 异步安全**：spawn_blocking + 5s 限时，真机 3 项实测（`f03b144`）；**upstream 发布就绪**：源仓 release CI 硬化（release/verify-online job）+ PUBLISH.md runbook + 本地全链演练与篡改负向留证（主仓 `682486c`，正式发布属用户检查点）；遗留勾销与按需保留清单更新见头部 |
+| v0.8 | 2026-08-21 | 阶段 D 落地（评估收窄后范围，worktree `feat/lua-stage-d` 已合入 master）：**M3** 实例 REST 回显遮蔽字面 password + set 回写恢复（`2af6f61`，B 复审遗留勾销）；**H1-TLS** NorthCfg 三键 `tls`/`ca_path`/`insecure_tls`——凭证明文过网收口（`5db2fd8`，缺省零行为变化 + 明文反向锁）；**Q12 告警最小闭环**（独立 spec 简化形态，不建第四角色壳）：EventBus `Alarm` 变体 + lux `alarms` Hash（跨重启保留）+ REST 查询/清除 + SSE `alarm` 帧 + `ctx:fire_event/clear_event` 跨角色注入（C6 全角色）+ 20/s 频控 + 同 key 1s 抖动 + 前端活跃告警面板（`72b0b94`/`e979173`/`b74de2a`）；**清偿批**：B 复审 P3 四项 + `strip_dev_prefix` helper 收拢 + flaky 两处加固（`60fa416`）；**串口 open 异步安全**：spawn_blocking + 5s 限时，真机 3 项实测（`f03b144`）；**upstream 发布就绪**：源仓 release CI 硬化（release/verify-online job）+ PUBLISH.md runbook + 本地全链演练与篡改负向留证（主仓 `682486c`，正式发布属用户检查点）；遗留勾销与按需保留清单更新见头部 |
 
 ## 设计问题决议登记（Q1-Q19，v0.5 全部定案）
 
@@ -79,7 +79,7 @@
 
 ## 1. 词汇表统一（设计的前置债务）
 
-现状存在两套 L 编号冲突：ctx API 的 L1-L6（能力层，`src/plugin/builtin/lua_client/api/mod.rs`）与 README/transform 的 L1-L3（插件形态层）。多角色设计无法在歧义词汇上展开，统一如下：
+现状存在两套 L 编号冲突：ctx API 的 L1-L6（能力层，`src/plugin/lua_core/api/mod.rs`）与 README/transform 的 L1-L3（插件形态层）。多角色设计无法在歧义词汇上展开，统一如下：
 
 | 术语 | 定义 |
 |---|---|

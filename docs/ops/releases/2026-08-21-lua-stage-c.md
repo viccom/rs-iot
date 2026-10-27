@@ -1,7 +1,7 @@
 # Release Note：Lua 脚本系统 · 阶段 C（数据加工）
 
 > 日期：2026-08-21
-> **状态**：已发布（worktree `feat/lua-stage-c`，`13875a6..` 9 task，待合并 master）
+> **状态**：已发布（worktree `feat/lua-stage-c`，`13875a6..` 9 task，已合并 master）
 > 范围：演进设计 v0.6 阶段 C 全量——luaTransform（transform 角色，Source 订阅型，Q19 三薄插件之三）/ EventBus Rtdata 载荷带值（Q6）/ subscribe 宿主过滤 + 自环防护（Q6 硬性验收）/ on_timer 周期回调 / rhai 冻结标注（Q7）
 > 读者：网关运维 + 数据加工脚本作者。升级动作集中在「升级必读」，其余为了解性内容。
 

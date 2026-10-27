@@ -1,6 +1,9 @@
 # tsink 第五轮实施计划（R5：P3 水位粗判——消维护拍全量扫）
 
-> **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
+> **状态**：implemented
+> **实施**：2026-08-29 ~ 09-03 分批（结论并入 2026-08-29 总账 §五-K（P3 水位粗判））
+> **代码**：tsink fork（`../tsink_fork`）
+> **测试**：tsink fork 侧 `cargo test`；rs-iot 侧 `tests/history_*_e2e.rs`
 
 **Goal:** 把维护拍 sealed 逐出的全 series×chunk_refs 内容比对（S1/S2，两份重复实现）替换为纯水位谓词 `key.sequence <= persisted_chunk_watermarks[series]`，消掉随累积段数线性增长的每拍成本——soak24b 实证的 L0 积压加速（43@3h→1007@27h，+45/h→+190/h）的根因。
 

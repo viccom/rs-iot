@@ -1,6 +1,9 @@
 # tsink 第四轮实施计划（R4：N8 修复——flush verify 对 compaction 替换的容忍语义）
 
-> **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
+> **状态**：implemented
+> **实施**：2026-08-29 ~ 09-03 分批（结论并入 2026-08-29 总账 §五-I（N8 flush verify 竞态））
+> **代码**：tsink fork（`../tsink_fork`）
+> **测试**：tsink fork 侧 `cargo test`；rs-iot 侧 `tests/history_*_e2e.rs`
 
 **Goal:** 修复 N8（flush worker 的 `verify_flush_segment_publication` 对"自己刚发布的 L0 根被 compaction 并发替换删除"零容忍→整 pass 失败→死亡螺旋至 WAL 8GB 硬上限），使 100K pts/s 长跑越过 T+90min 复现锚点。
 

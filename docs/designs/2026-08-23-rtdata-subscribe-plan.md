@@ -1,5 +1,12 @@
 # 实时数据订阅接口（OPC UA 式）实施计划
 
+> **机制修订（2026-10-27 审查）**：本文描述的"每连接独立 producer task 做 HGETALL poll-diff-push"
+> **自 2026-08-25 Phase 2 起不再是缺省路径**——缺省读源改为 `sub_impl = "ksub"`（`RtdataWatchService`
+> 消费 `ksubscribe("rtdata:*")` + per-devid 版本表 + epoch 重同步，见 `src/api/rtdata_watch.rs`、
+> `src/lib.rs:387`）。本文的 poll 机制降级为 `[rtdata].sub_impl = "poll"` 回退档
+> （`src/api/routes_rtdata_subscribe.rs:331` 双分支）。读本文时请勿据"每 tick 一次 HGETALL"估算
+> lux 热路径成本。遗留项"多订阅者共享 diff 服务"已由 RtdataWatchService 交付。
+
 > **状态**：implemented（2026-08-23 于 worktree feat/rtdata-subscribe 执行完毕，T1-T6 全落地，子代理驱动 + task 间审查；OPC UA 南向原生订阅不在本计划——用户明示下一轮另立）
 > **日期**：2026-08-23
 > **实施**：T1 tag_of 提升（13e16d7）→ T2 纯函数 TDD 10 单测（2f02869）→ T3 端点骨架+路由+401/200 e2e（b200986）→ T4 snapshot 全量+过滤（188ceb6）→ T5 datachange+removed（d9bdc89）→ T6 文档收口+全量验证

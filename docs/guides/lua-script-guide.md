@@ -43,11 +43,15 @@ luaClient 是 rs-iot 的南向 `Source`（与 modbus/opcua/s7 同构，`inventor
    ```json
    {
      "inst_id": "dev1",
-     "app_code": "luaClient",
-     "app_config": { "script": "mydev", "kind": "tcp", "endpoint": "192.168.1.10:502", "period": 2 },
-     "devices": [{ "label": "传感器", "value": "dev1", "children": [] }]
+     "object": {
+       "app_code": "luaClient", "app_type": "south",
+       "app_config": { "script": "mydev", "kind": "tcp", "endpoint": "192.168.1.10:502", "period": 2 },
+       "devices": [{ "devid": "dev1", "bind": {} }]
+     }
    }
    ```
+   > 注：`object` 包裹与 `devices:[{devid,bind}]` 绑定形态均为强制（M-2 起）；
+   > 设备须先在 devreg 注册，见 [`rest-api.md`](../reference/rest-api.md) §4.2 前置说明。
 
 3. `POST /api/v1/startinst`（body `{"inst_id":"dev1"}`）→ `redis-cli -p 6390 HGETALL rtdata:dev1` 验采集。REST 端点全表见 [`rest-api.md`](../reference/rest-api.md)。
 

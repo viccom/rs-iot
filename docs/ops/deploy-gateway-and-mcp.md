@@ -1,6 +1,6 @@
 # 部署指南：rsiot-gateway + rsiot-mcp + reasonix
 
-> **状态**：implemented（注意：写于 2026-08-12，早于 2026-08-18 gateway-core 拆分，产物结构待核对更新）
+> **状态**：implemented（注意：写于 2026-08-12，gateway 仍为单 crate（`crates/rsiot-gateway`），未见 gateway-core 拆分更新）
 > v3 AI Agent 集成的现场部署。三件套：rsiot-mcp（MCP server 子进程）+ rsiot-gateway（API Gateway）+ reasonix serve（AI agent）。
 > 前置：rs-iot 主程序已部署运行（:8790）。设计见 `../designs/2026-08-11-ai-agent-integration-v3-design.md` + `../decisions/2026-08-12-gateway-tech-selection.md`。
 
@@ -25,7 +25,7 @@ cargo build -j 2 --release -p rsiot-mcp -p rsiot-gateway
 listen      = "0.0.0.0:8080"
 rsiot_base  = "http://127.0.0.1:8790"   # rs-iot 主程序
 serve_base  = "http://127.0.0.1:8787"   # reasonix serve（下一节起）
-jwt_secret  = "<与 rs-iot config.toml [api] jwt_secret 同值>"
+jwt_secret  = "<与 rs-iot config.toml 顶层 jwt_secret 同值>"
 serve_token = "<reasonix serve --auth token，见下节>"
 ```
 

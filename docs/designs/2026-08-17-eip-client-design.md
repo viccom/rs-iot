@@ -35,7 +35,10 @@
 高级寻址由库解析）。`children[].type` 可选：
 - 缺省：走 `read_tags_batch`（标量 12 类）
 - `"string"`：单独走 `read_string_tag`（自定义 STRING 类型如 Str82 需专用解码路径）
-- `"bit"`：`value` 为 tag base，`children[].bit`（0-31）→ `read_bit`/`write_bit`
+- `"bit"`：**位寻址写进 tag 路径字符串**（如 `MyDint.5`），由 rust-ethernet-ip 库在读写两侧自动识别。
+  > 勘误（2026-10-27 审查）：本文早期版本写"`children[].bit`（0-31）→ `read_bit`/`write_bit`"，
+  > 但实现中既无 `bit` 字段（`src/types.rs` 的 `ChildSpec` 仅 label/value/type/props）也无
+  > `read_bit`/`write_bit`（grep 零命中）；位寻址一律走 tag 路径，见 `eip_client/mod.rs:24` 注释。
 
 ## 三、数据流（每 tick）
 
@@ -44,7 +47,7 @@ ticker(phase_ms 错峰)
   → read_tags_batch(标量 tags)：一次网络往返，Vec<(tag, Result<PlcValue, BatchError>)>
     per-tag 容错：单 tag 失败仅 warn + 计 fail，不丢整批（对标 write_batch 单 devid 容错）
   → "string" tags 逐个 read_string_tag
-  → "bit" tags 逐个 read_bit
+  → "bit" tags（路径含 `.N` 后缀）随标量批量读，库自动位寻址
   → PlcValue → SampleValue 映射 → 按 devid 分组 → hub.send(Sample)
 ```
 
@@ -69,7 +72,7 @@ REST `POST /api/v1/command/send` 或 MQTT `<hwid>/command`，`data` JSON：
 - `plc_type` 可选：`bool/sint/int/dint/lint/usint/uint/udint/ulint/real/lreal/string`
   （CIP 类型化写入，**强烈建议带**——写 DINT tag 传 REAL 会类型不匹配，对标 opcua 的 opc_type）
 - 缺省推断：bool→Bool、整数→Dint（AB 最常用）、浮点→Real、字符串→String
-- bit 写：`{"tag":"TagBase","bit":3,"value":true}` → `write_bit`
+- bit 写：`{"tag":"TagBase.3","value":true}` → 走 `write_tag`（库识别 `.3` 位后缀）
 - STRING 写走 `write_string_tag`（库处理 unconnected messaging + AB STRING 格式）
 
 ## 五、连接健康管理（对标 opcua session=None 模式）
@@ -92,7 +95,10 @@ REST `POST /api/v1/command/send` 或 MQTT `<hwid>/command`，`data` JSON：
 
 ## 七、交付与验证门槛
 
-- `Cargo.toml`：`rust-ethernet-ip = "1.2"` optional + `eip` feature 入 default
+- `Cargo.toml`：`rust-ethernet-ip = "1.2"` optional + `eip` feature
+  > 勘误（2026-10-27 审查）：**eip 已不在 default**。2026-08-26 用户裁决收敛默认编译面为
+  > `lua,lua-http,opcua,modbus`（见 [默认编译面决策](../decisions/2026-08-26-default-compile-surface.md)），
+  > eip 需显式 `--features eip`；未编译时 `find_source` 返回 "source plugin not found" 优雅降级。
 - `src/plugin/builtin/eip_client/mod.rs`（~450 行）+ `builtin/mod.rs` 2 行注册
 - `tests/eip_client_e2e.rs`（~300 行）
 - CLAUDE.md：feature 说明 + eipClient 端到端验证节

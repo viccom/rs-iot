@@ -1,7 +1,7 @@
 # 设备归属模型 + lux/RESP 收口 + secrets 加密 实施计划
 
 > 日期：2026-08-21
-> **状态**：implemented（8 task 全落地于 worktree `feat/device-ownership`，待合并 master；T8 冒烟记录见尾部）
+> **状态**：implemented（8 task 全落地于 worktree `feat/device-ownership`，已合并 master；T8 冒烟记录见尾部）
 > **实施**：T1 `64635eb` → T7 本提交（各 task 首末 commit 见 spec 实施块）
 > **代码**：见同日 spec 实施块（dev_registry/SampleSender/级联/devices 视图/lux 校验/secrets AEAD 的文件级清单——计划与 spec 同仓同特性，不重复罗列）
 > **测试**：566+/0 + clippy 0 + check_docs OK；T8 冒烟记录见尾部

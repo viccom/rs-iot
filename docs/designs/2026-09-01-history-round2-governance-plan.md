@@ -1,6 +1,10 @@
 # 历史链第二轮治理实施计划（R2：L0 消费提速 + persisted index 驻留有界化 + N7）
 
-> **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
+> **状态**：superseded
+> **取代者**：[2026-08-29-history-100k-improvement-plan.md](2026-08-29-history-100k-improvement-plan.md) §五-F（结论并入总账；本文 Task 3 调参已回退，勿按本文改 tsink 参数）
+> **实施**：2026-08-29 ~ 09-03 分批（结论并入 2026-08-29 总账 §五-F；**Task 3（drain 2s→10s + park 1s→250ms）已回退**（62ade1c，实证塌方至 848/s））
+> **代码**：tsink fork（过程稿，结论见总账）
+> **测试**：tsink fork 侧 `cargo test`；rs-iot 侧 `tests/history_*_e2e.rs`
 
 **Goal:** 消除第 3 轮复验收口判定"部分生效未根治"的两条无界增长——L0 段积压（~29 段/h 单调）与 persisted index 内存驻留（RSS 16.4GB@6h 破线），并把 N7（close 超时）处置掉，使 100K pts/s 长跑可达稳态。
 
@@ -13,7 +17,7 @@
 ## 〇、基线与全局约束（执行者必读）
 
 - **仓库/分支**：`E:\Rs_Codes\tsink_fork`，分支 `n5-sealed-backlog`，基线 `bfdc4b1`（7 commit 领先 master `ce1ad61`，1294 测试全绿）。整个仓库即本 feature 的隔离载体（master 只是合并基线，不直接动）。
-- **背景文档**：rs-iot `docs/plans/2026-08-29-history-100k-improvement-plan.md` §五-D/§五-E（第 3 轮判定与数据）；本计划的勘察来源是两份只读勘察报告（2026-09-01，锚点已内联到各 Task）。
+- **背景文档**：rs-iot `docs/designs/2026-08-29-history-100k-improvement-plan.md` §五-D/§五-E（第 3 轮判定与数据）；本计划的勘察来源是两份只读勘察报告（2026-09-01，锚点已内联到各 Task）。
 - **门禁**：每 Task 独立 commit（中文，仓库风格见 `git log --oneline`）；Task 完成定义 = 新增/修改测试先红后绿 + `cargo fmt` + `cargo clippy --all-features -- -D warnings` + 相关测试模块全绿。
 - **硬约束**：本机 cargo 一律 `-j 2`；不动段文件盘格式（chunks.bin/chunk_index.bin/series.bin/postings.bin/manifest.bin 布局不变）；实现者禁改已红测试的断言（期望值随 Task 指令更新除外，须在 commit message 注明）。
 - **第 3 轮实测基线（判据对照用）**：100K pts/s 生产（sent 68.1K/s + dropped 31.9K/s），L0 产出 324 段/h，实测消化 270-300 段/h，L0 单调 0→177@6.1h；RSS 单调→16,435MB；L2=1330 段（+218/h）；WAL 锯齿峰值 990MB；errors=0。工件 `rs-iot bench/history-100k/soak_r3_samples.log`。

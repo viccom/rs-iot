@@ -1,7 +1,7 @@
 # 设备归属模型设计（device ownership）+ lux/RESP 收口 + secrets 加密
 
 > 日期：2026-08-21
-> **状态**：implemented（2026-08-21/22 于 worktree `feat/device-ownership` 执行完毕，D-OWN-1..4 / D-LUX-1 / D-SEC-1 / D-CLN-1 全落地，待合并 master）
+> **状态**：implemented（2026-08-21/22 于 worktree `feat/device-ownership` 执行完毕，D-OWN-1..4 / D-LUX-1 / D-SEC-1 / D-CLN-1 全落地，已合并 master）
 > **实施**：T1 `64635eb` dev_registry → T2 `4eadce3` SampleSender 遮蔽 send → T3 `b5fac22` 级联闭环+预登记 → T4 `dc0d22b` GET /devices 并入 → T5 `7cb6b7b` 非 loopback 强制认证 → T6 `b6d5323` secrets AEAD → T7 本提交（D-CLN-1 + 文档收口）
 > **代码**：`src/db/dev_registry.rs`（dev2inst 注册表）+ `src/plugin/sample_sender.rs`（Source 出口归属登记，Deref+遮蔽；Sample/pipeline/lux 零改）+ `src/plugin/instance.rs`（预登记）/`src/api/routes_inst.rs`（级联/purge）/`routes_device.rs`（视图并入）+ `src/config.rs`+`src/db/mod.rs`+`src/lib.rs`（[lux] password + 非 loopback 校验 + 死表 WARN）+ `src/db/secrets.rs`（chacha20poly1305 AEAD + HKDF(jwt_secret) OnceLock 派生键，enc:v1/明文兼容懒迁移）
 > **测试**：`cargo test -p rs-iot --features lua,lua-http -j 4` **566+/0**（dev_registry 8 / SampleSender 7 / dev_ownership_e2e 集成 3：预登记·级联闭环·双宿主·purge / devices 视图 6 / lux 校验 6+redact / secrets 加密往返·篡改·nonce 唯一·明文兼容 6+）；clippy `-D warnings` 0；现场冒烟见计划实施块

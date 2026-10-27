@@ -1,10 +1,10 @@
 # 标签/设备元数据统一存储（Tag Registry）实施计划
 
-> **状态**：implemented（**tags 表已于 2026-08-25 M-4 退役**——被设备模型注册表 devreg.overrides 吸收，出口登记转型发现引擎；本计划为 Phase 1a 历史记述，演进见 [2026-08-25-device-model-registry-plan.md](2026-08-25-device-model-registry-plan.md)。`src/db/tag_registry.rs` 已删、`tests/tag_registry_e2e.rs` 语义平移为 `tests/tag_effective_e2e.rs`）
+> **状态**：implemented（**tags 表已于 2026-08-25 M-4 退役**——被设备模型注册表 devreg.overrides 吸收，出口登记转型发现引擎；本计划为 Phase 1a 历史记述，演进见 [2026-08-25-device-model-registry-plan.md](2026-08-25-device-model-registry-plan.md)。`src/db/tag_registry.rs`（已删除，见 M-4） 已删、`tests/tag_effective_e2e.rs（原 tag_registry_e2e.rs 已随 tags 表退役删除）` 语义平移为 `tests/tag_effective_e2e.rs`）
 > **日期**：2026-08-24（于 worktree feat/tag-registry 执行完毕，T1-T7 全落地）
 > **实施**：T1 tag_key+TagProps → T2 tag_registry 存储（glob/note_once/declared）→ T3 ChildSpec.props → T4 pipeline 接线+吞吐门槛 → T5 REST 四端点 → T6 e2e 六场景 → T7 文档收口
-> **代码**：`src/db/tag_registry.rs`（新增）、`src/api/routes_tag.rs`（新增）、`src/types.rs`（tag_key/TagProps/ChildSpec.props）、`src/db/rtdata.rs`（改用 tag_key）、`src/pipeline.rs`（flush 出口登记）、`src/lib.rs`+`src/api/routes_sys.rs`（declared 双刷新点）、`src/api/mod.rs`（路由）
-> **测试**：`tests/tag_registry_e2e.rs`（6 e2e：401/全链路登记+owner/声明式初值/不覆盖/glob 批量/删除重占位）+ 单测（tag_registry 7/routes_tag 2/types 新增 8）；全库 `--lib` 508 过；`throughput_e2e` 过
+> **代码**：`src/db/tag_registry.rs`（已删除，见 M-4）（新增）、`src/api/routes_tag.rs`（新增）、`src/types.rs`（tag_key/TagProps/ChildSpec.props）、`src/db/rtdata.rs`（改用 tag_key）、`src/pipeline.rs`（flush 出口登记）、`src/lib.rs`+`src/api/routes_sys.rs`（declared 双刷新点）、`src/api/mod.rs`（路由）
+> **测试**：`tests/tag_effective_e2e.rs（原 tag_registry_e2e.rs 已随 tags 表退役删除）`（6 e2e：401/全链路登记+owner/声明式初值/不覆盖/glob 批量/删除重占位）+ 单测（tag_registry 7/routes_tag 2/types 新增 8）；全库 `--lib` 508 过；`throughput_e2e` 过
 > **性能（3×3 交替 A/B，本机）**：出口登记初版逐点 String 分配实测 -13% 端到端吞吐 → 优化为 scratch 复用+借用查找后 **-8%**（TAGREG 2.14/2.34/2.26M vs BASELINE 2.41/2.28/2.67M，mean 点/秒）；**仓库门槛 ≥50万点/秒 PASS（4.5× 余量）**；本计划自设 <5% 目标未达——剩余为逐点"组合键+哈希查重"固有开销（精确登记语义下限），后续优化项登记：per-worker 本地 seen 缓存 + delete 代际失效、批量布隆预过滤
 > **遗留**：KSUB `tags:*` 缓存失效（当前 API 直读 lux）、前端标签管理页（P3）、alarm 结构化绑定/scale/history_mode（P2 backlog）
 > **背景**：历史时序存储（tsink 内嵌）总方案的前置地基——用户定调"先完善基础设计的缺陷：标签/设备元数据统一存储"。业界对标：Ignition per-tag `History Enabled`、OPC UA per-node 元数据、PI exception/compression 两级过滤（调研记录见会话）。现状缺口：跨插件唯一 tag 结构 `ChildSpec` 仅 3 字段（label/value/type），无任何 tag 级属性（history/deadband/unit/desc）持久化；lua/sidecar 动态 tag 无注册处；告警 key 是自由字符串。
@@ -89,7 +89,7 @@ pub struct TagProps {
 
 ## Task 2: `db/tag_registry.rs` 存储模块
 
-**Files:** Create `src/db/tag_registry.rs`；Modify `src/db/mod.rs`（+1 行）
+**Files:** Create `src/db/tag_registry.rs`（已删除，见 M-4）；Modify `src/db/mod.rs`（+1 行）
 
 - 纯函数（单测覆盖）：`glob_match(pattern, key)`（`*` 通配，编译为分段匹配）、`filter_history(map)`。
 - lux 交互：`note_once(lux, samples: &[Sample], declared: DeclaredProps 查询函数或预载 map)`——进程 once-set（模块内 `OnceLock<Mutex<HashSet<String>>>`）去重，首见 tag：HGET 探测，缺 → 占位 HSET（declared props 或默认）；已存在 → 仅补 once-set 不写。`get/list/set/batch_set/delete`（RMW 口径同 dev_registry：管理面最终一致可接受）。声明式 props 由调用方（Task 4）从实例配置预载 `HashMap<dev, HashMap<tag, TagProps>>` 传入——存储模块不依赖插件配置结构（低耦合）。
@@ -117,7 +117,7 @@ pub struct TagProps {
 
 ## Task 6: e2e
 
-**Files:** Create `tests/tag_registry_e2e.rs`（复用 `tests/common`）
+**Files:** Create `tests/tag_effective_e2e.rs（原 tag_registry_e2e.rs 已随 tags 表退役删除）`（复用 `tests/common`）
 
 场景：①401 未授权；②dataSim 采集 → 自动登记（props 默认 history=false、owner_inst=宿主实例）；③配置声明 props → 出数后落表初值；④API set 改 history → 实例 stop/start 再出数**不覆盖**（只补缺）；⑤batch glob 批量 + matched/updated 计数；⑥delete 后再出数重新占位。
 

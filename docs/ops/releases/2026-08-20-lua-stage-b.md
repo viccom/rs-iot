@@ -1,7 +1,7 @@
 # Release Note：Lua 脚本系统 · 阶段 B（北向突破）
 
 > 日期：2026-08-20
-> **状态**：已发布（worktree `feat/lua-stage-b`，`ded2cb4..` 12 task，待合并 master）
+> **状态**：已发布（worktree `feat/lua-stage-b`，`ded2cb4..` 12 task，已合并 master）
 > 范围：演进设计 v0.6 阶段 B 全量——luaNorth（Sink 首个接线者）/ mqtt-north 契约（Q5）/ secret 链路（Q4）/ cloud 配方 EMQX→OneNET（Q8）/ MqttPublisher 无损迁移 / MQTT 透传 backend（Q10）
 > 读者：网关运维 + 平台接入脚本作者。升级动作集中在「升级必读」，其余为了解性内容。
 

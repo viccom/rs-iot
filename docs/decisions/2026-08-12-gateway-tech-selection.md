@@ -361,7 +361,7 @@ let app = axum::Router::new()
 pub struct GwConfig {
     pub rsiot_base: String,        // "http://127.0.0.1:8790"
     pub serve_base: String,        // "http://127.0.0.1:8787"
-    pub jwt_secret: String,        // 与 rs-iot config.toml [api] jwt_secret 同值
+    pub jwt_secret: String,        // 与 rs-iot config.toml **顶层** jwt_secret 同值（无 [api] 表）
     pub listen: String,            // "0.0.0.0:8080"
     /// 方案 A（推荐）：直接配置文件指定 token（与 serve 启动 --token 一致）。
     pub serve_token: String,

@@ -1,6 +1,9 @@
 # 历史存储 10 万点容量与可靠性改进实施计划
 
-> **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
+> **状态**：implemented
+> **实施**：2026-08-29 ~ 09-03 分批（结论见 §五-K（10 万点四轮治理总账）；本条为 tsink 侧治理主记录）
+> **代码**：tsink fork（`../tsink_fork`）+ rs-iot `src/history/`、`src/api/routes_metrics/`、`src/db/alarms.rs`
+> **测试**：tsink fork 侧 `cargo test`；rs-iot 侧 `tests/history_*_e2e.rs`
 
 **Goal:** 消除 2026-08-29 历史模块 10 万点压测暴露的六项根因，使历史链达到 Phase 4 门禁（10 万点/秒 ≥100K pts/s 全量归档、无静默事故路径）。
 
@@ -244,7 +247,7 @@ Commit：tsink `feat(storage): cardinality_limit 运行期热更新`；rs-iot `f
 **Step 1**: worktree 里 `cargo build -j 2 --release --features history`（tsink fork 同步拉最新）
 **Step 2**: 清 `bench/history-100k/data/`，按既有工件重跑全流程（首启→provision→重启→**monitor 15s 间隔**→10 分钟→verify→停服→重启持久化→kill -9）
 **Step 3**: 门禁对照（Phase 4 六门禁）：①pipeline 劣化<5%（对比 off 基线，bench_pipeline_e2e）②历史写 ≥100K pts/s 100% 归档 ③kill -9 零丢失 ④磁盘 8-9B/点 ±20%（**数据需 seal 后测**：跑后等 partition 轮转或手动触发 compaction 再 du）⑤deadband 削减 ≥50%（加 deadband 对照组规模）⑥series===白名单数
-**Step 4**: 结果回填本文档 §五 + `docs/decisions.md` 登记
+**Step 4**: 结果回填本文档 §五 + `docs/decisions/` 新增 ADR 登记
 **Step 5**: Commit：`test(bench): 10 万点复测——门禁 N/6（附证据）`
 
 ### [决策点 D2] 24h soak：门禁全过且用户要求时启动（磁盘预算按 §二数学预留，retention 调 1 天）

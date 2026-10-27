@@ -7,7 +7,7 @@
 
 rs-iot 自身成为一个常驻设备（`devid="rsiot"`，实例 `self`，随进程无条件自启——不落 lux `instances`，重启恒在，`stopinst` 可临时停）：
 
-- **17 只读标签**周期上报（默认 5s，`rtdata:rsiot`）：识别（id/version/platform，Str）、资源（cpu_percent Float、mem_bytes/uptime_s Int）、统计（collector_count/device_count/tag_count/inst_running/inst_degraded/inst_failed/alarm_active/dbsize Int）、自身健康（healthy Bool——无降级无失败业务实例）、吞吐（pipeline_processed_count/hub_depth_last Int）
+- **20 只读标签**周期上报（默认 5s，`rtdata:rsiot`）：识别（id/version/platform，Str）、资源（cpu_percent Float、mem_bytes/uptime_s Int）、统计（collector_count/device_count/tag_count/inst_running/inst_degraded/inst_failed/alarm_active/dbsize Int）、自身健康（healthy Bool——无降级无失败业务实例）、吞吐（pipeline_processed_count/hub_depth_last Int）
 - **3 可写标签**（`POST /api/v1/command/send`，instance=`"self"`）：`watchdog`（写→下周期回读，写通路自检）、`note`（现场备注 Str ≤256）、`report_period`（上报周期秒，钳 [1,3600]，下周期生效）；多键可一命令同写
 - **hwid 部署期覆盖键**：config 顶层 `hwid`（空=硬件自动生成 `eiot*`；非空=指定——多网关接同一平台时规避同型号 CPU 撞号）
 - 健康统计口径：只认 lux `instances` 配置集内的 `stat:*`——残留 stat 键（旧实例被杀进程未落 stopped）不计入

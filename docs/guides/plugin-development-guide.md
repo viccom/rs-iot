@@ -52,7 +52,7 @@ N×M 网状耦合降维成 N+M——每个协议只对接总线，不互相适�
 
 ```
 ── 数据上行总线 ──────────────────────────────────────────────
-N × Source ──► hub(mpsc 256) ──► pipeline(Processor) ──► lux rtdata:<devid>
+N × Source ──► hub(mpsc 512) ──► pipeline(Processor) ──► lux rtdata:<devid>
    读出口（都从 lux rtdata 取最新值）：MqttPublisher(pull) / GET /api/v1/rtdatas
 
 ── 控制下行总线（CtlRegistry）──────────────────────────────
@@ -238,29 +238,47 @@ fn parse_cfg(app: &serde_json::Value) -> Result<S7Cfg, String> {
 
 ### 4.4 设备/变量模型
 
-`inst.devices: Vec<DeviceSpec>`（`src/types.rs`）：
+> **M-2 起变更（2026-08-25）**：`InstConfig.devices` 已是 **`Vec<DeviceBinding>`**，
+> 不再是 `DeviceSpec`。旧 `DeviceSpec`/`ChildSpec`（`label/value/children`）**已退役**——
+> 持久层不再写入，仅 `model::migrate` 迁移命令与装配期展开消费。
+
+`inst.devices: Vec<DeviceBinding>`（`src/types.rs:236`）：
 
 ```rust
-struct DeviceSpec {
-    label: String,              // 显示名（可空）
-    value: String,              // 设备 ID（rtdata:<devid> 的 key）
-    children: Vec<ChildSpec>,   // 变量列表
+pub struct DeviceBinding {
+    pub devid: String,                    // 引用的 devreg 设备 id
+    pub bind: BTreeMap<String, String>,   // 协议绑定参数（如 {"slave_id":"2"}；值均为字符串）
 }
-struct ChildSpec {
-    label: String,              // 显示名 = Sample.values 的 key（空则用 value）
-    value: String,              // 协议地址（NodeId / Modbus 地址串 / S7 地址串）
-    r#type: String,             // 值类型/kind（float / int / bool / i16 / f32 ...）
-}
+```
+
+**插件拿点表的正确方式**（装配期展开，勿自行解析元数据）：
+
+```rust
+// 在 run 入口一次性展开（对标 modbus_client/mod.rs:305、opcua_client、s7_client）
+let specs: Vec<DeviceSpec> = crate::model::expand::expand_to_specs(&ctx.lux, &inst.devices).await?;
+// specs[i].value = devid（Sample.devid）
+// specs[i].children[].value = 协议地址串
+// specs[i].children[].label = Sample.values 的 key（空则回退 value）
+// specs[i].children[].r#type = 值类型（float/int/bool/i16/f32…，插件自定义语义）
+```
+
+**DeviceSpec / ChildSpec 仍存在，但只是"装配期只读视图"**（`model::expand` 合成）：
+
+```rust
+struct DeviceSpec  { label: String, value: String, children: Vec<ChildSpec> }
+struct ChildSpec   { label: String, value: String, r#type: String }
 ```
 
 **约定**（所有内置 Source 一致）：
 - `DeviceSpec.value` = 设备 ID（`Sample.devid`）
-- `ChildSpec.value` = 协议地址串
+- `ChildSpec.value` = 协议地址串（来自设备模型模板 + 参数/覆盖解析）
 - `ChildSpec.label` = `Sample.values` 的 key（空则回退用 `ChildSpec.value`）
 - `ChildSpec.r#type` = 值类型，由插件定义语义（opcua 的 opc_type / modbus 的 bit/i16/f32 / s7 的 kind）
+- 绑定参数（`bind`）由插件自行解释（如 modbus 的 `slave_id`）；展开时 `params` 占位符替换与
+  `overrides` 三态覆盖已在 `expand_to_specs` 内完成
 
-**预解析**：`run` 入口一次性把 `devices` 解析成插件内部结构（如 `Vec<(devid, Vec<(field, addr, kind)>)>`），
-采集循环内不再重复 parse（对标 opcua_client.rs:289 / s7_client.rs run）。
+**预解析**：`run` 入口一次性展开并解析成插件内部结构，采集循环内不再重复
+（对标 `modbus_client/mod.rs:305`）。
 
 ### 4.5 采集循环范式（`select!` 模板）
 
@@ -396,7 +414,7 @@ inventory::submit! {
 
 ### 4.11 完整骨架（最小可运行 Source）
 
-最小参考：`src/plugin/builtin/datasim/mod.rs`（DataSim，模拟采集，~130 行）。协议采集参考：
+最小参考：`src/plugin/builtin/data_sim/mod.rs`（DataSim，模拟采集，~130 行）。协议采集参考：
 `opcua_client/mod.rs`（中等，批量读 + 类型映射）、`s7_client/mod.rs`（中等，批量读 + 大端解码）。
 
 ### 4.12 运行指标与诊断（M4 + P1 已落地）
@@ -517,7 +535,7 @@ pub trait Processor: Send + Sync {
 帧格式 `[4B BE length][1B type][JSON body]`，7 种帧类型（Hello/HelloAck/ConfigPush/DataUp/
 Command/CommandAck/Heartbeat）。**完整规范见 [`external-plugin-protocol.md`](../reference/external-plugin-protocol.md)**。
 
-实现：`src/plugin/builtin/sidecar_client.rs`（acceptor + task + codec）。集成测试：
+实现：`src/plugin/builtin/sidecar_client/mod.rs`（acceptor + task + codec）。集成测试：
 `tests/sidecar_e2e.rs`（进程内模拟客户端闭环）。
 
 ### 7.4 安全

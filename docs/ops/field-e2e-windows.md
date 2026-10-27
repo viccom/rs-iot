@@ -162,32 +162,49 @@ TOK=$(curl -s -X POST localhost:8790/api/v1/user/login -H "content-type: applica
   -d '{"user_id":"admin","pass":"admin"}' | jq -r .token)
 H="Authorization: Bearer $TOK"; CT="content-type: application/json"
 
-# Modbus TCP（注意请求体是 {inst_id, object} 包裹结构）
+# ⚠️ 前置（M-2 起强制）：设备元数据唯一来源 = 设备模型注册表。
+# 先建模型 + 注册设备，再建实例（实例只持绑定 devices:[{devid,bind}]）。
+# 内联点表（label/value/children）已随 DeviceSpec 退役，照旧写会 200 + status:error。
+
+# ① Modbus TCP 模型 + 设备
+curl -X POST localhost:8790/api/v1/devmodel/set -H "$H" -H "$CT" -d '{
+  "model_id":"mb-tcp-demo",
+  "tags":[
+    {"name":"const616","type":"i16","addr":"holding:21:i16"},
+    {"name":"sine","type":"f32","addr":"holding:32:f32"},
+    {"name":"input432","type":"u16","addr":"input:21:u16"}]}'
+curl -X POST localhost:8790/api/v1/devreg/set -H "$H" -H "$CT" -d '{
+  "devid":"devMbTcp","model":"mb-tcp-demo","params":{},"overrides":{}}'
+
+# ② Modbus TCP 实例（slave_id 在 bind 里）
 curl -X POST localhost:8790/api/v1/inst/set -H "$H" -H "$CT" -d '{"inst_id":"modbus-tcp","object":{
-  "inst_id":"modbus-tcp","app_code":"modbusClient","app_type":"south","auto_start":true,"host_kind":"builtin",
-  "app_config":{"kind":"tcp","endpoint":"127.0.0.1:502","slave_id":1,"period":2},
-  "devices":[{"label":"devMbTcp","value":"devMbTcp","children":[
-    {"label":"const616","value":"holding:21:i16","type":"i16"},
-    {"label":"sine","value":"holding:32:f32","type":"f32"},
-    {"label":"input432","value":"input:21:u16","type":"u16"}]}]}}'
+  "inst_name":"modbus tcp","app_code":"modbusClient","app_type":"south","auto_start":true,"host_kind":"builtin",
+  "app_config":{"kind":"tcp","endpoint":"127.0.0.1:502","period":2},
+  "devices":[{"devid":"devMbTcp","bind":{"slave_id":"1"}}]}}'
 
-# Modbus RTU 串口（com0com COM2⇄COM3）
+# ③ Modbus RTU 串口（com0com COM2⇄COM3）——共用同一模型
+curl -X POST localhost:8790/api/v1/devreg/set -H "$H" -H "$CT" -d '{
+  "devid":"devMbRtu","model":"mb-tcp-demo","params":{},"overrides":{}}'
 curl -X POST localhost:8790/api/v1/inst/set -H "$H" -H "$CT" -d '{"inst_id":"modbus-rtu","object":{
-  "inst_id":"modbus-rtu","app_code":"modbusClient","app_type":"south","auto_start":true,"host_kind":"builtin",
-  "app_config":{"kind":"rtu_serial","serial_port":"COM2","baud_rate":9600,"slave_id":1,"period":3},
-  "devices":[{"label":"devMbRtu","value":"devMbRtu","children":[
-    {"label":"const616","value":"holding:21:i16","type":"i16"}]}]}}'
+  "inst_name":"modbus rtu","app_code":"modbusClient","app_type":"south","auto_start":true,"host_kind":"builtin",
+  "app_config":{"kind":"rtu_serial","serial_port":"COM2","baud_rate":9600,"period":3},
+  "devices":[{"devid":"devMbRtu","bind":{"slave_id":"1"}}]}}'
 
-# OPC UA（模拟器免安认证匿名端点；节点 ns=2;s=Points/<点名>）
+# ④ OPC UA（模拟器免安认证匿名端点；节点 ns=2;s=Points/<点名>）
+curl -X POST localhost:8790/api/v1/devmodel/set -H "$H" -H "$CT" -d '{
+  "model_id":"ua-demo",
+  "tags":[{"name":"p008","type":"i16","addr":"ns=2;s=Points/p008_i16"}]}'
+curl -X POST localhost:8790/api/v1/devreg/set -H "$H" -H "$CT" -d '{
+  "devid":"devUa","model":"ua-demo","params":{},"overrides":{}}'
 curl -X POST localhost:8790/api/v1/inst/set -H "$H" -H "$CT" -d '{"inst_id":"opcua","object":{
-  "inst_id":"opcua","app_code":"opcuaClient","app_type":"south","auto_start":true,"host_kind":"builtin",
+  "inst_name":"opcua demo","app_code":"opcuaClient","app_type":"south","auto_start":true,"host_kind":"builtin",
   "app_config":{"endpoint":"opc.tcp://127.0.0.1:4840","security_policy":"none","period":3},
-  "devices":[{"label":"devUa","value":"devUa","children":[
-    {"label":"p008","value":"ns=2;s=Points/p008_i16","type":"i16"}]}]}}'
+  "devices":[{"devid":"devUa","bind":{}}]}}'
 
 # 启动（路由是 /startinst /stopinst，不是 /inst/start）+ 清 demo
 for i in modbus-tcp modbus-rtu opcua; do curl -X POST localhost:8790/api/v1/startinst -H "$H" -H "$CT" -d "{\"inst_id\":\"$i\"}"; done
-curl -X POST localhost:8790/api/v1/inst/delete -H "$H" -H "$CT" -d '{"inst_id":"sim1"}'
+# sim1 demo 已被 selfMonitor（rsiot 设备）取代——此步仅检查无 sim1 残留
+curl -s localhost:8790/api/v1/inst/roster -H "$H" | jq -r '.[] | select(.inst_id=="sim1")'
 ```
 
 ### 5.3 采集验证（交叉核对）

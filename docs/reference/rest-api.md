@@ -69,7 +69,7 @@ curl -s -XPOST -H "Authorization: $TOKEN" -H 'Content-Type: application/json' \
 | GET | `/api/v1/sysstatus` | — | `{"status":"ok","dbsize":<int>,"instances":{<inst>:<state>},"history":{...}}`（history 块见下方 bullet） |
 | GET | `/api/v1/plugins` | — | `{"sources":[...],"sinks":[...]}` |
 | GET | `/api/v1/inststatus` | — | `{<inst>:<state>}` |
-| POST | `/api/v1/startinst` | `{"inst_id":"..."}` | `{"status":"ok"}`；不存在 404；配置非法 400；非南向 400 |
+| POST | `/api/v1/startinst` | `{"inst_id":"..."}` | `{"status":"ok"}`；不存在 404；配置非法 400；绑定展开失败 404；**已运行 409**（幂等拒绝）。南向走 `start_source`、北向走 `start_sink`（R4 起均支持） |
 | POST | `/api/v1/stopinst` | `{"inst_id":"..."}` | `{"status":"ok"}` |
 | GET | `/api/v1/config` | — | 脱敏后的运行配置 JSON（`AppConfig` 全量结构） |
 
@@ -88,7 +88,7 @@ curl -s -XPOST -H "Authorization: $TOKEN" -H 'Content-Type: application/json' \
 | GET | `/api/v1/insts` | — | `{<inst_id>:<InstConfig>}` |
 | GET | `/api/v1/inst/roster` | — | `[{<InstConfig>, "state":"<running\|stopped\|...>"}, ...]`（配置全集 ∪ 运行态合并） |
 | GET | `/api/v1/inst/get` | `?inst_id=` | `{<inst_id>:<InstConfig>}`，无则 `{}` |
-| POST | `/api/v1/inst/set` | `{"inst_id":"...","object":<InstConfig>}` | `{"status":"ok"}`；外部插件额外 `{"status":"ok","plugin_token":"<hex>"}`；非法配置 `{"status":"error","msg":...}` |
+| POST | `/api/v1/inst/set` | `{"inst_id":"...","object":<InstConfig>}` | `{"status":"ok"}`；外部插件额外 `{"status":"ok","plugin_token":"<hex>"}`；非法配置 **HTTP 200** + `{"status":"error","msg":...}`（全 API 唯一以 200 表达失败的端点） |
 | POST | `/api/v1/inst/delete` | `{"inst_id":"..."}` | `{"status":"deleted"}` |
 | POST | `/api/v1/purge` | `{"scope":"all"\|"rtdata"}` | all：`{"status":"purged","instances":<N>,"rtdata_keys":<M>}`；rtdata：`{"status":"purged","rtdata_keys":<N>}` |
 
@@ -96,10 +96,31 @@ curl -s -XPOST -H "Authorization: $TOKEN" -H 'Content-Type: application/json' \
 - **外部插件**（`host_kind:"external"`）：每次 `set` 调 `ext_token::issue` **覆盖旧 token**（旧 token 即失效），明文 `plugin_token` 仅此次返回（管理员交付外部进程）。重复 set 同实例 = 轮换 token
 - `inst/delete` 连带清除外插件 token + 该实例全部 Lua kv（`luakv`）
 - **`inst/roster` 是实例名册的单一权威数据源**：`/inststatus`（`mgr.status()`）只含已 start 过的实例，`auto_start=false` 从未启动的配置实例会缺席。roster 合并 lux `instances` 配置全集与运行态——未在运行态的实例标 `state:"stopped"`；运行态中配置没有的实例（config.toml/代码启动）追加仅含 `inst_id`+`state` 的条目。回显经 M3 脱敏（`app_config.password` 字面值遮 `"***"`，`secret:` 引用原样），MCP `rsiot_list_instances` 同源
-- **`purge` 是危险操作**（前端已接二次确认）：`scope=all` 遍历全部实例逐个级联删除（停 task + 清 rtdata/stat/trace/配置/token/luakv），再兜底 `KEYS` 清 `rtdata:*`/`stat:*`/`luakv:*` 孤儿残留；**绝不碰** `users`/`passwords`/`groups`/`accesskey`/`ext_tokens` 系统数据。`scope=rtdata` 只清实时数据缓存（保留实例配置）；未知 scope 返回 `{"status":"error","msg":"unknown scope: '...', expected 'all' or 'rtdata'"}`
+- **`purge` 是危险操作**（前端已接二次确认）：`scope=all` 遍历全部实例逐个级联删除（停 task + 清 rtdata/stat/trace/配置/token/luakv），再兜底 `KEYS` 清 `rtdata:*`/`stat:*`/`luakv:*` 孤儿残留；**绝不碰** `users`/`passwords`/`groups`/`accesskey`/`ext_tokens` 系统数据。`scope=rtdata` 只清实时数据缓存（保留实例配置）；**两者都会 `DEL dev2inst`**（归属表随数据清空，D-OWN-2）；未知 scope 返回 `{"status":"error","msg":"unknown scope: '...', expected 'all' or 'rtdata'"}`
 
 **建普通采集实例示例**（modbus，RS485 多 slave 单实例）：
+
+> **前置（M-2 起强制）**：设备元数据唯一来源是设备模型注册表。建实例**之前**必须先
+> `POST /api/v1/devmodel/set`（模型/点位模板）+ `POST /api/v1/devreg/set`（设备实体）。
+> 实例只持**绑定** `devices:[{devid, bind}]`；内联点表（`label/value/children`）已随
+> `DeviceSpec` 退役——照旧写法得到 `invalid instance config: missing field \`devid\``
+> （**HTTP 200 + status:error**）。
+
 ```bash
+# ① 建模型（一次，可复用）
+curl -s -XPOST -H "Authorization: $TOKEN" -H 'Content-Type: application/json' \
+  http://localhost:8790/api/v1/devmodel/set -d '{
+    "model_id":"meter-1p",
+    "tags":[{"name":"voltage","type":"float","addr":"holding:0:f32:ABCD","unit":"V"}]
+  }'
+
+# ② 注册设备实体
+curl -s -XPOST -H "Authorization: $TOKEN" -H 'Content-Type: application/json' \
+  http://localhost:8790/api/v1/devreg/set -d '{
+    "devid":"devA","model":"meter-1p","params":{},"overrides":{}
+  }'
+
+# ③ 建实例（只写绑定；slave_id 在 bind 里，键值均为字符串）
 curl -s -XPOST -H "Authorization: $TOKEN" -H 'Content-Type: application/json' \
   http://localhost:8790/api/v1/inst/set -d '{
     "inst_id":"mb1",
@@ -107,18 +128,18 @@ curl -s -XPOST -H "Authorization: $TOKEN" -H 'Content-Type: application/json' \
       "inst_name":"modbus 电表","app_code":"modbusClient","app_type":"south",
       "app_config":{"kind":"tcp","endpoint":"192.168.1.10:502","period":2,
         "poll_strategy":"round_robin","request_timeout_secs":2},
-      "devices":[
-        {"label":"电表A","value":"devA","slave_id":1,"children":[
-          {"label":"电压","value":"holding:0:f32:ABCD","type":"float"}]},
-        {"label":"电表B","value":"devB","slave_id":2,"children":[
-          {"label":"电压","value":"holding:0:f32:ABCD","type":"float"}]}
-      ]
+      "devices":[{"devid":"devA","bind":{"slave_id":"1"}},{"devid":"devB","bind":{"slave_id":"2"}}]
     }
   }'
 ```
-- **M1 RS485 多 slave**：`slave_id` 下沉到设备级（`DeviceSpec.slave_id`），一条总线（同 `app_config` 串口参数）多从站由单实例轮询；`poll_strategy` = `round_robin`（默认，齐头并进）/ `sequential`（单设备多点时间一致）；`request_timeout_secs` per-request 超时跳过（单 slave 无响应故障隔离，不拖垮整轮）。单 slave 旧配置（`app_config.slave_id`）向后兼容回退。详见 CLAUDE.md「modbus_client 端到端」
+- **M1 RS485 多 slave**：`slave_id` 在 `DeviceBinding.bind`，一条总线多从站由单实例轮询；
+  `poll_strategy` = `round_robin`（默认）/ `sequential`；`request_timeout_secs` per-request 超时跳过
+  （单 slave 故障隔离）。模型/设备/绑定完整字段见 §4.15-§4.16。
 
 **建外部插件实例示例**（sidecarClient，返回 plugin_token）：
+
+> 同上前置：外部设备也须先在 devreg 注册（先建模型再 `devreg/set`）。
+
 ```bash
 curl -s -XPOST -H "Authorization: $TOKEN" -H 'Content-Type: application/json' \
   http://localhost:8790/api/v1/inst/set -d '{
@@ -126,12 +147,11 @@ curl -s -XPOST -H "Authorization: $TOKEN" -H 'Content-Type: application/json' \
     "object":{
       "inst_name":"python demo","app_code":"sidecarClient","app_type":"south",
       "host_kind":"external","app_config":{"heartbeat_timeout_secs":30},
-      "devices":[{"label":"demo","value":"devP","children":[
-        {"label":"温度","value":"temp","type":"float"}
-      ]}]
+      "devices":[{"devid":"devP","bind":{}}]
     }
   }'   # → {"status":"ok","plugin_token":"<hex>"}
 ```
+
 
 ### 4.3 设备 CRUD（`routes_device.rs`，实例配置聚合 ∪ lux Hash `dev2inst`）
 
@@ -139,10 +159,12 @@ curl -s -XPOST -H "Authorization: $TOKEN" -H 'Content-Type: application/json' \
 |---|---|---|---|
 | GET | `/api/v1/devices` | — | `{<dev_id>:<DeviceSpec>}` |
 | GET | `/api/v1/device/get` | `?dev_id=` | `{<dev_id>:<DeviceSpec>}`，无则 `{}` |
-| POST | `/api/v1/device/set` | `{"dev_id":"...","object":<DeviceSpec>}` | `{"status":"ok"}` |
-| POST | `/api/v1/device/delete` | `{"dev_id":"..."}` | `{"status":"deleted"}` |
+| POST | `/api/v1/device/set` | `{"inst_id":"...","dev_id":"...","object":{<bind 参数>}}` | `{"status":"ok"}`；实例不存在 404、设备未在 devreg 400 |
+| POST | `/api/v1/device/delete` | `{"inst_id":"...","dev_id":"..."}` | `{"status":"deleted"}`（**解绑**，devreg 设备实体保留） |
 
-- `device/set` **无 schema 校验**（裸 JSON 写入），建议仍按 `DeviceSpec` 结构写
+- `device/set` = **把已注册设备绑定到实例**（非建设备）：先查实例（404）、再查 devreg（400），
+  `object` 值全部字符串化后写入 `bind`（`routes_device.rs:112-172`）。
+- 建设备实体请用 `/api/v1/devreg/set`（§4.16）；旧 `DeviceSpec`（label/value/children）已随 M-2 退役。
 - `GET /devices` / `device/get` 响应可能含**运行时设备**条目（lua `set_value` 等运行时产生、无配置点表，经 `dev2inst` 归属表并入）：额外带 `"runtime": true` 与 `"owner_inst": "<宿主实例>"`（多宿主逗号串）字段；同 devid 存在配置时以配置为准（不带这两字段）
 
 ### 4.4 用户 / 登录（`routes_user.rs`，lux Hash `users`/`passwords`）
@@ -239,7 +261,7 @@ curl -s -XPOST -H "Authorization: $TOKEN" -H 'Content-Type: application/json' \
 
 **`/metrics`**（P1 #1，机器出口）：进程级 14 metric family（`rs_iot_info`/`uptime_seconds`/`process_cpu_pct`/`process_mem_bytes`/`ctl_*_total`/`pipeline_*_total`/`hub_depth[_max]`/`mqtt_*`）——注：mqtt_* 阶段 B 起恒 0（MqttPub 迁移 luaNorth，实时计数在 /api/v1/inst/stats extra：publish_ok/publish_fail/reconnect_count；字段保留为端点形状兼容，外部面板请迁移）。+ per-instance 5（`rs_iot_instance_info{inst_id,app_code,host_kind,state,health}` + `instance_tick_total`/`fail_total`/`last_activity_duration_ms`/`last_activity_ts`）。+ history 19（Phase 3 治理全量 + 2026-08-26 审查修复五拒收/跳过计数，**仅引擎 ok 时输出**——disabled/init_failed 省略防误导零值；源 `HistoryStats` atomic + `HistoryTelemetry` 引擎口径；运行态快照另见 `GET /api/v1/sysstatus` 的 `history` 块，语义见 §4.18）。十二计数器 counter：`rs_iot_history_{sent,written,dropped,deadbanded,skipped,lane_mismatch,nonfinite_skipped,dup_ts_skipped,stale_ts_dropped,ts_rejected,len_rejected,errors}_total`；治理七 family：gauge `rs_iot_history_archived_tags`（effective 快照 history=true 计数）/ gauge `rs_iot_history_series`（`list_metrics().len()` 官方口径，5s TTL 缓存）/ gauge `rs_iot_history_memory_used_bytes` / gauge `rs_iot_history_memory_budget_bytes`（tsink 引擎内存口径，预算=D6 `memory_limit_mb`）/ counter `rs_iot_history_deadband_evaluated_total`（死区评估行数，削减率分母——deadband=Some 标签的数值点）/ gauge `rs_iot_history_deadband_reduction_ratio`（=deadbanded/evaluated，分母 0 时输出 0）/ counter `rs_iot_history_write_errors_total{kind="memory_budget|cardinality|wal_disk|closed|other"}`（写错误按行五桶分型，Σkind == errors_total，值 0 桶也输出）。命名遵循 Prometheus 规范（counter `_total`、gauge 无后缀、耗时 `_ms`/字节 `_bytes`）。对接 Prometheus/Grafana：`job: rs-iot, /metrics`，免认证（内网信任，跨网加 IP 白名单/mTLS）。
 
-**`/api/v1/inst/stats`**（M4）：替代废弃的 `/api/v1/lua/stats`，**全部内置插件**（dataSim/opcua/modbus/s7/lua/sidecar）+ 北向 luaNorth 统一经 `StatTracker` 写 lux `stat:<inst>` InstanceStat。核心 6 字段：`status`（running/degraded/stopped）/`tick_count`/`fail_count`/`last_activity_ts`/`last_activity_duration_ms`/`last_err`；插件扩展字段经 `extra` 透传（如 opcua `session_reconnect_count`、modbus `exception_count`、lua `vm_restart_count`/`script_version`）。
+**`/api/v1/inst/stats`**（M4；缺 `inst_id` 时返回**全实例数组**）：替代废弃的 `/api/v1/lua/stats`，**全部内置插件**（dataSim/opcua/modbus/s7/lua/sidecar）+ 北向 luaNorth 统一经 `StatTracker` 写 lux `stat:<inst>` InstanceStat。核心 6 字段：`status`（running/degraded/stopped）/`tick_count`/`fail_count`/`last_activity_ts`/`last_activity_duration_ms`/`last_err`；插件扩展字段经 `extra` 透传（如 opcua `session_reconnect_count`、modbus `exception_count`、lua `vm_restart_count`/`script_version`）。
 
 **`/api/v1/inst/trace`**（P1 #2，报文 trace 开关）：per-instance 运行时激活收发字节 hex dump（裸报文调试）。激活后该实例收发字节进 tracing target `io_trace`（抓包风格 `[inst_id] TX/RX <hex>`，惰性超时关闭）。**覆盖 lua（io_engine direct dump：request TX/RX + recv_idle 被动 RX 三点）+ modbus 4 传输（`TraceIo<T>` 包底层 IO——TCP/RTU serial/RTU tcp/RTU udp）**；opcua/s7（非裸报文协议）/sidecar（bridge IPC 帧）后置。
 

@@ -90,7 +90,7 @@ curl -s -XPOST http://localhost:8790/api/v1/startinst \
 ### 3.3 外部进程连 bridge 报到
 
 ```
-外部 TCP connect → 发 Hello{inst_id, token, ver:"1"} → 等 HelloAck{ok:true} + ConfigPush{devices}
+外部 TCP connect → 发 Hello{inst_id, token, ver:"2"} → 等 HelloAck{ok:true} + ConfigPush{devices}
 ```
 
 ## 4. 二进制协议要点
@@ -100,7 +100,7 @@ curl -s -XPOST http://localhost:8790/api/v1/startinst \
 ## 5. 外部进程实现要点
 
 ### 5.1 握手
-- **必须先发 Hello**（带 `inst_id`/`token`/`ver:"1"`），等 `HelloAck{ok:true}` + `ConfigPush`
+- **必须先发 Hello**（带 `inst_id`/`token`/`ver:"2"`），等 `HelloAck{ok:true}` + `ConfigPush`
 - token 错 / 版本不符 / 实例未启动 / slot 满 → `HelloAck{ok:false, msg}` + 连接关闭
 
 ### 5.2 数据上行（DataUp）
@@ -131,7 +131,7 @@ function main():
     while true:                                  # 外层重连
         try:
             conn = tcp_connect(host, port)
-            send_frame(conn, Hello, {inst_id, token, ver:"1"})
+            send_frame(conn, Hello, {inst_id, token, ver:"2"})
             ack = recv_frame(conn)               # HelloAck
             if not ack.ok: log(ack.msg); sleep(backoff); continue
             cfg = recv_frame(conn)               # ConfigPush（devices）

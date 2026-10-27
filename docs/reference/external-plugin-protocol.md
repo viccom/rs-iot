@@ -123,5 +123,5 @@ rs-iot 收到写命令（MQTT `<hwid>/command` 或 REST `POST /api/v1/command/se
 ## 11. 参考实现
 
 - **Python 样例**：`examples/ext-plugin-python/`（可运行，含缓存补传）
-- **bridge 侧（Rust）**：`src/plugin/builtin/sidecar_client.rs`、`src/db/ext_token.rs`、`src/host.rs`（`BridgeRegistry`）
+- **bridge 侧（Rust）**：`src/plugin/builtin/sidecar_client/mod.rs`、`src/db/ext_token.rs`、`src/host.rs`（`BridgeRegistry`）
 - **端到端测试**：`tests/sidecar_e2e.rs`

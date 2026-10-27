@@ -263,7 +263,7 @@ DELETE /api/v1/inst/trace?inst_id=...                       → 200 {"status":"o
 | 改 | `src/lib.rs` + 所有 HostContext 构造点 | 加字段(`tests/metrics_e2e.rs::test_app` 等) |
 | 改 | `src/plugin/builtin/modbus_client/transport.rs` | 4 传输底层 IO 包 `TraceIo` + connect 签名加 `inst_id`+`trace_registry` |
 | 改 | `src/plugin/builtin/modbus_client/mod.rs` | session 类型标注跟进;`Source::run` 传 inst_id/registry 给 connect |
-| 改 | `src/plugin/builtin/lua_client/io_engine/mod.rs` | `spawn_io_task` 加 dump 调用;io_engine 注入 inst_id/registry |
+| 改 | `src/plugin/lua_core/io_engine/mod.rs` | `spawn_io_task` 加 dump 调用;io_engine 注入 inst_id/registry |
 | 改 | `src/plugin/builtin/lua_client/mod.rs` | `Source::run` 构造 io_engine 时传 inst_id/trace_registry |
 | 新 | `src/api/routes_trace.rs` | POST/GET/DELETE `/api/v1/inst/trace`(JWT 保护) |
 | 改 | `src/api/mod.rs` | 注册路由(`build_router`) |

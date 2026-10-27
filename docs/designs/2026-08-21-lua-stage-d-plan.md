@@ -1,7 +1,7 @@
 # Lua 脚本系统演进 · 阶段 D（按 2026-08-21 评估收窄）实施计划
 
 > 日期：2026-08-21
-> **状态**：implemented（2026-08-21 执行完毕，worktree `feat/lua-stage-d`（`38a37e4..`，基于 master `c82c86f`），9 task + T3/T4 间 fmt 收口（`187e740`），待合并 master）
+> **状态**：implemented（2026-08-21 执行完毕，worktree `feat/lua-stage-d`（`38a37e4..`，基于 master `c82c86f`），9 task + T3/T4 间 fmt 收口（`187e740`），已合并 master）
 > **实施**：T1 `2af6f61`（M3 实例回显遮蔽 + set 回写恢复）/ T2 `5db2fd8`（NorthCfg TLS 三键 + Transport 组装）/ T3 `72b0b94`（EventBus Alarm 变体 + lux alarms Hash + REST）/ T4 `e979173`（ctx:fire_event/clear_event：跨角色 + 20/s 频控 + 同 key 1s 抖动）/ T5 `b74de2a`（SSE alarm 接线 + 前端活跃告警面板 + 指南告警节）/ T6 `60fa416`（清偿批：north P3 四项 + tag helper 收拢 + flaky 加固）/ T7 `f03b144`（serial open spawn_blocking + 5s 限时 + 真机 3 项）/ T8 `682486c`（upstream 发布就绪注记 + 演练留证；源仓配套 commit 3235758）/ T9 本 commit（验收核对 + 文档同步 + 回归）
 > **代码**：`src/api/routes_inst.rs`（redact_inst/redact_inst_map/restore_masked_password）+ `src/plugin/builtin/lua_north/{config,contract}.rs`（tls/ca_path/insecure_tls + build_transport/NoVerify）+ `src/event_bus.rs` + `src/db/alarms.rs` + `src/api/routes_alarm.rs` + `src/plugin/lua_core/api/mod.rs`（fire_event/clear_event + AlarmStats）+ `frontend/src/{types.ts,stores/monitor.ts,components/monitor/AlarmPanel.vue,views/Monitor.vue}` + `src/plugin/lua_core/io_engine/serial.rs`（open 走 spawn_blocking+timeout）；源仓 `E:/Rs_Codes/rsiot-lualib`（release.yml 硬化 + docs/PUBLISH.md）
 > **测试**：T9 三组合全量回归实测（数字见文末「执行核对」）——default 组合：lib **420 通过 / 9 ignored**[需外部资源] + 30 个测试目标全绿；minimal 组合（`--no-default-features --features lua`）：lib **337 通过 / 5 ignored** + 30 目标全绿（回归中发现并修复 T4 遗留 bug：`ratelimit` 模块 lua-http 门控致 minimal 编译失败 E0432，解除门控——纯 std 通用件本就该随 lua 编译）；clippy（default+显式 lua,lua-http 双查）零警告；fmt 零 diff；check_docs 通过；前端 vitest **101 通过**（7 文件）+ build 过

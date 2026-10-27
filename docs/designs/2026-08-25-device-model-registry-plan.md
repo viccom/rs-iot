@@ -83,7 +83,10 @@ pub struct DeviceEntry {
 /// 实例级标签覆盖（三态：None=继承模板）。
 pub struct TagOverride {
     pub history: Option<bool>,
-    pub deadband: Option<f64>,
+    // 三态（显式关死区 / 未设 / 设值）：Option<Option<f64>> + deserialize_some
+    // （勘误 2026-10-27：本文早期草稿写 Option<f64>，会丢"null=显式关死区"语义，
+    //  实现见 src/model/types.rs:116 与下方 §执行修正）
+    pub deadband: Option<Option<f64>>,
     pub desc: Option<String>,
     pub unit: Option<String>,
 }
@@ -112,9 +115,9 @@ lux 表全景（改造后）：`devmodels` / `devreg` / `discoveries` / `instanc
 | `ChildSpec{label,value,type,props}` | `src/types.rs:194-206` | M-2 废弃（迁移命令消费后删）；`DeviceSpec.slave_id` → `DeviceBinding.bind` | M-2 |
 | `InstConfig.devices: Vec<DeviceSpec>` | `src/types.rs:208-231` | 改 `Vec<DeviceBinding>`；其余字段不动 | M-2 |
 | 各插件 children 解析（modbus `address.rs` PointSpec / opcua NodeId / s7 kind / eip tag） | `src/plugin/builtin/*/` | **地址解析器零改动**；仅采集装配前加 `model::addr::resolve` 前置 + 点表来源改为模型 | M-2 |
-| `note_once` 出口登记 + once-set | `src/db/tag_registry.rs` | 转型发现引擎：比对模型缓存，未建模 → discoveries（节流计数 60s/批）；once-set 机制换壳保留 | M-4 |
+| `note_once` 出口登记 + once-set | `src/db/tag_registry.rs`（已删除，见 M-4） | 转型发现引擎：比对模型缓存，未建模 → discoveries（节流计数 60s/批）；once-set 机制换壳保留 | M-4 |
 | `declared()` 预载（lib.rs/startinst 刷新） | `src/lib.rs` / `routes_sys.rs` | 转型 effective 物化缓存装载（数据源 模型∪覆盖；KSUB `devmodels:*`/`devreg:*` 失效或写路径失效） | M-1 装、M-4 接线 |
-| tags 表 CRUD + `glob_match` + `apply_set` | `src/db/tag_registry.rs` | CRUD 退役；`glob_match` **复用**（批量建模/清理）；`apply_set` 删（三态语义替代） | M-4 |
+| tags 表 CRUD + `glob_match` + `apply_set` | `src/db/tag_registry.rs`（已删除，见 M-4） | CRUD 退役；`glob_match` **复用**（批量建模/清理）；`apply_set` 删（三态语义替代） | M-4 |
 | `routes_tag.rs` 四端点 | `src/api/routes_tag.rs` | GET /tags 改读 effective 视图；set/batch/delete 改写 devreg.overrides | M-4 |
 | lua `set_value`/`collect` | `src/plugin/lua_core/api/mod.rs:468-526` | 宿主持模型点表快照（Arc），过闸；新增 devices()/tags()/param() | M-3 |
 | sidecar ConfigPush/DataUp | `src/plugin/builtin/sidecar_client/mod.rs:69-79,280-290` | 协议 v2 + 校验闸 | M-3 |
@@ -122,14 +125,20 @@ lux 表全景（改造后）：`devmodels` / `devreg` / `discoveries` / `instanc
 | `tag_registry_e2e.rs` 六场景 | `tests/` | M-4 改写（语义平移：不覆盖 → 覆盖不被模板刷新冲掉） | M-4 |
 | 死表 `devices` WARN | `src/lib.rs:305-313` | 改为提示运行迁移命令（若检测到内联结构） | M-2 |
 
+> 勘误（2026-10-27 审查）：本节早期版本把 `/api/v1/devices` 写成"设备注册表（?devid/?model 过滤）"、
+> 把 `/api/v1/device/set|delete` 写成"设备 CRUD"——M-4 之后语义已分化为 devreg（设备实体）与
+> device（实例绑定）两面，照旧描述会用 device/set 建设备并拿到 400。下表为订正后版本。
+
 ## 四、API 规格（JWT 保护，风格对齐 device/tag 系）
 
 | 端点 | 方法 | 说明 |
 |---|---|---|
 | `/api/v1/devmodels` | GET | 模型列表（`?model_id=` 单查） |
 | `/api/v1/devmodel/set` · `/delete` | POST | 模型 CRUD（删除校验：无 devreg 引用，有则 409 列引用） |
-| `/api/v1/devices` | GET | 设备注册表（`?devid=` / `?model=` 过滤，含 effective 摘要） |
-| `/api/v1/device/set` · `/delete` | POST | 设备 CRUD（validate：模型存在/参数齐/覆盖 tag 在模型中；删除级联：解绑实例引用+dev2inst+rtdata 清理对齐现有 cascade） |
+| `/api/v1/devreg` | GET | **设备注册表（权威建设备面）**：`?devid=` / `?model=` 过滤，`{devid: {…DeviceEntry, effective}}` |
+| `/api/v1/devreg/set` · `/delete` | POST | **设备实体 CRUD**（validate：模型存在/参数齐/覆盖 tag 在模型中；delete 级联解绑实例引用+dev2inst+rtdata） |
+| `/api/v1/devices` | GET | 聚合视图（devreg 派生 ∪ dev2inst 运行时补集，兼容旧形状；无 query 参数） |
+| `/api/v1/device/set` · `/delete` | POST | **实例绑定/解绑**（非建设备）：set = 把已存在于 devreg 的设备绑到实例（object=bind 参数）；delete = 从实例解绑，devreg 设备保留。见 `src/api/routes_device.rs:1-15` |
 | `/api/v1/discoveries` | GET | 发现队列（count 降序；`?dev_id=`） |
 | `/api/v1/discovery/clear` · `/adopt` | POST | 清除；一键建模（body 指定目标 model_id + tag 名/类型/地址建议 → 写入模型 tags → 队列清除） |
 | `/api/v1/migrate/inline-devices` | POST | 一次性迁移（幂等；返回 {converted_models, converted_devices, converted_instances}） |
