@@ -363,7 +363,14 @@ async fn mock_lux() -> lux::EmbeddedClient {
         lux: crate::config::LuxConfig {
             port: 0,
             data_dir: std::env::temp_dir()
-                .join(format!("lua-run-{}", std::process::id()))
+                .join(format!(
+                    "lua-run-{}-{}",
+                    std::process::id(),
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_nanos())
+                        .unwrap_or(0)
+                ))
                 .to_str()
                 .unwrap()
                 .to_string(),
@@ -373,7 +380,11 @@ async fn mock_lux() -> lux::EmbeddedClient {
     };
     let lux_cfg = crate::db::build_lux_config(&cfg);
     let handle = lux::run_with_config(lux_cfg).await.expect("lux");
-    handle.client()
+    // lux ≥0.37.1：ServerHandle drop 即发起优雅停机——测试 helper 只回
+    // client，绑定保活至函数尾（进程退出统一回收）。
+    let client = handle.client();
+    std::mem::forget(handle); // lux ≥0.37.1：drop=停机——async helper 栈帧随 future 完成销毁，绑定保活无效，须 forget
+    client
 }
 
 // --- T11 manifest dry-run 集成（Q1/§2.2/§4.4）---

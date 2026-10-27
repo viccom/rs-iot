@@ -13,8 +13,16 @@ use rs_iot::config::{AppConfig, LuxConfig};
 use std::path::PathBuf;
 
 /// 为测试创建独立 data_dir（临时目录，按 name 隔离）。
+///
+/// lux ≥0.37.1 对 data_dir 持排他锁——同名目录并发打开直接 AlreadyExists 拒启。
+/// 因此每次调用都拼 pid + 纳秒时钟保证唯一；同测试内跨 start/stop 重启复用
+/// **同一 PathBuf 变量**（kill 恢复/持久化类用例的既有惯例），不重复调用本函数。
 pub fn test_data_dir(name: &str) -> PathBuf {
-    std::env::temp_dir().join(format!("rsiot-it-{name}"))
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    std::env::temp_dir().join(format!("rsiot-it-{name}-{}-{nanos}", std::process::id()))
 }
 
 /// 启动测试 lux 实例：端口 0 由 OS 分配（见 lux `ServerConfig::port` 文档），

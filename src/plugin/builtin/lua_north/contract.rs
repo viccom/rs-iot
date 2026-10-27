@@ -1215,7 +1215,10 @@ mod tests {
         let handle = lux::run_with_config(crate::db::build_lux_config(&cfg))
             .await
             .expect("lux");
-        (handle.client(), data_dir)
+        // lux ≥0.37.1：drop handle = 停机，绑定保活（见 luakv 同款）。
+        let client = handle.client();
+        std::mem::forget(handle); // lux ≥0.37.1：drop=停机——async helper 栈帧随 future 完成销毁，绑定保活无效，须 forget
+        (client, data_dir)
     }
 
     /// lux pull 形状：写两个设备 rtdata（field 含 `<devid>.` 前缀）→ entries 的
@@ -1408,6 +1411,7 @@ mod tests {
             .await
             .expect("lux");
         let client = handle.client();
+        std::mem::forget(handle); // lux ≥0.37.1：drop=停机——async helper 栈帧随 future 完成销毁，绑定保活无效，须 forget
 
         let (_tx, rx) = mpsc::channel::<Sample>(8); // Sender 不消费（north 是 Sink 消费者）
         let (_cmd_tx, cmd_rx) = mpsc::channel::<crate::types::CtlMessage>(4);
@@ -1508,6 +1512,7 @@ mod tests {
             .await
             .expect("lux");
         let client = handle.client();
+        std::mem::forget(handle); // lux ≥0.37.1：drop=停机——async helper 栈帧随 future 完成销毁，绑定保活无效，须 forget
 
         let (_tx, rx) = mpsc::channel::<Sample>(8);
         let (_cmd_tx, cmd_rx) = mpsc::channel::<crate::types::CtlMessage>(4);
@@ -1634,6 +1639,7 @@ end"#,
             .await
             .expect("lux");
         let client = handle.client();
+        std::mem::forget(handle); // lux ≥0.37.1：drop=停机——async helper 栈帧随 future 完成销毁，绑定保活无效，须 forget
 
         let inst = InstConfig {
             inst_id: "north-e2e".into(),
@@ -1864,6 +1870,7 @@ function down(topic, payload) end"#
             .await
             .expect("lux");
         let client = handle.client();
+        std::mem::forget(handle); // lux ≥0.37.1：drop=停机——async helper 栈帧随 future 完成销毁，绑定保活无效，须 forget
 
         let inst = InstConfig {
             inst_id: "north-burst".into(),
@@ -2044,6 +2051,7 @@ end"#
             .await
             .expect("lux");
         let client = handle.client();
+        std::mem::forget(handle); // lux ≥0.37.1：drop=停机——async helper 栈帧随 future 完成销毁，绑定保活无效，须 forget
 
         let inst = InstConfig {
             inst_id: "north-e2e2".into(),

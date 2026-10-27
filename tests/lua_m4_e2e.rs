@@ -23,6 +23,13 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
+/// 本 binary 内测试互斥：`model::cache`（effective 物化）是进程级 OnceLock 全局，
+/// 任一测试 `set_model/set_device` 触发的全量刷新会把**自己 lux 实例**的表灌进
+/// 缓存、瞬间"抹掉"另一实例刚注册的模型——DataUp 闸随即把建模 tag 误判进发现
+/// 队列（偶发，时序敏感）。根因是架构评估 §3.4 登记的 Effective 隐式扇入；
+/// 本锁只保证 binary 内不互踩（跨 binary 不同进程天然隔离），根治待 §3.4 注入化。
+static CACHE_SENSITIVE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 /// lua 脚本 `collect` 调 `ctx:kv_set('counter', 42)` → 验 lux `luakv:<inst>` 落库。
 ///
 /// 脚本 collect 不调 `ctx:request`（return 静态表），故 endpoint 用闲置端口也不触发
@@ -30,6 +37,7 @@ use tokio_util::sync::CancellationToken;
 /// 调 kv_set（明确 async 驱动，落库可靠）。
 #[tokio::test]
 async fn lua_kv_set_persists_to_lux() {
+    let _cache_guard = CACHE_SENSITIVE.lock().await;
     let data_dir = test_data_dir("lua-m4-kv");
     let (handle, client) = common::start_lux(data_dir.to_str().expect("utf8")).await;
     rs_iot::db::identity::bootstrap(&client)
@@ -121,6 +129,7 @@ async fn hget_cell(client: &lux::EmbeddedClient, key: &str, field: &str) -> Stri
 /// M-3 校验闸 e2e：collect 产出未建模 tag 被过滤（rtdata 只落建模 tag）+ 计数。
 #[tokio::test]
 async fn collect_gate_filters_unmodeled_tags() {
+    let _cache_guard = CACHE_SENSITIVE.lock().await;
     let data_dir = common::test_data_dir("lua_gate");
     let _ = std::fs::remove_dir_all(&data_dir);
     let (handle, client) = common::start_lux(data_dir.to_str().expect("utf8")).await;

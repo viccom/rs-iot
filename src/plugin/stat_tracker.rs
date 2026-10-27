@@ -176,7 +176,14 @@ mod tests {
             lux: crate::config::LuxConfig {
                 port: 0,
                 data_dir: std::env::temp_dir()
-                    .join(format!("stattracker-{}", std::process::id()))
+                    .join(format!(
+                        "stattracker-{}-{}",
+                        std::process::id(),
+                        std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_nanos())
+                            .unwrap_or(0)
+                    ))
                     .to_str()
                     .unwrap()
                     .to_string(),
@@ -187,7 +194,9 @@ mod tests {
         let handle = lux::run_with_config(crate::db::build_lux_config(&cfg))
             .await
             .expect("lux");
-        StatTracker::new("t".into(), handle.client())
+        let client = handle.client();
+        std::mem::forget(handle); // lux ≥0.37.1：drop=停机——async helper 栈帧随 future 完成销毁，绑定保活无效，须 forget
+        StatTracker::new("t".into(), client)
     }
 
     #[tokio::test]

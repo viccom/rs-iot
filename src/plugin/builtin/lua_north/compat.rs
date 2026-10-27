@@ -269,7 +269,10 @@ mod tests {
         let handle = lux::run_with_config(crate::db::build_lux_config(&cfg))
             .await
             .expect("lux");
-        (handle.client(), data_dir)
+        // lux ≥0.37.1：drop handle = 停机，绑定保活（见 luakv 同款）。
+        let client = handle.client();
+        std::mem::forget(handle); // lux ≥0.37.1：drop=停机——async helper 栈帧随 future 完成销毁，绑定保活无效，须 forget
+        (client, data_dir)
     }
 
     /// 独立 temp scripts 根（先清再建，测试间互不污染）。

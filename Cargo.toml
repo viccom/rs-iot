@@ -87,7 +87,10 @@ chrono = "0.4"
 axum = { version = "0.8", features = ["macros"] }
 tower = "0.5"
 tower-http = { version = "0.6", features = ["trace", "cors"] }
-jsonwebtoken = { version = "10", features = ["rust_crypto"] }
+# 加密提供方须与 lux 全局唯一（jsonwebtoken 10 的 rust_crypto/aws_lc_rs 二选一；
+# lux ≥0.37.1 用 aws_lc_rs，feature 合一后若两侧各启一个 → 运行时 panic
+# "Could not automatically determine the process-level CryptoProvider"）。
+jsonwebtoken = { version = "10", features = ["aws_lc_rs"] }
 rust-embed = { version = "8", features = ["mime-guess"] }
 mime_guess = "2"
 
