@@ -9,6 +9,7 @@
 use axum::body::Body;
 use axum::http::header;
 use axum::http::{HeaderValue, StatusCode, Uri};
+use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::Router;
 use rust_embed::RustEmbed;
@@ -66,6 +67,11 @@ pub async fn serve(uri: Uri) -> Response {
 /// 部署演进（更新 HMI 不重编 gateway），故不嵌入。SPA 启发式与 `serve` 同款：
 /// 未命中且路径含点 = 静态资源缺失 404；不含点 = 回 index.html（history 路由
 /// 由 agent-hmi 前端接管）。未配置 hmi_dist 时 app.rs 不挂本服务。
+///
+/// 缓存策略（`hmi_cache_control`，审查 2026-10-27）：`assets/` 下是 vite 产物
+/// 哈希文件名（内容变即换名）→ immutable 一年；其余（index.html、SPA 回退、
+/// favicon 等）→ no-cache 每次回源校验——dist 重新部署后浏览器不会拿旧
+/// index.html 引用已删除的 hash 资产。
 pub fn hmi_router(dist: std::path::PathBuf) -> Router {
     let index_root = dist.clone();
     // 用 .fallback 而非 .not_found_service：后者把回退包进 SetStatus(404)——
@@ -77,7 +83,27 @@ pub fn hmi_router(dist: std::path::PathBuf) -> Router {
             async move { hmi_spa_fallback(root, uri).await }
         },
     )));
-    Router::new().fallback_service(dir)
+    Router::new()
+        .fallback_service(dir)
+        .layer(axum::middleware::from_fn(hmi_cache_control))
+}
+
+/// `/hmi` 响应 Cache-Control（from_fn 中间件；uri 已被 nest 剥掉 `/hmi` 前缀）：
+/// `assets/*` → `public, max-age=31536000, immutable`（哈希文件名，内容变即换名）；
+/// 其余 → `no-cache`（可缓存但须回源校验，部署后旧引用立即失效）。
+/// overriding 而非 if_not_present：ServeDir 默认不发 Cache-Control，语义由本
+/// 中间件单点决定。
+async fn hmi_cache_control(uri: Uri, request: axum::extract::Request, next: Next) -> Response {
+    let value = if uri.path().starts_with("/assets/") {
+        "public, max-age=31536000, immutable"
+    } else {
+        "no-cache"
+    };
+    // unwrap 安全：两值均为合法 HeaderValue（ASCII）。
+    let mut resp = next.run(request).await;
+    resp.headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_str(value).unwrap());
+    resp
 }
 
 /// SPA 回退（ServeDir 未命中时调用，uri 已被 nest 剥掉 `/hmi` 前缀）：

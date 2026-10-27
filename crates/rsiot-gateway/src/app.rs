@@ -131,6 +131,28 @@ mod tests {
         (status, body_text(resp).await)
     }
 
+    /// 同 `get`，另返回 Cache-Control 头（缓存策略断言用）。
+    async fn get_with_cache(app: &Router, path: &str) -> (StatusCode, String, String) {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(path)
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("call app");
+        let status = resp.status();
+        let cache = resp
+            .headers()
+            .get(axum::http::header::CACHE_CONTROL)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
+        (status, cache, body_text(resp).await)
+    }
+
     /// 配置 hmi_dist 后 /hmi 三态：根路径 index、资产命中、SPA 回退。
     ///
     /// 验证意图（规则7）：index 标记 HMI-TEST-INDEX 只存在于临时 dist——命中它
@@ -158,6 +180,29 @@ mod tests {
         let (code, body) = get(&app, "/hmi/assets/missing.js").await;
         assert_eq!(code, StatusCode::NOT_FOUND, "缺失资源必须 404");
         assert!(!body.contains("HMI-TEST-INDEX"));
+
+        let _ = std::fs::remove_dir_all(&dist);
+    }
+
+    /// /hmi 缓存策略（审查 2026-10-27）：assets/* 是 vite 哈希文件名 → immutable
+    /// 一年；其余（index/SPA 回退）→ no-cache 回源校验——dist 重部署后浏览器不得
+    /// 持旧 index.html 引用已删除的 hash 资产（那会表现为加载白屏直到手动刷新）。
+    #[tokio::test]
+    async fn hmi_cache_control_immutable_assets_and_nocache_index() {
+        let dist = temp_dist("cache");
+        let app = build_router(test_state(Some(dist.clone())));
+
+        let (code, cache, _) = get_with_cache(&app, "/hmi/assets/app.js").await;
+        assert_eq!(code, StatusCode::OK);
+        assert_eq!(cache, "public, max-age=31536000, immutable");
+
+        let (code, cache, _) = get_with_cache(&app, "/hmi").await;
+        assert_eq!(code, StatusCode::OK);
+        assert_eq!(cache, "no-cache");
+
+        let (code, cache, _) = get_with_cache(&app, "/hmi/editor/line1").await;
+        assert_eq!(code, StatusCode::OK, "SPA 回退");
+        assert_eq!(cache, "no-cache", "SPA 回退也是 index.html，须回源校验");
 
         let _ = std::fs::remove_dir_all(&dist);
     }
