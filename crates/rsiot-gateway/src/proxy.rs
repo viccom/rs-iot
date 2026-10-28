@@ -35,7 +35,7 @@ pub struct GwState {
     pub jwt_secret: Arc<String>,
     /// 供应商管理段（home_dir/warden；空 home_dir = 未启用，端点返 503）。
     pub reasonix: crate::config::ReasonixCfg,
-    /// agent-hmi 前端静态产物目录（可选）：Some 时 build_router 挂 `/hmi`
+    /// hmi-studio 前端静态产物目录（可选）：Some 时 build_router 挂 `/hmi`
     ///（文件系统 serve + SPA fallback，见 `static_assets::hmi_router`）。
     pub hmi_dist: Option<std::path::PathBuf>,
 }
@@ -112,8 +112,13 @@ pub async fn forward(State(st): State<Arc<GwState>>, req: Request, upstream: Ups
 
     // 提取入站 JWT（query 优先——EventSource 场景；退回 Authorization header——REST 场景）。
     // 注：auth_middleware 已验过有效性，此处仅取值不做密码学校验。
+    // 空值候选跳过（与 auth.rs 同约定）：旧 bundle 会拼出 `&token=` 空值——若不跳过，
+    // 会给上游注入空 Authorization，遮蔽浏览器自动携带的有效 Cookie（rs-iot 侧
+    // Authorization 优先于 Cookie，空 Bearer 也判 invalid token，2026-10-28 实测）。
     let inbound_jwt = extract_query_token(raw_query)
+        .filter(|t| !t.is_empty())
         .or_else(|| extract_bearer(&parts.headers))
+        .filter(|t| !t.is_empty())
         .filter(|_| matches!(upstream, Upstream::Rsiot));
 
     // 摘掉 query 里的 token=（rsiot 路径防泄漏；serve 路径 token 对 serve 零价值同样摘）。

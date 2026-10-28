@@ -163,3 +163,87 @@ async fn invalid_query_token_blocked_at_gateway() {
         "invalid token must be blocked at gateway auth layer"
     );
 }
+
+/// 旧 bundle 形态回归（2026-10-28 线上实测）：URL 带**空** `token=` + 有效 Cookie。
+///
+/// mock rsiot 模拟真实语义（Authorization 优先、空 Bearer 也判 invalid、认 Cookie）。
+/// 修复前两层都遮蔽 cookie：gateway auth 取空 query token 判 invalid 401；修掉后
+/// forward 仍从 query 取到空值注入空 Authorization → 上游 401。本测锁死两层：
+/// 整链 200 + 上游**不得**收到空 Bearer。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn empty_query_token_plus_cookie_does_not_shadow_cookie() {
+    let token = valid_jwt();
+
+    // mock rsiot：非空 Bearer 或 Cookie 含 token=<本测 JWT> 之一有效即 200；
+    // 收到空 "Bearer " 记账（修复前 forward 会注入它）。
+    let empty_bearer_seen = Arc::new(Mutex::new(false));
+    let flag = empty_bearer_seen.clone();
+    let want = token.clone();
+    let app = Router::new().route(
+        "/api/v1/events",
+        any(move |req: axum::extract::Request| {
+            let flag = flag.clone();
+            let want = want.clone();
+            async move {
+                let auth = req
+                    .headers()
+                    .get(axum::http::header::AUTHORIZATION)
+                    .and_then(|v| v.to_str().ok())
+                    .map(|s| s.to_string());
+                if auth.as_deref() == Some("Bearer ") {
+                    *flag.lock().unwrap() = true;
+                }
+                let cookie_ok = req
+                    .headers()
+                    .get(axum::http::header::COOKIE)
+                    .and_then(|v| v.to_str().ok())
+                    .is_some_and(|c| {
+                        c.split(';').map(str::trim).any(|p| p == format!("token={want}"))
+                    });
+                let auth_ok = auth.is_some_and(|a| a.starts_with("Bearer ") && a.len() > 8);
+                if auth_ok || cookie_ok {
+                    (axum::http::StatusCode::OK, "ok")
+                } else {
+                    (axum::http::StatusCode::UNAUTHORIZED, "invalid token")
+                }
+            }
+        }),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    let rsiot_url = format!("http://{addr}");
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+
+    let cfg = GwConfig {
+        listen: "127.0.0.1:0".into(),
+        rsiot_base: rsiot_url,
+        serve_base: "http://127.0.0.1:1".into(),
+        jwt_secret: "test-secret".into(),
+        serve_token: "unused".into(),
+        reasonix: Default::default(),
+        hmi_dist: None,
+    };
+    let gw = spawn_axum(build_router(Arc::new(
+        GwState::from_config(&cfg).expect("state"),
+    )))
+    .await;
+
+    // 旧 bundle 形态：?token=（空）+ 有效 cookie（gateway auth 验 cookie 放行）。
+    let resp = reqwest::Client::new()
+        .get(format!("{gw}/api/rsiot/api/v1/events?types=state&token="))
+        .header(reqwest::header::COOKIE, format!("token={token}"))
+        .send()
+        .await
+        .expect("request");
+    assert_eq!(
+        resp.status(),
+        reqwest::StatusCode::OK,
+        "empty query token must not shadow cookie (neither at auth nor at forward)"
+    );
+    assert!(
+        !*empty_bearer_seen.lock().unwrap(),
+        "forward must not inject an empty Authorization over the valid cookie"
+    );
+}

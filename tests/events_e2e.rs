@@ -240,6 +240,28 @@ async fn events_with_cookie_auth_ok() {
 }
 
 #[tokio::test]
+async fn events_empty_bearer_falls_through_to_cookie() {
+    // 空 Bearer（gateway 反代旧 bundle 会拼出）不得遮蔽同时携带的有效 Cookie
+    // ——否则旧标签页 SSE 401 死循环重连（2026-10-28 线上实测）。
+    let (app, handle, _bus) = test_app().await;
+    let cookie = login_cookie(&app).await;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/v1/events")
+                .header(header::AUTHORIZATION, "Bearer ")
+                .header(header::COOKIE, cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK, "empty bearer must defer to cookie");
+    common::stop_lux(handle).await;
+}
+
+#[tokio::test]
 async fn events_filter_excludes_other_kinds() {
     // ?types=log → publish Packet 不应出现在响应（被过滤）。
     use futures_util::StreamExt;

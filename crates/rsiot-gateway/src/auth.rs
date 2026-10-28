@@ -68,16 +68,24 @@ pub async fn auth_middleware(State(st): State<Arc<GwState>>, req: Request, next:
     if is_public(&path) {
         return next.run(req).await;
     }
+    // 候选链 Bearer → query → Cookie；空值候选一律跳过落到下一通道（升级部署后
+    // 未刷新的旧 bundle 会拼出 `&token=` 空值——空值不得遮蔽同时携带的有效 cookie，
+    // 否则旧标签页 SSE 401 死循环重连）。JWT 非空，跳过空值无语义损失。
     let token = req
         .headers()
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.strip_prefix("Bearer ").map(|t| t.to_string()))
+        .and_then(|s| s.strip_prefix("Bearer "))
+        .filter(|t| !t.is_empty())
+        .map(str::to_string)
         .or_else(|| {
             // EventSource 不能设 header，支持 ?token=<jwt> query 参数。
             req.uri().query().and_then(|q| {
-                q.split('&')
-                    .find_map(|kv| kv.strip_prefix("token=").map(|s| s.to_string()))
+                q.split('&').find_map(|kv| {
+                    kv.strip_prefix("token=")
+                        .filter(|t| !t.is_empty())
+                        .map(str::to_string)
+                })
             })
         })
         .or_else(|| {
@@ -90,8 +98,9 @@ pub async fn auth_middleware(State(st): State<Arc<GwState>>, req: Request, next:
                     let v = v.to_str().ok()?;
                     v.split(';')
                         .map(str::trim)
-                        .find_map(|pair| pair.strip_prefix("token=").map(|t| t.to_string()))
+                        .find_map(|pair| pair.strip_prefix("token=").filter(|t| !t.is_empty()))
                 })
+                .map(str::to_string)
         });
     match token {
         Some(t) => match verify_token(&t, st.jwt_secret.as_str()) {

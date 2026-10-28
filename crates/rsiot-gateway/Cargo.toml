@@ -22,8 +22,12 @@ tower-http = { version = "0.6", features = ["trace", "cors", "fs"] }
 # rs-iot 主 crate 的 reqwest 是 optional + lua-http 无 stream，gateway 独立声明带 stream。
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
 # 复用 rs-iot JWT（层1 鉴权共享 jwt_secret，plan-gateway-tech-selection.md §四层1）。
-# rust_crypto feature 与 rs-iot 对齐（根 Cargo.toml:59）。
-jsonwebtoken = { version = "10", features = ["rust_crypto"] }
+# 加密提供方必须全工作区唯一（jsonwebtoken 10 二选一）：与根 Cargo.toml 对齐用
+# aws_lc_rs——若两侧各启一个（rust_crypto/aws_lc_rs），任何把两个 crate 合并解析的
+# 构建命令（如 `cargo build -p rsiot-gateway -p rs-iot`）会 feature 联合出双提供方，
+# 运行时 panic "Could not automatically determine the process-level CryptoProvider"
+# （2026-10-28 部署实测；分条 -p 构建不触发，具隐蔽性）。
+jsonwebtoken = { version = "10", features = ["aws_lc_rs"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"

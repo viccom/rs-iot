@@ -67,12 +67,16 @@ pub async fn auth_middleware(State(st): State<AppState>, req: Request, next: Nex
         }
     }
 
-    // Authorization header（"Bearer <jwt>" 或裸 token）或 Cookie token
+    // Authorization header（"Bearer <jwt>" 或裸 token）或 Cookie token。
+    // 空值候选跳过（与 gateway auth.rs 同约定）：空 Bearer/空 Authorization 不得
+    // 遮蔽同时携带的有效 Cookie（gateway 反代旧 bundle 场景，2026-10-28 实测）。
     let token = req
         .headers()
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
-        .map(|s| s.strip_prefix("Bearer ").unwrap_or(s).to_string())
+        .map(|s| s.strip_prefix("Bearer ").unwrap_or(s))
+        .filter(|t| !t.is_empty())
+        .map(|s| s.to_string())
         .or_else(|| {
             req.headers()
                 .get(axum::http::header::COOKIE)

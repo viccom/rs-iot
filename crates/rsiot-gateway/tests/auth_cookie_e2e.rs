@@ -108,6 +108,27 @@ async fn invalid_cookie_token_returns_401() {
     assert_eq!(resp.status(), reqwest::StatusCode::UNAUTHORIZED);
 }
 
+/// 空 query token（旧 bundle 拼出 `&token=`）+ 有效 Cookie → 仍放行。
+///
+/// 真实场景回归：升级部署后未刷新的旧控制台 bundle 读不到已迁移的旧键，
+/// 拼出空 token 的 SSE URL——空值不得遮蔽同时携带的有效 cookie（否则旧标签页
+/// SSE 401 死循环重连，2026-10-28 线上实测）。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn empty_query_token_falls_through_to_cookie() {
+    let gw = spawn_axum(build_router(test_state())).await;
+    let resp = reqwest::Client::new()
+        .get(format!("{gw}/api/rsiot/api/v1/events?types=state&token="))
+        .header(reqwest::header::COOKIE, format!("token={}", valid_jwt()))
+        .send()
+        .await
+        .expect("request");
+    assert_eq!(
+        resp.status(),
+        reqwest::StatusCode::BAD_GATEWAY,
+        "empty query token must be skipped → cookie auth passes (502 from dead upstream)"
+    );
+}
+
 /// 名字仅以 token= 结尾的 cookie（如 `reasonix_token=…`）不得误当凭证——
 /// 精确名解析的锁死对照（rs-iot 主 crate 旧实现 `split("token=")` 会误命中）。
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
