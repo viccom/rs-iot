@@ -132,14 +132,6 @@ function setDensityMode(nextDensity: DensityName) {
         </RouterLink>
       </nav>
 
-      <!-- 跨 SPA 入口：组态前端由 gateway 在 /hmi 独立托管（ServeDir），同源整页跳转，
-           会话（HttpOnly cookie + webhmi_* 镜像键）与主题随跳转共享。 -->
-      <a class="nav-item nav-external" href="/hmi/">
-        <span class="nav-index">HMI</span>
-        <span class="nav-title">组态画面</span>
-        <span class="nav-summary">编辑与运行组态画面 →</span>
-      </a>
-
       <section class="sidebar-footer">
         <span>Design Mode</span>
         <strong>Industrial Refined</strong>
@@ -214,6 +206,9 @@ function setDensityMode(nextDensity: DensityName) {
               @click="setDensityMode('compact')"
             >紧凑</button>
           </div>
+          <!-- 跨 SPA 出口：组态前端由 gateway 在 /hmi 独立托管（ServeDir），同源整页跳转，
+               会话（HttpOnly cookie + webhmi_* 镜像键）与主题随跳转共享。 -->
+          <a class="ghost-button topbar-switch" href="/hmi/" title="组态画面编辑与运行">组态画面 ↗</a>
           <button class="ghost-button" @click="drawerOpen = !drawerOpen">
             {{ drawerOpen ? '收起 AI' : '打开 AI' }}
           </button>
@@ -395,12 +390,6 @@ function setDensityMode(nextDensity: DensityName) {
   opacity: 1;
 }
 
-/* 跨 SPA 出口条目：虚线边框示意"离开本控制台"（目标由网关独立托管）。 */
-.nav-external {
-  margin-top: 4px;
-  border-style: dashed;
-}
-
 .nav-index {
   grid-area: index;
   align-self: start;
@@ -557,6 +546,14 @@ function setDensityMode(nextDensity: DensityName) {
 .ghost-button:hover {
   border-color: var(--shell-nav-active-border);
   box-shadow: var(--shell-nav-active-shadow);
+}
+
+/* 顶栏跨 SPA 出口：ghost-button 形制 + 锚点归一（不继承链接蓝/下划线）。 */
+.topbar-switch {
+  display: inline-flex;
+  align-items: center;
+  text-decoration: none;
+  font-weight: 600;
 }
 
 .shell-content {

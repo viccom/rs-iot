@@ -51,10 +51,38 @@ async fn root_serves_index_html() {
     let gw = spawn(build_router(test_state())).await;
     let resp = reqwest::get(format!("{gw}/")).await.expect("request");
     assert_eq!(resp.status(), 200);
+    // shell 必须 no-cache：否则浏览器启发式缓存旧 index.html，升级部署后引用
+    // 已删除的 hash 资产（2026-10-28 前端整合线上旧 bundle 问题的半边根因）。
+    assert_eq!(
+        resp.headers().get(reqwest::header::CACHE_CONTROL).unwrap(),
+        "no-cache",
+        "SPA shell must be revalidated every time"
+    );
     let body = resp.text().await.expect("body");
     assert!(
         body.contains("<div id=\"app\">"),
         "expected embedded Vue index.html (app mount point); got:\n{body}"
+    );
+}
+
+/// `GET /assets/<hash>.js` 带 immutable 缓存头（vite 哈希文件名，内容变即换名）。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hashed_assets_are_immutable() {
+    let gw = spawn(build_router(test_state())).await;
+    // 先从 index.html 提真实 asset 路径（不硬编码 hash）。
+    let index = reqwest::get(format!("{gw}/")).await.expect("index");
+    let body = index.text().await.expect("body");
+    let asset = body
+        .split("src=\"/")
+        .nth(1)
+        .and_then(|s| s.split('"').next())
+        .expect("index references a hashed asset");
+    assert!(asset.starts_with("assets/"), "asset path: {asset}");
+    let resp = reqwest::get(format!("{gw}/{asset}")).await.expect("asset");
+    assert_eq!(resp.status(), 200);
+    assert_eq!(
+        resp.headers().get(reqwest::header::CACHE_CONTROL).unwrap(),
+        "public, max-age=31536000, immutable"
     );
 }
 

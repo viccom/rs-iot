@@ -9,7 +9,7 @@
 //! serve_base = "http://127.0.0.1:8787"
 //! jwt_secret = "<与 rs-iot 同值>"
 //! serve_token = "<reasonix serve --auth token>"
-//! # agent-hmi 前端静态产物目录（可选）：配置后 /hmi 前缀文件系统 serve 该目录
+//! # hmi-studio 前端静态产物目录（可选）：配置后 /hmi 前缀文件系统 serve 该目录
 //! # hmi_dist = "/opt/rs-iot/hmi-dist"
 //! ```
 
@@ -63,9 +63,9 @@ pub struct GwConfig {
     /// 供应商管理段（可选）。
     #[serde(default)]
     pub reasonix: ReasonixCfg,
-    /// agent-hmi 前端静态产物目录（可选，W2 集成）：配置后 `/hmi` 前缀以
+    /// hmi-studio 前端静态产物目录（可选，W2 集成）：配置后 `/hmi` 前缀以
     /// tower-http ServeDir 从该目录**运行时文件系统** serve（非 rust-embed——
-    /// agent-hmi dist 与 gateway 二进制独立部署演进），未命中无扩展名路径回
+    /// hmi-studio dist 与 gateway 二进制独立部署演进），未命中无扩展名路径回
     /// index.html（SPA fallback，启发式同 `static_assets::serve`）。
     /// 未配置则不挂 `/hmi`（落到既有静态 fallback）。
     #[serde(default)]

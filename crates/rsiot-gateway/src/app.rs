@@ -64,7 +64,7 @@ pub fn build_router(st: Arc<GwState>) -> Router {
                 async move { forward(State(st), req, Upstream::Rsiot).await }
             }),
         );
-    // /hmi：agent-hmi 前端静态产物（W2，可配）。配置 hmi_dist 才挂——文件系统
+    // /hmi：hmi-studio 前端静态产物（W2，可配）。配置 hmi_dist 才挂——文件系统
     // serve + SPA fallback（static_assets::hmi_router）；未配置不挂，/hmi 落到
     // 下方既有静态 fallback。非 /api/ 前缀故免 JWT（同主前端，登录页要先加载）。
     let app = match st.hmi_dist.clone() {
@@ -157,7 +157,7 @@ mod tests {
     ///
     /// 验证意图（规则7）：index 标记 HMI-TEST-INDEX 只存在于临时 dist——命中它
     /// 即证明走的是文件系统 serve 而非 rust-embed 嵌入主前端；SPA 回退与资产
-    /// 404 是 agent-hmi history 路由刷新不炸的存在性判据。
+    /// 404 是 hmi-studio history 路由刷新不炸的存在性判据。
     #[tokio::test]
     async fn hmi_configured_serves_index_asset_and_spa_fallback() {
         let dist = temp_dist("mounted");
@@ -171,7 +171,7 @@ mod tests {
         assert_eq!(code, StatusCode::OK, "已存在资产应原样返回");
         assert!(body.contains("hmi asset"));
 
-        // 未命中无扩展名路径（agent-hmi 前端路由，如 /hmi/editor/line1）→ SPA 回退。
+        // 未命中无扩展名路径（hmi-studio 前端路由，如 /hmi/editor/line1）→ SPA 回退。
         let (code, body) = get(&app, "/hmi/editor/line1").await;
         assert_eq!(code, StatusCode::OK, "无扩展名未命中应回 index.html");
         assert!(body.contains("HMI-TEST-INDEX"));
@@ -225,7 +225,7 @@ mod tests {
 
     /// /hmi 免 JWT（非 /api/ 前缀）：无凭证直接 200。
     ///
-    /// 验证意图（规则7）：auth 边界是 /api/*——agent-hmi SPA 登录页要先加载
+    /// 验证意图（规则7）：auth 边界是 /api/*——hmi-studio SPA 登录页要先加载
     /// 才能提交凭证，若 /hmi 要 JWT 则 SPA 启动死循环（同主前端 static_assets）。
     #[tokio::test]
     async fn hmi_does_not_require_jwt() {

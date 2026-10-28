@@ -27,10 +27,19 @@ struct FrontendAsset;
 /// 静态资源 handler（build_router 的 fallback）：从路径取文件名，命中则返文件，
 /// 未命中回退 index.html（SPA history 模式）。
 ///
+/// 缓存策略（与 `hmi_cache_control` 同款，2026-10-28 补齐）：`assets/` 下是 vite
+/// 哈希文件名产物 → immutable 一年；其余（index.html、SPA 回退）→ no-cache——
+/// 否则浏览器可启发式缓存旧 index.html，升级部署后引用已删除的 hash 资产。
 /// 由 axum fallback 调用，签名只接 `Uri`（不需要 State，前端资源是编译期嵌入的常量）。
 pub async fn serve(uri: Uri) -> Response {
     let path = uri.path().trim_start_matches('/');
     let file = if path.is_empty() { "index.html" } else { path };
+    // unwrap 安全：两值均为合法 HeaderValue（ASCII）。
+    let cache_value = if file.starts_with("assets/") {
+        "public, max-age=31536000, immutable"
+    } else {
+        "no-cache"
+    };
 
     if let Some(content) = FrontendAsset::get(file) {
         let mime = mime_guess::from_path(file).first_or_octet_stream();
@@ -40,6 +49,7 @@ pub async fn serve(uri: Uri) -> Response {
                 header::CONTENT_TYPE,
                 HeaderValue::from_str(mime.as_ref()).unwrap(),
             )
+            .header(header::CACHE_CONTROL, HeaderValue::from_str(cache_value).unwrap())
             .body(Body::from(content.data.into_owned()))
             .unwrap()
     } else if path.contains('.') {
@@ -52,6 +62,7 @@ pub async fn serve(uri: Uri) -> Response {
         match FrontendAsset::get("index.html") {
             Some(content) => Response::builder()
                 .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
+                .header(header::CACHE_CONTROL, HeaderValue::from_str("no-cache").unwrap())
                 .body(Body::from(content.data.into_owned()))
                 .unwrap(),
             None => (StatusCode::NOT_FOUND, "frontend not built").into_response(),
@@ -59,14 +70,14 @@ pub async fn serve(uri: Uri) -> Response {
     }
 }
 
-// ---------- /hmi agent-hmi 静态服务（可配 hmi_dist 时挂载，W2 集成） ----------
+// ---------- /hmi hmi-studio 静态服务（可配 hmi_dist 时挂载，W2 集成） ----------
 
 /// `/hmi` 前缀静态服务：**运行时文件系统** serve（tower-http `ServeDir`）。
 ///
-/// 与上方 rust-embed 主前端刻意不同：agent-hmi dist 与 gateway 二进制独立
+/// 与上方 rust-embed 主前端刻意不同：hmi-studio dist 与 gateway 二进制独立
 /// 部署演进（更新 HMI 不重编 gateway），故不嵌入。SPA 启发式与 `serve` 同款：
 /// 未命中且路径含点 = 静态资源缺失 404；不含点 = 回 index.html（history 路由
-/// 由 agent-hmi 前端接管）。未配置 hmi_dist 时 app.rs 不挂本服务。
+/// 由 hmi-studio 前端接管）。未配置 hmi_dist 时 app.rs 不挂本服务。
 ///
 /// 缓存策略（`hmi_cache_control`，审查 2026-10-27）：`assets/` 下是 vite 产物
 /// 哈希文件名（内容变即换名）→ immutable 一年；其余（index.html、SPA 回退、
