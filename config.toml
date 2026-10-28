@@ -35,3 +35,10 @@ dir = "./logs"        # 默认 "./logs"；置 "" 关闭文件层（仅终端）
 level = "info"        # RUST_LOG 优先
 max_days = 7          # 按文件名日期保留最近 N 天（0 = 不按天删）
 max_size_mb = 0       # 0=不限；>0 时按目录总大小删最旧
+
+# 历史时序存储（L2 部署期开关，2026-10-28 路线 A 启用；L1=--features history，
+# L3=per-tag TagProps.history 白名单——须逐 tag 显式开启才归档）。其余字段走
+# HistoryConfig 默认（内存 256MiB/保留 30d/WAL Periodic 500ms）。
+[history]
+enabled = true
+data_dir = "./data/history"
