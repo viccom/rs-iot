@@ -68,6 +68,7 @@ watch(() => monitor.selectedInstance, (cur, prev) => {
   armError.value = ''
   if (!monitor.packetSubscribed) return
   if (prev && prev !== cur) void monitor.stopPacketTrace(prev)
+  if (!cur) return // 切到"选择实例"（空）＝取消聚焦：只停旧，无目标可 arm（store 层守卫返回 false 也不该误报激活失败）
   void arm()
 })
 

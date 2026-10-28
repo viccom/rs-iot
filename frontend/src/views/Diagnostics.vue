@@ -93,7 +93,8 @@ useWorkspacePage(() => ({
             title="聚焦实例：日志按其精确过滤；报文抓样按其激活"
             @change="onInstChange"
           >
-            <option value="" disabled>选择实例</option>
+            <!-- 空值=不聚焦（日志回全进程流）；报文 Tab 下无可抓目标，激活按钮自然禁用。 -->
+            <option value="">{{ tab === 'log' ? '全部实例' : '选择实例' }}</option>
             <option v-for="inst in monitor.roster" :key="inst.inst_id" :value="inst.inst_id">
               {{ inst.inst_id }}（{{ inst.state }}）
             </option>
