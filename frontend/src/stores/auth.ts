@@ -37,10 +37,25 @@ export function bootstrapCookieSession() {
   }).catch(() => {})
 }
 
+// webhmi_user 有两种写入方：控制台存纯显示名（user_id），hmi-studio 存 JSON
+// 对象（{user_id, username, ...}）——统一键后互踩。读取时归一为显示名。
+function readUserDisplay(raw: string | null): string {
+  if (!raw) return ''
+  if (raw.startsWith('{')) {
+    try {
+      const o = JSON.parse(raw) as { user_id?: string; username?: string }
+      return o.username ?? o.user_id ?? ''
+    } catch {
+      return raw
+    }
+  }
+  return raw
+}
+
 export const useAuthStore = defineStore('auth', () => {
   migrateLegacyKeys()
   const token = ref(localStorage.getItem(TOKEN_KEY) || '')
-  const user = ref(localStorage.getItem(USER_KEY) || '')
+  const user = ref(readUserDisplay(localStorage.getItem(USER_KEY)))
 
   function setAuth(t: string, u: string) {
     token.value = t

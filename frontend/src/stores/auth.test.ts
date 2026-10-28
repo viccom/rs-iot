@@ -55,6 +55,21 @@ describe('auth store（统一会话键）', () => {
     expect(store.webhmi_user).toBeUndefined()
   })
 
+  it('webhmi_user 存的是 hmi-studio 的 JSON 对象时归一为显示名（username 优先）', () => {
+    stubLocalStorage({ webhmi_token: 't', webhmi_user: '{"user_id":"admin","username":"管理员"}' })
+    expect(useAuthStore().user).toBe('管理员')
+  })
+
+  it('JSON 对象无 username 时回落 user_id', () => {
+    stubLocalStorage({ webhmi_token: 't', webhmi_user: '{"user_id":"op"}' })
+    expect(useAuthStore().user).toBe('op')
+  })
+
+  it('纯字符串 user 原样透传（控制台自身写入格式）', () => {
+    stubLocalStorage({ webhmi_token: 't', webhmi_user: 'plain-name' })
+    expect(useAuthStore().user).toBe('plain-name')
+  })
+
   it('bootstrapCookieSession：有镜像才带 Bearer 调 /user/session（旧会话补 cookie）', () => {
     stubLocalStorage({ webhmi_token: 'mirror-jwt' })
     const fetchMock = vi.fn(async (_url: string, _init?: RequestInit) => new Response('{"status":"ok"}'))
