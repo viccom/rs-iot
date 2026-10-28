@@ -187,6 +187,7 @@ pub fn build_router(state: AppState) -> axum::Router {
         .route("/api/v1/user/changepass", post(routes_user::changepass))
         .route("/api/v1/user/checktoken", get(routes_user::checktoken))
         .route("/api/v1/user/login", post(routes_user::login))
+        .route("/api/v1/user/session", post(routes_user::session))
         .route("/api/v1/user/logout", post(routes_user::logout))
         // group + accesskey
         .route("/api/v1/usergroups", get(routes_group::list))

@@ -1,7 +1,7 @@
 // frontend/src/stores/auth.test.ts
-import { describe, it, expect, beforeEach } from 'vitest'
+import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { setActivePinia, createPinia } from 'pinia'
-import { useAuthStore } from './auth'
+import { useAuthStore, bootstrapCookieSession } from './auth'
 
 // jsdom 未装，手工 localStorage 桩（同 monitor.test.ts 模式）。
 function stubLocalStorage(initial: Record<string, string> = {}) {
@@ -53,5 +53,24 @@ describe('auth store（统一会话键）', () => {
     expect(auth.token).toBe('')
     expect(store.webhmi_token).toBeUndefined()
     expect(store.webhmi_user).toBeUndefined()
+  })
+
+  it('bootstrapCookieSession：有镜像才带 Bearer 调 /user/session（旧会话补 cookie）', () => {
+    stubLocalStorage({ webhmi_token: 'mirror-jwt' })
+    const fetchMock = vi.fn(async (_url: string, _init?: RequestInit) => new Response('{"status":"ok"}'))
+    vi.stubGlobal('fetch', fetchMock)
+    bootstrapCookieSession()
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit | undefined]
+    expect(url).toBe('/api/rsiot/api/v1/user/session')
+    expect(init?.headers).toMatchObject({ Authorization: 'Bearer mirror-jwt' })
+
+    // 无镜像不调用
+    const store = (globalThis as { localStorage?: Storage }).localStorage as Storage
+    store.removeItem('webhmi_token')
+    fetchMock.mockClear()
+    bootstrapCookieSession()
+    expect(fetchMock).not.toHaveBeenCalled()
+    vi.unstubAllGlobals()
   })
 })

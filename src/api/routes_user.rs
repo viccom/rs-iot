@@ -185,13 +185,50 @@ pub async fn login(State(st): State<AppState>, Json(req): Json<LoginReq>) -> Res
         "user": user,
     }))
     .into_response();
-    // 会话 cookie 有效期 1 天（具名常量，审计 B6）。SameSite=Lax：统一会话后
-    // cookie 是主凭证，Lax 挡跨站 POST 携带（CSRF 基线）；LAN http 不加 Secure。
-    const SESSION_COOKIE_MAX_AGE_SECS: u64 = 86_400;
-    let cookie = format!(
-        "token={token}; Path=/; HttpOnly; Max-Age={SESSION_COOKIE_MAX_AGE_SECS}; SameSite=Lax"
-    );
-    if let Ok(v) = cookie.parse() {
+    if let Ok(v) = session_cookie(&token).parse() {
+        resp.headers_mut().insert(axum::http::header::SET_COOKIE, v);
+    }
+    resp
+}
+
+/// 会话 cookie 有效期 1 天（具名常量，审计 B6）。SameSite=Lax：统一会话后
+/// cookie 是主凭证，Lax 挡跨站 POST 携带（CSRF 基线）；LAN http 不加 Secure。
+const SESSION_COOKIE_MAX_AGE_SECS: u64 = 86_400;
+
+fn session_cookie(token: &str) -> String {
+    format!("token={token}; Path=/; HttpOnly; Max-Age={SESSION_COOKIE_MAX_AGE_SECS}; SameSite=Lax")
+}
+
+/// `POST /api/v1/user/session`：凭有效凭证（Bearer/cookie）补发会话 cookie。
+///
+/// 旧会话自愈（统一会话，2026-10-28）：部署前登录的浏览器只有 JWT 镜像、没有
+/// cookie（旧 gateway 丢弃 Set-Cookie）——REST 走 Bearer 正常，SSE（EventSource
+/// 只能靠同源 cookie）401 死循环。前端启动时带镜像 Bearer 调本端点静默补 cookie。
+/// 须过 auth_middleware（非 PUBLIC）；顺带把 exp 续成新 24h（等价免密续登）。
+pub async fn session(
+    State(st): State<AppState>,
+    authed: Option<axum::Extension<auth::AuthedUser>>,
+) -> Response {
+    let Some(axum::Extension(authed)) = authed else {
+        return (
+            axum::http::StatusCode::UNAUTHORIZED,
+            "missing token".to_string(),
+        )
+            .into_response();
+    };
+    let token = match auth::encode_token(&authed.user_id, &st.jwt_secret) {
+        Ok(t) => t,
+        Err(e) => {
+            return (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("token error: {e}"),
+            )
+                .into_response()
+        }
+    };
+    let mut resp = Json(serde_json::json!({"status": "ok", "user_id": authed.user_id}))
+        .into_response();
+    if let Ok(v) = session_cookie(&token).parse() {
         resp.headers_mut().insert(axum::http::header::SET_COOKIE, v);
     }
     resp

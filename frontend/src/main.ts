@@ -8,7 +8,10 @@ import './styles/main.css'
 // [data-theme="dark"] 适配，与 applyTheme 设置的 documentElement dataset 对齐）
 import '@incremark/theme/styles.css'
 import { applyTheme, readStoredTheme } from './lib/theme'
+import { bootstrapCookieSession } from './stores/auth'
 
 applyTheme(readStoredTheme())
+// 旧会话自愈：镜像 token 在而 cookie 缺失时静默换发（SSE 依赖 cookie）
+bootstrapCookieSession()
 
 createApp(App).use(createPinia()).use(router).mount('#app')

@@ -211,3 +211,78 @@ async fn user_set_normal_path_roundtrip() {
 
     common::stop_lux(handle).await;
 }
+
+// ---------- user/session：旧会话 cookie 自愈（2026-10-28 统一会话补齐） ----------
+
+/// 登录拿 Bearer token（api_flow 便利函数）。
+async fn login_token(app: &axum::Router) -> String {
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/user/login")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"user_id":"admin","pass":"admin"}"#))
+                .expect("request"),
+        )
+        .await
+        .expect("call app");
+    let json = body_json(resp).await;
+    json["token"].as_str().expect("token").to_string()
+}
+
+/// 凭有效 Bearer 调 /user/session → 补发 Set-Cookie（旧会话自愈路径）。
+///
+/// 场景：部署前登录的浏览器只有 JWT 镜像无 cookie（旧 gateway 丢 Set-Cookie），
+/// REST 走 Bearer 正常、SSE（EventSource 只能靠同源 cookie）401——前端启动时
+/// 带镜像 Bearer 调本端点静默补 cookie。
+#[tokio::test]
+async fn session_with_bearer_reissues_cookie() {
+    let (app, handle) = test_app().await;
+    let token = login_token(&app).await;
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/user/session")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("call app");
+    assert_eq!(resp.status(), StatusCode::OK);
+    let cookie = resp
+        .headers()
+        .get(header::SET_COOKIE)
+        .and_then(|v| v.to_str().ok())
+        .expect("Set-Cookie present")
+        .to_string();
+    assert!(cookie.starts_with("token="), "cookie name: {cookie}");
+    assert!(cookie.contains("HttpOnly"), "cookie attrs: {cookie}");
+    assert!(cookie.contains("SameSite=Lax"), "cookie attrs: {cookie}");
+    // 换发的 cookie 值必须是可验证的新 JWT（不是透传原串也要能用）。
+    let new_token = cookie.split(';').next().unwrap().trim_start_matches("token=");
+    assert_ne!(new_token, "", "reissued token must be non-empty");
+    common::stop_lux(handle).await;
+}
+
+/// 无凭证调 /user/session → 401（不在 PUBLIC_PATHS，须过 auth_middleware）。
+#[tokio::test]
+async fn session_without_credential_is_401() {
+    let (app, handle) = test_app().await;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/user/session")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("call app");
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    common::stop_lux(handle).await;
+}

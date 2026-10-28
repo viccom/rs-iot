@@ -24,6 +24,19 @@ function migrateLegacyKeys() {
   localStorage.removeItem('hmi_user')
 }
 
+// 旧会话自愈：镜像 token 在而 cookie 缺失（旧 gateway 时代登录、Set-Cookie 被丢弃
+// 的会话）——凭 Bearer 换发 cookie（POST /user/session）。SSE 靠 cookie 鉴权，缺它
+// 会 401 重连循环；本调用异步尽力而为，进行中的 EventSource 重连数秒内自愈。
+// 裸 fetch（不走 apiFetch）：模块加载早于 store 初始化，且不引入 fetch.ts 循环。
+export function bootstrapCookieSession() {
+  const t = localStorage.getItem(TOKEN_KEY)
+  if (!t) return
+  void fetch('/api/rsiot/api/v1/user/session', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${t}` },
+  }).catch(() => {})
+}
+
 export const useAuthStore = defineStore('auth', () => {
   migrateLegacyKeys()
   const token = ref(localStorage.getItem(TOKEN_KEY) || '')
