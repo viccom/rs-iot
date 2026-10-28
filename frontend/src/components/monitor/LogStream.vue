@@ -24,7 +24,12 @@ const filtered = computed(() => {
   // target 模糊匹配（大小写不敏感 includes）——target 是全限定名（如 rsiot::plugin::...），
   // 全等匹配下输 "modbus" 会过滤不出任何行。
   const kw = target.value.trim().toLowerCase()
+  // 聚焦实例（诊断页右上角选择器）：选中即按日志的 fields.inst_id 精确过滤——
+  // 后端为实例任务包 inst_id span（2026-10-28 治本），无标注行（系统日志/旧快照）
+  // 在实例聚焦下不显示。
+  const inst = monitor.selectedInstance
   return monitor.logs.filter(l => {
+    if (inst && l.fields?.inst_id !== inst) return false
     if (!matchesLogSource(l.target || '', source.value)) return false
     const lv = (l.level || '').toLowerCase()
     if (want !== undefined && (lvRank[lv] ?? 0) < want) return false

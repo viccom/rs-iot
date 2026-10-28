@@ -77,25 +77,78 @@ impl LogRingBuffer {
 /// tracing subscriber layer:截获 event → LogEntry → push LogRingBuffer。
 ///
 /// 独立 EnvFilter("info,io_trace=trace")经 `.with_filter()` attach(见 init_tracing)。
+///
+/// 实例归属（2026-10-28）：实例任务在 instance.rs spawn 时包
+/// `info_span!("plugin_instance", inst_id = ...)`（tracing::Instrument）——本层
+/// on_new_span 抓 span 的 inst_id 字段入映射，on_event 按事件所属 span 注入
+/// entry.fields["inst_id"]。治本"按实例过滤日志"欠账（logSource.ts 同步注释）：
+/// 此前插件日志只有 target 前缀粗分，同插件多实例（lua_north 5 个实例共用
+/// target）无法精分。
 #[derive(Debug)]
 pub struct RingBufferLayer {
     /// 共享 ring buffer(Arc,init_tracing 建后注入 + AppState 同一实例)。
     pub buffer: std::sync::Arc<LogRingBuffer>,
     /// SSE 事件总线(阶段一):每条日志扇出。无 SSE 客户端时 publish 静默零开销。
     pub sender: crate::event_bus::EventBus,
+    /// span id → inst_id（on_new_span 抓取 / on_close 清理）。
+    span_inst: std::sync::Mutex<std::collections::HashMap<tracing::span::Id, String>>,
 }
 
-impl<S: tracing::Subscriber> Layer<S> for RingBufferLayer {
-    fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
+impl RingBufferLayer {
+    pub fn new(
+        buffer: std::sync::Arc<LogRingBuffer>,
+        sender: crate::event_bus::EventBus,
+    ) -> Self {
+        Self {
+            buffer,
+            sender,
+            span_inst: std::sync::Mutex::new(std::collections::HashMap::new()),
+        }
+    }
+}
+
+impl<S> Layer<S> for RingBufferLayer
+where
+    S: tracing::Subscriber + for<'lookup> tracing_subscriber::registry::LookupSpan<'lookup>,
+{
+    fn on_new_span(
+        &self,
+        attrs: &tracing::span::Attributes<'_>,
+        id: &tracing::span::Id,
+        _ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        let mut v = InstSpanVisitor::default();
+        attrs.record(&mut v);
+        if let Some(inst) = v.inst_id {
+            self.span_inst
+                .lock()
+                .expect("span_inst lock")
+                .insert(id.clone(), inst);
+        }
+    }
+
+    fn on_close(&self, id: tracing::span::Id, _ctx: tracing_subscriber::layer::Context<'_, S>) {
+        self.span_inst.lock().expect("span_inst lock").remove(&id);
+    }
+
+    fn on_event(&self, event: &tracing::Event<'_>, ctx: tracing_subscriber::layer::Context<'_, S>) {
         let meta = event.metadata();
         let mut visitor = EntryVisitor::default();
         event.record(&mut visitor);
+        // 实例归属：事件所属 span 的 inst_id（span 字段读取侧不可达，on_new_span 预抓）。
+        let inst_id = ctx
+            .event_span(event)
+            .and_then(|s| self.span_inst.lock().expect("span_inst lock").get(&s.id()).cloned());
+        let mut fields = visitor.fields;
+        if let Some(inst) = inst_id {
+            fields.entry("inst_id".to_string()).or_insert(inst);
+        }
         let entry = LogEntry {
             ts: crate::event_bus::now_iso8601(),
             level: meta.level().as_str().to_string(),
             target: meta.target().to_string(),
             message: visitor.message,
-            fields: visitor.fields,
+            fields,
         };
         self.buffer.push(entry.clone());
         // 通讯报文（target=io_trace）走独立 packet 通道（io_trace::dump 直推
@@ -105,6 +158,26 @@ impl<S: tracing::Subscriber> Layer<S> for RingBufferLayer {
             self.sender.publish(crate::event_bus::EventPayload::Log {
                 entry: std::sync::Arc::new(entry),
             });
+        }
+    }
+}
+
+/// on_new_span 字段抓取：只关心 inst_id。
+#[derive(Default)]
+struct InstSpanVisitor {
+    inst_id: Option<String>,
+}
+
+impl tracing::field::Visit for InstSpanVisitor {
+    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+        if field.name() == "inst_id" {
+            self.inst_id = Some(value.to_string());
+        }
+    }
+
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        if field.name() == "inst_id" {
+            self.inst_id = Some(format!("{value:?}"));
         }
     }
 }
@@ -232,11 +305,8 @@ mod tests {
     /// 用一个含 RingBufferLayer 的 dispatcher 驱动 tracing 宏,验 LogEntry 收集。
     fn with_layer_driver<F: FnOnce(&Arc<LogRingBuffer>)>(cap: usize, filter: &str, body: F) {
         let buffer = Arc::new(LogRingBuffer::new(cap));
-        let layer = RingBufferLayer {
-            buffer: buffer.clone(),
-            sender: crate::event_bus::EventBus::dummy(),
-        }
-        .with_filter(EnvFilter::new(filter));
+        let layer = RingBufferLayer::new(buffer.clone(), crate::event_bus::EventBus::dummy())
+            .with_filter(EnvFilter::new(filter));
         let subscriber = tracing_subscriber::registry().with(layer);
         let dispatch = tracing::dispatcher::Dispatch::new(subscriber);
         tracing::dispatcher::with_default(&dispatch, || body(&buffer));
@@ -294,6 +364,49 @@ mod tests {
         with_layer_driver(100, "info", |buf| {
             tracing::debug!("not captured");
             assert!(buf.recent(None, None, 100).is_empty());
+        });
+    }
+
+    #[test]
+    fn layer_annotates_inst_id_from_span() {
+        // 实例归属（2026-10-28）：事件在带 inst_id 字段的 span 内发出 →
+        // entry.fields.inst_id 注入（instance.rs spawn 时 instrument 的效果等价复现）。
+        with_layer_driver(100, "info", |buf| {
+            let span = tracing::info_span!("plugin_instance", inst_id = "mqtt-pub-default");
+            let _g = span.enter();
+            tracing::warn!("[luaNorth] inst mqtt-pub-default MQTT 断连（测试）");
+            drop(_g);
+            let r = buf.recent(None, None, 100);
+            assert_eq!(r.len(), 1);
+            assert_eq!(
+                r[0].fields.get("inst_id").map(String::as_str),
+                Some("mqtt-pub-default"),
+                "span 的 inst_id 必须注入 entry.fields"
+            );
+        });
+    }
+
+    #[test]
+    fn layer_outside_span_has_no_inst_id() {
+        // 无 span 的事件不受影响（fields 无 inst_id，系统日志语义不变）。
+        with_layer_driver(100, "info", |buf| {
+            tracing::info!("system log");
+            let r = buf.recent(None, None, 100);
+            assert_eq!(r.len(), 1);
+            assert!(!r[0].fields.contains_key("inst_id"));
+        });
+    }
+
+    #[test]
+    fn layer_event_field_inst_id_wins_over_span() {
+        // 事件自带 inst_id 字段（io_trace::dump 风格）时以事件字段为准（or_insert）。
+        with_layer_driver(100, "info", |buf| {
+            let span = tracing::info_span!("plugin_instance", inst_id = "span-inst");
+            let _g = span.enter();
+            tracing::info!(inst_id = "event-inst", "explicit");
+            drop(_g);
+            let r = buf.recent(None, None, 100);
+            assert_eq!(r[0].fields.get("inst_id").map(String::as_str), Some("event-inst"));
         });
     }
 }

@@ -122,12 +122,9 @@ pub fn init_tracing(
     // AppState（SSE endpoint 订阅）。
     let event_bus = crate::event_bus::EventBus::new(event_bus_capacity);
     layers.push(
-        crate::log_ringbuffer::RingBufferLayer {
-            buffer: ring_buffer.clone(),
-            sender: event_bus.clone(),
-        }
-        .with_filter(ring_filter)
-        .boxed(),
+        crate::log_ringbuffer::RingBufferLayer::new(ring_buffer.clone(), event_bus.clone())
+            .with_filter(ring_filter)
+            .boxed(),
     );
 
     let _ = tracing_subscriber::registry().with(layers).try_init();

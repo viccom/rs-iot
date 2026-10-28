@@ -77,7 +77,7 @@ useWorkspacePage(() => ({
       <div class="activate-bar">
         <p class="activate-hint">
           <template v-if="tab === 'log'">
-            日志为全进程流（含所有实例，经级别/target 过滤），默认不推送，点击激活开始订阅。
+            日志为全进程流（含所有实例），默认不推送，点击激活开始订阅；选中实例后按该实例精确过滤（仅显示其运行日志）。
           </template>
           <template v-else>
             报文抓样按实例激活（60s 窗口）；切换实例将停止旧实例推送并激活新实例。
@@ -85,11 +85,12 @@ useWorkspacePage(() => ({
         </p>
         <div class="activate-actions">
           <!-- 页内实例选择器（此前须去采集器页选择，诊断流程被打断）。
-               名册含未启动实例（state 一并展示）；抓样激活要求实例运行中。 -->
+               名册含未启动实例（state 一并展示）；抓样激活要求实例运行中；
+               日志页选中即按实例精确过滤（fields.inst_id，2026-10-28）。 -->
           <select
             class="inst-select"
             :value="monitor.selectedInstance"
-            title="选择抓样目标实例（日志流不受影响，为全进程推送）"
+            title="聚焦实例：日志按其精确过滤；报文抓样按其激活"
             @change="onInstChange"
           >
             <option value="" disabled>选择实例</option>

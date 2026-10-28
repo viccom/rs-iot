@@ -18,6 +18,7 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
+use tracing::Instrument;
 
 /// 插件实例运行状态。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -153,10 +154,15 @@ impl InstanceManager {
         let tx = SampleSender::new(self.hub_tx.clone(), self.ctx.lux.clone(), id_key.clone());
         let token_run = token.clone();
         let id_for_log = id_key.clone();
-        let source_join = tokio::spawn(async move {
-            source.run(ctx, inst, tx, cmd_rx, token_run).await;
-            tracing::info!("[instance] source {id_for_log} exited");
-        });
+        // 实例日志归属：任务整体包 inst_id span（log_ringbuffer on_new_span 抓取）
+        // ——插件内裸 tracing::warn! 无须逐条加字段即带实例标注（按实例过滤的治本）。
+        let source_join = tokio::spawn(
+            async move {
+                source.run(ctx, inst, tx, cmd_rx, token_run).await;
+                tracing::info!("[instance] source {id_for_log} exited");
+            }
+            .instrument(tracing::info_span!("plugin_instance", inst_id = %id_key)),
+        );
 
         let sup_join = self.spawn_supervisor(id_key.clone(), token.clone(), source_join);
 
@@ -209,10 +215,13 @@ impl InstanceManager {
         let ctx = self.ctx.clone();
         let token_run = token.clone();
         let id_for_log = id_key.clone();
-        let sink_join = tokio::spawn(async move {
-            sink.run(ctx, inst, sample_rx, cmd_rx, token_run).await;
-            tracing::info!("[instance] sink {id_for_log} exited");
-        });
+        let sink_join = tokio::spawn(
+            async move {
+                sink.run(ctx, inst, sample_rx, cmd_rx, token_run).await;
+                tracing::info!("[instance] sink {id_for_log} exited");
+            }
+            .instrument(tracing::info_span!("plugin_instance", inst_id = %id_key)),
+        );
 
         let sup_join = self.spawn_supervisor(id_key.clone(), token.clone(), sink_join);
 
