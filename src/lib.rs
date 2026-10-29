@@ -166,7 +166,15 @@ async fn shutdown_signal() {
     }
     #[cfg(not(windows))]
     {
-        let _ = tokio::signal::ctrl_c().await;
+        // SIGTERM 与 SIGINT 同为优雅停机触发：systemd/warden 等监管器停服惯例发
+        // TERM（tokio ctrl_c 仅装 SIGINT handler，TERM 默认直接终止会绕过优雅排空——
+        // history close/lux SAVE 全靠这条路径）。
+        let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("install SIGTERM handler");
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {},
+            _ = term.recv() => {},
+        }
     }
 }
 
