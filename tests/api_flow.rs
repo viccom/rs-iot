@@ -264,7 +264,11 @@ async fn session_with_bearer_reissues_cookie() {
     assert!(cookie.contains("HttpOnly"), "cookie attrs: {cookie}");
     assert!(cookie.contains("SameSite=Lax"), "cookie attrs: {cookie}");
     // 换发的 cookie 值必须是可验证的新 JWT（不是透传原串也要能用）。
-    let new_token = cookie.split(';').next().unwrap().trim_start_matches("token=");
+    let new_token = cookie
+        .split(';')
+        .next()
+        .unwrap()
+        .trim_start_matches("token=");
     assert_ne!(new_token, "", "reissued token must be non-empty");
     common::stop_lux(handle).await;
 }

@@ -49,7 +49,10 @@ pub async fn serve(uri: Uri) -> Response {
                 header::CONTENT_TYPE,
                 HeaderValue::from_str(mime.as_ref()).unwrap(),
             )
-            .header(header::CACHE_CONTROL, HeaderValue::from_str(cache_value).unwrap())
+            .header(
+                header::CACHE_CONTROL,
+                HeaderValue::from_str(cache_value).unwrap(),
+            )
             .body(Body::from(content.data.into_owned()))
             .unwrap()
     } else if path.contains('.') {
@@ -62,7 +65,10 @@ pub async fn serve(uri: Uri) -> Response {
         match FrontendAsset::get("index.html") {
             Some(content) => Response::builder()
                 .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
-                .header(header::CACHE_CONTROL, HeaderValue::from_str("no-cache").unwrap())
+                .header(
+                    header::CACHE_CONTROL,
+                    HeaderValue::from_str("no-cache").unwrap(),
+                )
                 .body(Body::from(content.data.into_owned()))
                 .unwrap(),
             None => (StatusCode::NOT_FOUND, "frontend not built").into_response(),

@@ -226,8 +226,8 @@ pub async fn session(
                 .into_response()
         }
     };
-    let mut resp = Json(serde_json::json!({"status": "ok", "user_id": authed.user_id}))
-        .into_response();
+    let mut resp =
+        Json(serde_json::json!({"status": "ok", "user_id": authed.user_id})).into_response();
     if let Ok(v) = session_cookie(&token).parse() {
         resp.headers_mut().insert(axum::http::header::SET_COOKIE, v);
     }

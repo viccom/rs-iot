@@ -72,7 +72,10 @@ async fn login_relays_upstream_set_cookie() {
         "/api/v1/user/login",
         post(|| async {
             (
-                [(axum::http::header::SET_COOKIE, "token=jwt-from-rsiot; Path=/; HttpOnly; Max-Age=86400")],
+                [(
+                    axum::http::header::SET_COOKIE,
+                    "token=jwt-from-rsiot; Path=/; HttpOnly; Max-Age=86400",
+                )],
                 Json(serde_json::json!({"status":"ok","token":"jwt-from-rsiot"})),
             )
         }),
@@ -94,7 +97,9 @@ async fn login_relays_upstream_set_cookie() {
         .filter_map(|v| v.to_str().ok())
         .collect();
     assert!(
-        cookies.iter().any(|c| c.starts_with("token=jwt-from-rsiot") && c.contains("HttpOnly")),
+        cookies
+            .iter()
+            .any(|c| c.starts_with("token=jwt-from-rsiot") && c.contains("HttpOnly")),
         "upstream Set-Cookie must be relayed, got: {cookies:?}"
     );
 }

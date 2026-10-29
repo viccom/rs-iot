@@ -19,10 +19,13 @@ fn unique_dir(tag: &str) -> PathBuf {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    std::env::temp_dir().join(format!("rsiot-bindfail-{tag}-{}-{nanos}", std::process::id()))
+    std::env::temp_dir().join(format!(
+        "rsiot-bindfail-{tag}-{}-{nanos}",
+        std::process::id()
+    ))
 }
 
-fn write_config(dir: &PathBuf, api_port: u16) -> PathBuf {
+fn write_config(dir: &std::path::Path, api_port: u16) -> PathBuf {
     let path = dir.join("config.toml");
     let lux = dir.join("lux");
     let logs = dir.join("logs");

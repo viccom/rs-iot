@@ -257,7 +257,11 @@ async fn events_empty_bearer_falls_through_to_cookie() {
         )
         .await
         .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK, "empty bearer must defer to cookie");
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "empty bearer must defer to cookie"
+    );
     common::stop_lux(handle).await;
 }
 

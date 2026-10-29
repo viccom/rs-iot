@@ -158,6 +158,9 @@ pub fn build_router(state: AppState) -> axum::Router {
         // 历史时序读（Phase 2：单 series raw/降采样查询；默认 JWT 保护，
         // 503/400 矩阵见 routes_history）
         .route("/api/v1/history", get(routes_history::history))
+        // BI 大屏端点（P1）：整窗统计 + 多 series 批量（routes_history 尾段）
+        .route("/api/v1/history/stats", get(routes_history::history_stats))
+        .route("/api/v1/history/batch", post(routes_history::history_batch))
         // 设备模型注册表（M-1；devreg 为过渡路径，M-2 接管 /api/v1/devices 系）
         .route("/api/v1/devmodels", get(routes_model::list))
         .route("/api/v1/devmodel/set", post(routes_model::set))

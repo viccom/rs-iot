@@ -5,7 +5,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
 use tracing::field::{Field, Visit};
-use tracing_subscriber::layer::{Context, Layer};
+use tracing_subscriber::layer::Layer;
 
 /// 一条日志(结构化,tracing event 经 Visit 收集)。
 #[derive(Debug, Clone, serde::Serialize)]
@@ -95,10 +95,8 @@ pub struct RingBufferLayer {
 }
 
 impl RingBufferLayer {
-    pub fn new(
-        buffer: std::sync::Arc<LogRingBuffer>,
-        sender: crate::event_bus::EventBus,
-    ) -> Self {
+    /// 构造带 span→inst_id 标注表的新层（on_new_span/on_event/on_close 维护）。
+    pub fn new(buffer: std::sync::Arc<LogRingBuffer>, sender: crate::event_bus::EventBus) -> Self {
         Self {
             buffer,
             sender,
@@ -136,9 +134,13 @@ where
         let mut visitor = EntryVisitor::default();
         event.record(&mut visitor);
         // 实例归属：事件所属 span 的 inst_id（span 字段读取侧不可达，on_new_span 预抓）。
-        let inst_id = ctx
-            .event_span(event)
-            .and_then(|s| self.span_inst.lock().expect("span_inst lock").get(&s.id()).cloned());
+        let inst_id = ctx.event_span(event).and_then(|s| {
+            self.span_inst
+                .lock()
+                .expect("span_inst lock")
+                .get(&s.id())
+                .cloned()
+        });
         let mut fields = visitor.fields;
         if let Some(inst) = inst_id {
             fields.entry("inst_id".to_string()).or_insert(inst);
@@ -406,7 +408,10 @@ mod tests {
             tracing::info!(inst_id = "event-inst", "explicit");
             drop(_g);
             let r = buf.recent(None, None, 100);
-            assert_eq!(r[0].fields.get("inst_id").map(String::as_str), Some("event-inst"));
+            assert_eq!(
+                r[0].fields.get("inst_id").map(String::as_str),
+                Some("event-inst")
+            );
         });
     }
 }

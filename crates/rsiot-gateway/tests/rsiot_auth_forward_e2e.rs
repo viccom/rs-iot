@@ -198,7 +198,9 @@ async fn empty_query_token_plus_cookie_does_not_shadow_cookie() {
                     .get(axum::http::header::COOKIE)
                     .and_then(|v| v.to_str().ok())
                     .is_some_and(|c| {
-                        c.split(';').map(str::trim).any(|p| p == format!("token={want}"))
+                        c.split(';')
+                            .map(str::trim)
+                            .any(|p| p == format!("token={want}"))
                     });
                 let auth_ok = auth.is_some_and(|a| a.starts_with("Bearer ") && a.len() > 8);
                 if auth_ok || cookie_ok {

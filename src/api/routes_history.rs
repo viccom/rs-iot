@@ -26,6 +26,7 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::Deserialize;
 use serde_json::json;
+use std::sync::Arc;
 
 /// `GET /api/v1/history` query（P3；时间参数一律秒）。
 #[derive(Deserialize)]
@@ -230,4 +231,279 @@ pub async fn history(State(st): State<AppState>, Query(q): Query<HistoryParams>)
             }
         }
     }
+}
+
+// ════════════════════════════════════════════════════════════════════
+// BI 大屏端点（P1，2026-10-29）：
+// - GET  /api/v1/history/stats  单 series 整窗统计（KPI 卡一 call 一卡）
+// - POST /api/v1/history/batch  多 series 批量查询（一屏多图一次往返，
+//   并发 cap 4、单条参数错字段化不拖整批）
+// 校验语义与既有 GET /history 一致（秒出入/半开窗/agg 联动/护栏）；
+// 既有 handler 不动，共用逻辑以独立函数落于本段。
+// ════════════════════════════════════════════════════════════════════
+
+/// batch 单条查询上限（读放大护栏：32×MAX_LIMIT 上界）。
+const MAX_BATCH_QUERIES: usize = 32;
+/// batch 内并发 select 上限（D3"少写者"同源考量：引擎查询并发受控）。
+const BATCH_CONCURRENCY: usize = 4;
+
+/// 校验通过的 series 查询（stats/batch/单条共用形状）。
+struct ValidatedSeries {
+    devid: String,
+    metric: String,
+    query: HistoryQuery,
+}
+
+/// 参数校验 + 秒→ms（照既有 `history` 的 P3/P12 语义；错误文案一致）。
+fn validate_series(
+    dev_id: &str,
+    tag: &str,
+    start: i64,
+    end: i64,
+    agg: Option<&str>,
+    interval: Option<u64>,
+    limit: Option<usize>,
+) -> Result<ValidatedSeries, String> {
+    if start >= end {
+        return Err("start must < end".into());
+    }
+    if agg.is_some() && interval.is_none() {
+        return Err("agg requires interval".into());
+    }
+    if interval.is_some() && agg.is_none() {
+        return Err("interval requires agg".into());
+    }
+    let parsed_agg = match agg {
+        Some(s) => match parse_agg(s) {
+            Some(a) => Some(a),
+            None => return Err("agg 须为 min/max/avg/sum/count/last 之一".into()),
+        },
+        None => None,
+    };
+    if interval == Some(0) {
+        return Err("interval must > 0".into());
+    }
+    if let Some(iv) = interval {
+        let Some(span) = end.checked_sub(start) else {
+            return Err("start/end 窗口跨度过大（差值溢出）".into());
+        };
+        if span as u64 / iv > MAX_BUCKETS {
+            return Err("降采样桶数 (end-start)/interval 不得超过 100000".into());
+        }
+    }
+    let limit = match limit {
+        Some(l) if l > MAX_LIMIT => return Err("limit 不得超过 100000".into()),
+        Some(l) => l,
+        None => DEFAULT_LIMIT,
+    };
+    let (Some(start_ms), Some(end_ms)) = (secs_to_ms(start), secs_to_ms(end)) else {
+        return Err("start/end 秒值换算毫秒溢出".into());
+    };
+    let downsample = match parsed_agg {
+        Some(a) => {
+            let Some(ms) = interval
+                .and_then(|s| i64::try_from(s).ok())
+                .and_then(secs_to_ms)
+            else {
+                return Err("interval 秒值换算毫秒溢出".into());
+            };
+            Some((ms, a))
+        }
+        None => None,
+    };
+    Ok(ValidatedSeries {
+        devid: dev_id.to_string(),
+        metric: tag.to_string(),
+        query: HistoryQuery {
+            start_ms,
+            end_ms,
+            downsample,
+            limit,
+        },
+    })
+}
+
+/// `GET /api/v1/history/stats?dev_id=&tag=&start=&end=`：整窗统计
+/// `{stats:{count,last,last_ts,avg,min,max,sum}}`（数值聚合仅数值型 lane；
+/// 空窗 count=0 其余 null）。raw 全读上限 MAX_LIMIT（护栏同单条端点）。
+pub async fn history_stats(State(st): State<AppState>, Query(q): Query<HistoryParams>) -> Response {
+    let (Some(dev_id), Some(tag), Some(start), Some(end)) = (&q.dev_id, &q.tag, q.start, q.end)
+    else {
+        return bad_request("dev_id, tag, start, end 均为必填");
+    };
+    let Ok(v) = validate_series(dev_id, tag, start, end, None, None, Some(MAX_LIMIT)) else {
+        return bad_request("start must < end");
+    };
+    let Some(reader) = st.history_reader.clone() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({
+                "error": "history unavailable",
+                "reason": history_reason(&st.history_engine_state),
+            })),
+        )
+            .into_response();
+    };
+    let metric = v.metric;
+    let devid = v.devid;
+    let result = tokio::task::spawn_blocking(move || reader.select(&metric, &devid, &v.query))
+        .await
+        .unwrap_or_else(|e| Err(format!("stats blocking 任务失败: {e}")));
+    match result {
+        Ok(points) => {
+            let mut count = 0usize;
+            let mut sum = 0.0f64;
+            let mut min = f64::INFINITY;
+            let mut max = f64::NEG_INFINITY;
+            let mut numeric = 0usize;
+            let mut last: Option<&crate::types::SampleValue> = None;
+            let mut last_ts: Option<i64> = None;
+            for p in &points {
+                count += 1;
+                last = Some(&p.value);
+                last_ts = Some(p.ts_ms / 1000);
+                if let Some(x) = match &p.value {
+                    crate::types::SampleValue::Float(f) => Some(*f),
+                    crate::types::SampleValue::Int(i) => Some(*i as f64),
+                    _ => None,
+                } {
+                    sum += x;
+                    min = min.min(x);
+                    max = max.max(x);
+                    numeric += 1;
+                }
+            }
+            let (avg, mn, mx, sm) = if numeric > 0 {
+                (
+                    json!(sum / numeric as f64),
+                    json!(min),
+                    json!(max),
+                    json!(sum),
+                )
+            } else {
+                (json!(null), json!(null), json!(null), json!(null))
+            };
+            Json(json!({
+                "dev_id": dev_id, "tag": tag,
+                "stats": {
+                    "count": count,
+                    "last": last.map(|v| serde_json::to_value(v).unwrap_or_default()).unwrap_or(json!(null)),
+                    "last_ts": last_ts,
+                    "avg": avg, "min": mn, "max": mx, "sum": sm,
+                },
+            }))
+            .into_response()
+        }
+        Err(e) => {
+            if let Some(msg) = e.strip_prefix("bad request: ") {
+                (StatusCode::BAD_REQUEST, Json(json!({ "error": msg }))).into_response()
+            } else {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({ "error": e })),
+                )
+                    .into_response()
+            }
+        }
+    }
+}
+
+/// `POST /api/v1/history/batch` body：`{queries:[{dev_id,tag,start,end,agg?,interval?,limit?}]}`。
+/// 响应 `{results:[{dev_id,tag,points,count}|{dev_id,tag,error}]}`——顺序与
+/// queries 一致；单条参数错/查询失败字段化，整体仍 200（单图失败不拖全屏）。
+#[derive(Deserialize)]
+pub struct BatchReq {
+    queries: Vec<BatchQuery>,
+}
+
+#[derive(Deserialize)]
+pub struct BatchQuery {
+    dev_id: Option<String>,
+    tag: Option<String>,
+    start: Option<i64>,
+    end: Option<i64>,
+    agg: Option<String>,
+    interval: Option<u64>,
+    limit: Option<usize>,
+}
+
+pub async fn history_batch(State(st): State<AppState>, Json(req): Json<BatchReq>) -> Response {
+    if req.queries.is_empty() {
+        return bad_request("queries 不得为空");
+    }
+    if req.queries.len() > MAX_BATCH_QUERIES {
+        return bad_request("queries 不得超过 32 条");
+    }
+    let Some(reader) = st.history_reader.clone() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({
+                "error": "history unavailable",
+                "reason": history_reason(&st.history_engine_state),
+            })),
+        )
+            .into_response();
+    };
+    let sem = Arc::new(tokio::sync::Semaphore::new(BATCH_CONCURRENCY));
+    let mut join = tokio::task::JoinSet::new();
+    for (idx, q) in req.queries.into_iter().enumerate() {
+        let reader = reader.clone();
+        let sem = sem.clone();
+        join.spawn(async move {
+            let _permit = sem.acquire().await;
+            let label = (
+                q.dev_id.clone().unwrap_or_default(),
+                q.tag.clone().unwrap_or_default(),
+            );
+            let validated = match (&q.dev_id, &q.tag, q.start, q.end) {
+                (Some(d), Some(t), Some(s), Some(e)) => {
+                    validate_series(d, t, s, e, q.agg.as_deref(), q.interval, q.limit)
+                }
+                _ => Err("dev_id, tag, start, end 均为必填".into()),
+            };
+            let outcome = match validated {
+                Err(msg) => Err(msg),
+                Ok(v) => {
+                    let metric = v.metric;
+                    let devid = v.devid;
+                    tokio::task::spawn_blocking(move || reader.select(&metric, &devid, &v.query))
+                        .await
+                        .unwrap_or_else(|e| Err(format!("batch blocking 任务失败: {e}")))
+                }
+            };
+            (idx, label, outcome)
+        });
+    }
+    let mut slots: Vec<Option<serde_json::Value>> = (0..32).map(|_| None).collect();
+    while let Some(joined) = join.join_next().await {
+        match joined {
+            Ok((idx, (devid, tag), outcome)) => {
+                let entry = match outcome {
+                    Ok(points) => {
+                        let out: Vec<_> = points
+                            .iter()
+                            .map(|p| json!({"ts": p.ts_ms / 1000, "value": p.value}))
+                            .collect();
+                        let count = out.len();
+                        json!({"dev_id": devid, "tag": tag, "points": out, "count": count})
+                    }
+                    // 参数类错误去引擎前缀；引擎错误整体进 error（前端单图占位）
+                    Err(e) => json!({
+                        "dev_id": devid, "tag": tag,
+                        "error": e.strip_prefix("bad request: ").unwrap_or(&e),
+                    }),
+                };
+                slots[idx] = Some(entry);
+            }
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({ "error": format!("batch 任务失败: {e}") })),
+                )
+                    .into_response()
+            }
+        }
+    }
+    let results: Vec<_> = slots.into_iter().flatten().collect();
+    Json(json!({ "results": results })).into_response()
 }

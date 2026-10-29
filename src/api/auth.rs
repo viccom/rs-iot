@@ -117,10 +117,10 @@ pub struct AuthedUser {
 /// 多对 cookie 以 `;` 分隔；名字必须恰为 `token`——`reasonix_token=` 等
 /// 后缀同名的 cookie 不得误当凭证（gateway 反代场景浏览器可能同时带两者）。
 fn cookie_token(cookie_header: &str) -> Option<&str> {
-    cookie_header.split(';').map(str::trim).find_map(|pair| {
-        pair.strip_prefix("token=")
-            .filter(|v| !v.is_empty())
-    })
+    cookie_header
+        .split(';')
+        .map(str::trim)
+        .find_map(|pair| pair.strip_prefix("token=").filter(|v| !v.is_empty()))
 }
 
 #[cfg(test)]
