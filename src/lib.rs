@@ -450,6 +450,11 @@ pub async fn run_app_with_shutdown(
     let app = api::build_router(state);
     let api_port = cfg.api_port;
     let api_bind_host = cfg.api_bind_host.clone();
+    // N10（2026-10-29）：API 端口被占曾是"error! 后继续运行"的僵尸态——
+    // 无 API 面但采集/归档照跑，与正常进程并存抢数据目录锁。bind 失败必须
+    // 级联优雅停机（走既有 close/SAVE 序）并使进程非零退出。
+    let bind_fail = shutdown.child_token();
+    let bind_fail_for_task = bind_fail.clone();
     let axum_handle = tokio::spawn(async move {
         match tokio::net::TcpListener::bind((api_bind_host.as_str(), api_port)).await {
             Ok(listener) => {
@@ -458,7 +463,10 @@ pub async fn run_app_with_shutdown(
                     tracing::error!("axum serve error: {e}");
                 }
             }
-            Err(e) => tracing::error!("bind :{api_port} failed: {e}"),
+            Err(e) => {
+                tracing::error!("bind :{api_port} failed: {e} —— 触发优雅停机退出（API 面不可用，继续运行即僵尸态）");
+                bind_fail_for_task.cancel();
+            }
         }
     });
 
@@ -511,7 +519,12 @@ pub async fn run_app_with_shutdown(
 
     tracing::info!("rs-iot ready. shutdown signal will stop all components.");
 
-    shutdown.cancelled().await;
+    // N10：API bind 失败与外部停机信号同等待（任一先到即走优雅停机序）；
+    // bind 失败分支随后转 Err 非零退出。
+    tokio::select! {
+        _ = shutdown.cancelled() => {}
+        _ = bind_fail.cancelled() => {}
+    }
 
     // 等 dispatcher 走完退出路径(token.cancel 级联 + drop worker_txs + join worker),
     // 让 worker 的 best-effort flush 在 shutdown_lux 前完成(防丢最后 ≤50ms 数据)。
@@ -533,6 +546,13 @@ pub async fn run_app_with_shutdown(
     mgr.stop_all().await;
     db::shutdown_lux(handle).await?;
     tracing::info!("rs-iot stopped");
+    // N10：bind 失败路径以 Err 非零退出（warden/systemd 由此判失败并告警；
+    // 正常停机保持 Ok(())）。
+    if bind_fail.is_cancelled() && !shutdown.is_cancelled() {
+        return Err(RsIotError::Config(format!(
+            "REST API bind :{api_port} failed (端口被占？) —— 已优雅停机退出"
+        )));
+    }
     Ok(())
 }
 
