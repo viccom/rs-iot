@@ -387,6 +387,9 @@ pub async fn history_stats(State(st): State<AppState>, Query(q): Query<HistoryPa
                 "dev_id": dev_id, "tag": tag,
                 "stats": {
                     "count": count,
+                    // 整窗 > MAX_LIMIT 时 select 只返回最旧 100k 点，聚合基于
+                    // 截断前缀——置 true 提醒 KPI 调用方（sum/last/last_ts 失真）
+                    "truncated": count >= MAX_LIMIT,
                     "last": last.map(|v| serde_json::to_value(v).unwrap_or_default()).unwrap_or(json!(null)),
                     "last_ts": last_ts,
                     "avg": avg, "min": mn, "max": mx, "sum": sm,

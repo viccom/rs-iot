@@ -210,6 +210,67 @@ async fn stats_aggregates_full_window() {
     assert_eq!(json["stats"]["max"], 60.0);
     assert_eq!(json["stats"]["last"], 60.0);
     assert_eq!(json["stats"]["last_ts"], 6, "last_ts 秒基线（6000ms/1000）");
+    assert_eq!(json["stats"]["truncated"], false, "未触上限不标截断");
+    common::stop_lux(handle).await;
+}
+
+/// 截断标志（2026-10-30 审查修复）：整窗点数 > raw 上限（MAX_LIMIT=100000）时
+/// stats 基于最旧 100k 点计算，sum/last/last_ts 会静默失真——响应必须带
+/// `truncated:true`；恰好 100k 无法区分真值与截断，保守置 true。
+#[tokio::test]
+async fn stats_marks_truncation_at_raw_read_limit() {
+    struct LimitReader {
+        n: usize,
+    }
+    impl HistoryReader for LimitReader {
+        fn select(
+            &self,
+            _metric: &str,
+            _devid: &str,
+            _q: &HistoryQuery,
+        ) -> Result<Vec<HistoryPoint>, String> {
+            Ok((0..self.n)
+                .map(|i| HistoryPoint {
+                    ts_ms: 1000 + i as i64,
+                    value: SampleValue::Float(i as f64),
+                })
+                .collect())
+        }
+    }
+
+    let (app, handle) = test_app(Some(Arc::new(LimitReader { n: 100_000 }))).await;
+    let token = login_token(&app).await;
+    let resp = req(
+        &app,
+        &token,
+        "GET",
+        "/api/v1/history/stats?dev_id=d1&tag=t1&start=0&end=200000",
+        "",
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    assert_eq!(json["stats"]["count"], 100_000);
+    assert_eq!(
+        json["stats"]["truncated"], true,
+        "命中 raw 读取上限必须标记截断（KPI sum/last 基于最旧 100k 点）"
+    );
+    common::stop_lux(handle).await;
+
+    let (app, handle) = test_app(Some(Arc::new(LimitReader { n: 99_999 }))).await;
+    let token = login_token(&app).await;
+    let resp = req(
+        &app,
+        &token,
+        "GET",
+        "/api/v1/history/stats?dev_id=d1&tag=t1&start=0&end=200000",
+        "",
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    assert_eq!(json["stats"]["count"], 99_999);
+    assert_eq!(json["stats"]["truncated"], false, "低于上限不标截断");
     common::stop_lux(handle).await;
 }
 

@@ -113,3 +113,97 @@ fn api_bind_failure_exits_nonzero_with_graceful_shutdown() {
         status.code()
     );
 }
+
+/// N10 收尾门（2026-10-30）：bind 失败曾只取消子 token、未级联父 shutdown——
+/// drain 窗口（等 pipeline 的 5s 超时）内补发 SIGTERM 会让信号任务把根 token
+/// 也取消，`bind_fail.is_cancelled() && !shutdown.is_cancelled()` 判定翻转，
+/// bind 失败以退出码 0 收场（监管器不告警）。
+///
+/// 门形态：B 实例 bind 失败（日志出现"触发优雅停机退出"即确认进入 drain）后
+/// 立刻发 SIGTERM，断言退出码仍非 0。红形态：退出码 0。
+#[cfg(unix)]
+#[test]
+fn api_bind_failure_keeps_nonzero_exit_when_sigterm_arrives_during_drain() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+
+    let dir_a = unique_dir("sigterm-a");
+    let dir_b = unique_dir("sigterm-b");
+    let cfg_a = write_config(&dir_a, port);
+    let cfg_b = write_config(&dir_b, port);
+
+    let mut first = spawn_rs_iot(&cfg_a);
+    assert!(
+        wait_port_open(port, Duration::from_secs(20)),
+        "前置：A 实例占住端口 {port}"
+    );
+
+    let mut second = spawn_rs_iot(&cfg_b);
+
+    // 轮询 B 的日志确认 bind 失败已发生（进入 drain 窗口），消除发信号时序竞态
+    let logs_b = dir_b.join("logs");
+    let start = Instant::now();
+    let mut bind_fail_seen = false;
+    while start.elapsed() < Duration::from_secs(20) {
+        if let Ok(entries) = std::fs::read_dir(&logs_b) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .map(|n| n.starts_with("rs-iot.log."))
+                    .unwrap_or(false)
+                {
+                    if let Ok(content) = std::fs::read_to_string(&path) {
+                        if content.contains("触发优雅停机退出") {
+                            bind_fail_seen = true;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        if bind_fail_seen {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(
+        bind_fail_seen,
+        "前置：B 实例日志未见 bind 失败（{:?}）",
+        logs_b
+    );
+
+    // drain 窗口内（5s pipeline 等待烧满期）补发 SIGTERM
+    let pid = second.id();
+    let _ = Command::new("kill")
+        .args(["-TERM", &pid.to_string()])
+        .status()
+        .expect("send SIGTERM");
+
+    let mut exited: Option<std::process::ExitStatus> = None;
+    while start.elapsed() < Duration::from_secs(20) {
+        match second.try_wait().unwrap() {
+            Some(status) => {
+                exited = Some(status);
+                break;
+            }
+            None => std::thread::sleep(Duration::from_millis(300)),
+        }
+    }
+
+    let _ = first.kill();
+    let _ = first.wait();
+    let _ = second.kill();
+    let _ = second.wait();
+    std::fs::remove_dir_all(&dir_a).ok();
+    std::fs::remove_dir_all(&dir_b).ok();
+
+    let status = exited.expect("红：收到 SIGTERM 的 B 实例 20s 内未退出");
+    assert!(
+        !status.success(),
+        "bind 失败 + drain 期 SIGTERM 必须仍非零退出（实际 {:?}）",
+        status.code()
+    );
+}

@@ -453,8 +453,16 @@ pub async fn run_app_with_shutdown(
     // N10（2026-10-29）：API 端口被占曾是"error! 后继续运行"的僵尸态——
     // 无 API 面但采集/归档照跑，与正常进程并存抢数据目录锁。bind 失败必须
     // 级联优雅停机（走既有 close/SAVE 序）并使进程非零退出。
-    let bind_fail = shutdown.child_token();
+    // 独立根 token（不能是 shutdown 的 child）：child.is_cancelled() 在祖先
+    // （根 shutdown）被取消时也为 true——曾使正常优雅停机误判成 bind 失败
+    // 非零退出（history_init_failed_e2e 抓住）。此 token 只由 bind 失败分支
+    // 取消，退出码判定 `bind_fail.is_cancelled()` 因此无歧义。
+    let bind_fail = CancellationToken::new();
     let bind_fail_for_task = bind_fail.clone();
+    // 级联用根 token：只取消 bind_fail（独立 token，与 shutdown 无父子关系）
+    // 不会传播到 pipeline 等后台任务，drain 的 5s 等待必然空转、数据面任务
+    // 脱离运行直至 SAVE（2026-10-30 审查修复）
+    let shutdown_for_task = shutdown.clone();
     let axum_handle = tokio::spawn(async move {
         match tokio::net::TcpListener::bind((api_bind_host.as_str(), api_port)).await {
             Ok(listener) => {
@@ -466,6 +474,9 @@ pub async fn run_app_with_shutdown(
             Err(e) => {
                 tracing::error!("bind :{api_port} failed: {e} —— 触发优雅停机退出（API 面不可用，继续运行即僵尸态）");
                 bind_fail_for_task.cancel();
+                // 级联父 token：让 pipeline_token/后台任务真正走停机序，
+                // 且 drain 期间补发 SIGTERM 不再翻转下面的退出码判定
+                shutdown_for_task.cancel();
             }
         }
     });
@@ -525,6 +536,10 @@ pub async fn run_app_with_shutdown(
         _ = shutdown.cancelled() => {}
         _ = bind_fail.cancelled() => {}
     }
+    // bind 失败已级联取消根 shutdown（见上方 axum task），因此不能用
+    // `!shutdown.is_cancelled()` 区分路径——drain 期补发 SIGTERM 曾把 bind 失败
+    // 翻转成退出码 0。用显式布尔钉住"本次停机由 bind 失败引发"。
+    let bind_failed = bind_fail.is_cancelled();
 
     // 等 dispatcher 走完退出路径(token.cancel 级联 + drop worker_txs + join worker),
     // 让 worker 的 best-effort flush 在 shutdown_lux 前完成(防丢最后 ≤50ms 数据)。
@@ -548,7 +563,7 @@ pub async fn run_app_with_shutdown(
     tracing::info!("rs-iot stopped");
     // N10：bind 失败路径以 Err 非零退出（warden/systemd 由此判失败并告警；
     // 正常停机保持 Ok(())）。
-    if bind_fail.is_cancelled() && !shutdown.is_cancelled() {
+    if bind_failed {
         return Err(RsIotError::Config(format!(
             "REST API bind :{api_port} failed (端口被占？) —— 已优雅停机退出"
         )));

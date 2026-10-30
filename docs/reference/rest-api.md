@@ -525,6 +525,40 @@ curl -s -H "Authorization: $TOKEN" \
 # → {"dev_id":"devA","tag":"temp","points":[{"ts":1756080000,"value":23.4},{"ts":1756080300,"value":23.6}...],"count":288}
 ```
 
+#### 4.18.2 BI 大屏端点（`routes_history.rs`，2026-10-29 P1）
+
+为 BI 大屏「一次往返取整屏数据」设的两个端点（消费方：hmi-studio 宿主聚合收集器，通道 B）。
+校验语义与 §4.18.1 完全一致（秒出入/半开窗/agg-interval 成对/降采样桶数与 limit 护栏），
+503 矩阵同 §4.18.1（引擎未就绪 `{error:"history unavailable",reason:…}`）。
+
+| Method | Path | 鉴权 | Body/Query | 成功响应（200） |
+|---|---|---|---|---|
+| GET | `/api/v1/history/stats` | JWT | `?dev_id=&tag=&start=&end=`（全必填，缺一 400） | `{dev_id, tag, stats:{count,truncated,last,last_ts,avg,min,max,sum}}` |
+| POST | `/api/v1/history/batch` | JWT | `{queries:[{dev_id,tag,start,end,agg?,interval?,limit?}]}` | `{results:[…]}`（顺序与 queries 一致） |
+
+- **stats（整窗统计，KPI 一 call 一卡）**：raw 全读（limit 钳到 MAX_LIMIT=100000，护栏同单条读）后进程内聚合。
+  `count`/`last`/`last_ts` 统计**全部类型**点；数值聚合 `avg`/`min`/`max`/`sum` 只统计数值 lane（Float/Int），
+  无数值点时四者为 `null`；空窗 `count=0`、其余全 `null`。
+  **`truncated`**（2026-10-30）：整窗点数超 MAX_LIMIT 时 raw 读只返回**最旧 100k 点**，聚合基于截断前缀——
+  响应置 `truncated:true` 提醒 KPI 调用方（`sum`/`last`/`last_ts` 失真），恰等于上限时保守置 true。
+- **batch（多 series 批量）**：≤32 条（`queries` 为空或超限 → 400）；条间并发 cap 4（Semaphore + spawn_blocking，
+  引擎查询并发受控）；**单条错误字段化**——参数错/查询失败在对应槽位返回 `{dev_id, tag, error}`，整体仍 200
+  （单图失败不拖全屏）；成功槽位 `{dev_id, tag, points:[{ts,value}], count}`（ts 秒、桶语义同 §4.18.1）。
+
+```bash
+# KPI 整窗统计
+curl -s -H "Authorization: $TOKEN" \
+  "http://localhost:8790/api/v1/history/stats?dev_id=devA&tag=power&start=1756080000&end=1756166400"
+# → {"dev_id":"devA","tag":"power","stats":{"count":288,"truncated":false,"last":2.4,"last_ts":1756166100,"avg":2.1,"min":0.4,"max":4.8,"sum":604.8}}
+# 多 series 批量（一条参数错不拖整批）
+curl -s -X POST -H "Authorization: $TOKEN" -H "Content-Type: application/json" \
+  -d '{"queries":[{"dev_id":"devA","tag":"temp","start":1756080000,"end":1756166400,"agg":"avg","interval":300},
+       {"dev_id":"devA","tag":"power","start":1756080000,"end":1756166400}]}' \
+  "http://localhost:8790/api/v1/history/batch"
+# → {"results":[{"dev_id":"devA","tag":"temp","points":[...],"count":288},
+#               {"dev_id":"devA","tag":"power","points":[...],"count":1440}]}
+```
+
 ### 4.19 agent-hmi 画面/主题存储（`routes_meta.rs`，lux Hash `screen:{id}` / `theme:{id}`）
 
 两资源同构（screens/themes 各五端点），供 agent-hmi（Web HMI 编辑器）持久化画面文档与主题文档。
