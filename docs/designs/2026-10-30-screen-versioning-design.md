@@ -1,6 +1,13 @@
 # 画面/主题文档版本管理与并发控制设计（routes_meta 演进）
 
-> 建立时点 2026-10-30。上游总体设计见 hmi-studio
+> **状态**：accepted（定稿待实施；第 1 轮 P0 工作流的后端权威源）
+> **日期**：2026-10-30
+> **实施**：未开始
+> **代码**：计划新增 `src/api/routes_meta.rs` 版本层（同文件扩展）；不新增模块
+> **测试**：计划新增 `tests/meta_versioning.rs`（§6 十一组）
+> **遗留**：全部（§8 全部实施步骤）
+
+> 上游总体设计见 hmi-studio
 > `docs/plans/2026-10-30-ai-assistant-and-extension-system-design.md`（P0 工作流）。
 > 本文是 rs-iot 侧实现的单一权威源：存储键族、API 契约、捕获策略、指标与测试。
 >
@@ -344,7 +351,7 @@ GB 级体量相比可忽略；且全部在 lux 内存 + 磁盘双写，随 lux S
 
 ## 6. 测试计划（TDD）
 
-单元/集成（`tests/meta_versioning.rs` 或 api 测试模块内）：
+计划新增 `tests/meta_versioning.rs`（或并入 api 测试模块内；二选一，实施时定）：
 
 1. 判重：同内容二次 PUT → version 不变、无新版本条目
 2. 捕获：内容变更 PUT → 旧内容可从 versions/{seq} 取回，author 正确

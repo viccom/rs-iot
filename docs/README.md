@@ -12,13 +12,13 @@
 
 | 主题 | 决策（why） | 设计（build） | 代码 | 测试 | 指南/参考 |
 |---|---|---|---|---|---|
-| 南向协议接入 | [feature 裁剪](decisions/2026-08-07-feature-gating-protocols.md)（已实施） | [eipClient](designs/2026-08-17-eip-client-design.md)（已实施·真机待验） | `src/plugin/builtin/{opcua,modbus,s7,eip}_client/` | `tests/{s7,modbus_multi_slave,eip_client,feature_gate}_e2e.rs` | CLAUDE.md 验证规则节 |
+| 南向协议接入 | [feature 裁剪](decisions/2026-08-07-feature-gating-protocols.md)（已实施） | [eipClient](designs/2026-08-17-eip-client-design.md)（已实施·真机待验） | `src/plugin/builtin/{opcua,modbus,s7,eip}_client/` | `tests/{s7,modbus_multi_slave,eip_client,feature_gate}_e2e.rs` | AGENTS.md 验证规则节 |
 | Lua 脚本系统 | [扩展策略](decisions/2026-08-07-plugin-extension-strategy.md)（已实施） | [采集系统](designs/2026-08-06-lua-script-collector-design.md)（已实施）→ [平台演进](designs/2026-08-18-lua-script-system-evolution-design.md)（已实施·阶段 A/B/C） | `src/plugin/lua_core/` + `src/plugin/builtin/{lua_client,lua_north,lua_transform}/` | `tests/lua_*_e2e.rs` + lua_core 内单测 | [lua-script-guide](guides/lua-script-guide.md) |
 | 外部插件 bridge | [扩展策略](decisions/2026-08-07-plugin-extension-strategy.md)（已实施） | —（[协议规约](reference/external-plugin-protocol.md)即设计） | `src/plugin/builtin/sidecar_client/` | `tests/sidecar_e2e.rs` | [开发指南](guides/external-plugin-dev-guide.md)、`examples/ext-plugin-*` |
 | 可观测性（M4+P1） | — | [packet-trace](designs/2026-08-10-packet-trace-design.md)（部分实施）· [log-ringbuffer](designs/2026-08-10-log-ringbuffer-design.md)（已实施） | `src/io_trace.rs`、`src/log_ringbuffer.rs`、`src/api/routes_{metrics,trace,logs}.rs` | `tests/{trace,log,metrics}_e2e.rs` | [埋点规范](conventions/instrumentation-conventions.md)、[rest-api](reference/rest-api.md) §4.10+ |
 | AI 网关集成 | [技术选型](decisions/2026-08-12-gateway-tech-selection.md)（已实施） | [v3 设计](designs/2026-08-11-ai-agent-integration-v3-design.md)（已实施）→ [分层演进](designs/2026-08-18-multi-system-gateway-design.md)（**待实施**） | `crates/rsiot-gateway/`、`crates/rsiot-mcp/` | gateway/mcp crate 内单测 | [部署指南](ops/deploy-gateway-and-mcp.md) |
-| 设备模型注册表（物模型） | [元数据唯一来源决策](decisions/2026-08-25-device-model-registry.md)（已实施） | [四期实施计划](designs/2026-08-25-device-model-registry-plan.md)（**已实施**·M-1~M-4 全并） | M-1~M-4 全并入（`src/model/` 九模块 + 六插件模型驱动 + lua/sidecar v2 + 发现引擎 + tags 退役 + 前端四面板） | `tests/model_registry_e2e.rs` + `tests/tag_effective_e2e.rs` | 决策文档 §3 业界对标 |
-| 历史时序存储（tsink） | [tsink 选型决策](decisions/2026-08-24-history-storage-tsink-selection.md)（已实施·含实测对比） | [总设计与路线图](designs/2026-08-24-history-storage-master-plan.md)（部分实施·ADR 权威版）→ [Tag Registry](designs/2026-08-24-tag-registry-plan.md)（已实施·Phase 1a 地基；tags 表于 M-4 退役被 devreg.overrides 吸收）→ [写路径 Phase 1b](designs/2026-08-25-history-write-path-plan.md)（已实施·四门禁全过·已并 master aedd1cf）→ [读+订阅 Phase 2](designs/2026-08-25-history-read-subscribe-plan.md)（已实施·feat/history-read-sub）→ [治理收口 Phase 3](designs/2026-08-26-history-phase3-governance-plan.md)（已实施·feat/history-phase3·治理 metrics/前端历史查询/init_failed+栈溢出 e2e/浏览器实测） | Phase 1b/2/3 已实施：`src/history/` + `src/api/routes_history.rs` + `src/api/rtdata_watch.rs`（订阅 dirty-set 服务；读侧 effective() 缓存见 `src/model/cache.rs`） | `tests/history_{dataflow,write,kill_recovery,read}_e2e.rs` + `tests/rtdata_{subscribe,watch}_e2e.rs` + `tests/tag_effective_e2e.rs` | 决策文档附录（实测基线/工件位置） |
+| 设备模型注册表（物模型） | [元数据唯一来源决策](decisions/2026-08-25-device-model-registry.md)（已实施） | [四期实施计划](designs/2026-08-25-device-model-registry-plan.md)（**已实施**·M-1~M-4 全并） | M-1~M-4 全并入（`src/model/` 九模块 + 六插件模型驱动 + lua/sidecar v2 + 发现引擎 + tags 退役 + 前端四面板） | `tests/model_registry_e2e.rs` + `tests/tag_effective_e2e.rs` + `tests/history_bi_e2e.rs` | 决策文档附录| 决策文档 §3 业界对标 |
+| 历史时序存储（tsink） | [tsink 选型决策](decisions/2026-08-24-history-storage-tsink-selection.md)（已实施·含实测对比） | [总设计与路线图](designs/2026-08-24-history-storage-master-plan.md)（部分实施·ADR 权威版）→ [Tag Registry](designs/2026-08-24-tag-registry-plan.md)（已实施·Phase 1a 地基；tags 表于 M-4 退役被 devreg.overrides 吸收）→ [写路径 Phase 1b](designs/2026-08-25-history-write-path-plan.md)（已实施·四门禁全过·已并 master aedd1cf）→ [读+订阅 Phase 2](designs/2026-08-25-history-read-subscribe-plan.md)（已实施·feat/history-read-sub）→ [治理收口 Phase 3](designs/2026-08-26-history-phase3-governance-plan.md)（已实施·feat/history-phase3·治理 metrics/前端历史查询/init_failed+栈溢出 e2e/浏览器实测） | Phase 1b/2/3 已实施 + BI 大屏端点 stats/batch（2026-10-29 P1，81a0216）：`src/history/` + `src/api/routes_history.rs` + `src/api/rtdata_watch.rs`（订阅 dirty-set 服务；读侧 effective() 缓存见 `src/model/cache.rs`） | `tests/history_{dataflow,write,kill_recovery,read}_e2e.rs` + `tests/rtdata_{subscribe,watch}_e2e.rs` + `tests/tag_effective_e2e.rs` + `tests/history_bi_e2e.rs` | 决策文档附录|`tests/tag_effective_e2e.rs` + `tests/history_bi_e2e.rs` | 决策文档附录（实测基线/工件位置） |
 | 现场部署与测试 | — | — | `field-kit/` | `field-kit` e2e 脚本 | [field-e2e-windows](ops/field-e2e-windows.md) |
 
 ## guides/ — 开发与使用指南（怎么用/怎么开发）
@@ -97,6 +97,7 @@
 | [2026-10-27-external-plugin-config-push-v3-design.md](designs/2026-10-27-external-plugin-config-push-v3-design.md) | 外部插件配置下发升级（ConfigPush v3）：补 `app_config`/`devices[].bind` 两层下发 + 版本集合协商 + 凭证解析下发 + 不变量与不做什么清单 | **已实施**（批次 1+2；批次 3 可选未做） |
 | [2026-08-26-history-phase3-governance-plan.md](designs/2026-08-26-history-phase3-governance-plan.md) | 历史存储 Phase 3 余项收口实施计划（治理 metrics 7 新 family/HistoryTelemetry 内存水位/前端历史查询面板/init_failed+栈溢出双 e2e/浏览器嵌入实测七项+2 bug 修复） | **已实施**（feat/history-phase3，2026-08-26） |
 | [2026-08-27-model-extension-slot-design.md](designs/2026-08-27-model-extension-slot-design.md) | 设备模型域扩展性设计（DeviceModel/TagTemplate 开放扩展槽）：flatten 语义/wire 形态/`x_` 键契约与毕业机制/报警外置与存储梯度定位边界/场景驱动演进路线 | **已实施**（扩展槽+键契约+读透出面：REST 校验/MCP 两读工具/前端只读展示） |
+| [2026-10-30-screen-versioning-design.md](designs/2026-10-30-screen-versioning-design.md) | 画面/主题文档版本管理与并发控制（routes_meta 演进）：`sv:` 键族 + 内容判重 + if_version 乐观锁 + rollback + SSE screen 事件 + embedded 无事务的失败矩阵 | accepted（定稿待实施） |
 
 ## ops/ — 部署与运维（怎么跑起来）
 
@@ -115,11 +116,11 @@
 
 ## docs 根级
 
-- [architecture.md](architecture.md)：架构详解（数据流/模块职责/lux 布局/环境依赖/2026-10-27 审查结论）——CLAUDE.md 项目地图的展开版
+- [architecture.md](architecture.md)：架构详解（数据流/模块职责/lux 布局/环境依赖/2026-10-27 审查结论）——AGENTS.md 项目地图的展开版
 - [conventions/documentation.md](conventions/documentation.md)：文档宪法（分域/命名/状态机/索引/校验）
 
 ## docs 之外的文档
 
-- 根 [README.md](../README.md)：项目门面（特性/构建/里程碑）；[CLAUDE.md](../CLAUDE.md)：AI 协作指令 + 项目地图（引用本索引大部分文档）
+- 根 [README.md](../README.md)：项目门面（特性/构建/里程碑）；[AGENTS.md](../AGENTS.md)：AI 协作指令 + 项目地图（引用本索引大部分文档）
 - 代码就近 README：[examples/lua-scripts/](../examples/lua-scripts/README.md)、[examples/ext-plugin-python/](../examples/ext-plugin-python/README.md)、[examples/ext-plugin-opcda-go/](../examples/ext-plugin-opcda-go/README.md)、[field-kit/](../field-kit/README.md)
 - 待补：`crates/rsiot-mcp`、`crates/rsiot-gateway`、`frontend/` 各自的 README
