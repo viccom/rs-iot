@@ -1,11 +1,11 @@
 # 画面/主题版本管理实施计划（P0 第 1 轮 · TDD 任务表）
 
-> **状态**：partially-implemented（A1~A8 完成，A9 部署验证进行中）
+> **状态**：implemented（A1~A9 全部完成）
 > **日期**：2026-10-30
-> **实施**：2026-10-30 A1~A8（版本层 + 三端点 + SSE + 指标 + 文档；11 组测试与全量 just check 绿）
+> **实施**：2026-10-30 `166fe25` 版本层+三端点+SSE+指标（→ `40698d4` 文档收口）；11 组测试全绿 + just check 全过 + release 重编（--features history）warden 重启后 §6 六条实测全符
 > **代码**：计划扩展 `src/api/routes_meta.rs`（版本层同文件）、`src/event_bus.rs`（Screen 变体）、`src/config.rs`（[meta] 段）、`src/process_metrics.rs` + `src/api/routes_metrics/render.rs`（四指标）、`src/api/mod.rs`（路由注册）；不新增模块
 > **测试**：计划新增 `tests/meta_versioning.rs`（设计 §6 十一组）
-> **遗留**：全部（§2 任务表）
+> **遗留**：无（dev 构建须带 `--features history` 的教训已登记最终报告；紧缩读改写窗口等设计级已知限制见设计文档 §7）
 
 权威设计：`docs/designs/2026-10-30-screen-versioning-design.md`（单一权威源，本文件
 只做任务切分与状态跟踪）。任务书：hmi-studio
@@ -45,7 +45,7 @@
 | A6 | author 提取（`Extension<Option<AuthedUser>>`，缺失记 "unknown"）+ `EventPayload::Screen` 变体（enum/kind/publish 三处）+ delete 级联 + publish（判重命中不发帧） | A2 | `cargo test --test meta_versioning sse_and_author`（第 2/8 组）+ `cargo test --lib`（event_bus 穷尽性） | ☐✅ |
 | A7 | 紧缩（HLEN > 2×cap 触发：HGETALL → 按 seq 降序保留 cap 条且正文存活 → DEL 整键 → 重写；每 PUT 至多一次）+ `[meta]` 配置段（`versions_ttl_secs`=2592000 / `versions_cap`=50，钳制 1..=500）+ 四指标（created/conflicts/rollbacks/compactions ×{kind}，挂 ProcessMetrics + render） | A5 | `cargo test --test meta_versioning ttl_compact_metrics`（第 6 组）+ `curl 127.0.0.1:8790/metrics \| grep rs_iot_meta_`（重启后实测） | ☐✅ |
 | A8 | `docs/reference/rest-api.md` §4.19 增补（三端点契约 + if_version + version 字段 + 409/410 形态）+ §4.10 事件表加 `screen` 行 + `[meta]` 键入 §1 配置清单 | A2~A7 | `python3 scripts/check_docs.py` | ☐✅ |
-| A9 | 全门禁 + 分笔提交（存储层/契约端点/SSE+指标/文档 四笔，每笔独立构建通过）+ `cargo build --release -p rs-iot`（单独构建）+ warden `dev-rs-iot` 重启 + 任务书 §6 六条 curl 实测 | A1~A8 | `just check`（两次瞬态红豁免口径见 §0）+ §6 六条逐条记录输出 | ☐⏳ |
+| A9 | 全门禁 + 分笔提交（存储层/契约端点/SSE+指标/文档 四笔，每笔独立构建通过）+ `cargo build --release -p rs-iot`（单独构建）+ warden `dev-rs-iot` 重启 + 任务书 §6 六条 curl 实测 | A1~A8 | `just check`（两次瞬态红豁免口径见 §0）+ §6 六条逐条记录输出 | ☐⏳✅ |
 
 ## 3. 完成判据（任务书 §9 摘要）
 
