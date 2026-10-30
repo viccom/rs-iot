@@ -45,3 +45,9 @@ max_size_mb = 0       # 0=不限；>0 时按目录总大小删最旧
 [history]
 enabled = true
 data_dir = "./data/history"
+
+# 画面/主题文档版本管理（P0，design 2026-10-30-screen-versioning）。
+# 版本正文 TTL 自动淘汰旧版；每画面元数据超 2×cap 触发紧缩（保留最新 cap 条）。
+[meta]
+versions_ttl_secs = 2592000   # 正文 TTL，默认 30 天（0 视为默认）
+versions_cap      = 50        # 每画面保留版本数上限（钳制 1..=500）

@@ -47,6 +47,16 @@ pub struct ProcessMetrics {
     pub mqtt_publish_fail_count: AtomicU64,
     /// mqtt 当前是否已连接（gauge，1=true/0=false；T8 后恒 false）。
     pub mqtt_connected: AtomicBool,
+    // 画面/主题版本管理（P0，design 2026-10-30-screen-versioning §5.2）
+    // 索引约定：0=screen 1=theme（routes_meta::MetaKind::metric_idx，两 kind 同构）。
+    /// 版本快照创建数（捕获发生时 +1；判重命中不计）。
+    pub meta_versions_created: [AtomicU64; 2],
+    /// if_version 409 次数（写者竞争温度计——持续增长 = 有写者没接乐观锁）。
+    pub meta_version_conflicts: [AtomicU64; 2],
+    /// 回滚次数。
+    pub meta_rollbacks: [AtomicU64; 2],
+    /// 紧缩执行次数（频繁 = cap 配置过小或 TTL 过长）。
+    pub meta_compactions: [AtomicU64; 2],
 }
 
 impl ProcessMetrics {
@@ -68,6 +78,10 @@ impl ProcessMetrics {
             mqtt_publish_count: AtomicU64::new(0),
             mqtt_publish_fail_count: AtomicU64::new(0),
             mqtt_connected: AtomicBool::new(false),
+            meta_versions_created: [AtomicU64::new(0), AtomicU64::new(0)],
+            meta_version_conflicts: [AtomicU64::new(0), AtomicU64::new(0)],
+            meta_rollbacks: [AtomicU64::new(0), AtomicU64::new(0)],
+            meta_compactions: [AtomicU64::new(0), AtomicU64::new(0)],
         }
     }
 
@@ -145,6 +159,25 @@ impl ProcessMetrics {
     /// 更新 mqtt 连接状态（T8 后无调用方——旧 mqtt_pub 已删；保留为端点形状）。
     pub fn mqtt_connected(&self, connected: bool) {
         self.mqtt_connected.store(connected, Ordering::Relaxed);
+    }
+
+    // ---------- 画面/主题版本管理（P0 §5.2；idx 0=screen 1=theme） ----------
+
+    /// 版本快照创建 +1（捕获发生时）。
+    pub fn meta_versions_created(&self, idx: usize) {
+        self.meta_versions_created[idx].fetch_add(1, Ordering::Relaxed);
+    }
+    /// if_version 409 +1（写者竞争温度计）。
+    pub fn meta_version_conflict(&self, idx: usize) {
+        self.meta_version_conflicts[idx].fetch_add(1, Ordering::Relaxed);
+    }
+    /// 回滚 +1。
+    pub fn meta_rollback(&self, idx: usize) {
+        self.meta_rollbacks[idx].fetch_add(1, Ordering::Relaxed);
+    }
+    /// 紧缩执行 +1（频繁 = cap 过小或 TTL 过长）。
+    pub fn meta_compaction(&self, idx: usize) {
+        self.meta_compactions[idx].fetch_add(1, Ordering::Relaxed);
     }
 }
 

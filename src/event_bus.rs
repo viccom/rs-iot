@@ -122,6 +122,26 @@ pub enum EventPayload {
         /// 时间戳（ISO8601/RFC3339，宿主填）。
         ts: String,
     },
+    /// 画面/主题文档变更（P0 版本管理，design 2026-10-30-screen-versioning §3.5）。
+    ///
+    /// 发布方 routes_meta：put（**判重命中不发**——内容未变不该惊动运行页）/
+    /// delete / rollback。`resource` 区分 screens/themes（同一事件 kind，机制
+    /// 随 MetaKind 泛化免费覆盖 themes）。前端 `addEventListener("screen")` 感知
+    /// 「画面已被他人/AI 修改」。
+    Screen {
+        /// 画面/主题 id。
+        id: String,
+        /// 资源种类（"screen" / "theme"）。
+        resource: &'static str,
+        /// 动作（"put" / "delete" / "rollback"）。
+        action: &'static str,
+        /// 变更后的版本号（delete = 删除前的 seq）。
+        version: u64,
+        /// 操作者（JWT sub；hmi-mcp 用专用 sub 天然可分辨人/AI）。
+        actor: String,
+        /// 时间戳（ISO8601/RFC3339）。
+        ts: String,
+    },
 }
 
 impl EventPayload {
@@ -133,6 +153,7 @@ impl EventPayload {
             Self::State { .. } => "state",
             Self::Rtdata { .. } => "rtdata",
             Self::Alarm { .. } => "alarm",
+            Self::Screen { .. } => "screen",
         }
     }
 }

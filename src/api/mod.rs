@@ -226,7 +226,9 @@ pub fn build_router(state: AppState) -> axum::Router {
                 .delete(routes_trace::stop),
         )
         // agent-hmi 画面/主题文档存储（W2 集成：纯存储无 schema 校验，边界与
-        // 契约见 routes_meta.rs / rest-api.md §4.19；默认 JWT 保护）
+        // 契约见 routes_meta.rs / rest-api.md §4.19；默认 JWT 保护）+ 版本管理
+        // 三端点（P0，design 2026-10-30-screen-versioning：versions 列表/单版
+        // 取回/rollback；PUT 支持 ?if_version= 乐观锁）
         .route("/api/v1/screens", get(routes_meta::screens_list))
         .route(
             "/api/v1/screens/{id}",
@@ -234,12 +236,36 @@ pub fn build_router(state: AppState) -> axum::Router {
                 .put(routes_meta::screens_put)
                 .delete(routes_meta::screens_delete),
         )
+        .route(
+            "/api/v1/screens/{id}/versions",
+            get(routes_meta::screens_versions),
+        )
+        .route(
+            "/api/v1/screens/{id}/versions/{seq}",
+            get(routes_meta::screens_version_get),
+        )
+        .route(
+            "/api/v1/screens/{id}/rollback",
+            post(routes_meta::screens_rollback),
+        )
         .route("/api/v1/themes", get(routes_meta::themes_list))
         .route(
             "/api/v1/themes/{id}",
             get(routes_meta::themes_get)
                 .put(routes_meta::themes_put)
                 .delete(routes_meta::themes_delete),
+        )
+        .route(
+            "/api/v1/themes/{id}/versions",
+            get(routes_meta::themes_versions),
+        )
+        .route(
+            "/api/v1/themes/{id}/versions/{seq}",
+            get(routes_meta::themes_version_get),
+        )
+        .route(
+            "/api/v1/themes/{id}/rollback",
+            post(routes_meta::themes_rollback),
         )
         // 实时数据查询
         .route("/api/v1/rtdatas", get(routes_rtdata::rtdatas))

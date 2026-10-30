@@ -51,6 +51,9 @@ pub struct AppConfig {
     /// [rtdata] 实时数据订阅配置（读源实现选型，详见 `RtdataConfig`）。
     #[serde(default)]
     pub rtdata: RtdataConfig,
+    /// [meta] 画面/主题文档版本管理配置（P0，design 2026-10-30-screen-versioning）。
+    #[serde(default)]
+    pub meta: MetaConfig,
     /// Lua stdlib 官方源/镜像 upstream 基址（设计 §3.6 D1/D2）。
     /// `POST /api/v1/lua/stdlib/sync` body 未传 upstream 时用它；内网镜像 =
     /// 官方静态目录完整拷贝，改此键指向镜像即切换。v1 占位官方 Pages URL（T13 建置）；
@@ -128,6 +131,7 @@ impl Default for AppConfig {
             pipeline: PipelineConfig::default(),
             history: HistoryConfig::default(),
             rtdata: RtdataConfig::default(),
+            meta: MetaConfig::default(),
             lua_stdlib_upstream: "https://rsiot.github.io/lualib/".into(),
             lua_stdlib_pin: None,
             event_bus_capacity: DEFAULT_EVENT_BUS_CAPACITY,
@@ -487,13 +491,50 @@ impl AppConfig {
             Some(p) if p.exists() => {
                 let s = std::fs::read_to_string(p)
                     .map_err(|e| RsIotError::Config(format!("read config {}: {e}", p.display())))?;
-                let cfg: AppConfig = toml::from_str(&s).map_err(|e| {
+                let mut cfg: AppConfig = toml::from_str(&s).map_err(|e| {
                     RsIotError::Config(format!("parse config {}: {e}", p.display()))
                 })?;
+                cfg.meta.sanitize();
                 Ok(cfg)
             }
             _ => Ok(Self::default()),
         }
+    }
+}
+
+/// [meta] 画面/主题文档版本管理配置（P0，design 2026-10-30-screen-versioning §5.1）。
+///
+/// 版本键族 `sv:{kind}:{id}:{seq|meta|v:{seq}}` 的治理参数：正文 TTL 自动淘汰
+/// 旧版本（无删除代码），容量上限触发紧缩（保留最新 cap 条）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MetaConfig {
+    /// 版本正文 TTL 秒（`sv:...:v:{seq}` SETEX）。默认 30 天；0 视为默认
+    /// （sanitize 钳制——TTL 无"永不过期"档，防 AI 高频写画面无限累积）。
+    pub versions_ttl_secs: u64,
+    /// 每画面保留版本数上限。紧缩触发线 HLEN > 2×cap，触发后按 seq 降序保留
+    /// 最新 cap 条且正文仍在的条目。钳制 1..=500（sanitize）。
+    pub versions_cap: usize,
+}
+
+impl Default for MetaConfig {
+    fn default() -> Self {
+        Self {
+            versions_ttl_secs: 2_592_000,
+            versions_cap: 50,
+        }
+    }
+}
+
+impl MetaConfig {
+    /// 加载期钳制（对齐深度审查对配置键的护栏要求）：ttl 0 → 默认 30 天；
+    /// cap 钳 1..=500（0/超大值静默回合法域，不 fail 启动——meta 是治理面
+    /// 而非安全面，激进拒绝不划算）。
+    pub fn sanitize(&mut self) {
+        if self.versions_ttl_secs == 0 {
+            self.versions_ttl_secs = 2_592_000;
+        }
+        self.versions_cap = self.versions_cap.clamp(1, 500);
     }
 }
 

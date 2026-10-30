@@ -1,4 +1,4 @@
-//! agent-hmi 画面/主题文档 CRUD（lux Hash `screen:{id}` / `theme:{id}`）。
+//! agent-hmi 画面/主题文档 CRUD（lux Hash `screen:{id}` / `theme:{id}`）+ 版本管理。
 //!
 //! 与 agent-hmi 的分工边界：本服务**只做存储**——id 词法约束 + 大小钳制 + JSON
 //! 语法合法性，**不做 schema 内容校验**（画面/主题文档的合法性由 agent-hmi 侧
@@ -8,14 +8,30 @@
 //! `doc` → 完整 JSON 文本原样）。列表用 `KEYS <前缀>:*`（仓内先例
 //! `routes_rtdata.rs` 全量列举同款——嵌入式 in-process 存储键空间有界，
 //! 无需 SCAN 游标循环）。
+//!
+//! 版本管理（P0，design `docs/designs/2026-10-30-screen-versioning-design.md`，
+//! 权威源）：独立前缀键族 `sv:{kind}:{id}:*`（seq 计数器 / meta 元数据 hash /
+//! v:{seq} 正文 SETEX）。**键族独立于 `screen:` 命名空间的根因**：`list()` 的
+//! `KEYS screen:*` + `valid_id` 过滤只是隐式边界（§1.2 脆弱点），版本键放进
+//! 去等于依赖"id 不能含冒号"这一条间接保护——独立前缀从根上不进扫描面
+//! （tests/meta_versioning.rs 第 10 组固化）。
+//!
+//! 失败矩阵（embedded lux 无事务，§4.3）：**head 的 HSET 是整个写入序列的最后
+//! 一步**——此前任何一步失败都中止并 500，宁可这次保存失败也不产生"内容变了
+//! 但没历史"的不可追溯写入；head 之后的 publish 失败吞掉（SSE 是通知非事务
+//! 参与方）。所有 lux 调用显式判 Err（不用吞错 helper——22ee8b0 原则）。
 
+use crate::api::auth::AuthedUser;
 use crate::api::{hget, AppState};
+use crate::event_bus::EventPayload;
 use axum::body::Bytes;
-use axum::extract::{Path, State};
+use axum::extract::{Extension, Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use lux::EmbeddedValue;
+use serde::Deserialize;
+use sha2::{Digest, Sha256};
 
 /// id 约束（agent-hmi 契约）：`^[a-z0-9][a-z0-9-]{0,63}$`，即总长 1..=64，
 /// 首字符小写字母/数字，其余可含连字符。
@@ -24,21 +40,49 @@ const ID_MAX_LEN: usize = 64;
 pub const MAX_DOC_BYTES: usize = 131_072;
 /// Hash 内存放 JSON 文本的 field 名（存储细节，REST 契约不可见）。
 const DOC_FIELD: &str = "doc";
-
-/// 资源种类：lux key 前缀 + 列表响应字段名（screens/themes 同构）。
+/// 资源种类：lux key 前缀 + 列表响应字段名 + 版本键族前缀（screens/themes 同构）。
+///
+/// `kind` 是资源名单词（SSE payload 的 `resource` 字段与指标 label 用），
+/// `sv_prefix` = `sv:{key_prefix}`——版本键族的独立命名空间。
 struct MetaKind {
     key_prefix: &'static str,
     list_field: &'static str,
+    kind: &'static str,
+    sv_prefix: &'static str,
+    /// 指标数组索引（ProcessMetrics 的 meta_* 二元数组：0=screen 1=theme）。
+    metric_idx: usize,
 }
 
 const SCREENS: MetaKind = MetaKind {
     key_prefix: "screen",
     list_field: "screens",
+    kind: "screen",
+    sv_prefix: "sv:screen",
+    metric_idx: 0,
 };
 const THEMES: MetaKind = MetaKind {
     key_prefix: "theme",
     list_field: "themes",
+    kind: "theme",
+    sv_prefix: "sv:theme",
+    metric_idx: 1,
 };
+
+/// `PUT`/`POST rollback` 的 query 参数：`?if_version=N` 乐观锁（缺省无条件写，
+/// 完全向后兼容——既有编辑器/e2e 播种零改动）。
+#[derive(Debug, Default, Deserialize)]
+pub struct VersionQuery {
+    /// 期望的当前版本号；与实际不符 → 409（不捕获、不留痕）。
+    /// seq 键缺失视为 0——`?if_version=0` 是合法的"仍是原始版"断言（迁移期）。
+    if_version: Option<u64>,
+}
+
+/// `POST /{kind}/{id}/rollback` body。
+#[derive(Debug, Deserialize)]
+pub struct RollbackBody {
+    /// 回滚到的目标版本号（该版正文将成为新 head）。
+    to_version: u64,
+}
 
 // ---------- handlers（screens） ----------
 
@@ -53,13 +97,59 @@ pub async fn screens_get(State(st): State<AppState>, Path(id): Path<String>) -> 
 pub async fn screens_put(
     State(st): State<AppState>,
     Path(id): Path<String>,
+    Query(q): Query<VersionQuery>,
+    user: Option<Extension<AuthedUser>>,
     body: Bytes,
 ) -> Response {
-    put(&st, &SCREENS, &id, &body).await
+    put(
+        &st,
+        &SCREENS,
+        &id,
+        &body,
+        q.if_version,
+        author_of(user.as_ref()),
+    )
+    .await
 }
 
-pub async fn screens_delete(State(st): State<AppState>, Path(id): Path<String>) -> Response {
-    delete(&st, &SCREENS, &id).await
+pub async fn screens_delete(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+    user: Option<Extension<AuthedUser>>,
+) -> Response {
+    delete(&st, &SCREENS, &id, author_of(user.as_ref())).await
+}
+
+/// `GET /api/v1/screens/{id}/versions`：版本元数据列表（seq 降序，至多 cap 条）。
+pub async fn screens_versions(State(st): State<AppState>, Path(id): Path<String>) -> Response {
+    versions_list(&st, &SCREENS, &id).await
+}
+
+/// `GET /api/v1/screens/{id}/versions/{seq}`：单版正文取回（404/410 矩阵）。
+pub async fn screens_version_get(
+    State(st): State<AppState>,
+    Path((id, seq)): Path<(String, u64)>,
+) -> Response {
+    version_get(&st, &SCREENS, &id, seq).await
+}
+
+/// `POST /api/v1/screens/{id}/rollback`：回滚到目标版（回滚本身可再回滚）。
+pub async fn screens_rollback(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+    Query(q): Query<VersionQuery>,
+    user: Option<Extension<AuthedUser>>,
+    body: Bytes,
+) -> Response {
+    rollback(
+        &st,
+        &SCREENS,
+        &id,
+        &body,
+        q.if_version,
+        &author_of(user.as_ref()),
+    )
+    .await
 }
 
 // ---------- handlers（themes） ----------
@@ -75,13 +165,59 @@ pub async fn themes_get(State(st): State<AppState>, Path(id): Path<String>) -> R
 pub async fn themes_put(
     State(st): State<AppState>,
     Path(id): Path<String>,
+    Query(q): Query<VersionQuery>,
+    user: Option<Extension<AuthedUser>>,
     body: Bytes,
 ) -> Response {
-    put(&st, &THEMES, &id, &body).await
+    put(
+        &st,
+        &THEMES,
+        &id,
+        &body,
+        q.if_version,
+        author_of(user.as_ref()),
+    )
+    .await
 }
 
-pub async fn themes_delete(State(st): State<AppState>, Path(id): Path<String>) -> Response {
-    delete(&st, &THEMES, &id).await
+pub async fn themes_delete(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+    user: Option<Extension<AuthedUser>>,
+) -> Response {
+    delete(&st, &THEMES, &id, author_of(user.as_ref())).await
+}
+
+/// `GET /api/v1/themes/{id}/versions`（MetaKind 泛化，机制免费覆盖 themes）。
+pub async fn themes_versions(State(st): State<AppState>, Path(id): Path<String>) -> Response {
+    versions_list(&st, &THEMES, &id).await
+}
+
+/// `GET /api/v1/themes/{id}/versions/{seq}`。
+pub async fn themes_version_get(
+    State(st): State<AppState>,
+    Path((id, seq)): Path<(String, u64)>,
+) -> Response {
+    version_get(&st, &THEMES, &id, seq).await
+}
+
+/// `POST /api/v1/themes/{id}/rollback`。
+pub async fn themes_rollback(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+    Query(q): Query<VersionQuery>,
+    user: Option<Extension<AuthedUser>>,
+    body: Bytes,
+) -> Response {
+    rollback(
+        &st,
+        &THEMES,
+        &id,
+        &body,
+        q.if_version,
+        &author_of(user.as_ref()),
+    )
+    .await
 }
 
 // ---------- 共享实现 ----------
@@ -91,17 +227,30 @@ fn err(code: StatusCode, msg: &str) -> Response {
     (code, Json(serde_json::json!({ "error": msg }))).into_response()
 }
 
+/// author 提取（design §3.6）：JWT 路径 auth 中间件已注入 `AuthedUser`；
+/// accesskey 直通路径无注入 → `"unknown"`（不因审计缺失而失败写）。
+fn author_of(user: Option<&Extension<AuthedUser>>) -> String {
+    user.map(|e| e.user_id.clone())
+        .unwrap_or_else(|| "unknown".into())
+}
+
 /// `GET /api/v1/{screens|themes}`：全部 id 升序列表。
 async fn list(st: &AppState, kind: &MetaKind) -> Response {
     let ids = ids_from_keys(&keys(st, kind.key_prefix).await, kind.key_prefix);
     Json(serde_json::json!({ kind.list_field: ids })).into_response()
 }
 
-/// `GET /api/v1/{screens|themes}/:id`：`{"id","doc"}`；不存在 404。
+/// `GET /api/v1/{screens|themes}/:id`：`{"id","doc","version"}`；不存在 404。
 /// （非法 id 永不可被 PUT 写入，hget miss → 404，无需单独分支。）
 async fn get(st: &AppState, kind: &MetaKind, id: &str) -> Response {
     match hget(&st.lux, &lux_key(kind.key_prefix, id), DOC_FIELD).await {
-        Some(raw) => Json(serde_json::json!({ "id": id, "doc": parse_doc(&raw) })).into_response(),
+        Some(raw) => {
+            let version = read_seq(st, kind, id).await.unwrap_or(0);
+            Json(serde_json::json!({
+                "id": id, "doc": parse_doc(&raw), "version": version
+            }))
+            .into_response()
+        }
         None => err(StatusCode::NOT_FOUND, "not found"),
     }
 }
@@ -133,7 +282,26 @@ pub(crate) fn validate_put(id: &str, body: &[u8]) -> Result<(), PutReject> {
         .map_err(|_| PutReject::InvalidJson)
 }
 
-async fn put(st: &AppState, kind: &MetaKind, id: &str, body: &[u8]) -> Response {
+/// 版本写入序列的结果——区分"判重命中"（ok + 旧版本号）与"新建版本"。
+enum PutOutcome {
+    /// 内容未变：返回当前版本号，不建版、不 INCR、不发事件。
+    Deduplicated(u64),
+    /// 内容变更（或首建）：新版本号。
+    Versioned(u64),
+}
+
+/// `PUT` 主流程（design §3.1/§3.2 捕获与乐观锁）。
+///
+/// 写入顺序即失败矩阵（§4.3）：判重 → if_version 校验 → 捕获旧版（失败 500
+/// 不写 head）→ INCR（失败 500）→ HSET head（最后一步，失败 500）→ publish。
+async fn put(
+    st: &AppState,
+    kind: &MetaKind,
+    id: &str,
+    body: &[u8],
+    if_version: Option<u64>,
+    author: String,
+) -> Response {
     if let Err(r) = validate_put(id, body) {
         return match r {
             PutReject::InvalidId => err(StatusCode::BAD_REQUEST, "invalid id"),
@@ -141,34 +309,546 @@ async fn put(st: &AppState, kind: &MetaKind, id: &str, body: &[u8]) -> Response 
             PutReject::InvalidJson => err(StatusCode::BAD_REQUEST, "invalid json"),
         };
     }
-    // validate_put 已保证 UTF-8 合法（serde_json 拒绝非法 UTF-8），lossy 仅兜底。
-    let raw = String::from_utf8_lossy(body);
-    // lux 写失败（磁盘满/WAL 等）必须 500——吞错报 ok 是静默数据丢失（审查
-    // 2026-10-27）；同 routes_model/routes_alarm 的 Err→500 先例。
-    match st
+    match put_versioned(st, kind, id, body, if_version, &author).await {
+        Ok(PutOutcome::Deduplicated(v)) => {
+            Json(serde_json::json!({ "status": "ok", "version": v })).into_response()
+        }
+        Ok(PutOutcome::Versioned(v)) => {
+            Json(serde_json::json!({ "status": "ok", "version": v })).into_response()
+        }
+        Err(PutErr::Conflict(cur)) => {
+            st.metrics.meta_version_conflict(kind.metric_idx);
+            (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({
+                    "error": "version conflict", "current_version": cur
+                })),
+            )
+                .into_response()
+        }
+        Err(PutErr::Lux(e)) => err(StatusCode::INTERNAL_SERVER_ERROR, &e),
+    }
+}
+
+/// 版本化写入的内部错误（handler 映射状态码；纯校验已在外层完成）。
+enum PutErr {
+    /// if_version 不匹配（当前实际版本号随行）。
+    Conflict(u64),
+    /// lux 命令失败——如实 500，不吞错报 ok（22ee8b0 原则）。
+    Lux(String),
+}
+
+impl PutErr {
+    fn lux(e: impl std::fmt::Display) -> Self {
+        Self::Lux(e.to_string())
+    }
+}
+
+/// 判重 → 乐观锁 → 捕获 → INCR → 写 head → 事件 → 紧缩（design §3.1 四步序）。
+async fn put_versioned(
+    st: &AppState,
+    kind: &MetaKind,
+    id: &str,
+    body: &[u8],
+    if_version: Option<u64>,
+    author: &str,
+) -> Result<PutOutcome, PutErr> {
+    // 读旧 doc + 当前 seq（首建 old=None；遗留画面 seq=0——"机制上线前的原貌"）。
+    let old_doc: Option<String> = match st
         .lux
-        .execute("HSET", &[&lux_key(kind.key_prefix, id), DOC_FIELD, &raw])
+        .execute_value("HGET", &[&lux_key(kind.key_prefix, id), DOC_FIELD])
         .await
     {
-        Ok(_) => Json(serde_json::json!({ "status": "ok" })).into_response(),
+        Ok(EmbeddedValue::Nil) => None,
+        Ok(v) => Some(crate::db::str_from_value(&v)),
+        Err(e) => return Err(PutErr::lux(e)),
+    };
+    let cur_seq = read_seq(st, kind, id).await.map_err(PutErr::lux)?;
+
+    // 内容判重（§4.1 收敛线 1）：字节级同内容 → 不建版、不 INCR、直接返回当前
+    // version（改一个像素保存十次只产生一条版本；e2e 全量 upsert 播种幂等）。
+    if old_doc.as_deref().map(|o| o.as_bytes()) == Some(body) {
+        return Ok(PutOutcome::Deduplicated(cur_seq));
+    }
+
+    // 乐观锁（§3.2）：不匹配 → 409，不捕获不留痕。
+    if let Some(expect) = if_version {
+        if expect != cur_seq {
+            return Err(PutErr::Conflict(cur_seq));
+        }
+    }
+
+    // 捕获旧内容为版本（§3.1 步 3）：old 存在才捕获；seq=0 的遗留画面捕获为
+    // 版本 0——任何画面任何时刻都满足"versions 最后一条 = 可回退的最老形态"。
+    if let Some(old) = &old_doc {
+        capture_version(st, kind, id, cur_seq, old, author)
+            .await
+            .map_err(PutErr::lux)?;
+        st.metrics.meta_versions_created(kind.metric_idx);
+    }
+
+    // INCR（失败 500：孤儿正文/元数据由 TTL 与紧缩清理，正确性无损——§4.3）。
+    let new_seq = incr_seq(st, kind, id).await.map_err(PutErr::lux)?;
+
+    // head 的 HSET 是最后一步（§4.2 不变量）：成功即新版生效。
+    if let Err(e) = st
+        .lux
+        .execute(
+            "HSET",
+            &[
+                &lux_key(kind.key_prefix, id),
+                DOC_FIELD,
+                &String::from_utf8_lossy(body),
+            ],
+        )
+        .await
+    {
+        return Err(PutErr::lux(e));
+    }
+
+    // publish（head 已落库；SSE 非事务参与方，发送失败本就静默）。
+    st.event_bus.publish(EventPayload::Screen {
+        id: id.to_string(),
+        resource: kind.kind,
+        action: "put",
+        version: new_seq,
+        actor: author.to_string(),
+        ts: crate::event_bus::now_iso8601(),
+    });
+
+    // 紧缩检查（§4.4）：HLEN 超阈值时收敛元数据容量。失败只影响历史完整性，
+    // 不影响已生效的 head——吞掉记日志（与 §4.3 "head 之后失败只影响通知面"
+    // 同级的尾部步骤）。
+    if let Err(e) = compact_if_needed(st, kind, id).await {
+        tracing::warn!(
+            "[meta] {} {id} 紧缩失败（下次写入再试）: {e}",
+            kind.key_prefix
+        );
+    }
+
+    Ok(PutOutcome::Versioned(new_seq))
+}
+
+/// `DELETE /api/v1/{screens|themes}/:id`：幂等（不存在也 ok）+ 版本键族级联删
+/// （§2.3——正文虽带 TTL，但 30 天内同 slug 重建会读到上一世代孤儿版本，
+/// seq 撞车 = "自己没写过的历史"）。
+async fn delete(st: &AppState, kind: &MetaKind, id: &str, author: String) -> Response {
+    if !valid_id(id) {
+        return err(StatusCode::BAD_REQUEST, "invalid id");
+    }
+    // 删除前读 seq（publish 载荷用；读失败不阻断删除——幂等语义优先）。
+    let seq_before = read_seq(st, kind, id).await.unwrap_or(0);
+
+    let key = lux_key(kind.key_prefix, id);
+    if let Err(e) = st.lux.execute("DEL", &[&key]).await {
+        return err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string());
+    }
+    // 级联：seq 计数器 + 元数据 hash。
+    for k in [sv_seq_key(kind, id), sv_meta_key(kind, id)] {
+        if let Err(e) = st.lux.execute("DEL", &[&k]).await {
+            return err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string());
+        }
+    }
+    // 级联：正文键（键空间有界 ≤cap 量级，KEYS 即可，无需 SCAN）。
+    let pattern = format!("{}:{id}:v:*", kind.sv_prefix);
+    match st.lux.execute_value("KEYS", &[&pattern]).await {
+        Ok(EmbeddedValue::Array(keys)) => {
+            for k in keys {
+                let key = crate::db::str_from_value(&k);
+                if let Err(e) = st.lux.execute("DEL", &[&key]).await {
+                    return err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string());
+                }
+            }
+        }
+        Ok(_) => {}
+        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+    }
+
+    st.event_bus.publish(EventPayload::Screen {
+        id: id.to_string(),
+        resource: kind.kind,
+        action: "delete",
+        version: seq_before,
+        actor: author,
+        ts: crate::event_bus::now_iso8601(),
+    });
+    Json(serde_json::json!({ "status": "ok" })).into_response()
+}
+
+/// `GET .../versions`：`{"versions":[{seq,ts,author,size,sha,expired}]}`，
+/// seq 降序至多 cap 条；`expired` 由 MGET 正文键批量判定（一次往返，§3.3）。
+async fn versions_list(st: &AppState, kind: &MetaKind, id: &str) -> Response {
+    if !valid_id(id) {
+        return err(StatusCode::BAD_REQUEST, "invalid id");
+    }
+    let cap = st.config.meta.versions_cap;
+    // HGETALL 直接判错（db::hgetall 吞错成空对象——lux 故障必须如实 500）。
+    let raw = match st
+        .lux
+        .execute_value("HGETALL", &[&sv_meta_key(kind, id)])
+        .await
+    {
+        Ok(EmbeddedValue::Array(arr)) => arr,
+        Ok(_) => Vec::new(),
+        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+    };
+    // field/value 对 → (seq, VersionMeta)，解析失败的脏条目跳过（防御手工改库）。
+    let mut entries: Vec<(u64, serde_json::Value)> = Vec::new();
+    let mut i = 0;
+    while i + 1 < raw.len() {
+        let seq = crate::db::str_from_value(&raw[i]).parse::<u64>().ok();
+        let meta: Option<serde_json::Value> =
+            serde_json::from_str(&crate::db::str_from_value(&raw[i + 1])).ok();
+        if let (Some(seq), Some(meta)) = (seq, meta) {
+            entries.push((seq, meta));
+        }
+        i += 2;
+    }
+    entries.sort_by_key(|(seq, _)| std::cmp::Reverse(*seq)); // seq 降序
+    entries.truncate(cap);
+
+    // MGET 正文键批量判存活（一次往返）。
+    let body_keys: Vec<String> = entries
+        .iter()
+        .map(|(seq, _)| sv_body_key(kind, id, *seq))
+        .collect();
+    let alive: Vec<bool> = if body_keys.is_empty() {
+        Vec::new()
+    } else {
+        let refs: Vec<&str> = body_keys.iter().map(String::as_str).collect();
+        match st.lux.execute_value("MGET", &refs).await {
+            Ok(EmbeddedValue::Array(vals)) => vals
+                .iter()
+                .map(|v| !matches!(v, EmbeddedValue::Nil))
+                .collect(),
+            Ok(_) => vec![false; body_keys.len()],
+            Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+        }
+    };
+
+    let versions: Vec<serde_json::Value> = entries
+        .iter()
+        .zip(alive.iter().chain(std::iter::repeat(&false)))
+        .map(|((seq, meta), alive)| {
+            // 元数据行原样透传（seq/ts/author/size/sha），expired 由本次批量判定注入。
+            let mut row = meta.clone();
+            row["seq"] = serde_json::json!(seq);
+            row["expired"] = serde_json::json!(!alive);
+            row
+        })
+        .collect();
+    Json(serde_json::json!({ "versions": versions })).into_response()
+}
+
+/// `GET .../versions/{seq}`：`{id,seq,ts,author,doc}`；元数据无该 seq → 404；
+/// 正文缺失（TTL 过期）→ 410（§3.3）。
+async fn version_get(st: &AppState, kind: &MetaKind, id: &str, seq: u64) -> Response {
+    if !valid_id(id) {
+        return err(StatusCode::BAD_REQUEST, "invalid id");
+    }
+    let meta = match st
+        .lux
+        .execute_value("HGET", &[&sv_meta_key(kind, id), &seq.to_string()])
+        .await
+    {
+        Ok(EmbeddedValue::Nil) => return err(StatusCode::NOT_FOUND, "not found"),
+        Ok(v) => crate::db::str_from_value(&v),
+        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+    };
+    let meta: serde_json::Value = serde_json::from_str(&meta).unwrap_or(serde_json::Value::Null);
+    match st
+        .lux
+        .execute_value("GET", &[&sv_body_key(kind, id, seq)])
+        .await
+    {
+        Ok(EmbeddedValue::Nil) => err(StatusCode::GONE, "version body expired"),
+        Ok(v) => {
+            let raw = crate::db::str_from_value(&v);
+            Json(serde_json::json!({
+                "id": id, "seq": seq,
+                "ts": meta["ts"], "author": meta["author"],
+                "doc": parse_doc(&raw),
+            }))
+            .into_response()
+        }
         Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
     }
 }
 
-/// `DELETE /api/v1/{screens|themes}/:id`：幂等（不存在也 ok）；id 词法校验与
-/// PUT 对称（非法 id 400，不放行构造越界 lux key）。
-async fn delete(st: &AppState, kind: &MetaKind, id: &str) -> Response {
+/// `POST .../rollback`：读目标版 → 快照当前 head 为新版本（回滚可再回滚）→
+/// 写 head = 目标正文 → INCR → 事件（§3.4）。可选 `?if_version` 同 PUT。
+async fn rollback(
+    st: &AppState,
+    kind: &MetaKind,
+    id: &str,
+    body: &[u8],
+    if_version: Option<u64>,
+    author: &str,
+) -> Response {
     if !valid_id(id) {
         return err(StatusCode::BAD_REQUEST, "invalid id");
     }
-    match st
+    let to: RollbackBody = match serde_json::from_slice(body) {
+        Ok(b) => b,
+        Err(_) => return err(StatusCode::BAD_REQUEST, "invalid json"),
+    };
+    match rollback_versioned(st, kind, id, to.to_version, if_version, author).await {
+        Ok(new_seq) => {
+            st.metrics.meta_rollback(kind.metric_idx);
+            Json(serde_json::json!({ "status": "ok", "version": new_seq })).into_response()
+        }
+        Err(RbErr::NotFound) => err(StatusCode::NOT_FOUND, "not found"),
+        Err(RbErr::Gone) => err(StatusCode::GONE, "version body expired"),
+        Err(RbErr::Conflict(cur)) => {
+            st.metrics.meta_version_conflict(kind.metric_idx);
+            (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({
+                    "error": "version conflict", "current_version": cur
+                })),
+            )
+                .into_response()
+        }
+        Err(RbErr::Lux(e)) => err(StatusCode::INTERNAL_SERVER_ERROR, &e),
+    }
+}
+
+/// rollback 内部错误（handler 映射状态码）。
+enum RbErr {
+    NotFound,
+    Gone,
+    Conflict(u64),
+    Lux(String),
+}
+
+async fn rollback_versioned(
+    st: &AppState,
+    kind: &MetaKind,
+    id: &str,
+    to_version: u64,
+    if_version: Option<u64>,
+    author: &str,
+) -> Result<u64, RbErr> {
+    // 目标版元数据（无 → 404）与正文（TTL 过期 → 410）。
+    let meta_raw = match st
         .lux
-        .execute("DEL", &[&lux_key(kind.key_prefix, id)])
+        .execute_value("HGET", &[&sv_meta_key(kind, id), &to_version.to_string()])
         .await
     {
-        Ok(_) => Json(serde_json::json!({ "status": "ok" })).into_response(),
-        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+        Ok(EmbeddedValue::Nil) => return Err(RbErr::NotFound),
+        Ok(v) => crate::db::str_from_value(&v),
+        Err(e) => return Err(RbErr::Lux(e.to_string())),
+    };
+    let target: String = match st
+        .lux
+        .execute_value("GET", &[&sv_body_key(kind, id, to_version)])
+        .await
+    {
+        Ok(EmbeddedValue::Nil) => return Err(RbErr::Gone),
+        Ok(v) => crate::db::str_from_value(&v),
+        Err(e) => return Err(RbErr::Lux(e.to_string())),
+    };
+    let _ = meta_raw; // 元数据仅用于存在性判定（目标正文的 ts/author 归属原版本）
+
+    // 快照当前 head 为新版本（§3.4 步 2——回滚本身可再回滚）。
+    let head: Option<String> = match st
+        .lux
+        .execute_value("HGET", &[&lux_key(kind.key_prefix, id), DOC_FIELD])
+        .await
+    {
+        Ok(EmbeddedValue::Nil) => None,
+        Ok(v) => Some(crate::db::str_from_value(&v)),
+        Err(e) => return Err(RbErr::Lux(e.to_string())),
+    };
+    let cur_seq = read_seq(st, kind, id).await.map_err(RbErr::Lux)?;
+
+    if let Some(expect) = if_version {
+        if expect != cur_seq {
+            return Err(RbErr::Conflict(cur_seq));
+        }
     }
+
+    if let Some(head) = &head {
+        capture_version(st, kind, id, cur_seq, head, author)
+            .await
+            .map_err(RbErr::Lux)?;
+        st.metrics.meta_versions_created(kind.metric_idx);
+    }
+
+    let new_seq = incr_seq(st, kind, id).await.map_err(RbErr::Lux)?;
+    if let Err(e) = st
+        .lux
+        .execute("HSET", &[&lux_key(kind.key_prefix, id), DOC_FIELD, &target])
+        .await
+    {
+        return Err(RbErr::Lux(e.to_string()));
+    }
+
+    st.event_bus.publish(EventPayload::Screen {
+        id: id.to_string(),
+        resource: kind.kind,
+        action: "rollback",
+        version: new_seq,
+        actor: author.to_string(),
+        ts: crate::event_bus::now_iso8601(),
+    });
+    if let Err(e) = compact_if_needed(st, kind, id).await {
+        tracing::warn!(
+            "[meta] {} {id} 紧缩失败（下次写入再试）: {e}",
+            kind.key_prefix
+        );
+    }
+    Ok(new_seq)
+}
+
+// ---------- 版本存储原语（sv: 键族） ----------
+
+fn sv_seq_key(kind: &MetaKind, id: &str) -> String {
+    format!("{}:{id}:seq", kind.sv_prefix)
+}
+fn sv_meta_key(kind: &MetaKind, id: &str) -> String {
+    format!("{}:{id}:meta", kind.sv_prefix)
+}
+fn sv_body_key(kind: &MetaKind, id: &str, seq: u64) -> String {
+    format!("{}:{id}:v:{seq}", kind.sv_prefix)
+}
+
+/// 当前版本号（`GET sv:...:seq`）。键缺失（遗留画面/首建）= 0。
+/// 读命令失败如实上抛（不吞错成 0——那是把故障伪装成"原始版"）。
+async fn read_seq(st: &AppState, kind: &MetaKind, id: &str) -> Result<u64, String> {
+    match st.lux.execute_value("GET", &[&sv_seq_key(kind, id)]).await {
+        Ok(EmbeddedValue::Nil) => Ok(0),
+        Ok(v) => crate::db::str_from_value(&v)
+            .parse::<u64>()
+            .map_err(|e| format!("corrupt seq key: {e}")),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+/// `INCR sv:...:seq` → 新版本号。
+async fn incr_seq(st: &AppState, kind: &MetaKind, id: &str) -> Result<u64, String> {
+    match st.lux.execute_value("INCR", &[&sv_seq_key(kind, id)]).await {
+        Ok(v) => crate::db::str_from_value(&v)
+            .parse::<u64>()
+            .map_err(|e| format!("corrupt incr result: {e}")),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+/// 捕获旧内容为版本 `seq`：SETEX 正文（TTL 自动淘汰，§4.1 收敛线 2）+
+/// HSET 元数据（seq/ts/author/size/sha，~140B，§2.2）。
+/// 两步任一失败都上抛——head 尚未写，中止保住"内容变了必有历史"（§4.3）。
+async fn capture_version(
+    st: &AppState,
+    kind: &MetaKind,
+    id: &str,
+    seq: u64,
+    old_doc: &str,
+    author: &str,
+) -> Result<(), String> {
+    let ttl = st.config.meta.versions_ttl_secs.max(1);
+    let ttl_str = ttl.to_string();
+    st.lux
+        .execute("SETEX", &[&sv_body_key(kind, id, seq), &ttl_str, old_doc])
+        .await
+        .map_err(|e| e.to_string())?;
+    let meta = serde_json::json!({
+        "seq": seq,
+        "ts": chrono::Utc::now().timestamp(),
+        "author": author,
+        "size": old_doc.len(),
+        "sha": sha16(old_doc.as_bytes()),
+    });
+    st.lux
+        .execute(
+            "HSET",
+            &[&sv_meta_key(kind, id), &seq.to_string(), &meta.to_string()],
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// 元数据容量紧缩（§4.4）：HLEN > 2×cap 时按 seq 降序保留最新 cap 条且正文
+/// 仍在的 → DEL 整键 → 逐条重写。非原子（读改写窗口内并发的另一次捕获可能
+/// 丢元数据，正文仍在但短期不出现在列表——概率极低、后果可自愈，§7 登记）。
+/// 每次写入至多触发一次。
+async fn compact_if_needed(st: &AppState, kind: &MetaKind, id: &str) -> Result<(), String> {
+    let cap = st.config.meta.versions_cap;
+    let hlen = match st
+        .lux
+        .execute_value("HLEN", &[&sv_meta_key(kind, id)])
+        .await
+    {
+        Ok(v) => crate::db::str_from_value(&v).parse::<u64>().unwrap_or(0),
+        Err(e) => return Err(e.to_string()),
+    };
+    if hlen as usize <= 2 * cap {
+        return Ok(());
+    }
+    st.metrics.meta_compaction(kind.metric_idx);
+
+    // 全量读 → 排序降序 → 保留前 cap 条且正文存活。
+    let raw = match st
+        .lux
+        .execute_value("HGETALL", &[&sv_meta_key(kind, id)])
+        .await
+    {
+        Ok(EmbeddedValue::Array(arr)) => arr,
+        Ok(_) => return Ok(()),
+        Err(e) => return Err(e.to_string()),
+    };
+    let mut entries: Vec<(String, String)> = Vec::new(); // (seq_str, meta_json)
+    let mut i = 0;
+    while i + 1 < raw.len() {
+        entries.push((
+            crate::db::str_from_value(&raw[i]),
+            crate::db::str_from_value(&raw[i + 1]),
+        ));
+        i += 2;
+    }
+    entries.sort_by(|a, b| {
+        let sa: u64 = a.0.parse().unwrap_or(0);
+        let sb: u64 = b.0.parse().unwrap_or(0);
+        sb.cmp(&sa)
+    });
+    entries.truncate(cap);
+
+    let keys: Vec<String> = entries
+        .iter()
+        .map(|(seq, _)| sv_body_key(kind, id, seq.parse().unwrap_or(0)))
+        .collect();
+    let alive: Vec<bool> = if keys.is_empty() {
+        Vec::new()
+    } else {
+        let refs: Vec<&str> = keys.iter().map(String::as_str).collect();
+        match st.lux.execute_value("MGET", &refs).await {
+            Ok(EmbeddedValue::Array(vals)) => vals
+                .iter()
+                .map(|v| !matches!(v, EmbeddedValue::Nil))
+                .collect(),
+            _ => vec![false; keys.len()],
+        }
+    };
+    let keep: Vec<&(String, String)> = entries
+        .iter()
+        .zip(alive.iter().chain(std::iter::repeat(&false)))
+        .filter(|(_, alive)| **alive)
+        .map(|(e, _)| e)
+        .collect();
+
+    // DEL 整键 + 重写保留集（无 HDEL——分类表有、解析器无，§1.1）。
+    st.lux
+        .execute("DEL", &[&sv_meta_key(kind, id)])
+        .await
+        .map_err(|e| e.to_string())?;
+    for (seq, meta) in keep {
+        st.lux
+            .execute("HSET", &[&sv_meta_key(kind, id), seq, meta])
+            .await
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 
 // ---------- 纯函数（单测覆盖） ----------
@@ -187,6 +867,12 @@ pub(crate) fn valid_id(id: &str) -> bool {
 /// lux key：`<前缀>:<id>`。
 fn lux_key(prefix: &str, id: &str) -> String {
     format!("{prefix}:{id}")
+}
+
+/// 内容 sha256 前 16 hex（判重展示与审计指纹；`sha2` 已在依赖树，无新依赖）。
+fn sha16(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    digest[..8].iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// 存储文本 → doc 值：parse 成功原样返回；失败退化为字符串（防御手工改库的数据）。
@@ -321,5 +1007,30 @@ mod tests {
             parse_doc("not json"),
             serde_json::Value::String("not json".to_string())
         );
+    }
+
+    /// 验证意图：sv: 键族的键名形状是列表隔离（§1.2）与级联删（§2.3）的共享
+    /// 契约——前缀错一格就会撞进 `KEYS screen:*` 扫描面或漏删世代正文。
+    #[test]
+    fn sv_key_shapes() {
+        assert_eq!(sv_seq_key(&SCREENS, "a"), "sv:screen:a:seq");
+        assert_eq!(sv_meta_key(&SCREENS, "a"), "sv:screen:a:meta");
+        assert_eq!(sv_body_key(&SCREENS, "a", 7), "sv:screen:a:v:7");
+        assert_eq!(sv_seq_key(&THEMES, "a"), "sv:theme:a:seq");
+        // 独立前缀断言：任何 sv 键都不以 screen:/theme: 开头。
+        assert!(!sv_body_key(&SCREENS, "a", 1).starts_with("screen:"));
+    }
+
+    /// 验证意图：sha16 是元数据审计指纹（§2.2）——长度恒 16、同内容稳定、
+    /// 异内容可区分；前 8 字节截取与十六进制小写是展示契约。
+    #[test]
+    fn sha16_stable_and_discriminating() {
+        let a = sha16(b"hello");
+        assert_eq!(a.len(), 16);
+        assert_eq!(a, sha16(b"hello"));
+        assert_ne!(a, sha16(b"hellp"));
+        assert!(a
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
     }
 }

@@ -215,6 +215,42 @@ pub(crate) fn render_process(
         if m.mqtt_connected.load(rel) { "1" } else { "0" },
     );
 
+    // 画面/主题版本管理（P0，design 2026-10-30-screen-versioning §5.2）。
+    // label kind: screen/theme（routes_meta 两 MetaKind 同构）；conflicts 持续
+    // 增长 = 有写者没接 if_version 乐观锁；compactions 频繁 = cap 过小/TTL 过长。
+    for (name, help, vals) in [
+        (
+            "rs_iot_meta_versions_created_total",
+            "画面/主题版本快照创建数(判重命中不计)",
+            &m.meta_versions_created,
+        ),
+        (
+            "rs_iot_meta_version_conflicts_total",
+            "画面/主题 if_version 409 次数(写者竞争温度计)",
+            &m.meta_version_conflicts,
+        ),
+        (
+            "rs_iot_meta_rollbacks_total",
+            "画面/主题回滚次数",
+            &m.meta_rollbacks,
+        ),
+        (
+            "rs_iot_meta_compactions_total",
+            "画面/主题版本元数据紧缩执行次数(频繁=cap 过小或 TTL 过长)",
+            &m.meta_compactions,
+        ),
+    ] {
+        family_header(&mut s, name, help, "counter");
+        for (idx, kind) in ["screen", "theme"].iter().enumerate() {
+            metric_line(
+                &mut s,
+                name,
+                &format!("{{kind=\"{kind}\"}}"),
+                &vals[idx].load(rel).to_string(),
+            );
+        }
+    }
+
     s
 }
 
@@ -621,6 +657,8 @@ mod tests {
         m.mqtt_publish_count.store(5, Ordering::Relaxed);
         m.mqtt_connected.store(true, Ordering::Relaxed);
         m.sse_lagged_count.store(3, Ordering::Relaxed);
+        m.meta_versions_created[0].store(2, Ordering::Relaxed);
+        m.meta_versions_created[1].store(1, Ordering::Relaxed);
         m
     }
 
@@ -628,13 +666,25 @@ mod tests {
     fn render_process_has_help_type_and_values() {
         let m = proc_metrics();
         let out = render_process(&m, "eiot_abc", "0.1.0", 12.5, 8192);
-        // 全部 18 个 metric family 都在场(防误删某 family 静默通过)
+        // 全部 22 个 metric family 都在场(防误删某 family 静默通过)
+        // 18 既有 + 4 版本管理(P0 2026-10-30: meta_versions_created/version_conflicts/
+        // rollbacks/compactions ×{kind=screen,theme})
         assert_eq!(
             out.lines()
                 .filter(|line| line.starts_with("# TYPE "))
                 .count(),
-            18,
-            "应输出 18 个 metric family"
+            22,
+            "应输出 22 个 metric family"
+        );
+        // 版本管理 label 形状：每 family 两行 {kind="screen"}/{kind="theme"}（P0）
+        assert!(out.contains("rs_iot_meta_versions_created_total{kind=\"screen\"} 2"));
+        assert!(out.contains("rs_iot_meta_versions_created_total{kind=\"theme\"} 1"));
+        assert_eq!(
+            out.lines()
+                .filter(|l| l.starts_with("rs_iot_meta_"))
+                .count(),
+            8,
+            "四 family × 两 kind 行"
         );
         // HELP / TYPE 每个 family 齐全
         assert!(out.contains("# HELP rs_iot_info "));
