@@ -78,6 +78,7 @@ curl -s -XPOST -H "Authorization: $TOKEN" -H 'Content-Type: application/json' \
 - `startinst` 仅支持**南向 Source**（拒绝北向 `app_type=north`）
 - `config` 返回**脱敏回显**：顶层 `jwt_secret`、`mqtt.username`/`mqtt.password` 与 `lux.password` 遮蔽为 `"***"`（保留键、替换值），其余字段原样——诊断需看 lux 端口/`data_dir`、bridge bind、log 级别等（供运维与 MCP `get_config` 工具读配置形态）
 - `[history]` 节（L2 部署期开关，缺省整节走默认 `enabled=false`）键清单：`enabled`/`data_dir`/`memory_limit_mb`/`cardinality_limit`/`retention_days`/`wal_sync_ms`/`wal_size_limit_mb`/`channel_capacity`/`batch_max_rows`/`close_timeout_secs`/`chunk_points`/`partition_secs`/`writer_threads`/`flush_interval_ms`/`seal_min_points`/`max_head_age_secs`/`catalog_persist_secs`/`health_degrading_ratio`/`health_dropping_ratio`/`alarm_drop_rate_per_sec`/`alarm_drop_ratio`（全键定义 `src/config.rs::HistoryConfig`）；其中 `data_dir` **有意可见**（纯路径无密钥，现场诊断需要）——三层开关语义见 §4.18。**边界校验**（2026-08-26 审查修复）：`memory_limit_mb`/`wal_size_limit_mb ∈ [1, 2^20]`、`retention_days ∈ [1, 36500]`、`channel_capacity ∈ [1, 2^24]`、`batch_max_rows ∈ [1, 2^20]`、`cardinality_limit ∈ [0, 2^24]`、`chunk_points ∈ [0, 65535]`、`partition_secs ∈ [0, 36500×86400]`、`writer_threads ∈ [1, 64]`、`data_dir` 非空——非法值**启动时按 init_failed fail-soft 处理**（error 日志 + 引擎停用 + `/api/v1/history` 503，主程序继续），此前超大值乘法换算可致 panic/静默 wrap；`wal_sync_ms`/`close_timeout_secs` 不设限（0 有合法语义：PerAppend 严格档/立即放弃）。**告警/健康阈值键**（Task B/#4 配置化，serde default 与原硬编码常量零漂移）：`health_degrading_ratio`（sysstatus `history.health` degrading 档累计占比阈值，**严格大于**判定，默认 0.005=0.5%）、`health_dropping_ratio`（dropping 档阈值，默认 0.05=5%）——两键 ∈ (0,1] 且 degrading < dropping（档位有序；不支持 0 禁用——errors>0 降档独立于占比，恒 ok 会掩盖错误面）；`alarm_drop_rate_per_sec`（T18 丢弃告警速率阈值，行/s，严格大于，默认 10.0；≥0，0 合法=只按占比判）、`alarm_drop_ratio`（告警窗口占比阈值，严格大于，默认 0.01=1%；∈ (0,1]）——两条件**均须满足**才 fire `rsiot.history_drop`。**调参键**（2026-08-29 压测调参面，T9）：`chunk_points`（单 chunk 点数上限，active 内存主控；0=引擎默认 2048，>0 透传 tsink `with_chunk_points`）——**10 万 series 场景建议 `chunk_points ≤ 512`**：active 稳态 ≈ series×cap×40B（2048→~4.1GB、512→~1GB）；`partition_secs`（分区窗口秒；0=引擎默认 3600，>0 透传 tsink `with_partition_duration`）——窗口越小 head 越早 seal（内存回收越快），但乱序跨窗写入受引擎 per-series 打开分区头上限约束；`chunk_points` 上界 65535 = tsink builder 钳位上界（越界透传会被静默钳位，故显式拒绝）；`writer_threads`（写线程数，T14 10 万点压测；1=单写线程零回归默认，>1 启用 N 写线程 series 亲和分片——同 series 恒同 writer，死区/乱序/lane 单写者全序保持，>1 时 tsink 写并发信号量对齐 N；每分片 channel 容量 = `channel_capacity÷N`，总在途行数不随分片膨胀）——**10 万 series 场景建议 4**（单写线程实测稳态 ~70K pts/s 是天花板，分片受引擎全局锁约束打折）
+- `[meta]` 节（P0 版本管理，2026-10-30）：`versions_ttl_secs`（版本正文 TTL 秒，默认 2592000=30 天；0 视为默认）/ `versions_cap`（每画面保留版本数上限，默认 50，钳制 1..=500；元数据超 2×cap 触发紧缩）——全键定义 `src/config.rs::MetaConfig`，语义见 §4.19
 - `[lux] password`（D-LUX-1）：`bind_host` 非 loopback（非 `127.0.0.1`/`::1`/`localhost`）时**必须**设置，否则启动即拒（错误信息指路：设密码或改回 loopback 绑定）；设置后 RESP 端口强制 AUTH。loopback 部署缺省空串，维持无密码单机信任模型
 - 响应含 `hwid` 覆盖键：空串 = 启动时按硬件自动生成；非空 = 部署期指定的网关 ID（多网关接同一平台需唯一）
 
@@ -259,7 +260,7 @@ curl -s -XPOST -H "Authorization: $TOKEN" -H 'Content-Type: application/json' \
 | DELETE | `/api/v1/inst/trace` | JWT | `?inst_id=` | `{"status":"ok"}` |
 | GET | `/api/v1/logs/recent` | JWT | `?level=&target=&limit=`（均可选） | `[LogEntry]`（最近 N 条结构化日志） |
 
-**`/metrics`**（P1 #1，机器出口）：进程级 14 metric family（`rs_iot_info`/`uptime_seconds`/`process_cpu_pct`/`process_mem_bytes`/`ctl_*_total`/`pipeline_*_total`/`hub_depth[_max]`/`mqtt_*`）——注：mqtt_* 阶段 B 起恒 0（MqttPub 迁移 luaNorth，实时计数在 /api/v1/inst/stats extra：publish_ok/publish_fail/reconnect_count；字段保留为端点形状兼容，外部面板请迁移）。+ per-instance 5（`rs_iot_instance_info{inst_id,app_code,host_kind,state,health}` + `instance_tick_total`/`fail_total`/`last_activity_duration_ms`/`last_activity_ts`）。+ history 26（Phase 3 治理全量 + P1 seal/catalog 七 counter + 2026-08-26 审查修复五拒收/跳过计数，**仅引擎 ok 时输出**——disabled/init_failed 省略防误导零值；源 `HistoryStats` atomic + `HistoryTelemetry` 引擎口径；运行态快照另见 `GET /api/v1/sysstatus` 的 `history` 块，语义见 §4.18）。十二计数器 counter：`rs_iot_history_{sent,written,dropped,deadbanded,skipped,lane_mismatch,nonfinite_skipped,dup_ts_skipped,stale_ts_dropped,ts_rejected,len_rejected,errors}_total`；治理七 family：gauge `rs_iot_history_archived_tags`（effective 快照 history=true 计数）/ gauge `rs_iot_history_series`（`list_metrics().len()` 官方口径，5s TTL 缓存）/ gauge `rs_iot_history_memory_used_bytes` / gauge `rs_iot_history_memory_budget_bytes`（tsink 引擎内存口径，预算=D6 `memory_limit_mb`）/ counter `rs_iot_history_deadband_evaluated_total`（死区评估行数，削减率分母——deadband=Some 标签的数值点）/ gauge `rs_iot_history_deadband_reduction_ratio`（=deadbanded/evaluated，分母 0 时输出 0）/ counter `rs_iot_history_write_errors_total{kind="memory_budget|cardinality|wal_disk|closed|other"}`（写错误按行五桶分型，Σkind == errors_total，值 0 桶也输出）。命名遵循 Prometheus 规范（counter `_total`、gauge 无后缀、耗时 `_ms`/字节 `_bytes`）。对接 Prometheus/Grafana：`job: rs-iot, /metrics`，免认证（内网信任，跨网加 IP 白名单/mTLS）。
+**`/metrics`**（P1 #1，机器出口）：进程级 18 metric family（`rs_iot_info`/`uptime_seconds`/`process_cpu_pct`/`process_mem_bytes`/`ctl_*_total`/`pipeline_*_total`/`hub_depth[_max]`/`mqtt_*` + 版本管理四族 `rs_iot_meta_{versions_created,version_conflicts,rollbacks,compactions}_total{kind="screen"|"theme"}`——conflicts 持续增长 = 有写者没接 if_version；compactions 频繁 = cap 过小/TTL 过长，P0 §4.19）——注：mqtt_* 阶段 B 起恒 0（MqttPub 迁移 luaNorth，实时计数在 /api/v1/inst/stats extra：publish_ok/publish_fail/reconnect_count；字段保留为端点形状兼容，外部面板请迁移）。+ per-instance 5（`rs_iot_instance_info{inst_id,app_code,host_kind,state,health}` + `instance_tick_total`/`fail_total`/`last_activity_duration_ms`/`last_activity_ts`）。+ history 26（Phase 3 治理全量 + P1 seal/catalog 七 counter + 2026-08-26 审查修复五拒收/跳过计数，**仅引擎 ok 时输出**——disabled/init_failed 省略防误导零值；源 `HistoryStats` atomic + `HistoryTelemetry` 引擎口径；运行态快照另见 `GET /api/v1/sysstatus` 的 `history` 块，语义见 §4.18）。十二计数器 counter：`rs_iot_history_{sent,written,dropped,deadbanded,skipped,lane_mismatch,nonfinite_skipped,dup_ts_skipped,stale_ts_dropped,ts_rejected,len_rejected,errors}_total`；治理七 family：gauge `rs_iot_history_archived_tags`（effective 快照 history=true 计数）/ gauge `rs_iot_history_series`（`list_metrics().len()` 官方口径，5s TTL 缓存）/ gauge `rs_iot_history_memory_used_bytes` / gauge `rs_iot_history_memory_budget_bytes`（tsink 引擎内存口径，预算=D6 `memory_limit_mb`）/ counter `rs_iot_history_deadband_evaluated_total`（死区评估行数，削减率分母——deadband=Some 标签的数值点）/ gauge `rs_iot_history_deadband_reduction_ratio`（=deadbanded/evaluated，分母 0 时输出 0）/ counter `rs_iot_history_write_errors_total{kind="memory_budget|cardinality|wal_disk|closed|other"}`（写错误按行五桶分型，Σkind == errors_total，值 0 桶也输出）。命名遵循 Prometheus 规范（counter `_total`、gauge 无后缀、耗时 `_ms`/字节 `_bytes`）。对接 Prometheus/Grafana：`job: rs-iot, /metrics`，免认证（内网信任，跨网加 IP 白名单/mTLS）。
 
 **`/api/v1/inst/stats`**（M4；缺 `inst_id` 时返回**全实例数组**）：替代废弃的 `/api/v1/lua/stats`，**全部内置插件**（dataSim/opcua/modbus/s7/lua/sidecar）+ 北向 luaNorth 统一经 `StatTracker` 写 lux `stat:<inst>` InstanceStat。核心 6 字段：`status`（running/degraded/stopped）/`tick_count`/`fail_count`/`last_activity_ts`/`last_activity_duration_ms`/`last_err`；插件扩展字段经 `extra` 透传（如 opcua `session_reconnect_count`、modbus `exception_count`、lua `vm_restart_count`/`script_version`）。
 
@@ -330,8 +331,9 @@ curl -X DELETE -H "Authorization: <token>" "localhost:8790/api/v1/alarms?key=dev
 |---|---|---|---|---|
 | GET | `/api/v1/events` | JWT | `?types=<逗号分隔 kind>`（缺省/空 = 全推） | `text/event-stream`：每事件一帧 `event: <kind>\ndata: <json>\n\n` |
 
-- **kind 五种**：`rtdata`（实时数据批量帧，Q6 带值：`{dev_ids,count,samples,ts}`——50ms 攒批窗口**一批一事件**而非每点一次，`samples` 按 dev 聚合携带最新值；lagged 丢帧/dev 超限截断时数据不全，前端靠既有 2s 轮询 `GET /rtdatas` 兜底）/ `alarm`（告警 fire/clear）/ `log`（与 `/api/v1/logs/recent` 同构的 LogEntry）/ `packet`（报文 trace hex dump：`{inst_id,dir:"tx"\|"rx",hex,ts}`）/ `state`（实例状态变更：`{inst_id,state,app_code,host_kind,ts}`）
+- **kind 六种**：`rtdata`（实时数据批量帧，Q6 带值：`{dev_ids,count,samples,ts}`——50ms 攒批窗口**一批一事件**而非每点一次，`samples` 按 dev 聚合携带最新值；lagged 丢帧/dev 超限截断时数据不全，前端靠既有 2s 轮询 `GET /rtdatas` 兜底）/ `alarm`（告警 fire/clear）/ `log`（与 `/api/v1/logs/recent` 同构的 LogEntry）/ `packet`（报文 trace hex dump：`{inst_id,dir:"tx"\|"rx",hex,ts}`）/ `state`（实例状态变更：`{inst_id,state,app_code,host_kind,ts}`）/ `screen`（画面/主题文档变更，§4.19）
 - **alarm 帧** data 形状：`{"kind":"alarm","action":"fire"|"clear","key","level","source","message","ts"}`（`source` 为宿主注入的实例 ID，不可伪造；一次 `addEventListener("alarm")` 覆盖双向）
+- **screen 帧** data 形状（P0 版本管理，§4.19 发布点 routes_meta）：`{"kind":"screen","id","resource":"screen"|"theme","action":"put"|"delete"|"rollback","version","actor","ts"}`——判重命中（内容未变）**不发帧**；`actor` = JWT sub（hmi-mcp 专用 sub 天然可分辨人/AI）。前端 `addEventListener("screen")` 感知「画面已被他人/AI 修改」
 - **鉴权走 cookie**：EventSource 无法带自定义 header，`/login` 已 `Set-Cookie token=...; HttpOnly` 同源自动带（Authorization 头通道同全局中间件，§2，curl 调试可用）
 - broadcast 语义：每连接独立 Receiver；慢客户端缓冲满收 `Lagged` → 丢帧继续不终结流，丢失条数累入 Prometheus `rs_iot_sse_lagged_total`（持续增长提示调大 `event_bus_capacity`，默认 256）
 - 无事件时 KeepAlive 周期发注释帧防代理超时；无生产者时连接静默等待
@@ -563,19 +565,28 @@ curl -s -X POST -H "Authorization: $TOKEN" -H "Content-Type: application/json" \
 
 两资源同构（screens/themes 各五端点），供 agent-hmi（Web HMI 编辑器）持久化画面文档与主题文档。
 
-| Method | Path | Body | 成功响应 |
+| Method | Path | Body/Query | 成功响应 |
 |---|---|---|---|
 | GET | `/api/v1/screens` | — | `{"screens":["a","b",...]}`（id 升序；lux `KEYS screen:*` 去前缀排序） |
-| GET | `/api/v1/screens/{id}` | — | `{"id":"a","doc":{...}}`；不存在 `404 {"error":"not found"}` |
-| PUT | `/api/v1/screens/{id}` | doc 全量 JSON | `{"status":"ok"}` |
-| DELETE | `/api/v1/screens/{id}` | — | `{"status":"ok"}`（幂等，不存在也 ok） |
-| GET/PUT/DELETE | `/api/v1/themes[/{id}]` | 同上 | `{"themes":[...]}` / `{"id","doc"}` / `{"status":"ok"}` |
+| GET | `/api/v1/screens/{id}` | — | `{"id":"a","doc":{...},"version":N}`；不存在 `404 {"error":"not found"}` |
+| PUT | `/api/v1/screens/{id}` | doc 全量 JSON；query `?if_version=N`（可选乐观锁） | `{"status":"ok","version":M}`；同内容判重命中 → version 不变 |
+| DELETE | `/api/v1/screens/{id}` | — | `{"status":"ok"}`（幂等；版本键族级联删） |
+| GET | `/api/v1/screens/{id}/versions` | — | `{"versions":[{seq,ts,author,size,sha,expired}]}`（seq 降序，至多 `versions_cap` 条） |
+| GET | `/api/v1/screens/{id}/versions/{seq}` | — | `{"id","seq","ts","author","doc"}`；元数据无该 seq `404`；正文 TTL 过期 `410 {"error":"version body expired"}` |
+| POST | `/api/v1/screens/{id}/rollback` | `{"to_version":N}`；query `?if_version=` 同 PUT | `{"status":"ok","version":M}`（回滚前 head 已存为新版本，回滚可再回滚） |
+| GET/PUT/DELETE | `/api/v1/themes[/{id}]` 及 `/versions*`/`/rollback` | 同上 | 同上（MetaKind 泛化，themes 机制同构免费覆盖） |
 
 - **lux 键**：每 id 一个 Hash——key `screen:{id}`（或 `theme:{id}`），field `doc` → 完整 JSON 文本**原样存储**（不做规范化重序列化），GET 时 parse 后原样返回
 - **id 约束**：`^[a-z0-9][a-z0-9-]{0,63}$`，不匹配 `PUT`/`DELETE` 返回 `400 {"error":"invalid id"}`
 - **大小钳制**：body ≤ 131072 字节，超出 `413 {"error":"payload too large"}`
 - **JSON 语法**：body 须为合法 JSON（`400 {"error":"invalid json"}`），仅存储完整性防御
-- **lux 故障**：PUT/DELETE 写失败（磁盘满/WAL 等）返回 `500 {"error":"<lux 错误>"}`，不静默报 ok
+- **lux 故障**：PUT/DELETE/versions/rollback 任一 lux 命令失败返回 `500 {"error":"<lux 错误>"}`，不静默报 ok
+- **版本管理**（P0，design `docs/designs/2026-10-30-screen-versioning-design.md`）：独立键族 `sv:{kind}:{id}:{seq|meta|v:{seq}}`（不放 `screen:` 命名空间——列表 `KEYS screen:*` 的隔离是脆弱巧合，独立前缀从根隔离）。捕获语义 = **记录旧内容**（每次内容变更前快照旧 doc 为版本）；head 永远是最新态不占版本位。三收敛线（§4.1）：**内容判重**（字节级同内容 PUT → 不建版不 INCR 直接返回当前 version——e2e 全量播种幂等的既有收益）、**正文 TTL**（`[meta].versions_ttl_secs` 默认 30 天 SETEX 自动淘汰）、**容量紧缩**（元数据 HLEN > 2×cap 时保留最新 cap 条）
+- **if_version 乐观锁**（§3.2）：query 参数（body 是裸 doc JSON 保持原样透传，不塞版本号）。缺省 = 无条件写（**完全向后兼容**，既有编辑器/e2e 播种零改动）；不匹配 → `409 {"error":"version conflict","current_version":M}` 不捕获不留痕。`seq` 键缺失视为 0——`?if_version=0` 是合法的「仍是原始版」断言（迁移期遗留画面）。防护的是"读到旧版本后长时间编辑再保存"（人/AI 实际模式），非毫秒级强一致
+- **version 字段语义**：遗留画面（机制上线前已存在、未被改过）version=0；首建 PUT 后 =1，此后每次内容变更 +1。GET 原样回传作 if_version 即可，无需特判 0
+- **rollback**：读目标版（无 404/过期 410）→ **快照当前 head 为新版本**（回滚本身可再回滚）→ 写 head = 目标正文 → INCR。delete 级联清 seq/meta/正文键（30 天内同 slug 重建不读到上一世代孤儿版本）
+- **审计**：每版元数据 `{seq,ts,author,size,sha}`（author = JWT sub，hmi-mcp 用专用 sub 天然可分辨人/AI；sha256 前 16 hex）；指标四族见 §4.10 `rs_iot_meta_*`
+- **SSE 变更事件**：`event: screen` 帧（§4.13）——put（判重命中不发）/delete/rollback
 - **与 agent-hmi 的分工边界**：rs-iot **只做存储，不做 schema 内容校验**——画面/主题文档的合法性（组件引用、绑定、主题变量等）由 agent-hmi 侧 G1 门禁负责；服务端校验止于 id 词法 / 大小 / JSON 语法三层
 - agent-hmi 前端静态产物由 rsiot-gateway `/hmi` 前缀提供（可配 `hmi_dist`，文件系统 serve + SPA fallback，见 `docs/ops/deploy-gateway-and-mcp.md`），经 `/api/rsiot` 反代调用本组端点
 
@@ -583,9 +594,19 @@ curl -s -X POST -H "Authorization: $TOKEN" -H "Content-Type: application/json" \
 # 存画面
 curl -s -XPUT -H "Authorization: $TOKEN" -H 'Content-Type: application/json' \
   http://localhost:8790/api/v1/screens/overview -d '{"name":"总览","widgets":[]}'
-# → {"status":"ok"}
+# → {"status":"ok","version":1}
 curl -s -H "Authorization: $TOKEN" http://localhost:8790/api/v1/screens
 # → {"screens":["overview"]}
+# 乐观锁：拿着过期版本号写 → 409
+curl -s -XPUT -H "Authorization: $TOKEN" -H 'Content-Type: application/json' \
+  "http://localhost:8790/api/v1/screens/overview?if_version=0" -d '{"name":"总览v2"}'
+# → {"error":"version conflict","current_version":1}（HTTP 409）
+# 版本历史与回滚
+curl -s -H "Authorization: $TOKEN" http://localhost:8790/api/v1/screens/overview/versions
+# → {"versions":[{"seq":1,"ts":1790000000,"author":"admin","size":43210,"sha":"a1b2...","expired":false}]}
+curl -s -XPOST -H "Authorization: $TOKEN" -H 'Content-Type: application/json' \
+  http://localhost:8790/api/v1/screens/overview/rollback -d '{"to_version":1}'
+# → {"status":"ok","version":3}
 ```
 
 ## 5. 数据模型（`src/types.rs`）
