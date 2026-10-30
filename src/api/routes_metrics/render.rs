@@ -340,6 +340,8 @@ pub(crate) struct TelemetrySnapshot {
     pub(crate) memory_components: crate::history::MemoryComponents,
     /// admission 缺口（Task 6：最近一次内存预算拒绝的预估与缺口）。
     pub(crate) admission: crate::history::AdmissionMemoryGap,
+    /// P1 flush/seal 门控与 catalog 节流计数（低速率写放大根治的观测面）。
+    pub(crate) flush_gate: crate::history::FlushGateMetrics,
 }
 
 /// 历史旁路计数器（七计数器 + H1/M11 拒收与跳过计数）+ Phase 3 治理七 family
@@ -494,6 +496,50 @@ pub(crate) fn render_history(
     ] {
         family_header(&mut s, name, help, "gauge");
         metric_line(&mut s, name, "", &val);
+    }
+
+    // P1 seal 门控与 catalog 节流（2026-10-29 低速率写放大根治观测面）：
+    // seal_hold 持续增长而 seal_trigger 稀少 = 门控生效（低速攒批）；
+    // catalog_persisted 应只在锚点/跨窗口增长，接近 attempts 说明节流失效。
+    for (name, help, val) in [
+        (
+            "rs_iot_history_seal_trigger_points_total",
+            "tsink 后台 flush 因 head 达到最小点数而 seal 的次数(P1)",
+            t.flush_gate.seal_trigger_points_total,
+        ),
+        (
+            "rs_iot_history_seal_trigger_age_total",
+            "tsink 后台 flush 因 head 年龄到期而 seal 的次数(P1 低速兜底)",
+            t.flush_gate.seal_trigger_age_total,
+        ),
+        (
+            "rs_iot_history_seal_trigger_wal_total",
+            "tsink 后台 flush 因未落盘 WAL 达上限而 seal 的次数(P1 高速安全阀)",
+            t.flush_gate.seal_trigger_wal_total,
+        ),
+        (
+            "rs_iot_history_seal_hold_total",
+            "tsink 后台 flush 因未达 seal 门槛而保持 head 打开的 series×拍计数(P1)",
+            t.flush_gate.seal_hold_total,
+        ),
+        (
+            "rs_iot_history_catalog_persist_attempts_total",
+            "tsink catalog 持久化路径进入次数(P1)",
+            t.flush_gate.catalog_persist_attempts_total,
+        ),
+        (
+            "rs_iot_history_catalog_persisted_total",
+            "tsink catalog 实际写盘次数(P1:稳态应远小于 attempts)",
+            t.flush_gate.catalog_persisted_total,
+        ),
+        (
+            "rs_iot_history_catalog_persist_skipped_total",
+            "tsink catalog 被节流或内容未变跳过的次数(P1)",
+            t.flush_gate.catalog_persist_skipped_total,
+        ),
+    ] {
+        family_header(&mut s, name, help, "counter");
+        metric_line(&mut s, name, "", &val.to_string());
     }
 
     // admission 拒绝累计（Task 6）：counter 语义,持续增长即事故进行中。
@@ -780,6 +826,7 @@ mod tests {
         let out = render_history(
             &history_stats(),
             &TelemetrySnapshot {
+                flush_gate: Default::default(),
                 memory_used_bytes: 111,
                 memory_budget_bytes: 268_435_456,
                 series: 7,
@@ -798,14 +845,14 @@ mod tests {
             },
             1,
         );
-        // 恰好 27 个 family:8 既有+新增 counter(nonfinite_skipped/dup_ts_skipped/
+        // 恰好 34 个 family:8 既有+新增 counter(nonfinite_skipped/dup_ts_skipped/
         // stale_ts_dropped/ts_rejected/len_rejected)+ 7 治理(四水位 gauge + 死区评估 counter +
         // 削减率 gauge + 写错误五桶 labeled counter)+ 8 观测扩展(五内存分量 gauge +
-        // admission 拒绝 counter + 预估/缺口 gauge)
+        // admission 拒绝 counter + 预估/缺口 gauge)+ 7 P1 seal 门控/catalog 节流 counter
         assert_eq!(
             out.lines().filter(|l| l.starts_with("# TYPE ")).count(),
-            27,
-            "history 应输出 27 个 metric family"
+            34,
+            "history 应输出 34 个 metric family"
         );
         // 每个 family:HELP/TYPE 头 + 数值行
         for (name, val) in [
@@ -842,6 +889,7 @@ mod tests {
         let out = render_history(
             &history_stats(),
             &TelemetrySnapshot {
+                flush_gate: Default::default(),
                 memory_used_bytes: 111,
                 memory_budget_bytes: 268_435_456,
                 series: 7,

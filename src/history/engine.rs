@@ -178,6 +178,23 @@ pub fn build_storage(cfg: &HistoryConfig, cardinality: usize) -> TResult<Storage
     if cfg.writer_threads > 1 {
         builder = builder.with_max_writers(cfg.writer_threads);
     }
+    // P1（2026-10-29 低速率写放大根治）：seal 门控与 catalog 节流。0 = tsink
+    // 引擎默认（拍长 250ms / head 年龄 300s / 最小点数 point_cap÷8 / catalog
+    // 30s）；非 0 显式覆盖。见 tsink docs/plans/2026-10-29-low-rate-seal-
+    // catalog-amplification.md。
+    if cfg.flush_interval_ms > 0 {
+        builder = builder.with_flush_interval(Duration::from_millis(cfg.flush_interval_ms));
+    }
+    if cfg.seal_min_points > 0 {
+        builder = builder.with_seal_min_points(cfg.seal_min_points);
+    }
+    if cfg.max_head_age_secs > 0 {
+        builder = builder.with_max_head_age(Duration::from_secs(cfg.max_head_age_secs));
+    }
+    if cfg.catalog_persist_secs > 0 {
+        builder =
+            builder.with_catalog_persist_interval(Duration::from_secs(cfg.catalog_persist_secs));
+    }
     builder
         .build()
         .map(|storage| StorageHandle {
@@ -306,6 +323,19 @@ impl crate::history::HistoryTelemetry for EngineTelemetry {
             rejections_total: flush.admission_memory_rejections_total,
             last_estimate_bytes: flush.admission_memory_last_estimate_bytes,
             last_shortfall_bytes: flush.admission_memory_last_shortfall_bytes,
+        }
+    }
+
+    fn flush_gate_metrics(&self) -> crate::history::FlushGateMetrics {
+        let flush = &self.storage.observability_snapshot().flush;
+        crate::history::FlushGateMetrics {
+            seal_trigger_points_total: flush.seal_trigger_points_total,
+            seal_trigger_age_total: flush.seal_trigger_age_total,
+            seal_trigger_wal_total: flush.seal_trigger_wal_total,
+            seal_hold_total: flush.seal_hold_total,
+            catalog_persist_attempts_total: flush.catalog_persist_attempts_total,
+            catalog_persisted_total: flush.catalog_persisted_total,
+            catalog_persist_skipped_total: flush.catalog_persist_skipped_total,
         }
     }
 }

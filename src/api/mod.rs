@@ -104,6 +104,7 @@ pub(crate) async fn history_telemetry_snapshot(
             series: t.series_count(),
             memory_components: t.memory_components(),
             admission: t.admission_memory_gap(),
+            flush_gate: t.flush_gate_metrics(),
         })
         .await
         .unwrap_or_default(),

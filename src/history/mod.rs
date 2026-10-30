@@ -135,6 +135,31 @@ pub trait HistoryTelemetry: Send + Sync {
     /// 预估增量（used+estimate=错误串 required），shortfall=required-budget；
     /// 从未拒绝时三读数全零。引擎关闭后读冻结值，不 panic。
     fn admission_memory_gap(&self) -> AdmissionMemoryGap;
+    /// P1 flush/seal 门控与 catalog 节流计数（tsink `flush` 观测面口径）。
+    /// 默认全零，便于测试替身与旧实现平滑接入。
+    fn flush_gate_metrics(&self) -> FlushGateMetrics {
+        FlushGateMetrics::default()
+    }
+}
+
+/// P1 flush/seal 门控与 catalog 节流计数（Prometheus counter 语义，
+/// 单调递增；引擎关闭后读冻结值）。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct FlushGateMetrics {
+    /// 当前 head 因达到最小点数而 seal 的次数。
+    pub seal_trigger_points_total: u64,
+    /// 因 head 年龄到期而 seal 的次数（低速兜底）。
+    pub seal_trigger_age_total: u64,
+    /// 因未落盘 WAL 达上限而 seal 的次数（高速安全阀）。
+    pub seal_trigger_wal_total: u64,
+    /// bounded 拍因未达门槛而保持 head 打开的（series × 拍）计数。
+    pub seal_hold_total: u64,
+    /// 进入 catalog 持久化路径的次数。
+    pub catalog_persist_attempts_total: u64,
+    /// catalog 实际写盘次数（稳态应远小于 attempts）。
+    pub catalog_persisted_total: u64,
+    /// catalog 被节流或内容未变而跳过的次数。
+    pub catalog_persist_skipped_total: u64,
 }
 
 /// 内存分量五元组（tsink `MemoryObservabilitySnapshot` 分量口径；Task 7

@@ -242,6 +242,20 @@ pub struct HistoryConfig {
     /// `with_partition_duration`。窗口越小 head 越早 seal(内存回收越快),
     /// 但乱序跨窗写入受 tsink max_active_partition_heads_per_series 约束
     pub partition_secs: u64,
+    /// P1 seal 门控:后台 flush 拍长(ms)。0=tsink 默认 250ms。拍长只是
+    /// 「seal 候选判定的最小时延」,不再等于「每拍 seal」——实际 seal 由
+    /// [`Self::seal_min_points`]/[`Self::max_head_age_secs`]/WAL 阈值决定
+    pub flush_interval_ms: u64,
+    /// P1 seal 门控:当前 head 最小 seal 点数。0=按 chunk_points/8 推导
+    /// (引擎默认 chunk 2048 → 256 点)。低速现场靠它把段粒度从「每拍 1 点」
+    /// 拉回百点级,把 catalog 全量重写成本摊薄 ~2 个数量级
+    pub seal_min_points: usize,
+    /// P1 seal 门控:当前 head 最长存活秒数,到期强制 seal(低速兜底:
+    /// 保证 WAL 与 active 内存有界)。0=tsink 默认 300s
+    pub max_head_age_secs: u64,
+    /// P1 catalog 最小重写间隔秒(段注册表缓存是派生数据,启动可由段目录
+    /// 重建)。0=tsink 默认 30s;checkpoint/优雅关闭锚点强制刷新
+    pub catalog_persist_secs: u64,
     /// 写线程数(T14,10 万点压测)。1=单写线程(行为与现状完全一致,零回归);
     /// n>1 启用 N 写线程 series 亲和分片:同一 series(devid+tag)恒定路由到
     /// 同一 writer(稳定 hash),死区/lane/乱序状态机的单写者全序保持;每分片
@@ -280,6 +294,10 @@ impl Default for HistoryConfig {
             close_timeout_secs: 15,
             chunk_points: 0,
             partition_secs: 0,
+            flush_interval_ms: 0,
+            seal_min_points: 0,
+            max_head_age_secs: 0,
+            catalog_persist_secs: 0,
             writer_threads: 1,
             // Task B/#4：默认值 = T17/T18 原硬编码常量（serde default 零漂移）
             health_degrading_ratio: 0.005,
