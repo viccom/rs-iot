@@ -1,10 +1,13 @@
-# rs-iot 配置（开发验证用）。生产部署按需调整。
+# rs-iot 配置示例（复制为 config.toml 后按需修改；config.toml 已被 .gitignore 忽略）
+# 本机开发实例：config.toml 是**运行态实例配置**，不入库；模板只保留结构与占位值。
 api_port = 8790                       # 默认值（2026-08-26 统一 8790），显式保留供现场调整
-jwt_secret = "qwerty1234567890asdfgh1234567890"
+jwt_secret = "CHANGE_ME_strong_random_secret"   # 必改：默认弱密钥会在启动日志告警
 
 [lux]
 port = 6390
-bind_host = "127.0.0.1"
+# 非 loopback 绑定必须配 password（启动期校验，缺则拒绝启动）
+bind_host = "0.0.0.0"
+password = "CHANGE_ME_lux_password"
 data_dir = "./data/lux"
 save_interval_secs = 300
 

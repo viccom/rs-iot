@@ -634,7 +634,7 @@ mod tests {
 ### 9.3 测试要验证意图
 
 测试必须表达**行为为什么重要**，不只验证"它做了什么"。业务逻辑变时测试应失败。参考全局
-CLAUDE.md 规则 7。
+AGENTS.md 规则 7。
 
 ---
 
@@ -707,7 +707,7 @@ Rust 模块系统对 `foo.rs` vs `foo/mod.rs` 透明，迁移**零代码改动**
 - [ ] 单测覆盖纯函数（解析/编解码/类型映射）
 - [ ] 四项质量门全绿（fmt / clippy -D warnings / test / doc -D warnings）
 - [ ] `README.md` 插件清单 + 里程碑更新
-- [ ] `CLAUDE.md` 模块表 + 验证规则段更新
+- [ ] `AGENTS.md` 模块表 + 验证规则段更新
 
 新增外部插件（sidecar）：无需写 rs-iot 代码，按 [`external-plugin-protocol.md`](../reference/external-plugin-protocol.md)
 实现外部进程 + 经 REST 建实例（`host_kind=external`）。

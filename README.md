@@ -21,6 +21,7 @@
 - **文件日志（M3）**：`tracing-appender` daily 轮转，`[log].dir` 默认 `./logs`（开箱即落盘）+ `max_days`/`max_size_mb` 保留期清理（按天/按总大小删旧，跳过当天活动日志）+ 退出 `WorkerGuard` flush（不再 `mem::forget`，保故障末尾日志）。
 - **可观测性（M4 + P1 三子系统）**：统一埋点（`InstanceStat` + `StatTracker`，全部内置插件 + sidecar + 北向 luaNorth）+ `GET /metrics`（Prometheus 文本，免 JWT，进程级 + per-instance 指标）+ `POST/GET/DELETE /api/v1/inst/trace`（per-instance 报文 hex dump 按需激活，lua + modbus 4 传输）+ `GET /api/v1/logs/recent`（日志 ring buffer 快照，进程级单 buffer 2000 条）+ `GET /api/v1/inst/stats`（per-instance JSON 指标，替代废弃的 `/api/v1/lua/stats`）。详见 `docs/reference/rest-api.md` §4.10。
 - **实例自愈可信（M3）**：实例 task 异常退出（panic/配置错误早退）由 supervisor 真实标 `Failed` + `error!` 落盘；REST `inststatus` 可见，`startinst` 重拉。
+- **历史时序存储（tsink 路线 A）**：三层开关（`history` Cargo feature，默认关 / `[history].enabled` / 标签 `TagProps.history` 白名单）；pipeline 出口**旁路**（fail-soft 满即丢 + 绝对死区 + 类型保真 + 写错误五型分桶）；读面 `GET /api/v1/history`（raw / 六聚合降采样）+ BI 大屏端点 `GET /api/v1/history/stats`（整窗统计）/ `POST /api/v1/history/batch`（≤32 条批量，单条错误字段化）；运行态观测走 `/sysstatus` 的 `history` 块与 `/metrics` 的 `rs_iot_history_*`。详见 `docs/reference/rest-api.md` §4.18。
 - **L1→L2 生产基线**：`missing_docs`/clippy/rustfmt 基线、统一 `RsIotError`（thiserror + `#[non_exhaustive]`）错误规范、newtype ID（`Hwid`/`InstId`/`UserId`/`PluginName`）、`tracing` 日志（`#[instrument]` + TraceLayer）、GitHub Actions CI。规范依据为外部文档《rust-architecture-by-code-size》（未入库）。
 
 ## 构建
@@ -36,7 +37,8 @@ cargo build --release   # release（lto + strip）
 
 ```bash
 # 前台。不带 --config 时用代码默认（lux :6390、REST :8790、mqtt localhost）；
-# 带仓库 config.toml 时：lux :6390、REST :8790、mqtt broker.emqx.io:1883
+# 带本地 config.toml 时：lux :6390、REST :8790、mqtt broker.emqx.io:1883
+# （仓库只带 config.example.toml；config.toml 是本机实例配置，已 gitignore）
 ./target/debug/rs-iot
 ./target/debug/rs-iot --config config.toml
 ```
@@ -82,6 +84,9 @@ rs-iot uninstall      # 卸载
 ```
 
 ## 配置（config.toml）
+
+> 仓库只带 **`config.example.toml`**（占位值）；运行用的 `config.toml` 是本机实例配置，已 gitignore：
+> `cp config.example.toml config.toml` 后按需修改（`jwt_secret`、非 loopback lux 的 `password` 必改）。
 
 ```toml
 api_port = 8790
@@ -200,12 +205,17 @@ GitHub Actions（`.github/workflows/ci.yml`，push/PR 触发）：
 - [x] **P1 #3** 日志 ring buffer：`RingBufferLayer` 截获最近 N 条 + `GET /api/v1/logs/recent?level=&target=&limit=`；独立 filter `info,io_trace=trace` 衔接报文 trace（`?target=io_trace` 拉报文 hex）
 - [x] **端到端测试** `tests/e2e_modbus_full_e2e.rs`：T1 modbus RTU serial（物理 COM2↔COM3 com0com + 仿真器，`#[ignore]` CI 跳过）/ T2 TCP / T3 lua 多设备 / T4 P1 三子系统；现场补充 RTU over UDP 采集 + 写命令（FC05/FC06）+ 三路径报文 trace 验证
 
+## 里程碑（续）：历史时序存储 tsink（2026-08-24 ~ 2026-10-29）
+
+- [x] **历史 Phase 1b/2/3**：写路径（pipeline 出口旁路 fan_out + 死区 + 类型保真）→ 读路径（`GET /api/v1/history` raw/六聚合降采样 + 前端历史趋势面板）→ 治理收口（内存水位/series 口径/错误五型分桶/503 显式拒绝矩阵）。存储引擎为 fork 自管的 tsink（`../tsink_fork` path 依赖；选型实测对比见 [docs/decisions/2026-08-24-history-storage-tsink-selection.md](docs/decisions/2026-08-24-history-storage-tsink-selection.md)）
+- [x] **BI 大屏端点**：`GET /api/v1/history/stats`（整窗统计）+ `POST /api/v1/history/batch`（多 series 批量，单条错误字段化）——2026-10-29，供 hmi-studio BI 图元通道 B 一次往返取整屏数据；契约 `docs/reference/rest-api.md` §4.18.2，测试 `tests/history_bi_e2e.rs`
+
 ## v2 路线
 
 - 更多南向协议：Modbus RTU / OPC DA client / IEC 60870-5-104 master / DNP3 / BACnet …
 - 北向服务器插件（既读出口又写入口）：OPC UA Server / OPC DA Server / Modbus slave / IEC 60870-5-104 Server —— 都经 CtlRegistry 写总线 + lux rtdata 读
 - L3 WASM 插件（wasmtime/extism）
-- 外部插件 bridge 增强：TLS（rustls）、配置变更自动 notify、历史时序存储、迟到数据 ts 单调过滤、北向外部插件（app_type=North + sidecarClient）、批量导入 API（几百实例运维）
+- 外部插件 bridge 增强：TLS（rustls）、配置变更自动 notify、外部直写历史存储、迟到数据 ts 单调过滤、北向外部插件（app_type=North + sidecarClient）、批量导入 API（几百实例运维）
 - DataFusion 分析视图（SQL/UDF，REST `/api/v1/query`）
 - 时序 downsample（lux Stream + 周期聚合）
 - v2 push sink：Sink trait 已保留，供推送式北向插件使用

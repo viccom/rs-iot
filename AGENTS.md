@@ -1,6 +1,6 @@
-# CLAUDE.md
+# AGENTS.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+本文件为 AI 编码代理（Claude Code / zcode 等）提供本仓库的协作指令与项目地图。
 
 ## 项目地图
 
@@ -40,13 +40,17 @@ POST /api/v1/command/send ─┼─► CtlRegistry.try_send(64) ──► 实例
 | crate | 职责 | 现状 |
 |---|---|---|
 | `crates/rsiot-mcp` | reasonix `[[plugins]]` spawn 的 stdio 子进程，把 MCP 工具调用翻译成 rs-iot loopback REST（照 dbx-mcp 范本：rmcp 2.2 + `#[tool]` 宏 + WebBackend JWT）。`server.rs` 声明 25 工具（含 query percent-encode 输入边界防护），`backend.rs` 调 REST | 25 工具完成（list_devices/read_tags/get_status/list_instances/get_recent_logs/send_device_command/start_instance/stop_instance/save_lua_script/get_config）+ risk 三档框架（CriticalWrite 关键设备禁写 P1 后置）+ query encode 单测；48 单测全绿 |
-| `crates/rsiot-gateway` | v3 独立 API Gateway，纯反代 rs-iot:8790 + reasonix serve:8787（`docs/decisions/2026-08-12-gateway-tech-selection.md`：axum 0.8 + reqwest 手写）。`proxy.rs` `forward()` 裸字节流透传（**不用** axum Sse/Event）+ rsiot 凭证转换（query token→Authorization）+ token 防泄漏，`auth.rs` 层1 JWT（复用主 crate jwt_secret） | B1 全完成（SSE 裸透传 + serve cookie 注入 + health 聚合 + rsiot 鉴权转发）；rust-embed 静态前端嵌入 + SPA fallback；58 测全绿（2026-10-28 实测）。剩余：OS 服务化 |
+| `crates/rsiot-gateway` | v3 独立 API Gateway，纯反代 rs-iot:8790 + reasonix serve:8787（`docs/decisions/2026-08-12-gateway-tech-selection.md`：axum 0.8 + reqwest 手写）。`proxy.rs` `forward()` 裸字节流透传（**不用** axum Sse/Event）+ rsiot 凭证转换（query token→Authorization）+ token 防泄漏，`auth.rs` 层1 JWT（复用主 crate jwt_secret） | B1 全完成（SSE 裸透传 + serve cookie 注入 + health 聚合 + rsiot 鉴权转发）；rust-embed 静态前端嵌入 + SPA fallback；58 测全绿（2026-10-28 实测）。OS 服务化已由 warden 进程监护承担（2026-10-29：systemd 常驻 warden :8789 托管 rs-iot/rsiot-gateway 启停，见「常用命令」warden 注记） |
 
 子 crate 与主 crate 的耦合边界：gateway 只透传主 crate REST（零改动）；rsiot-mcp 调主 crate REST，主 crate 已补 2 端点（`POST /api/v1/lua/script/save` 路径白名单 + `GET /api/v1/config` 脱敏，属主 crate 自身能力补全，已实现）。
 
 **前端工程**（`frontend/`，M1 起）：Vue3 + Vite + TypeScript SPA（工业监控界面 + AI 面板）。`src/views/`：Login 登录 / Overview 总览 / Telemetry 实时遥测（+ 历史趋势面板：HistoryQuery raw+六聚合/手写 SVG min-max 抽稀曲线/503 文案归一，消费 `GET /api/v1/history`；dev_id 随选中设备 chip 预填、tag 挂实时点位 datalist；实时点位表「操作」列行级「趋势」按钮预填直达（ad-hoc trend 惯例，RtdataPanel emit history 事件）——2026-08-26 自模型页迁入，历史查询属监控关注点，模型页回归纯元数据管理；纯函数 `frontend/src/lib/historyQuery.ts`）/ Collectors 采集实例 / **DeviceModels 设备模型注册表（四面板：设备模型/设备注册表/标签总览 effective/发现队列）** / Diagnostics 诊断 / Control 控制 / Lua 脚本；复用组件 `src/components/monitor/`（九面板：RtdataPanel/CollectorList/CommandPanel/LogStream/PacketTrace/AlarmPanel/SecretPanel/SystemStatus/InstanceForm）+ `src/components/devmeta/`（ModelForm/DeviceForm 表单 + HistoryQuery 历史查询面板）；基建 `frontend/src/api/client.ts` fetch 封装（自动带 JWT、401 区分已登录态 token 失效 vs 登录中业务 401）、`src/stores/`（Pinia：auth/monitor/agent/devreg/lua/secrets/workspace）、`frontend/src/router.ts`（history 模式 + 守卫）。**构建产物 `dist/` 经 rust-embed 嵌入 `crates/rsiot-gateway`**（gateway `static_assets.rs` 服务静态资源 + SPA fallback），`dist/` 不入库（`.gitignore`）。dev：`cd frontend && npm run dev`（Vite :5173，proxy `/api` → gateway :8080 同源无 CORS）；build：`npm run build`（产 `dist/` 后重编 gateway 才嵌入新前端）；单测基线 **17 文件 207 测**（`npm run test -- --run`，vitest；2026-10-28 实测）。
 
 **统一会话与主题（2026-10-28，与 hmi-studio 共享）**：两套同源 SPA（gateway `/` 控制台 + `/hmi` 组态）共享登录态——权威凭证是 login 下发的 HttpOnly cookie `token=<jwt>`（gateway `/api/gw/login` 透传 rs-iot Set-Cookie，auth 中间件三通道 Bearer/?token=/Cookie），SSE 靠同源 cookie 免 query token；localStorage 镜像键 `webhmi_token`/`webhmi_user`（旧 `rsiot_*`/`hmi_*` 一次性迁移）只做守卫判据与 Bearer；主题键 `webhmi_theme`，**默认工业深色**（暗色选择器统一 `html.dark` class，密度仍 `data-density`）。前端工具链对齐 hmi-studio：Vite 8 / TS 5.9 / vitest 5 / vue-router 5 / pinia 3 / vue-tsc 3（CI node 22）。
+
+**历史写放大根治（2026-10-29，tsink P1）**：后台 flush 的当前 head 受 **seal 门控**（默认 最小点数=chunk_points÷8 / head 年龄 300s / 未落盘 WAL 64MiB；满仓 rotate、分区滚动、准入压力与显式/关闭 flush 不受限），段注册表 catalog 改为**节流持久化**（默认 30s，checkpoint/关闭强制，启动可由段目录重建）。`[history]` 新增 `flush_interval_ms`/`seal_min_points`/`max_head_age_secs`/`catalog_persist_secs`（0=引擎默认）；`/metrics` 新增 `rs_iot_history_seal_*`/`catalog_*` 七 counter。实测 20 点/s 场景 CPU 28.3%→3.3%、每段 5.9→3,476 点。详见 tsink_fork `docs/plans/2026-10-29-low-rate-seal-catalog-amplification.md`。
+
+**BI 大屏数据面（2026-10-29，供 `../hmi-studio` 通道 B 消费）**：`GET /api/v1/history/stats`（单 series 整窗统计 `{stats:{count,last,last_ts,avg,min,max,sum}}`，数值聚合仅数值 lane）+ `POST /api/v1/history/batch`（多 series 批量：≤32 条、条间并发 cap 4、单条错误字段化整体仍 200）——契约见 `docs/reference/rest-api.md` §4.18.2，测试 `tests/history_bi_e2e.rs`。**告警只存当前活跃集**（`GET /api/v1/alarms`，无历史）——消费方只能做快照统计，不能做趋势/发生率。
 
 **存储布局与环境依赖**：lux Hash 表清单（users/passwords/devmodels/devreg/rtdata:*/alarms/discoveries…）、
 path 依赖（`../lux` / `../tsink_fork`）、端口与日志配置——**详见 [docs/architecture.md](docs/architecture.md) §三**。
@@ -100,6 +104,11 @@ cd frontend && npm run dev       # 前端 dev（Vite :5173 HMR，proxy /api → 
 cd frontend && npm run build     # 前端 build（产 dist/，需重编 gateway -p rsiot-gateway 才嵌入新前端）
 cd frontend && npm run test      # 前端单测（vitest，加 -- --run 单次跑完退出）
 ```
+
+> **本机生产运行由 warden 进程监护托管**（2026-10-29 起；HTTP API/Web UI :8789）：rs-iot / rsiot-gateway
+> 的启停/重启/状态/日志一律走 warden（`curl 127.0.0.1:8789/api/v1/services/{name}/restart`，托管清单
+> `../dist/run/dev/config/services.toml`），**禁止手工 nohup/systemd 双轨**。rs-iot 托管启动
+> 带 `--config config.toml`、working_dir = 仓库根；操作服务前后 `pgrep` 清点实例防僵尸并存。
 
 ### 前端开发流程（frontend/）
 
@@ -182,7 +191,7 @@ cargo build --features "s7,eip"                                      # 加装西
 - **新增外部南向插件**（任意语言）：外部进程实现 bridge 协议（`docs/reference/external-plugin-protocol.md`）→ rs-iot 侧 REST 建实例 `app_code="sidecarClient"` + `host_kind="external"` + `app_config`（连接参数，v3 下会下发给外部）+ devices（`routes_inst::set` 自动签发 token 返回明文一次）→ `startinst`（注册 slot 等外部接入）→ 外部进程连 bridge 报到（Hello `ver:"3"` 拿完整配置）。无需改 rs-iot 代码（外部协议地址语义由外部自解，rs-iot 下发已解析的 addr）。
 - **新增写命令入口**：调 `InstanceManager::send_ctl(inst, CtlMessage)`（经 `CtlRegistry` 路由到实例 `cmd_rx`，未注册返回 `false`）。现有入口：MQTT `<hwid>/command`（阶段 B 起经 luaNorth 兼容脚本 `down()` → `ctx:send_command`；进程内订阅路由在 `lua_north/`）、REST `POST /api/v1/command/send`（`routes_command.rs`）。写命令 `data` 字段格式由各南向插件 `handle_write` 自定（opcua `{node_id,value,opc_type}`、modbus `{address,value}`）。
 - **新增 config 字段**：`config.rs` 对应 struct 加 `#[serde(default)]` 字段 + `Default` 实现（缺失字段容错是既有约定）。
-- **新增二进制行为**：`main.rs` 子命令分发 → 逻辑在 `lib.rs`（前台）或 `service/`（服务态）——前台与服务态共用 `run_app_with_shutdown`，shutdown 来源不同（ctrl_c vs SCM/sigterm）。
+- **新增二进制行为**：`main.rs` 子命令分发 → 逻辑在 `lib.rs`（前台）或 `service/`（服务态）——前台与服务态共用 `run_app_with_shutdown`，shutdown 来源不同（ctrl_c vs SCM/sigterm）。API bind 失败同样走完整优雅停机序（pipeline flush/history close/lux SAVE）后**非零退出**（2026-10-29 修复：此前 bind 失败呈僵尸态——既不退出又占数据目录锁，见 `tests/bind_fail_exit_e2e.rs`；**2026-10-30 收尾**：bind 分支级联取消根 `shutdown` token（此前只取消子 token，drain 5s 空转、drain 期补发 SIGTERM 曾以退出码 0 收场）；`bind_fail` 用**独立根 token**而非 shutdown 的 child——child 的 `is_cancelled()` 在祖先取消时也为 true，会把正常优雅停机误判成 bind 失败非零退出）。
 - **实例自愈可信（M3）**：`start_source`/`start_sink` spawn source/sink task 后，再 spawn 一个 supervisor task（`spawn_supervisor`）唯一 await 其 join，task 退出且 `token` 未 cancel → 标 `InstState::Failed` + `error!`（覆盖 panic/配置错误早退/异常 return）；主动 `stop` 走 Stopping→Stopped（token cancel）不误判。状态仅内存（进程重启重置）。不自重启（后置）。`GET /api/v1/inststatus` 返回 Failed 实例；运维 `startinst` 重拉（Failed→Starting→Running）。**注意**：对 Failed 实例调 `stopinst` 会把状态改写为 Stopped（stop 总以 Stopped 收尾，操作员 stop 视为确认）；Failed 的 `error!` 日志已落盘，状态查询窗口在 stop 前可见。
 - **新增/修改插件埋点**：遵循 `docs/conventions/instrumentation-conventions.md` 6 约束。内置插件用 `StatTracker`（select! 加 flush ticker + tick_ok/fail）；进程级部件用 `ProcessMetrics`（atomic，/sysstatus 直读）。实例指标统一查 `GET /api/v1/inst/stats`（`{inst_id, app_code, host_kind, state, health}`，废弃的 `/api/v1/lua/stats` 已移除）。进程级 + per-instance 指标另经 `GET /metrics`（Prometheus exposition 文本，免 JWT）对接监控栈——同一 M4 数据源的机器出口（vs `/sysstatus`/`/inst/stats` 的 JSON 人查出口）。
 - **lua 脚本链路感知**：luaClient 通讯链路由宿主 IO task 管（open/connect/收发/重连/trace，脚本不碰），脚本只经 `ctx:request(frame, timeout)` 组帧/解帧。`ctx:transport()` 返回底层链路类型（`"tcp"`/`"serial"`/`"udp"`，与 `app_config.kind` 一致），脚本据此选帧格式（serial→PDU+CRC16、tcp→MBAP 头）。当前三种传输都是 client/主站侧；**TCP/UDP Server 不支持**（与请求-响应模型冲突，后置，详见 `docs/guides/lua-script-guide.md`「链路角色」）。一个实例一条链路；同链路多从站由脚本 `collect()` 循环轮询（M2 多设备输出）。
@@ -202,9 +211,9 @@ cargo build --features "s7,eip"                                      # 加装西
 
 ## 安全边界
 
-- **`data/`、`target/`、`logs/`、`*.log`、`pki/` 已被 .gitignore 忽略，不要提交**；**`gateway.toml` / `gateway.toml.bak` / `config.toml` 含 jwt_secret 与 serve_token，禁止提交真实值**；`data/` 含 lux 快照 + WAL，删除即丢数据。
+- **`data/`、`target/`、`logs/`、`*.log`、`pki/` 已被 .gitignore 忽略，不要提交**；**`gateway.toml` / `gateway.toml.bak` / `config.toml` 是本机运行态实例配置，均已 gitignore（2026-10-30 起 `config.toml` 也忽略，模板为 `config.example.toml`，只含占位值）**；`data/` 含 lux 快照 + WAL，删除即丢数据。
 - **`jwt_secret` 与 `MqttConfig::username/password` 不得写真实凭据进仓库**：config.toml 中 jwt_secret 是开发默认值（与 Lite_IOT 对齐），生产部署必须换；mqtt 公共 broker 仅开发验证用。
-- **lux 只 bind loopback**（`db/mod.rs` 中 `bind_host` 默认 127.0.0.1 + `require_auth=false`）。若要远程暴露 RESP，必须设 `[lux] password`（`require_auth` 由代码按 password 有无自动派生，无配置项）——这是认证边界，改动需显式确认。
+- **lux 默认只 bind loopback**（`db/mod.rs` 中 `bind_host` 默认 127.0.0.1 + `require_auth=false`）。若要远程暴露 RESP，必须设 `[lux] password`（`require_auth` 由代码按 password 有无自动派生，无配置项）——这是认证边界，改动需显式确认。**本机 dev 实例（`config.toml`）已显式改成 `0.0.0.0` + password，属受控例外**。
 - **`db::shutdown_lux` 必须先 SAVE 再 `shutdown_and_wait`**：lux 的 shutdown 默认不落盘（Memory 模式丢数据、Tiered 模式 WAL 不截断）。Tiered 下 `save_interval_secs` 也不能为 0（WAL 无限增长）。改 lux 交互代码时必须守住这两条。
 - **外部插件 bridge 安全**：bridge `bind_host` 默认 `127.0.0.1`（同机零暴露），跨机部署显式改 `0.0.0.0` 且 token 强制（acceptor 每连接校验，不可关）。外部插件 token 明文仅建实例时返回一次（存 `hmac_sha256` hash 于 `ext_tokens`），删实例自动清除——不得写真实 token 进 config.toml/日志。lux 永不对外部暴露（方案 C），外部只连 bridge。PoC 不上 TLS（局域网信任），跨机敏感场景 TLS 后置。
 - 输出信息：`hwid`（每机唯一标识）可在日志/API 中正常出现；不输出 bcrypt 哈希、JWT token 明文、lux `passwords` 表内容。

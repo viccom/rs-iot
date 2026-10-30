@@ -304,7 +304,7 @@ impl Source for LuaClient {
             cfg.script,
             cfg.period
         );
-        // 大声失败（CLAUDE.md 规则 10）：v1 重连由 collect period 天然限速，reconnect_secs 不生效。
+        // 大声失败（AGENTS.md 规则 10）：v1 重连由 collect period 天然限速，reconnect_secs 不生效。
         if inst.app_config.get("reconnect_secs").is_some() {
             tracing::warn!(
                 "[luaClient] inst {}: reconnect_secs 不生效（v1 重连由 collect period 天然限速）",

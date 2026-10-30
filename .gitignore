@@ -11,6 +11,7 @@ FIELD_E2E_LOCAL.md
 .bak/
 .playwright-mcp/
 gateway.toml
+config.toml
 __pycache__/
 
 # lua 脚本历史版本快照（运行时数据，save_script 自动生成，不入库）
