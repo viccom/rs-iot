@@ -129,6 +129,42 @@ async fn put(
         .unwrap()
 }
 
+/// 带认证 POST JSON（rollback 等），返回响应。
+async fn post_json(
+    app: &axum::Router,
+    tok: &str,
+    path: &str,
+    body: &str,
+) -> axum::response::Response {
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(path)
+                .header(header::AUTHORIZATION, tok)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+}
+
+/// 带认证 DELETE（无 body）。
+async fn delete(app: &axum::Router, tok: &str, path: &str) -> axum::response::Response {
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(path)
+                .header(header::AUTHORIZATION, tok)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+}
+
 /// 带认证 GET，返回 (status, json)。
 async fn get(app: &axum::Router, tok: &str, path: &str) -> (StatusCode, serde_json::Value) {
     let resp = app
@@ -221,6 +257,40 @@ async fn capture_old_doc_retrievable_with_author() {
 
 // ---------- 第 3 组：乐观锁 ----------
 
+/// 遗留画面（P0 上线前已存在、无 sv: 键）首次内容变更：旧内容捕获为**版本 0**
+/// （设计 §3.1 迁移期关键路径——线上 11 个长期资产全是这种形态，复审 L13 补测）。
+#[tokio::test]
+async fn legacy_screen_first_change_captures_version_zero() {
+    let (app, handle) = test_app().await;
+    let tok = jwt(&app).await;
+
+    // 模拟 P0 前既有画面：只有 head hash，无 seq/meta/正文键
+    handle
+        .client()
+        .execute(
+            "HSET",
+            &["screen:legacy", "doc", r#"{"name":"pre-p0","widgets":[]}"#],
+        )
+        .await
+        .expect("seed legacy head");
+
+    // GET：遗留画面 version=0
+    let (_, head) = get(&app, &tok, "/api/v1/screens/legacy").await;
+    assert_eq!(head["version"], 0, "无 seq 键应视为 0: {head}");
+
+    // if_version=0 是合法断言（迁移期）；内容变更 → 捕获版本 0 + INCR 到 1
+    let r = body_json(put(&app, &tok, "legacy", &doc(2), Some(0)).await).await;
+    assert_eq!(r["version"], 1, "遗留画面首次改动应 0→1: {r}");
+
+    let (_, versions) = get(&app, &tok, "/api/v1/screens/legacy/versions").await;
+    assert_eq!(seqs(&versions), vec![0], "旧内容应捕获为版本 0: {versions}");
+    let (st, v0) = get(&app, &tok, "/api/v1/screens/legacy/versions/0").await;
+    assert_eq!(st, StatusCode::OK, "{v0}");
+    assert_eq!(v0["doc"]["name"], "pre-p0", "版本 0 = 机制上线前原貌: {v0}");
+    assert_eq!(v0["author"], "admin");
+    common::stop_lux(handle).await;
+}
+
 /// 过期 if_version → 409 + current_version 且不留痕；缺省 = 无条件写（向后兼容）。
 #[tokio::test]
 async fn optimistic_lock_409_and_default_unconditional() {
@@ -254,6 +324,32 @@ async fn optimistic_lock_409_and_default_unconditional() {
     // if_version=0 是合法断言（"从未被本机制改过"）——首建即用 0 抢占
     let r = body_json(put(&app, &tok, "scr2", &doc(1), Some(0)).await).await;
     assert_eq!(r["version"], 1, "seq 缺失视为 0，if_version=0 应通过: {r}");
+    common::stop_lux(handle).await;
+}
+
+/// if_version 校验先于判重（复审 L4）：携带过期版本号、但提交内容与旧 head
+/// 逐字节相同的写，也必须 409——判重不得成为绕过乐观锁的旁路。
+#[tokio::test]
+async fn stale_if_version_conflicts_even_when_content_identical() {
+    let (app, handle) = test_app().await;
+    let tok = jwt(&app).await;
+
+    put(&app, &tok, "scr", &doc(1), None).await; // v1
+    put(&app, &tok, "scr", &doc(2), None).await; // v2
+
+    // 内容与当前 head 相同（doc(2)），但版本号停在 1：必须 409 而不是判重 ok
+    let resp = put(&app, &tok, "scr", &doc(2), Some(1)).await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::CONFLICT,
+        "过期 if_version 不得被判重旁路"
+    );
+    let e = body_json(resp).await;
+    assert_eq!(e["current_version"], 2, "{e}");
+
+    // 失败不留痕：无新版本
+    let (_, versions) = get(&app, &tok, "/api/v1/screens/scr/versions").await;
+    assert_eq!(seqs(&versions), vec![1], "{versions}");
     common::stop_lux(handle).await;
 }
 
@@ -329,6 +425,66 @@ async fn rollback_restores_target_and_snapshots_head() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    common::stop_lux(handle).await;
+}
+
+/// 回滚到"内容与当前 head 相同"的版本 = no-op（复审 L6）：不建版、不 INCR、
+/// 不发帧——重复点同一版回滚不再制造重复历史条目。
+#[tokio::test]
+async fn rollback_to_same_content_is_noop() {
+    let (app, handle) = test_app().await;
+    let tok = jwt(&app).await;
+    for n in 1..=3 {
+        put(&app, &tok, "scr", &doc(n), None).await;
+    }
+    // rollback 到 1 → head=v1（seq4，v3 已快照）
+    assert_eq!(
+        post_json(
+            &app,
+            &tok,
+            "/api/v1/screens/scr/rollback",
+            r#"{"to_version":1}"#
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
+    // rollback 到 3 → head=v3（seq5，v1 已快照）
+    assert_eq!(
+        post_json(
+            &app,
+            &tok,
+            "/api/v1/screens/scr/rollback",
+            r#"{"to_version":3}"#
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
+    let (_, before) = get(&app, &tok, "/api/v1/screens/scr/versions").await;
+    let count_before = seqs(&before).len();
+    assert_eq!(count_before, 4, "{before}");
+
+    // 再回滚到 3：head 内容 == 版本 3 → no-op（version 不变、无新版本）
+    let resp = post_json(
+        &app,
+        &tok,
+        "/api/v1/screens/scr/rollback",
+        r#"{"to_version":3}"#,
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let r = body_json(resp).await;
+    assert_eq!(r["version"], 5, "no-op 不消耗新版本号: {r}");
+
+    let (_, head) = get(&app, &tok, "/api/v1/screens/scr").await;
+    assert_eq!(head["version"], 5, "{head}");
+    let (_, after) = get(&app, &tok, "/api/v1/screens/scr/versions").await;
+    assert_eq!(
+        seqs(&after).len(),
+        count_before,
+        "no-op 不得新增版本: {after}"
+    );
     common::stop_lux(handle).await;
 }
 
@@ -441,8 +597,8 @@ async fn delete_cascades_version_keys() {
 
 // ---------- 第 8 组：SSE screen 事件 ----------
 
-/// put（内容变化）/delete/rollback 各发一帧 `event: screen`，payload 字段齐；
-/// 判重命中不发帧（内容未变不该惊动运行页）。
+/// put（内容变化）/rollback/delete 各发一帧 `event: screen`，payload 字段齐；
+/// 判重命中不发帧（内容未变不该惊动运行页）；回滚 no-op 同样不发帧。
 #[tokio::test]
 async fn sse_screen_events_frames_and_dedup_silent() {
     use futures_util::StreamExt;
@@ -464,10 +620,27 @@ async fn sse_screen_events_frames_and_dedup_silent() {
     assert_eq!(resp.status(), StatusCode::OK);
 
     put(&app, &tok, "scr", &doc(1), None).await; // 首建：put 帧
-    put(&app, &tok, "scr", &doc(2), None).await; // 变更：put 帧
+    put(&app, &tok, "scr", &doc(2), None).await; // 变更：put 帧（捕获 v1）
     put(&app, &tok, "scr", &doc(2), None).await; // 判重：无帧
+                                                 // 回滚 → rollback 帧（seq3；回滚前 head v2 已快照为 v2）
+    assert_eq!(
+        post_json(
+            &app,
+            &tok,
+            "/api/v1/screens/scr/rollback",
+            r#"{"to_version":1}"#
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
+    // 删除 → delete 帧（seq_before=3）
+    assert_eq!(
+        delete(&app, &tok, "/api/v1/screens/scr").await.status(),
+        StatusCode::OK
+    );
 
-    // 逐 chunk 读：两帧 put（version 1/2）后，继续读一段时间确认无第三帧
+    // 逐 chunk 读：期望 4 帧（put×2 + rollback + delete），判重不发
     let mut stream = resp.into_body().into_data_stream();
     let mut buf = String::new();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
@@ -478,25 +651,34 @@ async fn sse_screen_events_frames_and_dedup_silent() {
             }
             Ok(None) => break,
             Err(_) => {
-                // 500ms 无新 chunk：若已见两帧则认为判重未发帧
-                if buf.matches("event: screen").count() >= 2 {
+                // 500ms 无新 chunk：收满预期帧才提前结束（少帧时继续等到 deadline 再断言失败）
+                if buf.matches("event: screen").count() >= 4 {
                     break;
                 }
             }
         }
     }
     let frames = buf.matches("event: screen").count();
-    assert_eq!(frames, 2, "两次有效 PUT 恰两帧（判重不发）: {buf}");
-    assert!(
-        buf.contains(r#""action":"put""#),
-        "payload 带 action: {buf}"
+    assert_eq!(
+        frames, 4,
+        "put×2 + rollback + delete 恰四帧（判重不发）: {buf}"
     );
+    assert_eq!(
+        buf.matches(r#""action":"put""#).count(),
+        2,
+        "两次有效 PUT 各一帧: {buf}"
+    );
+    assert!(
+        buf.contains(r#""action":"rollback""#),
+        "rollback 帧缺失: {buf}"
+    );
+    assert!(buf.contains(r#""action":"delete""#), "delete 帧缺失: {buf}");
     assert!(buf.contains(r#""id":"scr""#), "payload 带 id: {buf}");
     assert!(
         buf.contains(r#""actor":"admin""#),
         "payload 带 actor: {buf}"
     );
-    assert!(buf.contains(r#""version":2"#), "payload 带 version: {buf}");
+    assert!(buf.contains(r#""version":3"#), "payload 带 version: {buf}");
     assert!(buf.contains(r#""ts":""#), "payload 带 ts: {buf}");
     common::stop_lux(handle).await;
 }

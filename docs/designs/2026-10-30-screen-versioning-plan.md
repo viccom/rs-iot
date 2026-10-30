@@ -52,3 +52,20 @@
 - 11 组测试全绿；`just check` 除 §0 登记的瞬态项外全绿
 - 服务重启后 §6 六条实测全部预期（409+current_version / 判重 version 不变 / versions 元数据 / rollback 双验 / 列表无 `sv:` 污染 / 四指标存在）
 - e2e 预期副作用（w8 等播种产生版本条目由判重+TTL 消化）不修测试不加清理钩子
+
+## 4. 实施后复审修复（2026-10-30）
+
+对 P0 实现做深度复审后的修复（均为错误路径/边界语义，不改主流程）：
+
+| 发现 | 修复 | 验证 |
+|---|---|---|
+| M1 紧缩的 MGET 失败被吞成"全过期"，随后仍 `DEL meta` + 重写空集 → 一次瞬态故障静默清空整屏版本历史 | MGET 失败/非数组/长度不符一律 `Err`（调用方本就 warn+跳过）；HGETALL 读到空表直接跳过，**存活判定不可信时绝不 DEL** | 代码路径 + `compaction_keeps_latest_cap` 零回归 |
+| L4 判重先于 if_version：过期版本号 + 同内容可绕过乐观锁 | `if_version` 校验前移（提供且不等即 409），再判重；新增 `stale_if_version_conflicts_even_when_content_identical` | `cargo test --test meta_versioning` 14/14 |
+| L5 GET/DELETE 把 seq 读失败吞成 0（与模块"所有 lux 调用判 Err"矛盾） | GET 改直接 HGET（Nil→404 / Err→500 / seq Err→500）；DELETE 记 warn 后继续（幂等优先） | 同上 |
+| L6 回滚到与当前 head 同内容的版本仍建版 + INCR（重复历史条目） | `RollbackOutcome::Unchanged` no-op（不建版/不 INCR/不发帧/不计数）；新增 `rollback_to_same_content_is_noop` | 同上 |
+| L13 迁移路径（遗留画面 seq 缺失→版本 0）与 delete/rollback SSE 帧无覆盖 | 新增 `legacy_screen_first_change_captures_version_zero`；SSE 用例扩为 put×2+rollback+delete 四帧 + 判重静默 | 同上 |
+| L13 `[meta]` 钳制无单测 | 新增 `meta_config_sanitize_clamps_zero_and_overflow`（cap=0 会让每次写清空历史，必须锁死） | `cargo test --lib` 673/673 |
+| L10 设计文档未回写 / metric family 计数错 | 设计头回写 implemented；§3.2 补"校验先于判重"、§3.4 补 rollback no-op、§4.4 补"存活判定不可信→放弃紧缩"；rest-api §4.10 18→22、§4.19 同步三处语义 | `python3 scripts/check_docs.py` |
+
+验证口径：`cargo test --test meta_versioning` 14/14、`cargo test --lib` 673/673、`cargo fmt --check`、`cargo clippy -p rs-iot --all-targets -- -D warnings`。
+**未重编 release、未重启 dev-rs-iot**——线上仍跑修复前二进制；重编（须 `--features history`）与 warden 重启留待用户裁决。

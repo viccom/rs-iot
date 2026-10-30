@@ -966,4 +966,31 @@ alarm_drop_ratio = 0.05"#,
             "无 [rtdata] 节走 Default（ksub）"
         );
     }
+
+    /// [meta] 加载期钳制（P0 §5.1；复审 L13 补测）：ttl 0 → 默认 30 天，
+    /// cap 钳 1..=500。0/超大值静默回合法域（治理面不阻断启动），但绝不能让
+    /// cap=0 进入路由——`truncate(0)` 加阈值 0 会让每次写都紧缩并清空历史。
+    #[test]
+    fn meta_config_sanitize_clamps_zero_and_overflow() {
+        let mut m = MetaConfig {
+            versions_ttl_secs: 0,
+            versions_cap: 0,
+        };
+        m.sanitize();
+        assert_eq!(m.versions_ttl_secs, 2_592_000, "ttl=0 应回落 30 天");
+        assert_eq!(m.versions_cap, 1, "cap=0 应钳到 1（否则历史必被清空）");
+
+        let mut m = MetaConfig {
+            versions_ttl_secs: 7,
+            versions_cap: 10_000,
+        };
+        m.sanitize();
+        assert_eq!(m.versions_ttl_secs, 7, "非零 ttl 原样保留");
+        assert_eq!(m.versions_cap, 500, "cap 上限 500");
+
+        // 缺 [meta] 节 → Default 已合法（sanitize 幂等）
+        let cfg: AppConfig = toml::from_str("").unwrap();
+        assert_eq!(cfg.meta.versions_ttl_secs, 2_592_000);
+        assert_eq!(cfg.meta.versions_cap, 50);
+    }
 }
