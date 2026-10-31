@@ -46,13 +46,20 @@ rs-iot 有三条南向扩展路径，按协议特征选：
 ```toml
 [bridge]
 enable = true               # 默认 false；现有部署零影响
-bind_host = "127.0.0.1"     # 同机；跨机改 "0.0.0.0"（token 强制校验）
+bind_host = "127.0.0.1"     # 同机；跨机改 "0.0.0.0"（token 强制校验，不可关）
 port = 8781
 heartbeat_timeout_secs = 15
 accept_hello_timeout_secs = 10
+# max_connections = 512     # 并发连接上限（默认 512）；超限的新连接被拒
 ```
 
 ### 3.2 建外部插件实例（拿一次性 token）
+
+> **前置（M-2 起强制）**：设备元数据唯一来源是设备模型注册表——建实例**之前**必须先
+> 建模型（`POST /api/v1/devmodel/set`）再注册设备（`POST /api/v1/devreg/set`）。实例只持
+> **扁平绑定** `devices:[{devid, bind}]`；旧内联点表写法（`label/value/children`）已随
+> `DeviceSpec` 退役——照旧写法得到 `invalid instance config: missing field 'devid'`，
+> **拿不到 plugin_token**。设备模型/注册表完整字段见 rest-api.md §4.15-§4.16。
 
 ```bash
 # 登录拿 JWT（注意 body 字段：user_id / pass）
@@ -60,7 +67,21 @@ TOKEN=$(curl -s -XPOST http://localhost:8790/api/v1/user/login \
   -H 'Content-Type: application/json' \
   -d '{"user_id":"admin","pass":"admin"}' | jq -r .token)
 
-# 建实例（app_code=sidecarClient, host_kind=external）→ 响应含 plugin_token（仅此次）
+# ① 建设备模型（一次，可复用；tags 的 name 即外部 DataUp 上报的 tag）
+curl -s -XPOST http://localhost:8790/api/v1/devmodel/set \
+  -H "Authorization: $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"model_id":"env-sensor","tags":[
+    {"name":"temp","type":"float","unit":"℃"},
+    {"name":"humidity","type":"float","unit":"%RH"}
+  ]}'
+
+# ② 注册设备实体（devid = rtdata:<devid> 的 key = DataUp.devid）
+curl -s -XPOST http://localhost:8790/api/v1/devreg/set \
+  -H "Authorization: $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"devid":"devP","model":"env-sensor","params":{},"overrides":{}}'
+
+# ③ 建实例（app_code=sidecarClient, host_kind=external；devices 只写绑定）
+#    → 响应含 plugin_token（仅此次）
 curl -s -XPOST http://localhost:8790/api/v1/inst/set \
   -H "Authorization: $TOKEN" -H 'Content-Type: application/json' \
   -d '{
@@ -68,24 +89,22 @@ curl -s -XPOST http://localhost:8790/api/v1/inst/set \
     "object":{
       "inst_name":"my collector","app_code":"sidecarClient","app_type":"south",
       "host_kind":"external","app_config":{"heartbeat_timeout_secs":30},
-      "devices":[{"label":"设备","value":"devP","children":[
-        {"label":"温度","value":"temp","type":"float"},
-        {"label":"湿度","value":"humidity","type":"float"}
-      ]}]
+      "devices":[{"devid":"devP","bind":{}}]
     }
   }' | jq .    # → {"status":"ok","plugin_token":"<hex>"}
 
-# 启动实例（注册 slot，等外部接入）
+# ④ 启动实例（注册 slot，等外部接入；绑定展开失败会 404——回到 ①② 检查）
 curl -s -XPOST http://localhost:8790/api/v1/startinst \
   -H "Authorization: $TOKEN" -H 'Content-Type: application/json' \
   -d '{"inst_id":"ext1"}'
 ```
 
 **关键约定**：
-- `device.value`（`devP`）= 设备 ID = `rtdata:devP` 的 key = `DataUp.devid`
-- `children[].value`（`temp`）= 数据点位 tag = `DataUp.samples[].tag`
-- `children[].type`（`float`）= 值类型提示，外部按实际采集类型用
-- **每次 `inst/set` 都重新签发并覆盖旧 token**（旧 token 即失效）——重复 set 同实例等于轮换 token，外部需用新 token 重连
+- `devices[].devid`（`devP`）= 设备 ID = `rtdata:devP` 的 key = `DataUp.devid`
+- **tag 不在实例配置里**——来自 ① 设备模型的 `tags[].name`（ConfigPush 下发给外部，
+  DataUp 上报的 tag 须与之匹配；未建模标签会被 M-3 校验闸拒收计数，不进 rtdata）
+- `tags[].type` = 值类型提示，外部按实际采集类型用
+- **每次 `inst/set` 都重新签发并覆盖旧 token**（旧 token 即失效）——重复 set 同实例等于轮换 token，外部需用新 token 重连；**无独立吊销端点**，轮换/吊销都走重复 set
 
 ### 3.3 外部进程连 bridge 报到
 
@@ -105,7 +124,7 @@ curl -s -XPOST http://localhost:8790/api/v1/startinst \
 
 ### 5.2 数据上行（DataUp）
 - `DataUp{devid, samples:[{tag, value, ts}, ...]}`，一帧可批量（不同 ts 也行）
-- `value`：JSON 数字/布尔/字符串（bridge 按 `SampleValue` 解析：整数→Int、浮点→Float、布尔→Bool、字符串→Str）
+- `value`：JSON 数字/布尔/字符串（bridge 按 `SampleValue` 解析：整数→Int、浮点→Float、布尔→Bool、字符串→Str）；**null/数组/对象**不在 `SampleValue` 形内——映射为 `Str(<JSON 串>)` 落库
 - **`ts` 用采集时刻的 Unix 秒**（非发送时刻）——补传时保留原 ts
 
 ### 5.3 写命令（Command）
@@ -131,7 +150,7 @@ function main():
     while true:                                  # 外层重连
         try:
             conn = tcp_connect(host, port)
-            send_frame(conn, Hello, {inst_id, token, ver:"2"})
+            send_frame(conn, Hello, {inst_id, token, ver:"3"})
             ack = recv_frame(conn)               # HelloAck
             if not ack.ok: log(ack.msg); sleep(backoff); continue
             cfg = recv_frame(conn)               # ConfigPush（devices）

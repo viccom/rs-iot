@@ -10,7 +10,7 @@
 
 ```
 ── 数据上行 ─────────────────────────────────────────────────────────
-N × Source(dataSim/opcua/modbus/s7/eip/lua/sidecar) ─► hub(mpsc 512)
+N × Source(dataSim/selfMonitor/sidecar/modbus/opcua/s7/eip/luaClient/luaTransform) ─► hub(mpsc 512)
   ─► pipeline dispatcher(按 devid FNV-1a 分片) ─► N worker(Processor + 攒批 50ms)
   ─► lux rtdata:<devid>
   读出口：GET /api/v1/rtdatas · SSE /rtdatas/subscribe(ksub 缺省) · luaNorth 北向(pull)
@@ -31,17 +31,17 @@ POST /api/v1/command/send ─┼─► CtlRegistry.try_send(64) ─► 实例 So
 
 | 模块 | 职责 |
 |---|---|
-| `lib.rs` | 库入口。`run_app_with_shutdown` 编排全链路：lux 启动 → identity bootstrap → hub/InstanceManager/MqttPublisher/pipeline/axum 全部挂到 `CancellationToken` |
+| `lib.rs` | 库入口。`run_app_with_shutdown` 编排全链路：lux 启动 → identity bootstrap → hub/InstanceManager/默认 luaNorth 北向实例(mqtt-pub-default，T8 迁移)/pipeline/axum 全部挂到 `CancellationToken` |
 | `main.rs` | CLI 入口（run / install / uninstall / service 子命令），clap 解析 |
 | `config.rs` | `AppConfig`：toml 加载，缺失字段走 Default（api_port 8780 / lux 6390 / mqtt 5s） |
 | `error.rs` | `RsIotError`（thiserror + `#[non_exhaustive]`）+ `TResult<T>` 别名 |
 | `types.rs` | 数据模型 + newtype ID（见编码约定） |
 | `host.rs` | `HostContext`（lux client + hwid + shutdown + `CtlRegistry` 命令路由表 + `BridgeRegistry` 外部连接分发），注入每个插件 task |
 | `model/` | **设备模型注册表域（物模型，M-1 起；决策 2026-08-25 元数据唯一来源）**：`types.rs`（DeviceModel/TagTemplate/DeviceEntry/TagOverride 三态覆盖/DeviceBinding + serde）、`addr.rs`（参数化地址 resolve 纯函数：`{name}` 占位符 + `+N` 整数偏移）、`effective.rs`（模板默认∪覆盖合并 + 顶层 unit/desc 垫底）、`validate.rs`（结构自校验 + 引用完整性：模型存在/params 齐/覆盖 tag∈模型）、`store.rs`（lux `devmodels`/`devreg` CRUD + 删除引用守卫 + update 引用预检）、`migrate.rs`（旧内联点表一次性迁移）、`cache.rs`（effective 物化缓存，写路径刷新）、`expand.rs`（装配期绑定展开，M-2）、`discovery.rs`（**发现引擎 M-4：pipeline 出口未建模标签→`discoveries` 队列（effective O(1) 比对 + once-set 热路径 + per-entry 60s 节流聚合 + LRU 5000 摊还逐出 + glob_match）+ clear/sweep/adopt 对账）——REST 面 `routes_model.rs`/`routes_devreg.rs`（**过渡路径 `/api/v1/devreg*`，M-2 接管 `/api/v1/devices` 系**）+ `routes_discovery.rs`（队列/清除/adopt 一键建模）+ `routes_tag.rs`（**M-4 改造：effective 视图 + devreg.overrides 三态写入 + legacy-export**；旧 `db/tag_registry.rs` tags CRUD 已随 tags 表退役删除）+ `POST /api/v1/migrate/inline-devices` |
-| `plugin/` | `traits.rs`（Source/Sink/Processor 契约）、`registry.rs`（inventory 静态注册）、`instance.rs`（生命周期管理 + `send_ctl` 写命令投递 + **M3 supervisor：task 异常退出标 Failed + 告警**）、`builtin/`（datasim 模拟采集 / opcua_client OPC UA 采集 / modbus_client Modbus TCP/RTU(serial/over-tcp/over-udp) 采集 / s7_client 西门子 S7 全系列采集 / **eip_client 罗克韦尔 AB EtherNet/IP 采集（rust-ethernet-ip，批量读 + tag 位寻址）** / lua_north 北向发布（mqtt-north，`[mqtt]` 兼容迁移） / **sidecar_client 外部插件 bridge**）、`ticker.rs`（采集 ticker jitter helper：FNV-1a 确定性相位错峰，`pipeline::route` 复用同算法 pub(crate)） |
+| `plugin/` | `traits.rs`（Source/Sink/Processor 契约；Source 出口 `tx` 为 `SampleSender`，`sample_sender.rs` D-OWN-1 归属登记包装）、`registry.rs`（inventory 静态注册）、`instance.rs`（生命周期管理 + `send_ctl` 写命令投递 + **M3 supervisor：task 异常退出标 Failed + 告警**）、`builtin/` 十插件（data_sim 模拟采集 / self_monitor 自监控（devid=rsiot） / opcua_client OPC UA 采集 / modbus_client Modbus TCP/RTU(serial/over-tcp/over-udp) 采集 / s7_client 西门子 S7 全系列采集 / **eip_client 罗克韦尔 AB EtherNet/IP 采集（rust-ethernet-ip，批量读 + tag 位寻址）** / lua_client Lua 脚本采集 / lua_transform Lua 数据加工（Source 订阅型） / lua_north 北向发布（唯一 Sink，`[mqtt]` 兼容迁移默认实例） / **sidecar_client 外部插件 bridge**；s7/eip 出默认 feature 门，见 decisions/2026-08-26）；另 `src/ticker.rs`（采集 ticker jitter helper：FNV-1a 确定性相位错峰，`pipeline::route` 复用同算法 pub(crate)） |
 | `pipeline.rs` | dispatcher（hub 唯一消费者，按 devid FNV-1a 分片）+ N worker（各持 `EmbeddedClient::clone` 独立 session Mutex，攒批 50ms → `db::rtdata::write_batch` B 形态 HSET 多对；worker panic 由 dispatcher join 检测补 gauge + 计死亡；退出 best-effort flush + cancel 级联 + join） |
 | `history/` | 历史时序存储写/读路径（旁路）：**写（Phase 1b）**——`rows.rs` fan_out 白名单过滤（effective() L3）/有界 channel（满即丢+计数）/单写线程 8MiB 栈 + deadband/批内去重/lane 防混型；`engine.rs` StorageBuilder D6 资源边界组装 + D10 close；**读（Phase 2）**——`mod.rs` HistoryReader trait 族（无条件编译，tsink 类型不出 engine.rs）+ `engine.rs` EngineReader raw/downsample（秒↔ms、P4 类型映射、P12 错误分层），REST 面 `src/api/routes_history.rs`（`GET /api/v1/history`，见 docs/reference/rest-api.md §4.18）；**Phase 3 治理（2026-08-26）**——`rows.rs` 写错误五型分桶（WriteErrorKind，Σkind==errors）+ 死区评估计数（削减率分母）、`mod.rs` HistoryTelemetry trait（内存水位/series 引擎口径，无条件编译）+ `engine.rs` impl、`lib.rs` maybe_init 全程 8MiB spawn_scoped 专线（陷阱 4：Windows debug 主线程 init 栈溢出 0xC00000FD，见 `tests/history_init_stack_e2e.rs`）；三层开关 L1 feature `history` 默认 off / L2 `[history].enabled` / L3 `TagProps.history`，见 `docs/designs/2026-08-25-history-write-path-plan.md` + `2026-08-25-history-read-subscribe-plan.md` + `2026-08-26-history-phase3-governance-plan.md` |
-| `transform/` | `passthrough`（默认）/ `rhai`（feature `transform`，默认开启——**已冻结 deprecated** Q7：不接线不投入，数据加工走 luaTransform） |
+| `transform/` | `passthrough`（恒定使用）/ `rhai`（feature `transform`，**已出 default、冻结 deprecated** Q7：不接线不投入，pipeline 恒 Passthrough，数据加工走 luaTransform） |
 | `db/` | `build_lux_config`、`shutdown_lux`（先 SAVE）、`identity::bootstrap`（幂等建 admin）、`rtdata::write_batch`（B 形态：聚合 devid → 逐 devid HSET 多对，per-devid 容错单 devid 失败不丢整批；`write` 单 Sample test-only 兼容入口）、`ext_token::issue/verify/revoke`（外部插件 token，hmac_sha256） |
 | `api/` | axum 路由 + JWT 中间件（auth.rs）+ 各 routes_*.rs + rust-embed 静态前端；`routes_history.rs` 历史读端点（§4.18）、`rtdata_watch.rs` RtdataWatchService（ksubscribe("rtdata:*") 消费 + per-devid 版本表 + epoch 重同步——`/rtdatas/subscribe` ksub 读源底座，`[rtdata].sub_impl` ksub/poll 双读源）、`routes_metrics/`（render.rs+mod.rs）Phase 3 治理 family——archived_tags/series/内存水位/死区评估与削减率/写错误五桶分型（spawn_blocking 采 telemetry，仅引擎 ok 输出，§4.10） |
 | `service/` | Windows Service（`windows-service` dispatch）/ systemd unit 生成 |

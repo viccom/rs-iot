@@ -8,6 +8,16 @@
 > **遗留**：无
 > **关联**：`docs/decisions/2026-08-07-plugin-extension-strategy.md`（上层策略，本方案是其第 6/7 节"现场裁剪"的具体落地）
 > **目标**：把 `opcua_client` / `modbus_client` / `s7_client` 三个南向协议插件改为可选 Cargo feature，实现"现场按需编译 + 系统依赖可选 + 二进制体积裁剪"，**零运行时风险、零行为破坏**。
+>
+> **勘误（2026-10-31，正文保留决策时快照，现状以下列为准）**：
+> - §4.1 的 `default = ["transform","lua","lua-http","opcua","modbus","s7"]` 已被
+>   [2026-08-26-default-compile-surface.md](2026-08-26-default-compile-surface.md) **部分取代**：
+>   现 `default = ["lua","lua-http","opcua","modbus"]`，s7/eip 出默认（显式 `--features s7,eip`），
+>   transform 同样出默认（Q7 冻结）
+> - §4.2 的 `pub mod mqtt_pub;` 模块已删除（T8：mqttPub 迁移为默认 luaNorth 实例）；feature 名单
+>   另含 `eip`（2026-08-17 `1f522e8` 纳入，§2.3 命名表当时未回填）
+> - 文中行号（`instance.rs:78-80` 等）为当时快照，现为 `instance.rs:115-117`；CI minimal 档已扩为
+>   lua 裁剪 + `lua,modbus,opcua` build + `s7,eip` test 三档（`.github/workflows/ci.yml`）
 
 ## 1. 现状分析
 

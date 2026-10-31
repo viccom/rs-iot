@@ -61,7 +61,7 @@ RSIOT_BENCH_HISTORY=on RSIOT_BENCH_SUB=poll|ksub cargo run --release --features 
 | `modbusClient` | TCP / RTU serial / RTU over TCP-UDP 设备 | 同上；serial 需 `libudev-dev`（Linux） |
 | `s7Client` | 西门子 S7（CI 内 `tests/s7_e2e.rs` 有 mock server 覆盖协议链路） | REST 建实例 → 采点 |
 | `eipClient` | 罗克韦尔 AB PLC（**需 `--features eip`**，已出默认） | REST 建实例 → 采点；位寻址写 tag 路径 `.N` |
-| `sidecarClient` | 无（CI 内 `tests/sidecar_e2e.rs` 进程内模拟） | 起外部模拟进程 → bridge 衔接 → 归属登记 |
+| `sidecarClient` | 无（CI 内 `tests/sidecar_e2e.rs` 进程内模拟外部客户端） | bridge 握手/配置推送/数据上行/写命令闭环；改 bridge 协议跑 `cargo test --test sidecar_e2e` |
 
 ### REST 端点
 
@@ -92,7 +92,7 @@ cd frontend && npm ci && npm run test -- --run && npm run build
 仅 `npm run build` 不会更新二进制——必须重编 gateway；且 rust-embed 不感知 dist 内容变化，
 必要时 `touch crates/rsiot-gateway/src/static_assets.rs` 再编译。
 
-## 二、集成测试索引（`tests/`，42 个）
+## 二、集成测试索引（`tests/`，45 个，2026-10-31 时点）
 
 命名 `*_e2e.rs` 为端到端，无后缀三篇为早期 M0 遗留（`dataflow` / `api_flow` / `config_load`）。
 `tests/common/mod.rs` 提供 `start_lux`（端口 0 + 独立临时 data_dir）/ `test_data_dir` /

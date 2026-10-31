@@ -12,8 +12,8 @@
 
 ```
 ── 数据上行总线 ─────────────────────────────────────────────────────────
-N × Source(dataSim / opcuaClient / modbusClient / s7Client / sidecarClient[外部]) ──► hub (mpsc 512) ──► pipeline dispatcher(按 devid FNV-1a 分片) ──► N worker(Processor + 攒批 50ms + write_batch B 形态 HSET 多对) ──► lux rtdata:<devid>
-   └─ 读出口（都从 lux rtdata 取最新值）：GET /api/v1/rtdatas / MqttPublisher pull / 未来北向 UA Server·Modbus slave·104
+N × Source(dataSim / selfMonitor / opcuaClient / modbusClient / s7Client / eipClient / luaClient / luaTransform / sidecarClient[外部]) ──► hub (mpsc 512) ──► pipeline dispatcher(按 devid FNV-1a 分片) ──► N worker(Processor + 攒批 50ms + write_batch B 形态 HSET 多对) ──► lux rtdata:<devid>
+   └─ 读出口（都从 lux rtdata 取最新值）：GET /api/v1/rtdatas / luaNorth 北向(pull) / 未来北向 UA Server·Modbus slave·104
 ── 控制下行总线（CtlRegistry，多源写入口 → 实例 cmd_rx）──────────────────
 MQTT <hwid>/command 订阅 ─┐
 POST /api/v1/command/send ─┼─► CtlRegistry.try_send(64) ──► 实例 Source::run 的 cmd_rx ──► handle_write（opcua/modbus...）
@@ -189,7 +189,7 @@ cargo build --features "s7,eip"                                      # 加装西
 - **新增 API 路由**：在 `src/api/` 加 `routes_*.rs` handler → `api/mod.rs` `build_router` 注册路由 → 需要免鉴权则在 `auth.rs` `PUBLIC_PATHS` 加白名单（默认全部要 JWT 或 `X-Access-Key`）→ DTO 与 state 从 `AppState`（lux client + mgr + hwid + jwt_secret）取。
 - **新增 lux Hash 表/字段**：先更新 `db/identity.rs:3-20` 的清单注释 → 读写逻辑放对应模块（用户→routes_user、实例→routes_inst、rtdata→`db/rtdata.rs`）→ 初始数据在 `identity::bootstrap` 幂等写入（用 `HEXISTS` 判断，不覆盖已有记录）。
 - **新增南向/北向插件**：`plugin/builtin/` 新文件实现 trait + `inventory::submit!` 注册 → `types::InstConfig` 的 `app_code` 字符串匹配注册表名 → 默认数据流靠 `lib.rs` 的 demo config（`try_start_from_lux` 读到 `instances` 表 autoStart 实例则优先拉起）。
-- **新增外部南向插件**（任意语言）：外部进程实现 bridge 协议（`docs/reference/external-plugin-protocol.md`）→ rs-iot 侧 REST 建实例 `app_code="sidecarClient"` + `host_kind="external"` + `app_config`（连接参数，v3 下会下发给外部）+ devices（`routes_inst::set` 自动签发 token 返回明文一次）→ `startinst`（注册 slot 等外部接入）→ 外部进程连 bridge 报到（Hello `ver:"3"` 拿完整配置）。无需改 rs-iot 代码（外部协议地址语义由外部自解，rs-iot 下发已解析的 addr）。
+- **新增外部南向插件**（任意语言）：外部进程实现 bridge 协议（`docs/reference/external-plugin-protocol.md`）→ rs-iot 侧先 devreg 注册设备（devmodel/set + devreg/set，M-2 起强制）再 REST 建实例 `app_code="sidecarClient"` + `host_kind="external"` + `app_config`（连接参数，v3 下会下发给外部）+ devices 扁平绑定 `[{devid,bind}]`（`routes_inst::set` 自动签发 token 返回明文一次）→ `startinst`（注册 slot 等外部接入）→ 外部进程连 bridge 报到（Hello `ver:"3"` 拿完整配置）。无需改 rs-iot 代码（外部协议地址语义由外部自解，rs-iot 下发已解析的 addr）。
 - **新增写命令入口**：调 `InstanceManager::send_ctl(inst, CtlMessage)`（经 `CtlRegistry` 路由到实例 `cmd_rx`，未注册返回 `false`）。现有入口：MQTT `<hwid>/command`（阶段 B 起经 luaNorth 兼容脚本 `down()` → `ctx:send_command`；进程内订阅路由在 `lua_north/`）、REST `POST /api/v1/command/send`（`routes_command.rs`）。写命令 `data` 字段格式由各南向插件 `handle_write` 自定（opcua `{node_id,value,opc_type}`、modbus `{address,value}`）。
 - **新增 config 字段**：`config.rs` 对应 struct 加 `#[serde(default)]` 字段 + `Default` 实现（缺失字段容错是既有约定）。
 - **新增二进制行为**：`main.rs` 子命令分发 → 逻辑在 `lib.rs`（前台）或 `service/`（服务态）——前台与服务态共用 `run_app_with_shutdown`，shutdown 来源不同（ctrl_c vs SCM/sigterm）。API bind 失败同样走完整优雅停机序（pipeline flush/history close/lux SAVE）后**非零退出**（2026-10-29 修复：此前 bind 失败呈僵尸态——既不退出又占数据目录锁，见 `tests/bind_fail_exit_e2e.rs`；**2026-10-30 收尾**：bind 分支级联取消根 `shutdown` token（此前只取消子 token，drain 5s 空转、drain 期补发 SIGTERM 曾以退出码 0 收场）；`bind_fail` 用**独立根 token**而非 shutdown 的 child——child 的 `is_cancelled()` 在祖先取消时也为 true，会把正常优雅停机误判成 bind 失败非零退出）。

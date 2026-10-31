@@ -22,7 +22,8 @@ rs-iot 通过 **sidecarClient bridge** 接入任意语言（C/C++/Go/Rust/Java/P
 | 端口 | `config.bridge.port`（默认 8781） |
 | bind | `config.bridge.bind_host`（默认 `127.0.0.1`；跨机改 `0.0.0.0`） |
 | 启用 | `config.bridge.enable = true`（默认 `false`，现有部署零影响） |
-| 协议版本 | `2`（`Hello.ver`；v1 拒连带升级提示） |
+| 并发上限 | `config.bridge.max_connections`（默认 512）；超限新连接被拒 |
+| 协议版本 | **`3`（当前）**，支持集 `["2","3"]`（`Hello.ver` 集合匹配，缺失按 `"2"`；v1 拒连带升级提示）——差异见 §9 |
 
 ## 2. 帧格式
 
@@ -39,7 +40,7 @@ rs-iot 通过 **sidecarClient bridge** 接入任意语言（C/C++/Go/Rust/Java/P
 | type | 值 | 名称 | 方向 | body 字段 |
 |---|---|---|---|---|
 | Hello | 0x01 | 握手 | ext→bridge | `{inst_id, token, ver}` |
-| HelloAck | 0x02 | 握手应答 | bridge→ext | `{ok, msg, heartbeat_secs}` |
+| HelloAck | 0x02 | 握手应答 | bridge→ext | `{ok, msg, heartbeat_secs}`（`heartbeat_secs` 仅成功形态携带） |
 | ConfigPush | 0x03 | 配置下发 | bridge→ext | `{inst_id, v, devices:[...]}` + v3 `app_config` |
 | DataUp | 0x04 | 数据上行 | ext→bridge | `{devid, samples:[{tag,value,ts},...]}` |
 | Command | 0x05 | 写命令 | bridge→ext | `{cmd_id, devid, cmd, data}` |

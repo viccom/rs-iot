@@ -49,7 +49,7 @@ cargo build --release   # release（lto + strip）
 redis-cli -p 6390 PING                       # PONG（lux RESP）
 redis-cli -p 6390 HGETALL rtdata:devB        # 实时数据缓存（采集→管道→入库）
 
-# 北向 MQTT 周期发布（pull 模式：MqttPublisher 每 5s 从 lux 抽取发布）
+# 北向 MQTT 周期发布（pull 模式：[mqtt] 配置生成的默认 luaNorth 实例周期从 lux 抽取发布）
 mosquitto_sub -h broker.emqx.io -t '+/devB/datas' -v
 
 # REST + JWT
@@ -129,12 +129,12 @@ ring_buffer_capacity = 2000   # 日志 ring buffer 容量（GET /api/v1/logs/rec
 │            └─ 进程内 EmbeddedClient（零拷贝）             │
 │                                                          │
 │  ── 数据上行总线 ──────────────────────────────────────── │
-│  Source(dataSim)    ─┐                                   │
-│  Source(opcuaClient) └─► hub(mpsc 256) ─► pipeline ─► Processor(rhai) │
-│  Source(modbusClient)┘                                 └─► lux HSET rtdata:<dev> │
+│  Source(dataSim)     ─┐                                  │
+│  Source(opcuaClient)  └─► hub(mpsc 512) ─► pipeline ─► Processor(Passthrough) │
+│  Source(modbusClient) ┘                                └─► lux HSET rtdata:<dev> │
 │                                                          │
 │  ── 北向读出口（都从 lux rtdata 取最新值）─────────────── │
-│  MqttPublisher（常驻）── 周期 KEYS rtdata:* → HGETALL → PUBLISH <hwid>/<dev>/datas │
+│  luaNorth 默认实例 mqtt-pub-default ── 周期 pull lux → PUBLISH <hwid>/<dev>/datas │
 │  GET /api/v1/rtdatas                                      │
 │                                                          │
 │  ── 控制下行总线（CtlRegistry，多源写入口 → 实例 cmd_rx）─ │

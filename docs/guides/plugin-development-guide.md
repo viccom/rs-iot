@@ -32,13 +32,14 @@ N×M 网状耦合降维成 N+M——每个协议只对接总线，不互相适�
 
 ### 1.1 三类插件（按职责正交）
 
-| trait | 职责 | 方向 | 现有实现 |
+| trait | 职责 | 方向 | 现有实现（10 个，2026-10-31；feature 门见 §3.4） |
 |---|---|---|---|
-| `Source` | 产出数据，推入 hub | 南向（设备 → rs-iot） | dataSim / opcuaClient / modbusClient / s7Client / sidecarClient |
-| `Sink` | 消费数据，发往外部 | 北向（rs-iot → 云/总线） | mqttPub |
-| `Processor` | 转换 Sample | 中间（hub → pipeline） | passthrough / rhai（feature `transform`） |
+| `Source` | 产出数据，推入 hub | 南向（设备 → rs-iot） | dataSim / selfMonitor / sidecarClient / modbusClient / opcuaClient / s7Client / eipClient / luaClient / **luaTransform**（订阅型：消费 EventBus 而非真机采集） |
+| `Sink` | 消费数据，发往外部 | 北向（rs-iot → 云/总线） | **luaNorth**（唯一 Sink，MQTT 北向；旧 mqttPub 已删，T8 无损迁移为默认 luaNorth 实例，见 §5） |
+| `Processor` | 转换 Sample | 中间（hub → pipeline） | passthrough（恒定）/ rhai（feature `transform`，**Q7 冻结不接线**，见 §6） |
 
-契约定义见 `src/plugin/traits.rs`。
+契约定义见 `src/plugin/traits.rs`；权威注册清单 = `src/plugin/builtin/mod.rs` 的模块声明（带 feature 门）。
+运行时清单 = `GET /api/v1/plugins`（返回**当前编译面**的 sources/sinks，裁剪构建下 s7/eip 不在列表）。
 
 ### 1.2 三层形态（按运行位置）
 
@@ -53,12 +54,15 @@ N×M 网状耦合降维成 N+M——每个协议只对接总线，不互相适�
 ```
 ── 数据上行总线 ──────────────────────────────────────────────
 N × Source ──► hub(mpsc 512) ──► pipeline(Processor) ──► lux rtdata:<devid>
-   读出口（都从 lux rtdata 取最新值）：MqttPublisher(pull) / GET /api/v1/rtdatas
+   读出口（都从 lux rtdata 取最新值）：luaNorth 北向实例(pull) / GET /api/v1/rtdatas
 
 ── 控制下行总线（CtlRegistry）──────────────────────────────
 MQTT <hwid>/command / POST /api/v1/command/send ──► CtlRegistry.try_send(64)
    ──► 实例 Source::run 的 cmd_rx ──► handle_write
 ```
+
+> MQTT `<hwid>/command` 订阅随 T8 迁移落在默认 luaNorth 实例的 down 回调
+> （`lua_north/compat.rs`，订阅项由宿主配置生成），不再有独立 mqtt_pub 模块。
 
 - **南向采集与北向发布完全解耦**：Source 只写 hub，Sink 只从 lux rtdata 读（pull）或从独立
   channel 读（push）。lux rtdata 是唯一数据交汇点。
@@ -68,8 +72,8 @@ MQTT <hwid>/command / POST /api/v1/command/send ──► CtlRegistry.try_send(6
 ### 1.4 核心解耦机制（五条）
 
 1. **trait 契约**——框架依赖抽象（Source/Sink/Processor），不依赖具体协议实现
-2. **channel 解耦**——hub（256）+ cmd（64）异步边界 + 背压；写命令 `try_send` 非阻塞，channel
-   满丢弃（对标 Go 版 `default` 语义，**勿改阻塞**）
+2. **channel 解耦**——hub（512，`lib.rs` 构造）+ cmd（64）异步边界 + 背压；写命令 `try_send`
+   非阻塞，channel 满丢弃（对标 Go 版 `default` 语义，**勿改阻塞**）
 3. **lux 作进程内数据总线**——RESP 契约，上下游无直接引用
 4. **`inventory` 静态注册**——编译期发现，无注册顺序依赖，编进单一二进制
 5. **`CancellationToken`**——独立启停；控制面（cmd）不阻塞数据面（hub）
@@ -101,18 +105,22 @@ UpperCamelCase（首字母大写）。
 
 如果必须改，只能新增别名映射（`find_source` 兼容老名），不得直接 rename。
 
-### 2.3 现状清单与偏差
+### 2.3 现状清单与偏差（10 个，2026-10-31）
 
-| 注册名 | 目录名 | struct | 状态 |
-|---|---|---|---|
-| `dataSim` | `data_sim/` | `DataSim` | ✓ 已规范化（原 `datasim.rs` 连写，2026-08 修正） |
-| `opcuaClient` | `opcua_client/` | `OpcuaClient` | ✓ |
-| `modbusClient` | `modbus_client/` | `ModbusClient` | ✓（拆子模块，见 [§3.1](#31-子目录结构目标态)） |
-| `s7Client` | `s7_client/` | `S7Client` | ✓ |
-| `mqttPub` | `mqtt_pub/` | `MqttPub` | ✓ 已规范化（原 `MqttPublisher`，2026-08 修正） |
-| `sidecarClient` | `sidecar_client/` | `SidecarClient` | ✓ |
+| 注册名 | 目录名 | struct | feature | 状态 |
+|---|---|---|---|---|
+| `dataSim` | `data_sim/` | `DataSim` | — | ✓ 已规范化（原 `datasim.rs` 连写，2026-08 修正） |
+| `selfMonitor` | `self_monitor/` | `SelfMonitor` | — | ✓（自监控设备 devid=rsiot） |
+| `sidecarClient` | `sidecar_client/` | `SidecarClient` | — | ✓ |
+| `modbusClient` | `modbus_client/` | `ModbusClient` | modbus（默认开） | ✓（拆子模块，见 [§3.1](#31-子目录结构目标态)） |
+| `opcuaClient` | `opcua_client/` | `OpcuaClient` | opcua（默认开） | ✓ |
+| `s7Client` | `s7_client/` | `S7Client` | s7（默认关） | ✓ |
+| `eipClient` | `eip_client/` | `EipClientPlugin` | eip（默认关） | ⚠ struct 带.Plugin 后缀，是唯一偏离三层派生的存量偏差（保留不改，记录在案） |
+| `luaClient` | `lua_client/` | `LuaClient` | lua（默认开） | ✓ |
+| `luaTransform` | `lua_transform/` | `LuaTransform` | lua（默认开） | ✓（Source 订阅型，非 Processor） |
+| `luaNorth` | `lua_north/` | `LuaNorth` | lua（默认开） | ✓（唯一 Sink；旧 mqttPub 已删，见 §5） |
 
-所有内置插件均已收敛到子目录结构 + 三层命名规范（2026-08 完成迁移）。**新增插件必须从注册名严格派生目录名与 struct 名**。
+新增插件必须从注册名严格派生目录名与 struct 名（存量偏差 `EipClientPlugin` 不作为先例）。
 
 ---
 
@@ -122,24 +130,26 @@ UpperCamelCase（首字母大写）。
 
 ```
 src/plugin/builtin/
-├── mod.rs                  # 仅 `pub mod xxx;` 声明（一行一插件，字母序）
-├── data_sim/
-│   └── mod.rs              # DataSim 实现 + inventory + 单测
-├── opcua_client/
-│   └── mod.rs              # 中等插件：单 mod.rs 足够
-├── s7_client/
+├── mod.rs                  # 仅 `pub mod xxx;` 声明（一行一插件，字母序；协议插件带 #[cfg(feature)]
+├── data_sim/               # —（无条件编译）
+├── self_monitor/           # —
+├── sidecar_client/         # —（或拆 acceptor.rs / codec.rs / frame.rs）
 │   └── mod.rs
-├── modbus_client/          # 大插件：拆子模块（原 1733 行 → 6 文件）
+├── eip_client/             # #[cfg(feature = "eip")]
+├── lua_client/             # #[cfg(feature = "lua")]
+├── lua_north/              # #[cfg(feature = "lua")]（唯一 Sink + compat 默认北向实例）
+├── lua_transform/          # #[cfg(feature = "lua")]
+├── modbus_client/          # #[cfg(feature = "modbus")]；大插件：拆子模块（原 1733 行 → 6 文件）
 │   ├── mod.rs              # Source impl + handle_write + Evt + inventory + tests（~960 行）
 │   ├── config.rs           # Transport / ModbusCfg / parse_cfg
 │   ├── address.rs          # Func / Type / Order / PointSpec / parse_* / addr_*
 │   ├── codec.rs            # 字节序 perm / decode / encode / decode_point / encode_value
 │   ├── merge.rs            # Region / merge_regions
 │   └── transport.rs        # connect / UdpIo / 串口参数映射
-├── mqtt_pub/
+├── opcua_client/           # #[cfg(feature = "opcua")]；中等插件：单 mod.rs 足够
 │   └── mod.rs
-└── sidecar_client/
-    └── mod.rs              # 或拆 acceptor.rs / codec.rs / frame.rs
+└── s7_client/              # #[cfg(feature = "s7")]
+    └── mod.rs
 ```
 
 **规则**：
@@ -152,7 +162,7 @@ src/plugin/builtin/
 
 | 插件规模 | 结构 | 判断依据 |
 |---|---|---|
-| < 500 行 | 单 `mod.rs` | datasim / mqtt_pub / opcua / s7 / sidecar |
+| < 500 行 | 单 `mod.rs` | datasim / self_monitor / opcua / s7 / sidecar |
 | 500–1000 行 | 单 `mod.rs` 仍可接受 | 接近上限时评估拆分 |
 | > 1000 行 | **拆子模块** | modbus_client（~1700 行）应拆 transport/codec/address/merge |
 
@@ -166,6 +176,25 @@ src/plugin/builtin/
 2. `inventory::submit!` 静态注册（**每个插件恰好一次**）
 3. `pub use` 重导出插件 struct（供 `find_source` 工厂返回）
 4. 子模块声明（`mod transport;` 等，私有，不对外）
+
+### 3.4 feature gate（编译面裁剪）
+
+协议插件**必须**挂 feature 门（决策 [2026-08-26 默认编译面](../decisions/2026-08-26-default-compile-surface.md)；
+机制见 [2026-08-07 feature-gating](../decisions/2026-08-07-feature-gating-protocols.md)）。新增协议插件四步：
+
+1. `Cargo.toml` `[dependencies]`：协议库 `default-features = false, optional = true`（惯例见 tokio-modbus/rust-ethernet-ip 条目）
+2. `Cargo.toml` `[features]`：`<name> = ["dep:<crate>"]`；**是否进 `default` 需裁决**——当前
+   `default = ["lua", "lua-http", "opcua", "modbus"]`，s7/eip 显式 `--features` 启用
+3. `src/plugin/builtin/mod.rs`：`#[cfg(feature = "<name>")] pub mod xxx_client;`
+4. 测试：新增端到端测试文件（对标 `tests/s7_e2e.rs` / `tests/eip_client_e2e.rs`），非默认 feature
+   的测试文件头加 `#![cfg(feature = "xxx")]`（文件级门）；CI 侧 `just check-s7-eip` 同理扩
+
+**行为语义**：关掉 feature ≠ 编译失败——`find_source` 优雅降级，建实例时返回
+`source plugin not found: <app_code>`（`instance.rs`），实例无法拉起但主程序照常运行。
+**排障提示**：实例报 plugin not found / `/api/v1/plugins` 列表里没有某插件 → 先确认构建带了
+对应 feature（`cargo build --features s7,eip`），再查注册名拼写。
+
+dataSim / selfMonitor / sidecarClient 无条件编译（不挂门——自监控与外部接入是系统能力，非可选协议）。
 
 ---
 
@@ -183,16 +212,31 @@ pub trait Source: Send + Sync {
     fn name(&self) -> &'static str;
 
     /// 运行采集循环：产出经 tx 推入 hub，命令从 cmd_rx 消费，token 取消时退出。
+    ///
+    /// `tx` 是 `SampleSender`（D-OWN-1：send/try_send 遮蔽转发前把 devid 归属
+    /// 登记到 lux dev2inst）；`Deref` 回 `mpsc::Sender` 兼容其余用法。
     async fn run(
         &self,
         ctx: HostContext,
         inst: InstConfig,
-        tx: mpsc::Sender<Sample>,
+        tx: SampleSender,
         cmd_rx: mpsc::Receiver<CtlMessage>,
         token: CancellationToken,
     );
 }
 ```
+
+**`SampleSender` 契约**（`src/plugin/sample_sender.rs`，D-OWN-1 起替换裸 `mpsc::Sender<Sample>`）：
+
+- **用法与裸 Sender 几乎一致**：`tx.send(sample).await` / `tx.try_send(sample)` 直接用，
+  其余方法（`clone`/`is_closed`/`capacity`…）经 `Deref` 透传——**自身 `send`/`try_send` 方法
+  遮蔽 Deref 的**（Rust 方法查找优先自身），转发前把 `sample.devid` 归属登记到 lux `dev2inst`
+  （设备 → 宿主实例路由表；进程内 `seen` 去重，同 devid 仅首次 HSET）
+- **先登记后转发**：样本即使因背压被丢弃，devid 已产出即归属成立（丢样不否定归属）；
+  登记失败仅 warn 不阻断数据面（最终一致，启动预登记兜底）
+- `Clone` 全共享（inner/lux/seen 同一登记态）——同实例多任务克隆后共享去重表
+- **插件不要绕过它**：不要缓存裸 Sender、不要自己写 lux dev2inst——直接用 `tx` 即可
+- `InstanceManager::start_source` 是唯一构造点；测试/北向黑洞通道用 `SampleSender::untracked`（纯转发不登记）
 
 **硬性约束**：
 - `name()` 返回值、`inventory::submit!` 的 `name` 字段、配置里的 `app_code` **三者必须完全一致**
@@ -211,8 +255,14 @@ pub trait Source: Send + Sync {
 | `ctx.shutdown` | `CancellationToken` | 全局关闭（task 应用 `token` = `shutdown.child_token()`，但框架已传 `token` 参数，直接用） |
 | `ctx.ctl_registry` | `CtlRegistry` | 命令路由表（框架已自动 register/unregister，插件一般不直接用） |
 | `ctx.bridge_registry` | `BridgeRegistry` | 外部插件连接分发（仅 sidecarClient 用） |
+| `ctx.metrics` | `Arc<ProcessMetrics>` | 进程级指标（M4，`/metrics` 出口） |
+| `ctx.trace_registry` | `TraceRegistry` | 报文 trace 开关注册表（P1：裸报文协议包 `TraceIo` 用，见 §4.12） |
+| `ctx.event_tx` | `EventBus` | SSE 事件总线（luaTransform 订阅它做数据加工；普通 Source 不用） |
+| `ctx.history` | `Option<HistoryHandle>` | 历史归档旁路句柄（Phase 1b；恒由 pipeline 出口 fan-out，插件不碰） |
 
-**普通采集插件只需 `ctx.hwid`**（组装 Sample）。lux/registry 由框架管理。
+（字段清单以 `src/host.rs` `HostContext` 为权威，共 9 项。）
+
+**普通采集插件只需 `ctx.hwid`**（组装 Sample）+ 按需 `ctx.trace_registry`/`ctx.metrics`。lux/registry 由框架管理。
 
 ### 4.3 配置解析（`app_config`）
 
@@ -280,9 +330,13 @@ struct ChildSpec   { label: String, value: String, r#type: String }
 **预解析**：`run` 入口一次性展开并解析成插件内部结构，采集循环内不再重复
 （对标 `modbus_client/mod.rs:305`）。
 
+**启动前置**：`startinst` 前绑定必须可展开——devices 引用的 devreg 设备/模型不存在或参数缺失，
+展开失败直接 **404 拒启**（`routes_sys.rs`，语义见 rest-api.md §4.2）。新插件联调"实例起不来"
+先查这条链：devmodel → devreg → inst.devices 绑定。
+
 ### 4.5 采集循环范式（`select!` 模板）
 
-所有内置 Source 遵循同一骨架（参考 `opcua_client.rs:272`、`s7_client.rs` run）：
+所有内置 Source 遵循同一骨架（参考 `opcua_client/mod.rs` run、`s7_client/mod.rs` run）：
 
 ```rust
 async fn run(&self, ctx, inst, tx, mut cmd_rx, token) {
@@ -330,6 +384,9 @@ async fn run(&self, ctx, inst, tx, mut cmd_rx, token) {
 - **懒连接**：首个 tick 才连接，连接失败 `continue`（下个 tick 重试），不阻塞 task
 - **断线重连**：读失败 + 连接错误 → `conn = None`，下个 tick 重连（对标 opcua `session=None`）
 - **`MissedTickBehavior::Skip`**：积压 tick 跳过，不补偿（避免catch-up 风暴）
+- **ticker 错峰**：多实例整点同步触发会形成脉冲——用 `src/ticker.rs` 的 FNV-1a 确定性相位
+  （`fnv1a(inst_id) % period_ms`）把首 tick 散布开（对标 data_sim/modbus；`pipeline::route`
+  的 devid 分片复用同算法）
 - **`tx.send(sample).await.is_err()` → break**：hub 关闭（pipeline 挂），task 退出
 - **埋点（M4）**：task 内持 `StatTracker::new(inst_id, ctx.lux.clone())`，select! 加第 4 分支 `flush_ticker.tick() → tracker.flush()`；采集成功 `tracker.tick_ok(elapsed_ms)`、失败 `tracker.tick_fail(reason)`。连接底层 IO 包 `TraceIo::new(stream, inst_id, ctx.trace_registry.clone())` 接入报文 trace（详见 [§4.12](#412-运行指标与诊断m4--p1-已落地)）
 
@@ -357,7 +414,7 @@ async fn handle_write(conn: &Option<Connection>, data: &str) {
 - 写失败 `warn`，不 panic
 
 **写入口**（插件不感知，统一经 CtlRegistry）：
-- MQTT `<hwid>/command` 订阅（`mqtt_pub.rs`）
+- MQTT `<hwid>/command` 订阅（T8 起随默认 luaNorth 实例的 down 回调，`lua_north/compat.rs`）
 - REST `POST /api/v1/command/send`（`routes_command.rs` → `InstanceManager::send_ctl`）
 
 ### 4.7 错误处理
@@ -414,8 +471,9 @@ inventory::submit! {
 
 ### 4.11 完整骨架（最小可运行 Source）
 
-最小参考：`src/plugin/builtin/data_sim/mod.rs`（DataSim，模拟采集，~130 行）。协议采集参考：
-`opcua_client/mod.rs`（中等，批量读 + 类型映射）、`s7_client/mod.rs`（中等，批量读 + 大端解码）。
+最小参考：`src/plugin/builtin/data_sim/mod.rs`（DataSim，模拟采集，~170 行）。协议采集参考：
+`opcua_client/mod.rs`（中等，批量读 + 类型映射）、`s7_client/mod.rs`（中等，批量读 + 大端解码）、
+`eip_client/mod.rs`（批量读 + tag 位寻址写）。
 
 ### 4.12 运行指标与诊断（M4 + P1 已落地）
 
@@ -441,11 +499,14 @@ inventory::submit! {
 
 ## 5. 内置 Sink 开发（北向发布）
 
-Sink 消费 Sample 发往外部（MQTT broker / 数据库 / 云）。
+Sink 消费数据发往外部（MQTT broker / 数据库 / 云）。**现役唯一 Sink = `luaNorth`**
+（MQTT 北向，Lua 脚本可编程发布面）；独立 `mqttPub` 插件已删——T8（2026-08）把 `[mqtt]` 配置
+无损迁移为**默认 luaNorth 实例** `mqtt-pub-default`（内置 mqttPub 兼容脚本）。
 
 ### 5.1 Sink trait 契约
 
 ```rust
+// src/plugin/traits.rs
 #[async_trait]
 pub trait Sink: Send + Sync {
     fn name(&self) -> &'static str;
@@ -458,25 +519,33 @@ pub trait Sink: Send + Sync {
 
 ### 5.2 两种范式
 
-- **push 模式**：Sink 从 `rx` 消费 Sample（`InstanceManager::start_sink` 传入 `sample_rx`）。
-  Trait 保留此能力，v2 push sink 用。
-- **pull 模式**（现状默认）：Sink 不从 `rx` 消费，而是常驻独立 task，周期从 lux rtdata 抽取
-  （`MqttPublisher` 范式，见 `mqtt_pub.rs`）。`lib.rs` 直接 spawn，不经 `start_sink`。
+- **pull 模式**（luaNorth 现状）：Sink 不从 `rx` 消费 Sample，而是 mqtt task 独占网络 IO、
+  BatchTick 经 lux `pull` 收拢批量（`KEYS rtdata:*` → 批量取值 → PUBLISH）。多 Source 产出
+  汇 lux，pull 天然聚合 + 单一发布点；`rx` 通道当前是黑洞（`SampleSender::untracked`）。
+- **push 模式**：Sink 从 `rx` 消费 Sample（`InstanceManager::start_sink` 接入）。trait 保留此
+  能力，pipeline 尚不 fan-out 到 sink——留给 v2 逐 tag 低延迟发布场景。
 
-**当前北向发布用 pull 模式**（MqttPublisher 每 N 秒 `KEYS rtdata:*` → `HGETALL` → PUBLISH），
-原因：多 Source 产出汇 lux，pull 模式天然聚合 + 单一发布点。
+### 5.3 北向现状与扩展路径
 
-### 5.3 新增北向协议
-
-- pull 模式：照 `mqtt_pub.rs`，常驻 task 从 lux 抽取，注册到 `shutdown` child token
-- push 模式：实现 `Sink` trait + `inventory::submit! { SinkEntry {...} }`，由 pipeline fan-out
-  （v2 路线，当前 pipeline 不 fan-out 到 sink）
+- **`[mqtt]` 配置默认北向**：`lib.rs` 启动时 `compat::start_default_north`（R5 单通道锁：本进程
+  已运行不二次启动；lux 已有同名配置沿用不覆盖；auto_start 交 lux autoStart 路径）——经
+  InstanceManager 全套生命周期管理（supervisor/Failed 状态/stat 埋点一体）。
+- **luaNorth 脚本契约**：`auth/up/down/on_connack/on_disconnect` 回调（`down` 即
+  `<hwid>/command` 命令订阅转发），详见 `docs/guides/lua-script-guide.md` 北向章节。
+- **新增北向协议**：优先评估 **luaNorth + Lua 脚本**（零编译，MQTT 之外协议再议）；
+  确需 Rust 进程内实现时：实现 `Sink` trait + `inventory::submit! { SinkEntry {...} }`，
+  `startinst` 对 `app_type=north` 走 `start_sink`（R4 起支持，此前被 400 拒）。
 
 ---
 
-## 6. Processor 开发（L2 数据转换）
+## 6. Processor 开发（L2 数据转换）——**冻结**
 
 Processor 在 pipeline 内转换 Sample（hub → Processor → lux rtdata）。
+
+> **Q7 裁决（2026-08）：冻结不接线**。`lib.rs` 构建 pipeline 时**恒用 `Passthrough`**
+> （rhai 不经配置切换）；feature `transform` 已出 default，仅为保留解冻入口。
+> **数据加工一律走 `luaTransform`**（Source 订阅型：消费 EventBus 上的点值变更做计算/衍生点，
+> 产出经 SampleSender 回 hub，不占 Processor 位）——新增转换需求先看 luaTransform 范式。
 
 ### 6.1 Processor trait 契约
 
@@ -490,14 +559,13 @@ pub trait Processor: Send + Sync {
 
 ### 6.2 现有实现
 
-- `transform::passthrough::Passthrough`：默认，原样透传
-- `transform::rhai::RhaiProcessor`（feature `transform`，默认开启）：内嵌 rhai 脚本转换
+- `transform::passthrough::Passthrough`：恒定使用，原样透传
+- `transform::rhai::RhaiProcessor`（feature `transform`，**冻结 deprecated**）：存在但不被接线
 
 ### 6.3 新增 Processor
 
-- 实现 `Processor` trait
-- 在 `src/transform/` 新文件
-- 默认用 `Passthrough`，rhai 由配置切换（`lib.rs` 构建 pipeline 时选择）
+原则上不新增（见本节开头冻结裁决）。确需解冻：实现 trait + `src/transform/` 新文件 +
+`lib.rs` 接线选择逻辑——须先在 decisions 登记推翻 Q7 的新裁决。
 
 ---
 
@@ -526,7 +594,9 @@ pub trait Processor: Send + Sync {
 ### 7.2 接入流程（rs-iot 侧，无需写代码）
 
 1. REST 建实例：`app_code="sidecarClient"` + `host_kind="external"` + `app_config{heartbeat_timeout_secs?}`
-   + `devices`（`routes_inst::set` 自动签发 token，**明文返回一次**）
+   + `devices:[{devid, bind}]`（**扁平绑定**——设备须先在 devreg 注册，完整流程与 curl 示例见
+   [`external-plugin-dev-guide.md`](external-plugin-dev-guide.md) §3.2；`routes_inst::set` 自动签发
+   token，**明文返回一次**）
 2. `startinst`（注册 slot 等外部接入）
 3. 外部进程连 bridge（`config.bridge`，默认 `127.0.0.1:8781`）报到
 
@@ -589,8 +659,8 @@ struct CtlMessage {
 ### 8.3 lux rtdata 布局
 
 - Hash `rtdata:<devid>`，field `<devid>.<tag>`，value `[ts, localTime, value]` JSON
-- 由 pipeline 写（`db::rtdata::write`），**插件不直接写**（推 hub 即可）
-- 读出口：`MqttPublisher`（pull）/ `GET /api/v1/rtdatas`
+- 由 pipeline 写（`db::rtdata::write_batch`），**插件不直接写**（推 hub 即可）
+- 读出口：luaNorth 北向实例（pull）/ `GET /api/v1/rtdatas`
 
 ### 8.4 CtlRegistry 路由（`src/host.rs`）
 
@@ -676,8 +746,11 @@ Rust 模块系统对 `foo.rs` vs `foo/mod.rs` 透明，迁移**零代码改动**
 
 - `datasim.rs` → `data_sim/mod.rs`（目录名规范化；注册名 `dataSim` 锁定不变）
 - `MqttPublisher` → `MqttPub`（struct 重命名 + `lib.rs` 调用 + 4 处 doc 注释连带清理；不影响持久化）
+- **T8（2026-08）**：`mqttPub` 插件整体删除——`[mqtt]` 配置无损迁移为默认 luaNorth 实例
+  `mqtt-pub-default`（`lua_north/compat.rs`）；本节为历史记录，§2.3 现状清单不再含 mqttPub
 
-现状全部插件已符合三层命名规范（见 [§2.3](#23-现状清单与偏差)）。**注册名永不改**（持久化契约，见 [§2.2](#22-注册名锁定持久化契约)）。
+现状全部插件已符合三层命名规范（见 [§2.3](#23-现状清单与偏差)；存量偏差 `EipClientPlugin` 记录在案）。
+**注册名永不改**（持久化契约，见 [§2.2](#22-注册名锁定持久化契约)）。
 
 ### 11.3 向后兼容红线
 
@@ -694,9 +767,11 @@ Rust 模块系统对 `foo.rs` vs `foo/mod.rs` 透明，迁移**零代码改动**
 
 - [ ] 注册名 lowerCamelCase（如 `s7Client`），目录名 snake_case（`s7_client/`），struct UpperCamelCase（`S7Client`）
 - [ ] `name()` / `inventory::submit!` name / `app_code` 三者一致
-- [ ] `Source::run` 三分支 select（token / cmd_rx / ticker）
-- [ ] 配置 `parse_cfg` 容错（必填报错 + 可选缺省 + 边界 clamp）
-- [ ] 预解析 `devices`，采集循环不重复 parse
+- [ ] 协议插件挂 feature 门四步全做（§3.4：optional dep / `[features]` / `#[cfg]` / 文件级门测试）
+- [ ] `Source::run` 三分支 select（token / cmd_rx / ticker）；`tx` 用 `SampleSender` 语义（§4.1，勿缓存裸 Sender）
+- [ ] 配置 `parse_cfg` 容错（必填报错 + 可选缺省 + 边界 clamp；`period` 单位=秒且 `.max(1)`）
+- [ ] 预解析 `devices`（`expand_to_specs`），采集循环不重复 parse；绑定不可展开 → startinst 404（§4.4）
+- [ ] ticker 错峰（`src/ticker.rs` FNV-1a 相位，§4.5）
 - [ ] 连接懒连 + 断线重连（`Option<Conn>` + `is_connection_error()`）
 - [ ] 写命令 `handle_write`（cmd_rx 分支 + JSON data + 未连接 warn 丢弃）
 - [ ] 错误 `tracing::warn!` 降级，绝不 panic
@@ -706,6 +781,7 @@ Rust 模块系统对 `foo.rs` vs `foo/mod.rs` 透明，迁移**零代码改动**
 - [ ] `pub` 项有 `///` doc 注释（中文）
 - [ ] 单测覆盖纯函数（解析/编解码/类型映射）
 - [ ] 四项质量门全绿（fmt / clippy -D warnings / test / doc -D warnings）
+- [ ] **运行时自检**：`GET /api/v1/plugins` 出现新注册名；带 feature 门的插件在默认构建与 `--features` 构建下各验证一次（默认构建下应优雅报 plugin not found）
 - [ ] `README.md` 插件清单 + 里程碑更新
 - [ ] `AGENTS.md` 模块表 + 验证规则段更新
 

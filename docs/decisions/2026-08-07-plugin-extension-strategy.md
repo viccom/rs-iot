@@ -7,6 +7,16 @@
 > **测试**：`tests/sidecar_e2e.rs`、`tests/lua_*_e2e.rs`
 > **遗留**：bridge TLS / 北向外部插件 / 批量导入 API（README v2 路线）
 > **相关文档**：`docs/reference/external-plugin-protocol.md`（sidecar 协议）、`docs/guides/lua-script-guide.md`（Lua 脚本）
+>
+> **勘误（2026-10-31，正文保留决策时快照，现状以下列为准）**：
+> - §2 trait 快照的 `tx: mpsc::Sender<Sample>` 已演进为 **`SampleSender`**（D-OWN-1 归属登记包装，
+>   `src/plugin/sample_sender.rs`）——本决策"跨边界类型不透明"的机制结论不受影响，反更甚
+> - §5 矩阵"opcua/modbus/s7 未做 feature 化"已全部实施（含 eip，见
+>   [2026-08-07-feature-gating-protocols.md](2026-08-07-feature-gating-protocols.md)）；默认编译面其后被
+>   [2026-08-26-default-compile-surface.md](2026-08-26-default-compile-surface.md) 调整（s7/eip 出默认）
+> - §7"第一层必做：抽 SDK crate"未做，且已被本决策头部结论（SDK crate 明确不做）取代——外部扩展
+>   走 sidecar + lua 双通道
+> - 文中行号（`host.rs:124` / `instance.rs:94` 等）为当时快照，已随代码漂移
 
 ## 1. 背景与诉求演进
 
