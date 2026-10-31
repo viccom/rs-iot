@@ -441,11 +441,15 @@ impl Source for EipClientPlugin {
 ///
 /// 返回 false 仅当传输级失败（应拆连接重连）；单 tag 失败（BatchError，
 /// 如 tag 不存在）仅 warn + 跳过，不丢整批（对标 pipeline per-devid 容错）。
+///
+/// `tx` 必须是 `&SampleSender`（D-OWN-1）：**不能收 `&mpsc::Sender<Sample>`**——
+/// `SampleSender` 对裸 Sender 有 `Deref`，收裸类型时调用点 `&tx` 会被自动脱壳，
+/// `send` 解析到 mpsc 原生方法，dev2inst 归属登记整体被绕过（2026-10-31 审查修复）。
 async fn collect_once(
     client: &mut EipClient,
     targets: &Targets,
     ctx: &HostContext,
-    tx: &mpsc::Sender<Sample>,
+    tx: &SampleSender,
     inst_id: &str,
 ) -> bool {
     // devid → BTreeMap 聚合（batch 与 string 两路并到同一 tick 采样）。

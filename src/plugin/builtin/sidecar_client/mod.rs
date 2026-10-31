@@ -204,11 +204,15 @@ fn make_codec() -> LengthDelimitedCodec {
     b.new_codec()
 }
 
-/// 从 `app_config` 读心跳超时覆盖（`heartbeat_timeout_secs`）。
+/// 从 `app_config` 读心跳超时覆盖（`heartbeat_timeout_secs`），**最小钳制 1 秒**。
+///
+/// 零值必须拦住：调用侧 `hb_check = hb_timeout / 2` 直通 `tokio::time::interval`——
+/// 零周期会让首个外部连接接入时 panic（tokio 对零周期直接炸），task 崩 → 实例 Failed。
+/// 同钳制也保证 `HelloAck.heartbeat_secs` 下发的值语义可用（0 会让客户端忙等）。
 fn parse_hb_timeout(app: &serde_json::Value, default: Duration) -> Duration {
     app.get("heartbeat_timeout_secs")
         .and_then(|v| v.as_u64())
-        .map_or(default, Duration::from_secs)
+        .map_or(default, |v| Duration::from_secs(v.max(1)))
 }
 
 /// 设备点表 → ConfigPush `devices[]` 条目（v2/v3 共用；纯函数）。
@@ -870,6 +874,27 @@ mod tests {
         assert_eq!(
             parse_hb_timeout(&serde_json::json!({}), Duration::from_secs(15)),
             Duration::from_secs(15)
+        );
+    }
+
+    #[test]
+    fn parse_hb_timeout_clamps_zero_to_one_second() {
+        // 回归：heartbeat_timeout_secs=0 → hb_check=0 → interval(0) 在首个外部连接
+        // 接入时 panic（tokio 零周期直接炸），task 崩、实例被 supervisor 标 Failed。
+        assert_eq!(
+            parse_hb_timeout(
+                &serde_json::json!({"heartbeat_timeout_secs": 0}),
+                Duration::from_secs(15)
+            ),
+            Duration::from_secs(1)
+        );
+        // 1s 是合法最小值，不被抬高
+        assert_eq!(
+            parse_hb_timeout(
+                &serde_json::json!({"heartbeat_timeout_secs": 1}),
+                Duration::from_secs(15)
+            ),
+            Duration::from_secs(1)
         );
     }
 

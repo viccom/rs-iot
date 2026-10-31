@@ -49,11 +49,7 @@ impl Source for DataSim {
         }
 
         // 采集周期（秒），可在 app_config.period 覆盖，默认 3s。
-        let period_secs = inst
-            .app_config
-            .get("period")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(3);
+        let period_secs = parse_period(&inst.app_config);
 
         let period = std::time::Duration::from_secs(period_secs);
         // jitter 相位：FNV-1a(inst_id) % period，多实例首次 tick 散布，削整点脉冲。
@@ -133,6 +129,18 @@ impl Source for DataSim {
     }
 }
 
+/// 解析采集周期（秒）：`app_config.period`，缺省 3s，**最小钳制 1 秒**。
+///
+/// 纯函数（便于单测）：`period=0` 直通的话 `tokio::time::interval_at` 会 panic
+/// （tokio 对零周期直接炸），用户一次误配就能把实例 task 打崩（supervisor 标 Failed）。
+/// 与 modbus/opcua/s7/eip 的 `parse_cfg` 同口径（`.max(1)`）。
+fn parse_period(app: &serde_json::Value) -> u64 {
+    app.get("period")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(3)
+        .max(1)
+}
+
 /// 基于 tag + 时间产生一个平滑变化的模拟值（确定性，便于观察）。
 fn simulate(tag: &str, kind: &str, now: i64) -> SampleValue {
     let phase = (tag.bytes().fold(0u32, |a, b| a.wrapping_add(b as u32)) % 360) as f64;
@@ -168,5 +176,21 @@ mod tests {
             format!("{c:?}"),
             "value should change over time"
         );
+    }
+
+    #[test]
+    fn parse_period_defaults_to_3() {
+        assert_eq!(parse_period(&serde_json::json!({})), 3);
+    }
+
+    #[test]
+    fn parse_period_keeps_explicit_value() {
+        assert_eq!(parse_period(&serde_json::json!({"period": 10})), 10);
+    }
+
+    #[test]
+    fn parse_period_clamps_zero_to_one() {
+        // 回归：period=0 曾直通 interval_at → tokio panic（Zero period），实例 task 崩。
+        assert_eq!(parse_period(&serde_json::json!({"period": 0})), 1);
     }
 }
