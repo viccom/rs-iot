@@ -13,6 +13,10 @@
 //! # hmi_dist = "/opt/rs-iot/hmi-dist"
 //! # hmi-studio 图元插件目录（可选，P3b）：配置后挂 /hmi/widgets（只读、全量 no-cache）
 //! # hmi_widgets_dir = "/opt/rs-iot/hmi-widgets"
+//!
+//! [reasonix]
+//! # 供应商管理 / 附件工作区 / 工具提示注入开关（见 ReasonixCfg）
+//! # tool_hint = false   # 缺省 true；关闭 submit 前缀工具提示（会污染会话标题/历史气泡）
 //! ```
 
 use serde::Deserialize;
@@ -35,6 +39,11 @@ pub struct ReasonixCfg {
     /// git 根（reasonix 取最近 git 根为 workspaceRoot，boot.go resolveWorkspaceRoot）。
     /// 缺省（空）时 /api/agent/attachments、/api/agent/workspace 返 503。
     pub workspace_dir: String,
+    /// `POST /api/agent/submit` 的 input 前缀是否注入 `AGENT_TOOL_HINT`（冷启动盲区缓解）。
+    /// 缺省（未配置）= true，保持既有行为；false = 原样透传。
+    /// 关闭场景：注入文本会进入会话标题与历史气泡（模型把提示当用户原话复述），
+    /// 若工作区 AGENTS.md 已承担工具面指引，可关闭以保持会话干净。
+    pub tool_hint: Option<bool>,
 }
 
 impl ReasonixCfg {
@@ -45,6 +54,11 @@ impl ReasonixCfg {
         } else {
             &self.service_name
         }
+    }
+
+    /// submit 工具提示注入开关（缺省开——未配置的既有部署行为不变）。
+    pub fn tool_hint(&self) -> bool {
+        self.tool_hint.unwrap_or(true)
     }
 }
 
@@ -123,6 +137,24 @@ hmi_dist = "/opt/rs-iot/hmi-dist"
 "#;
         let c = GwConfig::parse(s).unwrap();
         assert_eq!(c.hmi_dist, Some(PathBuf::from("/opt/rs-iot/hmi-dist")));
+    }
+
+    /// [reasonix] tool_hint：缺省开（既有部署行为不变），显式 false 关闭注入。
+    #[test]
+    fn parses_reasonix_tool_hint_switch() {
+        let base = r#"
+listen = "0.0.0.0:8080"
+rsiot_base = "http://127.0.0.1:8790"
+serve_base = "http://127.0.0.1:8787"
+jwt_secret = "secret"
+serve_token = "tok"
+"#;
+        let c = GwConfig::parse(base).unwrap();
+        assert!(c.reasonix.tool_hint(), "缺省必须开启（既有部署行为不变）");
+
+        let off = format!("{base}\n[reasonix]\ntool_hint = false\n");
+        let c = GwConfig::parse(&off).unwrap();
+        assert!(!c.reasonix.tool_hint(), "显式 false 必须关闭注入");
     }
 
     /// 缺失字段报错（不静默 Default——gateway 配置错不能隐式放行）。

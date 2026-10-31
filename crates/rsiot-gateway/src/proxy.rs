@@ -235,7 +235,8 @@ pub const AGENT_TOOL_HINT: &str = "\
 激活报文 trace 用 rsiot_start_packet_trace。\
 涉及网关设备/实例/数据/日志/报文的任务,优先调用对应 MCP 工具,不要用 bash 直连 redis-cli/lux。";
 
-/// agent submit 专用转发：`input` 字段前缀注入 `AGENT_TOOL_HINT`，其余原样透传。
+/// agent submit 专用转发：`input` 字段前缀注入 `AGENT_TOOL_HINT`（`[reasonix] tool_hint`
+/// 关闭时原样透传），其余原样透传。
 ///
 /// 只挂在 `POST /api/agent/submit`（app.rs 的 /api/agent `nest` 子路由显式 `/submit`，
 /// 剥前缀后其余 fallback 裸透传）。body 非 JSON/无 `input` 字段 → 原样透传（降级
@@ -243,6 +244,8 @@ pub const AGENT_TOOL_HINT: &str = "\
 /// 注入后重构 Request 复用 `forward`（Serve cookie 注入 + SSE 透传逻辑零重复）。
 pub async fn forward_agent_submit(State(st): State<Arc<GwState>>, req: Request) -> Response {
     let (mut parts, body) = req.into_parts();
+    // 工具提示开关（[reasonix] tool_hint，缺省 true）：false 时注入分支整体跳过。
+    let hint_enabled = st.reasonix.tool_hint();
     // submit body 是 JSON 文本（前端 agent.ts `{input: <text>}`），1MB 上限绰绰有余。
     let bytes = match axum::body::to_bytes(body, 1024 * 1024).await {
         Ok(b) => b,
@@ -268,9 +271,9 @@ pub async fn forward_agent_submit(State(st): State<Arc<GwState>>, req: Request) 
                 .and_then(|i| i.as_str())
                 .map(|s| s.to_string());
             if let Some(original) = input {
-                // 斜杠命令（/model /effort）跳过 HINT 注入：serve 用 input 前缀拦截
-                // 这两条命令（serve.go），HINT 前置会破坏前缀匹配致命令失效。
-                if !input_should_get_hint(&original) {
+                // 开关关闭 → 原样透传；斜杠命令（/model /effort）同理跳过 HINT 注入：
+                // serve 用 input 前缀拦截这两条命令（serve.go），HINT 前置会破坏前缀匹配致命令失效。
+                if !hint_enabled || !input_should_get_hint(&original) {
                     bytes.to_vec()
                 } else {
                     v["input"] =

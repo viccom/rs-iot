@@ -31,13 +31,21 @@ async fn spawn_axum(router: Router) -> String {
 }
 
 fn test_state(serve_base: String) -> Arc<GwState> {
+    test_state_tool_hint(serve_base, None)
+}
+
+/// 带工具提示开关的状态构造（None = 未配置 → 缺省开）。
+fn test_state_tool_hint(serve_base: String, tool_hint: Option<bool>) -> Arc<GwState> {
     let cfg = GwConfig {
         listen: "127.0.0.1:0".into(),
         rsiot_base: "http://127.0.0.1:1".into(),
         serve_base,
         jwt_secret: "test-secret".into(),
         serve_token: "mock-serve-token".into(),
-        reasonix: Default::default(),
+        reasonix: rsiot_gateway::config::ReasonixCfg {
+            tool_hint,
+            ..Default::default()
+        },
         hmi_dist: None,
         hmi_widgets_dir: None,
     };
@@ -114,6 +122,35 @@ async fn submit_input_prefixed_with_tool_hint() {
     assert!(
         got.len() > "devA 的温度是多少".len(),
         "hint actually prepended; got {got}"
+    );
+}
+
+/// 开关关闭（[reasonix] tool_hint = false）：submit input 原样透传、不注入提示前缀。
+/// 动机：注入文本会进会话标题与历史气泡（模型把提示当用户原话复述）；关闭后
+/// 工具面指引由工作区 AGENTS.md 承担。
+#[tokio::test]
+async fn submit_input_passes_through_when_tool_hint_disabled() {
+    let recorded = Arc::new(tokio::sync::Mutex::new(None::<String>));
+    let mock = spawn_axum(mock_serve_submit(recorded.clone())).await;
+    let gw = spawn_axum(build_router(test_state_tool_hint(mock, Some(false)))).await;
+
+    let resp = reqwest::Client::new()
+        .post(format!("{gw}/api/agent/submit"))
+        .bearer_auth(test_jwt())
+        .json(&serde_json::json!({ "input": "devA 的温度是多少" }))
+        .send()
+        .await
+        .expect("request");
+    assert_eq!(resp.status(), 200);
+
+    let got = recorded
+        .lock()
+        .await
+        .clone()
+        .expect("mock must record input");
+    assert_eq!(
+        got, "devA 的温度是多少",
+        "tool_hint=false must pass input through unchanged; got {got}"
     );
 }
 

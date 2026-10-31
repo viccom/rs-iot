@@ -38,6 +38,11 @@ serve_token = "<reasonix serve --auth token，见下节>"
 `/api/` 前缀，免 JWT（同主前端，登录页要先加载）。agent-hmi 的画面/主题数据经
 `/api/rsiot/api/v1/screens|themes` 反代到 rs-iot（rest-api.md §4.19）。
 
+可选 `[reasonix]` 段：`home_dir`（REASONIX_HOME，供应商管理用）、`warden_url` + `service_name`
+（改配置后重启 reasonix）、`workspace_dir`（附件/工作区浏览沙箱，须与 reasonix 工作区一致）、
+`tool_hint`（缺省 `true`：`POST /api/agent/submit` 的 input 前缀注入 rsiot 工具提示；注入文本会
+进入会话标题/历史气泡，工作区 AGENTS.md 已承担工具面指引时可设 `false` 关闭）。
+
 ### Windows Service
 
 ```powershell
