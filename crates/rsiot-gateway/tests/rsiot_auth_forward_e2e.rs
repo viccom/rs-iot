@@ -98,6 +98,7 @@ async fn query_token_forwarded_as_authorization() {
         serve_token: "unused".into(),
         reasonix: Default::default(),
         hmi_dist: None,
+        hmi_widgets_dir: None,
     };
     let gw = spawn_axum(build_router(Arc::new(
         GwState::from_config(&cfg).expect("state"),
@@ -148,6 +149,7 @@ async fn invalid_query_token_blocked_at_gateway() {
         serve_token: "unused".into(),
         reasonix: Default::default(),
         hmi_dist: None,
+        hmi_widgets_dir: None,
     };
     let gw = spawn_axum(build_router(Arc::new(
         GwState::from_config(&cfg).expect("state"),
@@ -226,6 +228,7 @@ async fn empty_query_token_plus_cookie_does_not_shadow_cookie() {
         serve_token: "unused".into(),
         reasonix: Default::default(),
         hmi_dist: None,
+        hmi_widgets_dir: None,
     };
     let gw = spawn_axum(build_router(Arc::new(
         GwState::from_config(&cfg).expect("state"),

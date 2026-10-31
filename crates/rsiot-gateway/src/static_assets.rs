@@ -137,3 +137,25 @@ async fn hmi_spa_fallback(dist: std::path::PathBuf, uri: Uri) -> Response {
         Err(_) => (StatusCode::NOT_FOUND, "hmi index.html not found").into_response(),
     }
 }
+
+// ---------- /hmi/widgets 插件目录（P3b，2026-10-31） ----------
+
+/// `/hmi/widgets` 静态服务：只读 ServeDir，**全量 no-cache**（与 `hmi_dist` 的
+/// assets/immutable 策略刻意不同——插件文件非哈希名，内容更新靠
+/// `?v=<version>` 查询参数 bust，缓存只会拿到跨版本旧件）。未命中一律 404
+///（无 SPA 回退：loader 只按 index.json 的 entry 精确取件，HTML 回退无意义）。
+pub fn widgets_router(dir: std::path::PathBuf) -> Router {
+    Router::new()
+        .fallback_service(ServeDir::new(dir))
+        .layer(axum::middleware::from_fn(widgets_cache_control))
+}
+
+/// 全量 `no-cache`：可缓存但须回源校验（ETag/Last-Modified 由 ServeDir 提供）。
+async fn widgets_cache_control(_uri: Uri, request: axum::extract::Request, next: Next) -> Response {
+    let mut resp = next.run(request).await;
+    resp.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_str("no-cache").unwrap(),
+    );
+    resp
+}

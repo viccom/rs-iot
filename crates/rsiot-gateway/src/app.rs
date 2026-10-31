@@ -71,6 +71,12 @@ pub fn build_router(st: Arc<GwState>) -> Router {
         Some(dist) => app.nest_service("/hmi", static_assets::hmi_router(dist)),
         None => app,
     };
+    // /hmi/widgets：图元插件目录（P3b，可配）。更具体前缀先于 /hmi 的 wildcard
+    //（matchit 最长前缀）；只读 + 全量 no-cache + 无 SPA 回退（widgets_router）。
+    let app = match st.hmi_widgets_dir.clone() {
+        Some(dir) => app.nest_service("/hmi/widgets", static_assets::widgets_router(dir)),
+        None => app,
+    };
     app.fallback(static_assets::serve)
         .with_state(st.clone())
         .layer(axum::middleware::from_fn_with_state(st, auth_middleware))
@@ -86,6 +92,14 @@ mod tests {
 
     /// 构造测试 GwState（上游指向不可达端口无妨——/hmi 测试不打上游）。
     fn test_state(hmi_dist: Option<std::path::PathBuf>) -> Arc<GwState> {
+        test_state_with(hmi_dist, None)
+    }
+
+    /// 同上 + 插件目录（P3b /hmi/widgets 测试）。
+    fn test_state_with(
+        hmi_dist: Option<std::path::PathBuf>,
+        hmi_widgets_dir: Option<std::path::PathBuf>,
+    ) -> Arc<GwState> {
         let cfg = GwConfig {
             listen: "127.0.0.1:0".into(),
             rsiot_base: "http://127.0.0.1:8790".into(),
@@ -94,6 +108,7 @@ mod tests {
             serve_token: "t".into(),
             reasonix: Default::default(),
             hmi_dist,
+            hmi_widgets_dir,
         };
         Arc::new(GwState::from_config(&cfg).expect("state"))
     }
@@ -234,6 +249,56 @@ mod tests {
         // oneshot 请求不带任何 Authorization 头。
         let (code, _) = get(&app, "/hmi").await;
         assert_eq!(code, StatusCode::OK, "/hmi 必须免 JWT（同主前端）");
+        let _ = std::fs::remove_dir_all(&dist);
+    }
+    /// P3b /hmi/widgets：配置 hmi_widgets_dir 后命中插件文件且全量 no-cache；
+    /// 与 /hmi 前缀共存（更长前缀优先），未命中 404 无 SPA 回退。
+    #[tokio::test]
+    async fn widgets_configured_serves_plugin_files_no_cache() {
+        let dist = temp_dist("widgets-mounted");
+        let wdir =
+            std::env::temp_dir().join(format!("rsiot-gw-widgets-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&wdir);
+        std::fs::create_dir_all(wdir.join("hello-card")).expect("mkdir");
+        std::fs::write(wdir.join("index.json"), r#"{"plugins":[]}"#).expect("write index");
+        std::fs::write(wdir.join("hello-card").join("dist.js"), "// plugin factory")
+            .expect("write dist");
+        let app = build_router(test_state_with(Some(dist.clone()), Some(wdir.clone())));
+
+        let (code, cache, body) = get_with_cache(&app, "/hmi/widgets/index.json").await;
+        assert_eq!(code, StatusCode::OK, "index.json 应命中插件目录");
+        assert!(body.contains("plugins"), "got:\n{body}");
+        assert_eq!(
+            cache, "no-cache",
+            "插件文件非哈希名——全量 no-cache，靠 ?v= bust"
+        );
+
+        let (code, _, _) = get_with_cache(&app, "/hmi/widgets/hello-card/dist.js").await;
+        assert_eq!(code, StatusCode::OK);
+
+        // 未命中 → 404 且不回 hmi_dist 的 index.html（loader 精确取件，HTML 回退有害）
+        let (code, body) = get(&app, "/hmi/widgets/hello-card/missing.js").await;
+        assert_eq!(code, StatusCode::NOT_FOUND);
+        assert!(!body.contains("HMI-TEST-INDEX"));
+
+        // 与 /hmi 共存不串：/hmi 根路径仍是 dist index
+        let (code, body) = get(&app, "/hmi").await;
+        assert_eq!(code, StatusCode::OK);
+        assert!(body.contains("HMI-TEST-INDEX"));
+
+        let _ = std::fs::remove_dir_all(&dist);
+        let _ = std::fs::remove_dir_all(&wdir);
+    }
+
+    /// 未配置 hmi_widgets_dir：/hmi/widgets/* 落到 hmi_dist 的静态 404（含点路径），
+    /// 前端 loader 得到 404 → 静默无插件（降级路径，规则7）。
+    #[tokio::test]
+    async fn widgets_unconfigured_falls_through_to_404() {
+        let dist = temp_dist("widgets-none");
+        let app = build_router(test_state(Some(dist.clone())));
+        let (code, body) = get(&app, "/hmi/widgets/index.json").await;
+        assert_eq!(code, StatusCode::NOT_FOUND, "未配置时不得凭空出插件面");
+        assert!(!body.contains("HMI-TEST-INDEX"));
         let _ = std::fs::remove_dir_all(&dist);
     }
 }

@@ -37,6 +37,7 @@ fn test_state(rsiot_base: String, serve_base: String) -> Arc<GwState> {
         serve_token: "tok".into(),
         reasonix: Default::default(),
         hmi_dist: None,
+        hmi_widgets_dir: None,
     };
     Arc::new(GwState::from_config(&cfg).expect("state"))
 }

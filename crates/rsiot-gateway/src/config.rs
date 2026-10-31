@@ -11,6 +11,8 @@
 //! serve_token = "<reasonix serve --auth token>"
 //! # hmi-studio 前端静态产物目录（可选）：配置后 /hmi 前缀文件系统 serve 该目录
 //! # hmi_dist = "/opt/rs-iot/hmi-dist"
+//! # hmi-studio 图元插件目录（可选，P3b）：配置后挂 /hmi/widgets（只读、全量 no-cache）
+//! # hmi_widgets_dir = "/opt/rs-iot/hmi-widgets"
 //! ```
 
 use serde::Deserialize;
@@ -70,6 +72,13 @@ pub struct GwConfig {
     /// 未配置则不挂 `/hmi`（落到既有静态 fallback）。
     #[serde(default)]
     pub hmi_dist: Option<PathBuf>,
+    /// hmi-studio 图元插件目录（可选，P3b 2026-10-31）：配置后挂 `/hmi/widgets`
+    ///（只读静态、全量 no-cache——插件非哈希名，靠 `?v=<version>` 查询参数 bust）。
+    /// 与 `hmi_dist` 生命周期解耦：插件是**站点工件**（install-plugin.mjs 维护、
+    /// 备份纪律显式包含），dist 重新部署不得清空它。未配置则不挂
+    ///（`/hmi/widgets/*` 落到 hmi_dist 的 404，前端 loader 静默无插件）。
+    #[serde(default)]
+    pub hmi_widgets_dir: Option<PathBuf>,
 }
 
 impl GwConfig {

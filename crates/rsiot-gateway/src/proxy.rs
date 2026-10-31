@@ -38,6 +38,8 @@ pub struct GwState {
     /// hmi-studio 前端静态产物目录（可选）：Some 时 build_router 挂 `/hmi`
     ///（文件系统 serve + SPA fallback，见 `static_assets::hmi_router`）。
     pub hmi_dist: Option<std::path::PathBuf>,
+    /// hmi-studio 图元插件目录（可选，P3b）：Some 时挂 `/hmi/widgets`（只读、全量 no-cache）。
+    pub hmi_widgets_dir: Option<std::path::PathBuf>,
 }
 
 impl GwState {
@@ -57,6 +59,7 @@ impl GwState {
             jwt_secret: Arc::new(cfg.jwt_secret.clone()),
             reasonix: cfg.reasonix.clone(),
             hmi_dist: cfg.hmi_dist.clone(),
+            hmi_widgets_dir: cfg.hmi_widgets_dir.clone(),
         })
     }
 }

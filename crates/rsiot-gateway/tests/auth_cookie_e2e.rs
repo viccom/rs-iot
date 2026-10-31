@@ -38,6 +38,7 @@ fn test_state() -> Arc<GwState> {
         serve_token: "unused".into(),
         reasonix: Default::default(),
         hmi_dist: None,
+        hmi_widgets_dir: None,
     };
     Arc::new(GwState::from_config(&cfg).expect("build state"))
 }
