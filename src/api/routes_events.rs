@@ -73,5 +73,13 @@ pub async fn events(State(st): State<AppState>, Query(q): Query<EventsQuery>) ->
                 .map(Ok::<_, Infallible>)
         }
     });
+    // 首帧即时性（2026-10-31）：开头垫一个注释帧——过滤型流静默时首个字节原本要等
+    // KeepAlive 默认 15s 首拍，缓冲型代理（vite dev / 部分网关）会扣住响应头直到
+    // 首个 body 字节，下游 15s 预算的 EventSource 直接超时（hmi-studio e2e 实测：
+    // ttfb 恰 15.0039s）。注释帧对 EventSource 语义透明（规范要求忽略）。
+    let stream = tokio_stream::iter(vec![Ok::<_, Infallible>(
+        Event::default().comment("connected"),
+    )])
+    .chain(stream);
     Sse::new(stream).keep_alive(KeepAlive::default())
 }

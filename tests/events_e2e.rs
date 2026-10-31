@@ -308,3 +308,43 @@ async fn events_filter_excludes_other_kinds() {
     );
     common::stop_lux(handle).await;
 }
+
+/// 首帧即时性（2026-10-31 修复回归）：过滤型流（types=…）连接后无匹配事件时，
+/// 首个字节必须**立即**到达（开头的注释帧）——而非等 KeepAlive 默认 15s 首拍。
+/// 缓冲型代理（vite dev / 部分网关）会扣住响应头直到首个 body 字节，15s 延迟
+/// 会让下游 15s 预算的 EventSource 连接判定直接超时（hmi-studio e2e 实测）。
+#[tokio::test]
+async fn events_filtered_stream_first_byte_is_immediate() {
+    use futures_util::StreamExt;
+    let (app, handle, _bus) = test_app().await;
+    let tok = jwt(&app).await;
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                // 过滤一个静默 kind：连接后不会有任何匹配事件（不 publish）
+                .uri("/api/v1/events?types=screen")
+                .header(header::AUTHORIZATION, tok)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let mut stream = resp.into_body().into_data_stream();
+    // 2s 内必须见到首块（注释帧 ": connected"）；未修复时 KeepAlive 首拍 15s → 红
+    let first = tokio::time::timeout(std::time::Duration::from_secs(2), stream.next()).await;
+    let chunk = first
+        .expect("首块应在 2s 内到达（缓冲型代理扣头场景）")
+        .expect("流未应立即关闭")
+        .expect("chunk 读取成功");
+    let text = String::from_utf8_lossy(&chunk).to_string();
+    assert!(
+        text.trim_start().starts_with(':'),
+        "首帧应为注释帧（冒号开头），got: {text}"
+    );
+    common::stop_lux(handle).await;
+}
