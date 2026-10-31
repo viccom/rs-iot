@@ -40,7 +40,7 @@ const ID_MAX_LEN: usize = 64;
 pub const MAX_DOC_BYTES: usize = 131_072;
 /// Hash 内存放 JSON 文本的 field 名（存储细节，REST 契约不可见）。
 const DOC_FIELD: &str = "doc";
-/// 资源种类：lux key 前缀 + 列表响应字段名 + 版本键族前缀（screens/themes 同构）。
+/// 资源种类：lux key 前缀 + 列表响应字段名 + 版本键族前缀（screens/themes/symbols 同构）。
 ///
 /// `kind` 是资源名单词（SSE payload 的 `resource` 字段与指标 label 用），
 /// `sv_prefix` = `sv:{key_prefix}`——版本键族的独立命名空间。
@@ -49,7 +49,7 @@ struct MetaKind {
     list_field: &'static str,
     kind: &'static str,
     sv_prefix: &'static str,
-    /// 指标数组索引（ProcessMetrics 的 meta_* 二元数组：0=screen 1=theme）。
+    /// 指标数组索引（ProcessMetrics 的 meta_* 三元数组：0=screen 1=theme 2=symbol）。
     metric_idx: usize,
 }
 
@@ -66,6 +66,17 @@ const THEMES: MetaKind = MetaKind {
     kind: "theme",
     sv_prefix: "sv:theme",
     metric_idx: 1,
+};
+/// 第三资源族 `symbol`（P3a reg-combin，2026-10-31）：站点自建组合图元的存储面——
+/// doc = 一个 combin 描述（`{id,name,combin_json,width,height}`），编辑器启动时
+/// list → registerConfig 进「我的符号」组。四端点（无 versions 浏览/rollback，
+/// v1 裁剪）；PUT/DELETE 内部的版本捕获/级联删除随 MetaKind 机制免费继承。
+const SYMBOLS: MetaKind = MetaKind {
+    key_prefix: "symbol",
+    list_field: "symbols",
+    kind: "symbol",
+    sv_prefix: "sv:symbol",
+    metric_idx: 2,
 };
 
 /// `PUT`/`POST rollback` 的 query 参数：`?if_version=N` 乐观锁（缺省无条件写，
@@ -218,6 +229,42 @@ pub async fn themes_rollback(
         &author_of(user.as_ref()),
     )
     .await
+}
+
+// ---------- handlers（symbols，P3a） ----------
+
+pub async fn symbols_list(State(st): State<AppState>) -> Response {
+    list(&st, &SYMBOLS).await
+}
+
+pub async fn symbols_get(State(st): State<AppState>, Path(id): Path<String>) -> Response {
+    get(&st, &SYMBOLS, &id).await
+}
+
+pub async fn symbols_put(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+    Query(q): Query<VersionQuery>,
+    user: Option<Extension<AuthedUser>>,
+    body: Bytes,
+) -> Response {
+    put(
+        &st,
+        &SYMBOLS,
+        &id,
+        &body,
+        q.if_version,
+        author_of(user.as_ref()),
+    )
+    .await
+}
+
+pub async fn symbols_delete(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+    user: Option<Extension<AuthedUser>>,
+) -> Response {
+    delete(&st, &SYMBOLS, &id, author_of(user.as_ref())).await
 }
 
 // ---------- 共享实现 ----------
@@ -1072,6 +1119,24 @@ mod tests {
         assert_eq!(sv_seq_key(&THEMES, "a"), "sv:theme:a:seq");
         // 独立前缀断言：任何 sv 键都不以 screen:/theme: 开头。
         assert!(!sv_body_key(&SCREENS, "a", 1).starts_with("screen:"));
+    }
+
+    /// 验证意图（P3a）：三资源族（screen/theme/symbol）的键前缀、列表字段、指标索引
+    /// 必须两两不同——任何一处撞车都会让列表混入他族键或指标互相覆盖。
+    #[test]
+    fn three_meta_kinds_are_fully_isolated() {
+        let kinds = [&SCREENS, &THEMES, &SYMBOLS];
+        for a in 0..kinds.len() {
+            for b in (a + 1)..kinds.len() {
+                assert_ne!(kinds[a].key_prefix, kinds[b].key_prefix, "lux key 前缀撞车");
+                assert_ne!(kinds[a].sv_prefix, kinds[b].sv_prefix, "版本键族前缀撞车");
+                assert_ne!(kinds[a].list_field, kinds[b].list_field, "列表响应字段撞车");
+                assert_ne!(kinds[a].metric_idx, kinds[b].metric_idx, "指标数组索引撞车");
+            }
+        }
+        assert_eq!(SYMBOLS.kind, "symbol");
+        // sv 键不落 symbol: 命名空间（列表 KEYS symbol:* 的前缀隔离，同 screens 教训）。
+        assert!(!sv_body_key(&SYMBOLS, "a", 1).starts_with("symbol:"));
     }
 
     /// 验证意图：sha16 是元数据审计指纹（§2.2）——长度恒 16、同内容稳定、

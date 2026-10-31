@@ -267,6 +267,15 @@ pub fn build_router(state: AppState) -> axum::Router {
             "/api/v1/themes/{id}/rollback",
             post(routes_meta::themes_rollback),
         )
+        // 第三资源族 symbols（P3a reg-combin，2026-10-31：站点自建组合图元，
+        // 四端点——versions 浏览/rollback v1 裁剪，PUT/DELETE 版本机制免费继承）
+        .route("/api/v1/symbols", get(routes_meta::symbols_list))
+        .route(
+            "/api/v1/symbols/{id}",
+            get(routes_meta::symbols_get)
+                .put(routes_meta::symbols_put)
+                .delete(routes_meta::symbols_delete),
+        )
         // 实时数据查询
         .route("/api/v1/rtdatas", get(routes_rtdata::rtdatas))
         // 实时数据订阅（OPC UA 式：snapshot 全量 + 周期 datachange；

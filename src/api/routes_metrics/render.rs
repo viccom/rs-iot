@@ -216,32 +216,32 @@ pub(crate) fn render_process(
     );
 
     // 画面/主题版本管理（P0，design 2026-10-30-screen-versioning §5.2）。
-    // label kind: screen/theme（routes_meta 两 MetaKind 同构）；conflicts 持续
-    // 增长 = 有写者没接 if_version 乐观锁；compactions 频繁 = cap 过小/TTL 过长。
+    // label kind: screen/theme/symbol（routes_meta 三 MetaKind 同构，symbol=P3a）；conflicts 持续
+    // 增长 = 有写者没接 if_version 乐观锁；compactions 频繁 = cap 过小或 TTL 过长。
     for (name, help, vals) in [
         (
             "rs_iot_meta_versions_created_total",
-            "画面/主题版本快照创建数(判重命中不计)",
+            "画面/主题/符号版本快照创建数(判重命中不计)",
             &m.meta_versions_created,
         ),
         (
             "rs_iot_meta_version_conflicts_total",
-            "画面/主题 if_version 409 次数(写者竞争温度计)",
+            "画面/主题/符号 if_version 409 次数(写者竞争温度计)",
             &m.meta_version_conflicts,
         ),
         (
             "rs_iot_meta_rollbacks_total",
-            "画面/主题回滚次数",
+            "画面/主题/符号回滚次数",
             &m.meta_rollbacks,
         ),
         (
             "rs_iot_meta_compactions_total",
-            "画面/主题版本元数据紧缩执行次数(频繁=cap 过小或 TTL 过长)",
+            "画面/主题/符号版本元数据紧缩执行次数(频繁=cap 过小或 TTL 过长)",
             &m.meta_compactions,
         ),
     ] {
         family_header(&mut s, name, help, "counter");
-        for (idx, kind) in ["screen", "theme"].iter().enumerate() {
+        for (idx, kind) in ["screen", "theme", "symbol"].iter().enumerate() {
             metric_line(
                 &mut s,
                 name,
@@ -676,15 +676,17 @@ mod tests {
             22,
             "应输出 22 个 metric family"
         );
-        // 版本管理 label 形状：每 family 两行 {kind="screen"}/{kind="theme"}（P0）
+        // 版本管理 label 形状：每 family 三行 {kind="screen"}/{kind="theme"}/{kind="symbol"}
+        // （P0 两 kind；symbol = P3a 2026-10-31 第三资源族）
         assert!(out.contains("rs_iot_meta_versions_created_total{kind=\"screen\"} 2"));
         assert!(out.contains("rs_iot_meta_versions_created_total{kind=\"theme\"} 1"));
+        assert!(out.contains("rs_iot_meta_versions_created_total{kind=\"symbol\"} 0"));
         assert_eq!(
             out.lines()
                 .filter(|l| l.starts_with("rs_iot_meta_"))
                 .count(),
-            8,
-            "四 family × 两 kind 行"
+            12,
+            "四 family × 三 kind 行"
         );
         // HELP / TYPE 每个 family 齐全
         assert!(out.contains("# HELP rs_iot_info "));

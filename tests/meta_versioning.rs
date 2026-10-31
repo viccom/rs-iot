@@ -810,3 +810,70 @@ async fn failure_matrix_lux_down_returns_500_not_ok() {
     let (st, _) = get(&app, &tok, "/api/v1/screens/scr/versions").await;
     assert_eq!(st, StatusCode::INTERNAL_SERVER_ERROR);
 }
+
+/// P3a 第三资源族 symbols（2026-10-31）：四端点 CRUD 走 MetaKind 同构机制——
+/// 验证意图 = symbols 与 screens 的键空间/列表互不可见 + PUT 判重与版本捕获免费继承
+///（无 versions 浏览端点，靠间接证据：同内容重 PUT version 不变）。
+#[tokio::test]
+async fn symbols_crud_isolated_from_screens() {
+    let (app, _h) = test_app().await;
+    let tok = jwt(&app).await;
+
+    // PUT + GET roundtrip（doc = 符号模板形状；非 ASCII 故 String as_bytes）
+    let sym = r#"{"name":"泵阀组合","combin_json":{"id":"probe-combin","type":"group","tag":"group","children":[]},"width":220,"height":140}"#
+        .as_bytes()
+        .to_vec();
+    let resp = put_raw(&app, &tok, "/api/v1/symbols/pump-valve", &sym, None).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let (st, v) = get(&app, &tok, "/api/v1/symbols/pump-valve").await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(v["doc"]["name"], "泵阀组合");
+    assert_eq!(v["version"], 1);
+
+    // 判重免费继承：同内容重 PUT → version 不变
+    let resp = put_raw(&app, &tok, "/api/v1/symbols/pump-valve", &sym, None).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let v = body_json(resp).await;
+    assert_eq!(v["version"], 1);
+
+    // 键空间隔离：symbols 列表不含 screens 项，反之亦然
+    put(&app, &tok, "scr-1", &doc(1), None).await;
+    let (_, v) = get(&app, &tok, "/api/v1/symbols").await;
+    assert_eq!(v["symbols"], serde_json::json!(["pump-valve"]));
+    let (_, v) = get(&app, &tok, "/api/v1/screens").await;
+    assert_eq!(v["screens"], serde_json::json!(["scr-1"]));
+
+    // DELETE 幂等；删除后 GET 404
+    let resp = delete(&app, &tok, "/api/v1/symbols/pump-valve").await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let resp = delete(&app, &tok, "/api/v1/symbols/pump-valve").await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let (st, _) = get(&app, &tok, "/api/v1/symbols/pump-valve").await;
+    assert_eq!(st, StatusCode::NOT_FOUND);
+}
+
+/// 通用 PUT（任意 meta 资源路径，symbols 等非 screens 资源用）。
+async fn put_raw(
+    app: &axum::Router,
+    tok: &str,
+    path: &str,
+    body: &[u8],
+    if_version: Option<u64>,
+) -> axum::response::Response {
+    let uri = match if_version {
+        Some(v) => format!("{path}?if_version={v}"),
+        None => path.to_string(),
+    };
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(uri)
+                .header(header::AUTHORIZATION, tok)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(body.to_vec()))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+}
