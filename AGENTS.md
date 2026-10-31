@@ -50,6 +50,7 @@ POST /api/v1/command/send ─┼─► CtlRegistry.try_send(64) ──► 实例
 
 **历史写放大根治（2026-10-29，tsink P1）**：后台 flush 的当前 head 受 **seal 门控**（默认 最小点数=chunk_points÷8 / head 年龄 300s / 未落盘 WAL 64MiB；满仓 rotate、分区滚动、准入压力与显式/关闭 flush 不受限），段注册表 catalog 改为**节流持久化**（默认 30s，checkpoint/关闭强制，启动可由段目录重建）。`[history]` 新增 `flush_interval_ms`/`seal_min_points`/`max_head_age_secs`/`catalog_persist_secs`（0=引擎默认）；`/metrics` 新增 `rs_iot_history_seal_*`/`catalog_*` 七 counter。实测 20 点/s 场景 CPU 28.3%→3.3%、每段 5.9→3,476 点。详见 tsink_fork `docs/plans/2026-10-29-low-rate-seal-catalog-amplification.md`。
 
+**agent-hmi 元存储三资源族（P0 版本管理 + P3a，routes_meta.rs MetaKind 泛化）**：screens/themes 七端点 + symbols 四端点（`/api/v1/symbols[/{id}]` GET/PUT/DELETE——站点自建组合图元模板，hmi-studio「我的符号」存取面；无 versions 浏览/rollback，PUT/DELETE 内部版本捕获/级联删除免费继承）；`?if_version=` 乐观锁 + `sv:` 版本键族 + SSE `screen` 帧（resource: screen/theme/symbol）；指标 `rs_iot_meta_*{kind=screen|theme|symbol}`。契约见 `docs/reference/rest-api.md` §4.19，测试 `tests/meta_versioning.rs`。
 **BI 大屏数据面（2026-10-29，供 `../hmi-studio` 通道 B 消费）**：`GET /api/v1/history/stats`（单 series 整窗统计 `{stats:{count,last,last_ts,avg,min,max,sum}}`，数值聚合仅数值 lane）+ `POST /api/v1/history/batch`（多 series 批量：≤32 条、条间并发 cap 4、单条错误字段化整体仍 200）——契约见 `docs/reference/rest-api.md` §4.18.2，测试 `tests/history_bi_e2e.rs`。**告警只存当前活跃集**（`GET /api/v1/alarms`，无历史）——消费方只能做快照统计，不能做趋势/发生率。
 
 **存储布局与环境依赖**：lux Hash 表清单（users/passwords/devmodels/devreg/rtdata:*/alarms/discoveries…）、
