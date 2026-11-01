@@ -233,15 +233,32 @@ pub(crate) fn parse_cfg(app: &serde_json::Value) -> Result<LuaCfg, String> {
     let mem_limit_mb = app
         .get("mem_limit_mb")
         .and_then(|v| v.as_u64())
-        .unwrap_or(super::budget::DEFAULT_MEM_LIMIT_MB as u64) as usize;
-    let hook_instr_limit =
-        app.get("hook_instr_limit")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(super::budget::DEFAULT_HOOK_INSTR_LIMIT as u64) as u32;
+        .unwrap_or(super::budget::DEFAULT_MEM_LIMIT_MB as u64);
+    // F-2（2026-11-01 审查）：0 在 mlua 是关闭限额（静默失效）；上限防
+    // `mb*1024*1024` 边角。hook ≥2^32 截断成 0 = 每指令触发 hook（VM 即败）。
+    if mem_limit_mb == 0 || mem_limit_mb > 65536 {
+        return Err("mem_limit_mb 须为 1-65536（0 在 mlua 是关闭限额而非不限额）".to_string());
+    }
+    let mem_limit_mb = mem_limit_mb as usize;
+    let hook_instr_limit = app
+        .get("hook_instr_limit")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(super::budget::DEFAULT_HOOK_INSTR_LIMIT as u64);
+    if hook_instr_limit == 0 || hook_instr_limit > u32::MAX as u64 {
+        return Err(format!(
+            "hook_instr_limit 须为 1-{}（u32；0 会使 VM 全调用即败）",
+            u32::MAX
+        ));
+    }
+    let hook_instr_limit = hook_instr_limit as u32;
+    // F-2：u64→u32 截断改 try_from（4294967297 截成 1 = 一次失败即 degraded）。
     let fail_threshold = app
         .get("fail_threshold")
         .and_then(|v| v.as_u64())
-        .unwrap_or(super::budget::DEFAULT_FAIL_THRESHOLD as u64) as u32;
+        .unwrap_or(super::budget::DEFAULT_FAIL_THRESHOLD as u64)
+        .max(1);
+    let fail_threshold = u32::try_from(fail_threshold)
+        .map_err(|_| format!("fail_threshold 超出 u32 范围（>{}）", u32::MAX))?;
     // Q3/§4.5-1：缺省 10s；max(1) 钳下限（0 会把每个回调打成必超时）。
     let callback_timeout_ms = app
         .get("callback_timeout_ms")

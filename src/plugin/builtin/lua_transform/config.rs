@@ -68,19 +68,33 @@ pub(crate) fn parse_transform_cfg(app: &serde_json::Value) -> Result<TransformCf
         .unwrap_or(core_::budget::DEFAULT_CALLBACK_TIMEOUT_MS)
         .max(1);
     // 复审 P2-2：连续失败降级阈值可配（照 collector lua_core config 缺省 10）。
+    // F-2（2026-11-01 审查）：域校验对齐 lua_core config（截断/关限额均 Err）。
     let fail_threshold = app
         .get("fail_threshold")
         .and_then(|v| v.as_u64())
         .unwrap_or(10)
-        .max(1) as u32;
+        .max(1);
+    let fail_threshold = u32::try_from(fail_threshold)
+        .map_err(|_| format!("fail_threshold 超出 u32 范围（>{}）", u32::MAX))?;
     let mem_limit_mb = app
         .get("mem_limit_mb")
         .and_then(|v| v.as_u64())
-        .unwrap_or(core_::budget::DEFAULT_MEM_LIMIT_MB as u64) as usize;
-    let hook_instr_limit =
-        app.get("hook_instr_limit")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(core_::budget::DEFAULT_HOOK_INSTR_LIMIT as u64) as u32;
+        .unwrap_or(core_::budget::DEFAULT_MEM_LIMIT_MB as u64);
+    if mem_limit_mb == 0 || mem_limit_mb > 65536 {
+        return Err("mem_limit_mb 须为 1-65536（0 在 mlua 是关闭限额而非不限额）".to_string());
+    }
+    let mem_limit_mb = mem_limit_mb as usize;
+    let hook_instr_limit = app
+        .get("hook_instr_limit")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(core_::budget::DEFAULT_HOOK_INSTR_LIMIT as u64);
+    if hook_instr_limit == 0 || hook_instr_limit > u32::MAX as u64 {
+        return Err(format!(
+            "hook_instr_limit 须为 1-{}（u32；0 会使 VM 全调用即败）",
+            u32::MAX
+        ));
+    }
+    let hook_instr_limit = hook_instr_limit as u32;
     let scripts_root = app
         .get("scripts_root")
         .and_then(|v| v.as_str())

@@ -213,6 +213,19 @@ impl Source for LuaTransform {
                     other => Evt::Cmd(other),
                 },
                 Some(()) = reload_rx.recv() => Evt::Reload, // None（watcher 退出）忽略，不忙循环
+                // E-1（2026-11-01 审查）：两个 ticker 臂必须排在 EventBus 臂**之前**。
+                // biased 下臂序固定，此前 event 在前：持续 Rtdata 批压力（批处理耗时
+                // ≥ 50ms 批间隔，万点/s 变更率可达）时 event 臂永远先就绪，ticker/
+                // flush_ticker 确定性饿死——on_timer 聚合停摆且 stat 不落盘（状态恒
+                // running、计数无变化，完全不可观测）。ticker 每周期至多让出一拍，
+                // 前置不会反过来饿死 event。
+                _ = flush_ticker.tick() => {
+                    core_::budget::sync_runtime_devs(&mut tracker, &runtime_devs);
+                    sync_transform_stats(&mut tracker, &dropped, rtdata_points, rtdata_skipped, rtdata_lagged, &alarm);
+                    tracker.flush_if_due().await;
+                    continue;
+                }
+                _ = ticker.tick() => Evt::Tick,
                 // EventBus（订阅型数据面）：非订阅实例（subscribe 空）分支永久禁用
                 //（pending 不完成）；Lagged（慢消费覆写旧值）→ debug + 继续收；
                 // Closed → 禁用分支（EventBus 与宿主同生命周期，防御分支）。
@@ -239,13 +252,6 @@ impl Source for LuaTransform {
                         continue;
                     }
                 },
-                _ = flush_ticker.tick() => {
-                    core_::budget::sync_runtime_devs(&mut tracker, &runtime_devs);
-                    sync_transform_stats(&mut tracker, &dropped, rtdata_points, rtdata_skipped, rtdata_lagged, &alarm);
-                    tracker.flush_if_due().await;
-                    continue;
-                }
-                _ = ticker.tick() => Evt::Tick,
             };
             match evt {
                 Evt::Cmd(Some(m)) => {

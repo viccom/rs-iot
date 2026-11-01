@@ -77,6 +77,10 @@ const REQUEST_CAP: usize = 64;
 pub(crate) static SUBSCRIBE_FAIL: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 
+/// Down 事件因通道满被丢弃的累计（F-1/F-3，2026-11-01 审查：Down 分流独立通道后
+/// 满即丢 + 计数——命令无重传语义，但丢弃量必须可见，落 stat extra `down_dropped`）。
+pub(crate) static DOWN_DROPPED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// spawn mqtt task（网络 IO 独占；不触 VM/回调——回调全在主循环侧）。
 ///
 /// **双任务形态（复审阻塞-1 重构，回归 spike-2 核心决策）**：
@@ -94,6 +98,8 @@ pub(crate) static SUBSCRIBE_FAIL: std::sync::atomic::AtomicU64 =
 pub(crate) fn spawn_mqtt_task(
     mut cmd_rx: mpsc::Receiver<MqttCmd>,
     evt_tx: mpsc::Sender<MqttEvt>,
+    // F-1：Down 专用通道（与状态事件分离，见 pump 内注释）。
+    down_tx: mpsc::Sender<MqttEvt>,
     token: CancellationToken,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
@@ -114,6 +120,7 @@ pub(crate) fn spawn_mqtt_task(
                         let (c, e) = rumqttc::AsyncClient::new(*opts, REQUEST_CAP);
                         client = Some(c);
                         let evt = evt_tx.clone();
+                        let down_t = down_tx.clone();
                         pump = Some(tokio::spawn(async move {
                             let mut e = e;
                             loop {
@@ -125,10 +132,27 @@ pub(crate) fn spawn_mqtt_task(
                                     }
                                     Ok(rumqttc::Event::Incoming(rumqttc::Packet::Publish(p))) => {
                                         // T7 down() 全量路由（命令 topic 是 T8 兼容脚本概念）。
-                                        let _ = evt.try_send(MqttEvt::Down {
-                                            topic: p.topic.clone(),
-                                            payload: p.payload.to_vec(),
-                                        });
+                                        // F-1（2026-11-01 审查）：Down 改走独立通道 + try_send。
+                                        // 此前与 ConnAck/Disconnected 共用 evt（阻塞 send），
+                                        // 下行风暴填满 evt 后 pump 阻塞在状态事件 send 上
+                                        // 不再 poll —— 与主循环 flush 的 cmd send、handler 的
+                                        // publish（flume REQUEST_CAP 满）构成四边等待环，
+                                        // 断连时刻命中即实例永久冻结（不重连不响应控制）。
+                                        // 状态通道在飞 ≤2（ConnAck/Disconnected 交替）永不满，
+                                        // 环的关键边被切断；Down 无重传语义，满即丢 + 计数。
+                                        if down_t
+                                            .try_send(MqttEvt::Down {
+                                                topic: p.topic.clone(),
+                                                payload: p.payload.to_vec(),
+                                            })
+                                            .is_err()
+                                        {
+                                            DOWN_DROPPED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                            tracing::debug!(
+                                                "[luaNorth] Down 通道满，丢弃一条（topic={}）",
+                                                p.topic
+                                            );
+                                        }
                                     }
                                     Ok(rumqttc::Event::Incoming(rumqttc::Packet::Disconnect)) => {
                                         let _ = evt

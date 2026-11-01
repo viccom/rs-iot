@@ -81,7 +81,14 @@ pub(crate) fn parse_north_cfg(app: &serde_json::Value) -> Result<NorthCfg, Strin
         return Err("app_config.host 不得为空".into());
     }
 
-    let port_v = app.get("port").and_then(|v| v.as_u64()).unwrap_or(1883);
+    // F-4（2026-11-01 审查）：port 存在但类型错（如 "1883" 字符串）此前静默缺省
+    // 1883——坏声明必须可见（对齐 subscribe/secrets 的 Err 口径）。
+    let port_v = match app.get("port") {
+        None | Some(serde_json::Value::Null) => 1883u64,
+        Some(v) => v
+            .as_u64()
+            .ok_or_else(|| "port 须为数字（1-65535）".to_string())?,
+    };
     if port_v == 0 || port_v > u16::MAX as u64 {
         return Err(format!("非法 port {port_v}（1-65535）"));
     }
@@ -102,14 +109,41 @@ pub(crate) fn parse_north_cfg(app: &serde_json::Value) -> Result<NorthCfg, Strin
         .and_then(|v| v.as_u64())
         .unwrap_or(core_::budget::DEFAULT_CALLBACK_TIMEOUT_MS)
         .max(1);
+    // F-2（2026-11-01 审查）：沙箱参数域校验。mem_limit_mb=0 在 mlua 语义是**关闭**
+    // 限额（静默失效，非"不限额"的合理表达）；hook_instr_limit 经 u64→u32 截断，
+    // ≥2^32 会变 0 = 每指令触发 hook，VM 全调用即败——两者都 Err（坏声明可见）。
     let mem_limit_mb = app
         .get("mem_limit_mb")
         .and_then(|v| v.as_u64())
-        .unwrap_or(core_::budget::DEFAULT_MEM_LIMIT_MB as u64) as usize;
-    let hook_instr_limit =
-        app.get("hook_instr_limit")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(core_::budget::DEFAULT_HOOK_INSTR_LIMIT as u64) as u32;
+        .unwrap_or(core_::budget::DEFAULT_MEM_LIMIT_MB as u64);
+    if mem_limit_mb == 0 || mem_limit_mb > 65536 {
+        return Err(
+            "mem_limit_mb 须为 1-65536（0 在 mlua 是关闭限额而非不限额；如需宽松请给大值）"
+                .to_string(),
+        );
+    }
+    let hook_instr_limit = app
+        .get("hook_instr_limit")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(core_::budget::DEFAULT_HOOK_INSTR_LIMIT as u64);
+    if hook_instr_limit == 0 || hook_instr_limit > u32::MAX as u64 {
+        return Err(format!(
+            "hook_instr_limit 须为 1-{}（u32；越界值此前静默截断，0 会使 VM 全调用即败）",
+            u32::MAX
+        ));
+    }
+    let (mem_limit_mb, hook_instr_limit) = (mem_limit_mb as usize, hook_instr_limit as u32);
+
+    // F-4：可选字符串键——存在但非字符串/非 Null → Err。
+    let opt_str = |key: &str| -> Result<Option<String>, String> {
+        match app.get(key) {
+            None | Some(serde_json::Value::Null) => Ok(None),
+            Some(v) => v
+                .as_str()
+                .map(|s| Some(s.to_string()))
+                .ok_or_else(|| format!("{key} 须为字符串")),
+        }
+    };
 
     // 字符串数组键（subscribe/secrets）：非数组 → Err（坏声明比静默缺省更危险，
     // 与 secret 授权清单语义对齐——漏授权即拒绝，配置错误必须可见）。
@@ -148,18 +182,11 @@ pub(crate) fn parse_north_cfg(app: &serde_json::Value) -> Result<NorthCfg, Strin
         script,
         host,
         port: port_v as u16,
-        username: app
-            .get("username")
-            .and_then(|v| v.as_str())
-            .map(String::from),
-        password: app
-            .get("password")
-            .and_then(|v| v.as_str())
-            .map(String::from),
-        client_id: app
-            .get("client_id")
-            .and_then(|v| v.as_str())
-            .map(String::from),
+        // F-4：三个字符串键类型错（如数字密码 12345）此前静默 None——匿名连接
+        // 或无门可查的认证失败；显式 Err（Null 视同缺省，兼容显式清空）。
+        username: opt_str("username")?,
+        password: opt_str("password")?,
+        client_id: opt_str("client_id")?,
         batch_max_count,
         batch_max_secs,
         period,
@@ -268,6 +295,57 @@ mod tests {
             parse_north_cfg(&json!({"script":"s","host":"  "})).is_err(),
             "host 空白串无效"
         );
+    }
+
+    /// F-4（2026-11-01 审查）：port/username/password/client_id 类型不符 → Err
+    /// （此前静默缺省：字符串 port 悄悄用 1883、数字密码悄悄匿名连接）。
+    #[test]
+    fn parse_rejects_wrong_typed_scalars() {
+        let base = json!({"script":"s","host":"h"});
+        for (k, v) in [
+            ("port", json!("1883")),
+            ("username", json!(42)),
+            ("password", json!(12345)),
+            ("client_id", json!(true)),
+        ] {
+            let mut cfg = base.clone();
+            cfg[k] = v;
+            assert!(
+                parse_north_cfg(&cfg).is_err(),
+                "{k} 类型错必须 Err（坏声明可见）"
+            );
+        }
+        // Null 视同缺省（显式清空的兼容语义）
+        let mut cfg = base.clone();
+        cfg["password"] = serde_json::Value::Null;
+        assert!(parse_north_cfg(&cfg).is_ok());
+    }
+
+    /// F-2：沙箱参数域校验——mem_limit_mb=0（mlua 语义=关限额）与
+    /// hook_instr_limit 越界（u64→u32 截断 0 = 每指令触发 hook）都 Err。
+    #[test]
+    fn parse_rejects_sandbox_out_of_range() {
+        let base = json!({"script":"s","host":"h"});
+        let mut c = base.clone();
+        c["mem_limit_mb"] = json!(0);
+        assert!(parse_north_cfg(&c).is_err(), "mem_limit_mb=0 必须 Err");
+        let mut c = base.clone();
+        c["mem_limit_mb"] = json!(65537);
+        assert!(parse_north_cfg(&c).is_err(), "mem_limit_mb>65536 必须 Err");
+        let mut c = base.clone();
+        c["hook_instr_limit"] = json!(0);
+        assert!(parse_north_cfg(&c).is_err(), "hook_instr_limit=0 必须 Err");
+        let mut c = base.clone();
+        c["hook_instr_limit"] = json!(4294967296u64);
+        assert!(
+            parse_north_cfg(&c).is_err(),
+            "hook_instr_limit≥2^32 必须 Err（截断 0 会使 VM 全调用即败）"
+        );
+        // 域内合法值照常
+        let mut c = base.clone();
+        c["mem_limit_mb"] = json!(64);
+        c["hook_instr_limit"] = json!(1000000);
+        assert!(parse_north_cfg(&c).is_ok());
     }
 
     /// 防路径穿越（与 collector 同规则）+ 非法 port。

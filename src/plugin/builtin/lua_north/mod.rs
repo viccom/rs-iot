@@ -221,10 +221,14 @@ impl Sink for LuaNorth {
         // 5. mqtt task + 通道（spike-2 模型：网络 IO 独占，回调全在主循环侧）。
         let (mqtt_cmd_tx, mqtt_cmd_rx) = mpsc::channel::<contract::MqttCmd>(64);
         let (mqtt_evt_tx, mut mqtt_evt_rx) = mpsc::channel::<contract::MqttEvt>(64);
+        // F-1（2026-11-01 审查）：Down 独立通道——状态通道（ConnAck/Disconnected/
+        // PubResult）在飞 ≤2 永不满，pump 不再因 evt 满停 poll，等待环被切断。
+        let (mqtt_down_tx, mut mqtt_down_rx) = mpsc::channel::<contract::MqttEvt>(64);
         // 句柄保留：主循环退出时 abort（pump 独占 poll 不进 select，token 观测
         // 不到其内部——复审阻塞-1 重构后 handler 虽有 token 分支，abort 作最终
         // 确定性清理，同 io_join.abort 惯例）。
-        let mqtt_task = contract::spawn_mqtt_task(mqtt_cmd_rx, mqtt_evt_tx, token.clone());
+        let mqtt_task =
+            contract::spawn_mqtt_task(mqtt_cmd_rx, mqtt_evt_tx, mqtt_down_tx, token.clone());
 
         let mut tracker = crate::plugin::stat_tracker::StatTracker::new(
             inst.inst_id.to_string(),
@@ -298,6 +302,8 @@ impl Sink for LuaNorth {
         // 批缓冲（取舍 1：rx 样本与 lux pull 批量共用出口，flush 消费后清空）。
         let mut batch: Vec<Sample> = Vec::new();
         let mut batch_ticks: u64 = 0;
+        // F-3：满批逐出（丢最旧）计数——此前静默丢弃无度量。
+        let mut batch_evicted: u64 = 0;
         // 满批/到时统一触发标志（match 内置位、match 后执行 flush）。
         let mut flush_now = false;
 
@@ -314,6 +320,7 @@ impl Sink for LuaNorth {
                 Some(s) = rx.recv() => Evt::Sample(s),
                 Some(()) = reload_rx.recv() => Evt::Reload,
                 Some(ev) = mqtt_evt_rx.recv() => Evt::Mqtt(ev),
+                Some(ev) = mqtt_down_rx.recv() => Evt::Mqtt(ev), // F-1：Down 专用通道
                 // 重连退避到期（仅 pending 时启用；Instant 固定，每轮重建 future 无漂移）。
                 _ = tokio::time::sleep_until(reconnect_at), if reconnect_pending => {
                     Evt::ReconnectNow
@@ -325,6 +332,7 @@ impl Sink for LuaNorth {
                         publish_fail,
                         reconnect_count,
                         down_skipped,
+                        batch_evicted,
                         &alarm,
                     );
                     tracker.flush_if_due().await;
@@ -346,6 +354,7 @@ impl Sink for LuaNorth {
                     // 入批缓冲 + 容量截断（丢最旧保最新；flush 清空）。
                     if batch.len() >= cfg.batch_max_count {
                         batch.remove(0);
+                        batch_evicted += 1;
                     }
                     batch.push(s);
                     // 满批即发（Q5 混合批量 count 维，复审 P1-1）：此前只有时间维，
@@ -539,6 +548,7 @@ impl Sink for LuaNorth {
                         publish_fail,
                         reconnect_count,
                         down_skipped,
+                        batch_evicted,
                         &alarm,
                     );
                     tracker.flush().await;
@@ -556,6 +566,7 @@ impl Sink for LuaNorth {
             publish_fail,
             reconnect_count,
             down_skipped,
+            batch_evicted,
             &alarm,
         );
         tracker.flush().await;
@@ -572,12 +583,19 @@ fn sync_north_stats(
     publish_fail: u64,
     reconnect_count: u64,
     down_skipped: u64,
+    batch_evicted: u64,
     alarm: &core_::api::AlarmStats,
 ) {
     tracker.extra_insert("publish_ok", serde_json::json!(publish_ok));
     tracker.extra_insert("publish_fail", serde_json::json!(publish_fail));
     tracker.extra_insert("reconnect_count", serde_json::json!(reconnect_count));
     tracker.extra_insert("down_skipped", serde_json::json!(down_skipped));
+    // F-3：两类此前不可见的丢弃——满批逐出（丢最旧）与 Down 通道满丢弃。
+    tracker.extra_insert("batch_evicted", serde_json::json!(batch_evicted));
+    tracker.extra_insert(
+        "down_dropped",
+        serde_json::json!(contract::DOWN_DROPPED.load(std::sync::atomic::Ordering::Relaxed)),
+    );
     // Q12 T4（spec alarm §3）：fire_event 被频控拒绝累计（风暴可见性）。
     tracker.extra_insert(
         "alarm_rate_limited",
