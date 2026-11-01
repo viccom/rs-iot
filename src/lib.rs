@@ -252,7 +252,11 @@ pub async fn run_app_with_shutdown(
 
     let metrics = std::sync::Arc::new(process_metrics::ProcessMetrics::new());
     let ctl_registry = host::CtlRegistry::new(metrics.clone());
-    let bridge_registry = host::BridgeRegistry::new();
+    // 心跳失联默认值来自 `[bridge].heartbeat_timeout_secs`（此前该配置键只有编译期
+    // 常量、写进 config.toml 不生效）；实例 app_config 可再按实例覆盖。
+    let bridge_registry = host::BridgeRegistry::with_hb_timeout(std::time::Duration::from_secs(
+        cfg.bridge.heartbeat_timeout_secs,
+    ));
     // 报文 trace 注册表：HostContext（task dump）与 AppState（REST 激活/查询）共享同一实例
     //（TraceRegistry 内部 Arc<DashMap>，clone 共享状态——REST activate 立即影响 task dump）。
     // with_sender 注入事件总线：dump 激活时扇出 Packet 到 SSE。

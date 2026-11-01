@@ -29,6 +29,11 @@
 //! 写命令 `data` JSON：`{"tag":"Program:Main.SetPoint","value":1500,"plc_type":"dint"}`。
 //! `plc_type` 可选（CIP 类型化写入，建议带）：bool/sint/int/dint/lint/usint/uint/
 //! udint/ulint/real/lreal/string；缺省推断 bool→Bool、整数→Dint、浮点→Real、串→String。
+//!
+//! **报文 trace 豁免（不接 `TraceIo`）**：EIP/CIP 虽是二进制协议，但 `rust-ethernet-ip`
+//! 在 `EipClient::connect` 内部自建并独占 TCP 流（外层拿不到裸 `TcpStream` 句柄），
+//! `TraceIo<T>` 无处包装；与 opcua/s7（库自管会话，非裸报文）同属豁免面。帧级诊断
+//! 走库自身日志 + `GET /api/v1/logs/recent`；若未来换成可注入 IO 的库再接线。
 
 use crate::host::HostContext;
 use crate::plugin::sample_sender::SampleSender;

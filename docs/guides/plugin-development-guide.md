@@ -487,7 +487,15 @@ inventory::submit! {
 
 插件扩展字段经 `extra`（serde flatten）透传——如 opcua `session_reconnect_count`、modbus `exception_count`、s7 `reconnect_count`、lua `vm_restart_count`/`script_version`、sidecar `connected`/`heartbeat`。`select!` 主循环加 flush ticker + `tick_ok(elapsed_ms)`/`tick_fail(reason)` 两个上报入口（参考任一内置插件实现）。
 
-**报文 trace（P1 #2，`io_trace`）**：收发报文 hex dump，per-instance 运行时开关（`POST /api/v1/inst/trace` 按需激活，惰性超时关闭）。**阶段 1 已覆盖 lua（io_engine direct dump：request TX/RX + recv_idle 被动 RX 三点）+ modbus 4 传输（`TraceIo<T>` 包底层 IO，`src/io_trace.rs`）**；opcua/s7（非裸报文协议，线缆字节无意义）/sidecar（bridge IPC 帧）后置。新增裸报文协议插件：底层 IO 包一层 `TraceIo<T>` 即可接入（trace 关闭时 dump 快速路径几乎零成本）。
+**报文 trace（P1 #2，`io_trace`）**：收发报文 hex dump，per-instance 运行时开关（`POST /api/v1/inst/trace` 按需激活，惰性超时关闭）。**阶段 1 已覆盖 lua（io_engine direct dump：request TX/RX + recv_idle 被动 RX 三点）+ modbus 4 传输（`TraceIo<T>` 包底层 IO，`src/io_trace.rs`）**。
+
+**豁免清单（三条，均为结构性不可接，非欠账）**：
+- `opcua` / `s7`：库自管会话/协议栈，非裸报文——线缆字节对诊断无意义
+- `eip`：`rust-ethernet-ip` 在 `EipClient::connect` 内部自建并独占 TCP 流，外层拿不到裸
+  `TcpStream`，`TraceIo<T>` 无处包装（诊断走库日志 + `/logs/recent`）
+- `sidecar`：bridge 是 IPC 帧，已有 DataUp/Command 帧级日志
+
+新增裸报文协议插件（自己持有 socket 的）：底层 IO 包一层 `TraceIo<T>` 即可接入（trace 关闭时 dump 快速路径几乎零成本）。
 
 **链路类型感知（lua）**：lua 脚本经 `ctx:transport()`（返回 `"tcp"`/`"serial"`/`"udp"`）感知底层链路，据此选帧格式（与 `TraceIo` 报文 trace 同属 lua IO 层能力，详见 [`lua-script-guide.md`](lua-script-guide.md)「通讯链路抽象」）。
 

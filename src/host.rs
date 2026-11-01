@@ -4,6 +4,7 @@ use crate::types::CtlMessage;
 use dashmap::DashMap;
 use lux::EmbeddedClient;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -98,17 +99,42 @@ pub struct BridgeConn {
 /// acceptor 校验外部进程 Hello 后，按 `inst_id` 把裸 `TcpStream` 经此表分发给对应
 /// sidecarClient task（每外部实例一个 task、一个 slot）。slot 用 mpsc 支持外部多次重连。
 /// task 收到 stream 后自行 `tokio::io::split` + `FramedRead`/`FramedWrite`（codec 在 sidecar_client）。
-#[derive(Clone, Default, Debug)]
+#[derive(Clone, Debug)]
 pub struct BridgeRegistry {
     map: Arc<DashMap<String, mpsc::Sender<BridgeConn>>>,
+    /// 心跳失联判定默认值（`[bridge].heartbeat_timeout_secs` 的运行时落点；
+    /// sidecarClient 的 `app_config.heartbeat_timeout_secs` 可再覆盖）。构造时
+    /// 下限钳制 1s——零值会让 task 侧 `interval(hb/2)` panic（tokio 零周期）。
+    hb_timeout: Duration,
+}
+
+impl Default for BridgeRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl BridgeRegistry {
-    /// 构造空注册表。
+    /// 构造空注册表（心跳默认值 = `[bridge]` 的编译期缺省 15s）。
     pub fn new() -> Self {
+        Self::with_hb_timeout(Duration::from_secs(
+            crate::config::DEFAULT_HEARTBEAT_TIMEOUT_SECS,
+        ))
+    }
+
+    /// 构造并指定心跳默认值——`lib.rs` 用 `cfg.bridge.heartbeat_timeout_secs` 调本入口，
+    /// 这是该配置键的**唯一生效点**（此前只有常量、配置写了不生效）。
+    /// 下限钳制 1s：0 会让 sidecar task 的 `interval(hb/2)` panic（tokio 零周期）。
+    pub fn with_hb_timeout(hb_timeout: Duration) -> Self {
         Self {
             map: Arc::new(DashMap::new()),
+            hb_timeout: hb_timeout.max(Duration::from_secs(1)),
         }
+    }
+
+    /// 心跳失联判定默认值（sidecarClient task 在 `app_config` 未覆盖时使用）。
+    pub fn hb_timeout(&self) -> Duration {
+        self.hb_timeout
     }
 
     /// 注册实例的连接 slot（sidecarClient task 启动时）。
@@ -212,5 +238,30 @@ mod tests {
         assert!(r.send("full", dummy()), "满丢仍返 true（对标 Go default）");
         assert!(r.send("full", dummy()), "第二次满");
         assert_eq!(r.metrics.ctl_dropped_count.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn bridge_hb_timeout_defaults_clamps_and_wires() {
+        // 缺省 = config 单源常量（审计 B6：两端共用同一默认值）
+        assert_eq!(
+            BridgeRegistry::new().hb_timeout(),
+            Duration::from_secs(crate::config::DEFAULT_HEARTBEAT_TIMEOUT_SECS)
+        );
+        // 显式配置生效——`[bridge].heartbeat_timeout_secs` 的唯一运行时落点
+        //（此前该配置键只被解析、从未读取）
+        assert_eq!(
+            BridgeRegistry::with_hb_timeout(Duration::from_secs(30)).hb_timeout(),
+            Duration::from_secs(30)
+        );
+        // 0 钳到 1s：零值会让 sidecar task 的 interval(hb/2) panic（tokio 零周期）
+        assert_eq!(
+            BridgeRegistry::with_hb_timeout(Duration::ZERO).hb_timeout(),
+            Duration::from_secs(1)
+        );
+        // Default 与 new 等价（手写 Default，防加字段后 derive 默认成 0）
+        assert_eq!(
+            BridgeRegistry::default().hb_timeout(),
+            BridgeRegistry::new().hb_timeout()
+        );
     }
 }

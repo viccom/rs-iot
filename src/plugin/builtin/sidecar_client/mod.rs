@@ -59,9 +59,6 @@ const CURRENT_VERSION: &str = "3";
 const DEFAULT_VER: &str = "2";
 /// 单帧最大字节数（codec 上限，容纳大配置 push）。
 const MAX_FRAME: usize = 4 * 1024 * 1024;
-/// task 侧心跳超时缺省（`app_config.heartbeat_timeout_secs` 可覆盖）。
-/// 引用 config 单源常量（审计 B6：与 bridge 服务端默认同一来源，防两端漂移）。
-const HB_TIMEOUT_DEFAULT_SECS: u64 = crate::config::DEFAULT_HEARTBEAT_TIMEOUT_SECS;
 
 /// 不下发给外部插件的 `app_config` 键（宿主内部语义）。
 ///
@@ -387,10 +384,9 @@ impl Source for SidecarClient {
             return;
         }
 
-        let hb_timeout = parse_hb_timeout(
-            &inst.app_config,
-            Duration::from_secs(HB_TIMEOUT_DEFAULT_SECS),
-        );
+        // 默认值来自宿主 `[bridge].heartbeat_timeout_secs`（BridgeRegistry 构造时注入，
+        // 单源见 config::DEFAULT_HEARTBEAT_TIMEOUT_SECS）；本实例 app_config 可覆盖。
+        let hb_timeout = parse_hb_timeout(&inst.app_config, ctx.bridge_registry.hb_timeout());
         let hb_check = hb_timeout / 2;
 
         // 连接 slot：acceptor 分发来的连接（stream + Hello 版本）经此进入 task。容量 1

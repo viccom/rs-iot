@@ -11,10 +11,12 @@ pub const DEFAULT_EVENT_BUS_CAPACITY: usize = 256;
 /// 审计 B3 裁定非破坏护栏）。
 pub const DEFAULT_JWT_SECRET: &str = "qwerty1234567890asdfgh1234567890";
 
-/// sidecar 心跳失联判定默认秒数（bridge 服务端默认值；**sidecar_client 的
-/// `HB_TIMEOUT_DEFAULT_SECS` 必须引用本常量**——审计 B6：两端各自定义同一
-/// 失联参数是已发生的双源，漂移会出现 server 判失联/client 自认健康的
-/// 幽灵断连）。
+/// sidecar 心跳失联判定默认秒数（bridge 服务端默认值）。
+///
+/// **单源纪律（审计 B6）**：`BridgeRegistry::new()` 用它构造默认心跳值，sidecar_client
+/// task 再从 `BridgeRegistry::hb_timeout()` 取——两端不得各自定义同一失联参数，
+/// 漂移会出现 server 判失联/client 自认健康的幽灵断连。`[bridge].heartbeat_timeout_secs`
+/// 配置项经 `BridgeRegistry::with_hb_timeout()` 生效（下限 1s 钳制），本常量只是缺省。
 pub const DEFAULT_HEARTBEAT_TIMEOUT_SECS: u64 = 15;
 
 /// [history] partition_secs 上界（T9）：36500 天秒数，与 retention_days 上界
