@@ -56,6 +56,7 @@
 | [2026-08-26-default-compile-surface.md](decisions/2026-08-26-default-compile-surface.md) | 默认编译面收敛：default=[lua,lua-http,opcua,modbus]，s7/eip/transform 显式启用 | 已实施 |
 | [2026-08-31-n5-longrun-degradation-fixes.md](decisions/2026-08-31-n5-longrun-degradation-fixes.md) | 长跑退化 n5 修复决策：长时运行下采集/管道/告警域的退化修复取舍 | 已实施 |
 | [2026-08-27-model-extension-slot.md](decisions/2026-08-27-model-extension-slot.md) | 设备模型开放扩展槽（extra）与 `x_` 键契约：前向兼容信封 + 宿主不解释 + 外置应用定位边界 | 已实施 |
+| [2026-11-01-upstream-library-fork-policy.md](decisions/2026-11-01-upstream-library-fork-policy.md) | 上游库缺陷处置策略：三层（插件规避 / 最小 fork / 上游 PR）；tokio-s7 fork 4 补丁（S-1/S-4/S-5/S-9）、rust-ethernet-ip 先规避+PR、async-opcua/tokio-modbus 不 fork；含 `[patch.crates-io]` 形态、CI 适配、治理与退出条件 | **待实施** |
 
 ## designs/ — 设计定稿（怎么做，日期命名）
 
@@ -100,6 +101,8 @@
 | [2026-10-30-screen-versioning-design.md](designs/2026-10-30-screen-versioning-design.md) | 画面/主题文档版本管理与并发控制（routes_meta 演进）：`sv:` 键族 + 内容判重 + if_version 乐观锁 + rollback + SSE screen 事件 + embedded 无事务的失败矩阵 | **已实施**（166fe25/40698d4；2026-10-30 复审修复：锁序/回滚 no-op/错误路径） |
 | [2026-10-30-screen-versioning-plan.md](designs/2026-10-30-screen-versioning-plan.md) | 画面/主题版本管理实施计划（P0 第 1 轮 TDD 任务表 A1~A9 + 开工基线漂移记录） | **已实施**（166fe25/40698d4：11 组测试 + §6 六实测全符） |
 | [2026-11-01-layering-coupling-review.md](designs/2026-11-01-layering-coupling-review.md) | 分层耦合专项：实测 10 模块强连通分量 → 切三条类型回边（InstState/LogEntry/ModelError 上移）+ 分层门禁 `scripts/check_layers.py` + plugin→history / api→lua_core 收口 | **已实施**（2026-11-01） |
+| [2026-11-01-plugin-audit-fix-plan.md](designs/2026-11-01-plugin-audit-fix-plan.md) | 内置插件审查修复跟踪（10 插件 28 项真 BUG：四协议 I/O 超时/RTU 串扰/eip 位寻址+panic/luaTransform 饿死/luaNorth 等待环/静默写 0 拒写/sidecar 日志与注册竞态等）+ 定性不修清单 | **已实施**（A~H 八批 + 门禁全绿） |
+| [2026-11-01-protocol-semantics-audit.md](designs/2026-11-01-protocol-semantics-audit.md) | 协议插件协议语义审查台账（Modbus/OPC UA/S7/EtherNet/IP 73 条）：逐条定级 + 框架/插件/上游库归责 + 库源码与探针证据；含 HMI 写通道失效、S7 重连风暴与写应答丢弃、EIP 批量失败不重连、OPC UA 60s 阻塞等 | **待实施** |
 
 ## ops/ — 部署与运维（怎么跑起来）
 
