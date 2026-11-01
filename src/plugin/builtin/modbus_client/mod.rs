@@ -313,6 +313,14 @@ impl Source for ModbusClient {
         let plans = plan_devices(&devices, cfg.gap_threshold, cfg.max_regs, cfg.slave_id);
         let poll_order = build_poll_order(&plans, cfg.poll_strategy);
         let req_timeout = Duration::from_secs(cfg.request_timeout_secs);
+        // C-3（2026-11-01 审查）：per-plan 连续超时计数。RTU 帧无事务 ID——读超时后
+        // 迟到的响应会串到下个同功能码请求（tick N 的 region A 响应被当作
+        // tick N+1 的 region B 数据解码发布，**静默错值**）。Timeout 分支此前
+        // 永不拆 session（故障隔离取舍），现在同一 plan 连续 2 次超时即拆 session
+        // 重连（保单 slave 隔离：计数按 plan 独立，任何成功/exception 响应归零
+        // ——exception 也是 slave 在应答的活性证明）。
+        const TIMEOUT_STREAK_DROP: u32 = 2;
+        let mut timeout_streak: Vec<u32> = vec![0; plans.len()];
         // handle_write 反查 devid → slave_id（写命令按目标设备切 slave）。
         let devid_to_slave: HashMap<String, u8> = plans
             .iter()
@@ -351,7 +359,14 @@ impl Source for ModbusClient {
             match evt {
                 Evt::Cmd(Some(m)) => {
                     if m.cmd == "write" {
-                        handle_write(&mut session, &m.data, &m.devid, &devid_to_slave).await;
+                        handle_write(
+                            &mut session,
+                            &m.data,
+                            &m.devid,
+                            &devid_to_slave,
+                            req_timeout,
+                        )
+                        .await;
                     } else {
                         tracing::info!("[modbusClient] inst {inst_id} unknown cmd: {}", m.cmd);
                     }
@@ -370,7 +385,12 @@ impl Source for ModbusClient {
                             }
                             Err(e) => {
                                 tracing::warn!("[modbusClient] inst {inst_id} connect failed: {e}");
-                                tokio::time::sleep(Duration::from_secs(cfg.reconnect_secs)).await;
+                                // C-6（2026-11-01 审查）：退避 sleep 与 token 竞争——
+                                // 此前裸 sleep 最长把停机延迟 reconnect_secs（可配 86400）。
+                                tokio::select! {
+                                    _ = token.cancelled() => break,
+                                    _ = tokio::time::sleep(Duration::from_secs(cfg.reconnect_secs)) => {}
+                                }
                                 continue;
                             }
                         }
@@ -404,6 +424,7 @@ impl Source for ModbusClient {
                             };
                         match outcome {
                             ReadOutcome::Ok(buf) => {
+                                timeout_streak[*pi] = 0;
                                 for (field, p) in &reg.points {
                                     if let Some(v) = decode_point(p, &buf, reg.start) {
                                         acc.entry(plan.devid.clone())
@@ -413,6 +434,8 @@ impl Source for ModbusClient {
                                 }
                             }
                             ReadOutcome::Exception(exc) => {
+                                // exception = slave 在应答（活性证明），超时计数归零。
+                                timeout_streak[*pi] = 0;
                                 exceptions += 1;
                                 tracker
                                     .extra_insert("exception_count", serde_json::json!(exceptions));
@@ -432,6 +455,17 @@ impl Source for ModbusClient {
                                     reg.len(),
                                     cfg.request_timeout_secs
                                 );
+                                // C-3：连续 2 次超时拆 session——迟到响应串扰下一请求
+                                // 的风险只在「超时后继续复用同一 session」时存在。
+                                timeout_streak[*pi] = timeout_streak[*pi].saturating_add(1);
+                                if timeout_streak[*pi] >= TIMEOUT_STREAK_DROP {
+                                    transport_failed = true;
+                                    tracing::warn!(
+                                        "[modbusClient] inst {inst_id} slave {} 连续 {} 次超时，拆 session 重连（防 RTU 迟到响应串扰）",
+                                        plan.slave_id,
+                                        timeout_streak[*pi]
+                                    );
+                                }
                             }
                             ReadOutcome::Transport(e) => {
                                 tracing::warn!(
@@ -493,6 +527,7 @@ async fn handle_write(
     data: &str,
     devid: &str,
     devid_to_slave: &HashMap<String, u8>,
+    req_timeout: Duration,
 ) {
     let req: serde_json::Value = match serde_json::from_str(data) {
         Ok(v) => v,
@@ -553,17 +588,27 @@ async fn handle_write(
         }
     };
     sess.set_slave(Slave(slave_id));
+    // C-1（2026-11-01 审查）：写路径（RMW 读 + 写）统一包 req_timeout——读路径早有
+    // 超时，写路径此前裸 await：slave 收包不回（TCP 半开）会把 handle_write 连同
+    // 整个 select 永久挂死（token/cmd/flush 全停，stop 3s 超时后 task 泄漏）。
+    // 超时即拆 session：RTU 下在途响应若迟到，也不能留给下一请求串扰。
+    let mut drop_sess = false;
     // 仅 holding bit 写需 RMW（coil 直接写单 coil，无需读当前值）。
     let current_reg = if p.func == Func::Holding && p.typ == Type::Bit {
-        match sess.read_holding_registers(p.addr, 1).await {
-            Ok(Ok(buf)) => buf.first().copied(),
-            Ok(Err(exc)) => {
+        match tokio::time::timeout(req_timeout, sess.read_holding_registers(p.addr, 1)).await {
+            Ok(Ok(Ok(buf))) => buf.first().copied(),
+            Ok(Ok(Err(exc))) => {
                 tracing::warn!("[modbusClient] bit write RMW read exception: {exc:?}");
                 return;
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 tracing::warn!("[modbusClient] bit write RMW read failed: {e:?}");
                 return;
+            }
+            Err(_) => {
+                tracing::warn!("[modbusClient] bit write RMW read timeout ({req_timeout:?})");
+                drop_sess = true;
+                None
             }
         }
     } else {
@@ -577,25 +622,30 @@ async fn handle_write(
         }
     };
     let result = match payload {
+        WritePayload::Coils(c) if c.len() == 1 => {
+            tokio::time::timeout(req_timeout, sess.write_single_coil(p.addr, c[0])).await
+        }
         WritePayload::Coils(c) => {
-            if c.len() == 1 {
-                sess.write_single_coil(p.addr, c[0]).await
-            } else {
-                sess.write_multiple_coils(p.addr, &c).await
-            }
+            tokio::time::timeout(req_timeout, sess.write_multiple_coils(p.addr, &c)).await
+        }
+        WritePayload::Regs(r) if r.len() == 1 => {
+            tokio::time::timeout(req_timeout, sess.write_single_register(p.addr, r[0])).await
         }
         WritePayload::Regs(r) => {
-            if r.len() == 1 {
-                sess.write_single_register(p.addr, r[0]).await
-            } else {
-                sess.write_multiple_registers(p.addr, &r).await
-            }
+            tokio::time::timeout(req_timeout, sess.write_multiple_registers(p.addr, &r)).await
         }
     };
     match result {
-        Ok(Ok(())) => {}
-        Ok(Err(exc)) => tracing::warn!("[modbusClient] write exception: {exc:?}"),
-        Err(e) => tracing::warn!("[modbusClient] write failed: {e:?}"),
+        Ok(Ok(Ok(()))) => {}
+        Ok(Ok(Err(exc))) => tracing::warn!("[modbusClient] write exception: {exc:?}"),
+        Ok(Err(e)) => tracing::warn!("[modbusClient] write failed: {e:?}"),
+        Err(_) => {
+            tracing::warn!("[modbusClient] write timeout ({req_timeout:?})，拆 session");
+            drop_sess = true;
+        }
+    }
+    if drop_sess {
+        *session = None;
     }
 }
 
@@ -810,6 +860,62 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(cfg.request_timeout_secs, 1, "0 clamp 1");
+    }
+
+    /// C-4（2026-11-01 审查）：非数字字符串写值必须 Err 拒写——此前
+    /// `unwrap_or(0)` 会静默向 PLC 写 0（工业写危险）。
+    #[test]
+    fn encode_value_rejects_non_numeric_string() {
+        let p = parse_point("holding:0:f32").unwrap();
+        let err =
+            encode_value(&SampleValue::Str("1O".into()), &p, None).expect_err("非数字串必须拒写");
+        assert!(err.contains("非数字"), "错误信息应说明原因：{err}");
+        // 数字串照常接受（兼容下行 JSON 值为字符串数字的既有用法）
+        assert!(encode_value(&SampleValue::Str("1.5".into()), &p, None).is_ok());
+        let pi = parse_point("holding:4:i32").unwrap();
+        assert!(encode_value(&SampleValue::Str("42".into()), &pi, None).is_ok());
+        assert!(encode_value(&SampleValue::Str("4x".into()), &pi, None).is_err());
+        // bool 点的 "true" 串不受影响（不走数值路径）
+        let pb = parse_point("coil:0:bool").unwrap();
+        assert!(encode_value(&SampleValue::Str("true".into()), &pb, None).is_ok());
+    }
+
+    /// C-5：数值键越界（u8/u16/u32 域外）显式 Err，不再 `as` 静默截断
+    /// （300 号 slave_id 截成 44 会打到错误从站）。
+    #[test]
+    fn parse_cfg_rejects_out_of_range_numbers() {
+        for (key, bad) in [
+            ("slave_id", 300u64),
+            ("gap_threshold", 65537),
+            ("baud_rate", u64::from(u32::MAX) + 1),
+            ("data_bits", 261), // 261 as u8 = 5，会绕过 5..=8 白名单——必须 Err
+            ("stop_bits", 257), // 257 as u8 = 1，同理
+        ] {
+            let cfg = parse_cfg(&serde_json::json!({"endpoint":"127.0.0.1:502", key: bad}));
+            assert!(cfg.is_err(), "{key}={bad} 必须整体 Err（不得静默截断）");
+        }
+        // 边界内合法值照常
+        assert!(
+            parse_cfg(&serde_json::json!({
+                "endpoint":"127.0.0.1:502","slave_id":247,"gap_threshold":65535,"data_bits":8,"stop_bits":2
+            }))
+            .is_ok()
+        );
+    }
+
+    /// C-6：reconnect_secs 钳到 [1,3600]（小时级退避等同静默瘫痪）。
+    #[test]
+    fn parse_cfg_reconnect_secs_clamped() {
+        let cfg = parse_cfg(&serde_json::json!({
+            "endpoint":"127.0.0.1:502","reconnect_secs":86400
+        }))
+        .unwrap();
+        assert_eq!(cfg.reconnect_secs, 3600, "86400 钳 3600");
+        let cfg = parse_cfg(&serde_json::json!({
+            "endpoint":"127.0.0.1:502","reconnect_secs":0
+        }))
+        .unwrap();
+        assert_eq!(cfg.reconnect_secs, 1);
     }
 
     #[test]

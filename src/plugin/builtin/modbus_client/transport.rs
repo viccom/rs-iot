@@ -24,13 +24,17 @@ pub(super) async fn connect(
     inst_id: &str,
     trace_registry: TraceRegistry,
 ) -> Result<Context, String> {
+    // C-2（2026-11-01 审查）：TCP connect 包 req_timeout——此前裸 connect 在
+    // SYN 黑洞（对端掉电/防火墙 DROP）挂 OS 级重试 ~2min，期间 token/cmd 全停。
+    let connect_timeout = std::time::Duration::from_secs(cfg.request_timeout_secs.max(1));
     let mut ctx = match cfg.transport {
         Transport::Tcp => {
             let addr = parse_addr(&cfg.endpoint)?;
             // TCP:手动 connect + tcp::attach_slave（接受泛型 transport，可插 TraceIo）。
             // 原先用的 `tcp::connect` 库内建连接，不经我们手，无法包 TraceIo，故改写。
-            let stream = TcpStream::connect(addr)
+            let stream = tokio::time::timeout(connect_timeout, TcpStream::connect(addr))
                 .await
+                .map_err(|_| format!("connect tcp {} timeout ({connect_timeout:?})", cfg.endpoint))?
                 .map_err(|e| format!("connect tcp {}: {e}", cfg.endpoint))?;
             tcp::attach_slave(
                 TraceIo::new(stream, inst_id.into(), trace_registry.clone()),
@@ -39,8 +43,14 @@ pub(super) async fn connect(
         }
         Transport::RtuTcp => {
             let addr = parse_addr(&cfg.endpoint)?;
-            let stream = TcpStream::connect(addr)
+            let stream = tokio::time::timeout(connect_timeout, TcpStream::connect(addr))
                 .await
+                .map_err(|_| {
+                    format!(
+                        "connect rtu-tcp {} timeout ({connect_timeout:?})",
+                        cfg.endpoint
+                    )
+                })?
                 .map_err(|e| format!("connect rtu-tcp {}: {e}", cfg.endpoint))?;
             rtu::attach_slave(
                 TraceIo::new(stream, inst_id.into(), trace_registry.clone()),

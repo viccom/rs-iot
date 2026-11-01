@@ -121,15 +121,38 @@ fn v32(v: u64) -> u32 {
     u32::try_from(v).unwrap_or(u32::MAX)
 }
 
+/// connect 上限（A-3）：库内 `EipClient` 构造是裸 `TcpStream::connect`（无超时），
+/// 黑洞地址（防火墙 DROP）会挂 OS 级 SYN 重试 ~2min，期间 token/cmd 全停——
+/// 外层包 timeout，超时即 drop future（socket 一并释放）。
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// 建立连接并应用透传配置（max_packet_size / batch 参数）。
 async fn connect(cfg: &EipCfg) -> Result<EipClient, String> {
+    // A-3：整体包 CONNECT_TIMEOUT（with_route_path/connect 两大构造路径同款）。
     let mut client = match cfg.slot {
-        Some(slot) => EipClient::with_route_path(&cfg.endpoint, RoutePath::new().add_slot(slot))
-            .await
-            .map_err(|e| format!("connect {} slot {slot}: {e}", cfg.endpoint))?,
-        None => EipClient::connect(&cfg.endpoint)
-            .await
-            .map_err(|e| format!("connect {}: {e}", cfg.endpoint))?,
+        Some(slot) => {
+            let fut = EipClient::with_route_path(&cfg.endpoint, RoutePath::new().add_slot(slot));
+            match tokio::time::timeout(CONNECT_TIMEOUT, fut).await {
+                Ok(r) => r.map_err(|e| format!("connect {} slot {slot}: {e}", cfg.endpoint))?,
+                Err(_) => {
+                    return Err(format!(
+                        "connect {} slot {slot}: timeout ({CONNECT_TIMEOUT:?})",
+                        cfg.endpoint
+                    ))
+                }
+            }
+        }
+        None => {
+            match tokio::time::timeout(CONNECT_TIMEOUT, EipClient::connect(&cfg.endpoint)).await {
+                Ok(r) => r.map_err(|e| format!("connect {}: {e}", cfg.endpoint))?,
+                Err(_) => {
+                    return Err(format!(
+                        "connect {}: timeout ({CONNECT_TIMEOUT:?})",
+                        cfg.endpoint
+                    ))
+                }
+            }
+        }
     };
     if let Some(sz) = cfg.max_packet_size {
         client.set_max_packet_size(sz);
@@ -193,12 +216,26 @@ fn json_to_sample_value(v: &serde_json::Value) -> SampleValue {
     }
 }
 
+/// SampleValue → 写 STRING tag 的可读串（A-1：`plc_type=string` + 非 Str 值时使用，
+/// 此前 `unreachable!` 在数值+string 组合直接 panic 杀实例）。
+fn sample_to_string_repr(v: &SampleValue) -> String {
+    match v {
+        SampleValue::Str(s) => s.clone(),
+        SampleValue::Int(i) => i.to_string(),
+        SampleValue::Float(f) => f.to_string(),
+        SampleValue::Bool(b) => b.to_string(),
+    }
+}
+
 /// SampleValue + 显式 plc_type → PlcValue。
 ///
-/// CIP 类型化写入（写 DINT tag 传 REAL 会类型不匹配），`plc_type=None` 退回
+/// CIP 类型化写入（写 DINT tag 传 REAL 会类型不匹配），`plc_type=None`（或空白）退回
 /// 默认推断：bool→Bool、整数→Dint（AB 最常用）、浮点→Real、串→String。
 /// 数值按目标类型截断；Bool 节点接受 0/非零或布尔。
-fn plc_with_type(v: &SampleValue, plc_type: Option<&str>) -> PlcValue {
+///
+/// **未知 plc_type 返回 Err**（A-6，2026-11-01 审查）：此前静默回退默认推断，
+/// "dnit" 类拼写错误会按 Dint 写入 PLC——与 s7 `parse_kind` 的报错口径对齐。
+fn plc_with_type(v: &SampleValue, plc_type: Option<&str>) -> Result<PlcValue, String> {
     let default = || match v {
         SampleValue::Bool(b) => PlcValue::Bool(*b),
         SampleValue::Int(i) => PlcValue::Dint(*i as i32),
@@ -206,7 +243,7 @@ fn plc_with_type(v: &SampleValue, plc_type: Option<&str>) -> PlcValue {
         SampleValue::Str(s) => PlcValue::String(s.clone()),
     };
     let Some(t) = plc_type.map(str::trim).filter(|s| !s.is_empty()) else {
-        return default();
+        return Ok(default());
     };
     let as_f = || match v {
         SampleValue::Float(f) => *f,
@@ -221,7 +258,7 @@ fn plc_with_type(v: &SampleValue, plc_type: Option<&str>) -> PlcValue {
         SampleValue::Str(s) => s.parse().unwrap_or(0),
     };
     let as_u = || as_i().max(0) as u64;
-    match t.to_lowercase().as_str() {
+    let out = match t.to_lowercase().as_str() {
         "bool" => PlcValue::Bool(match v {
             SampleValue::Bool(b) => *b,
             SampleValue::Int(i) => *i != 0,
@@ -238,29 +275,41 @@ fn plc_with_type(v: &SampleValue, plc_type: Option<&str>) -> PlcValue {
         "ulint" => PlcValue::Ulint(as_u()),
         "real" => PlcValue::Real(as_f() as f32),
         "lreal" => PlcValue::Lreal(as_f()),
-        "string" => PlcValue::String(match v {
-            SampleValue::Str(s) => s.clone(),
-            other => format!("{other:?}"),
-        }),
-        _ => default(),
-    }
+        "string" => PlcValue::String(sample_to_string_repr(v)),
+        other => {
+            return Err(format!(
+                "未知 plc_type {other:?}（支持 bool/sint/int/dint/lint/usint/uint/udint/ulint/real/lreal/string）"
+            ));
+        }
+    };
+    Ok(out)
 }
 
 /// 采集目标（预解析）：`(devid, [(field, tag)])`；`string_tags` 单列
 /// （走 `read_string_tag`，批量路径只解标准 STRING handle 0x0FCE）。
 struct Targets {
-    /// 批量读（标量 + 位寻址 tag；`read_tags_batch` 一次网络往返）。
+    /// 批量读（**无 `.` 的标量 tag**；`read_tags_batch` 一次网络往返）。
     batch: Vec<(String, Vec<(String, String)>)>,
     /// 逐个 `read_string_tag`（自定义 STRING 类型）。
     strings: Vec<(String, Vec<(String, String)>)>,
+    /// 逐个 `read_tag` 单点读：含 `.` 的 tag（位寻址 `MyDint.5` / UDT 成员路径）。
+    ///
+    /// A-2（2026-11-01 审查）：库的批量读对位寻址只编码**父字**、位"完全在客户端
+    /// 解析"（rust-ethernet-ip tag-path lib.rs:220-231），批量解码无位掩码——
+    /// `MyDint.5` 批量读到的是父字整值而非该位（静默错数据）。单点 `read_tag`
+    /// 有位处理，故含 `.` 的 tag 一律分流（UDT 成员路径单点读同样正确，仅损失
+    /// 批量打包收益）。
+    per_tag: Vec<(String, Vec<(String, String)>)>,
 }
 
 fn parse_targets(devices: &[crate::types::DeviceSpec]) -> Targets {
     let mut batch = Vec::new();
     let mut strings = Vec::new();
+    let mut per_tag = Vec::new();
     for dev in devices {
         let mut b = Vec::new();
         let mut s = Vec::new();
+        let mut p = Vec::new();
         for c in &dev.children {
             if c.value.is_empty() {
                 continue;
@@ -272,6 +321,9 @@ fn parse_targets(devices: &[crate::types::DeviceSpec]) -> Targets {
             };
             if c.r#type.eq_ignore_ascii_case("string") {
                 s.push((field, c.value.clone()));
+            } else if c.value.contains('.') {
+                // A-2：位寻址/成员路径分流单点读（见 Targets::per_tag 注释）。
+                p.push((field, c.value.clone()));
             } else {
                 b.push((field, c.value.clone()));
             }
@@ -282,8 +334,15 @@ fn parse_targets(devices: &[crate::types::DeviceSpec]) -> Targets {
         if !s.is_empty() {
             strings.push((dev.value.clone(), s));
         }
+        if !p.is_empty() {
+            per_tag.push((dev.value.clone(), p));
+        }
     }
-    Targets { batch, strings }
+    Targets {
+        batch,
+        strings,
+        per_tag,
+    }
 }
 
 #[async_trait]
@@ -403,9 +462,23 @@ impl Source for EipClientPlugin {
                             >= Duration::from_secs(cfg.health_check_secs)
                     {
                         last_health_check = std::time::Instant::now();
-                        if let Err(e) = c.check_health_detailed().await {
-                            tick_ok = false;
-                            tracing::warn!("[eipClient] inst {inst_id} health check failed: {e}");
+                        // A-4：库 `check_health_detailed` 三个返回路径全是 Ok（失败
+                        // 语义是 Ok(false)），此前只 match Err（死代码）——Ok(false)
+                        // 同样视为会话失效，走 !tick_ok 的拆连接重连路径。
+                        match c.check_health_detailed().await {
+                            Ok(true) => {}
+                            Ok(false) => {
+                                tick_ok = false;
+                                tracing::warn!(
+                                    "[eipClient] inst {inst_id} health check 报告会话失效（keep-alive/重注册失败），拆连接重连"
+                                );
+                            }
+                            Err(e) => {
+                                tick_ok = false;
+                                tracing::warn!(
+                                    "[eipClient] inst {inst_id} health check failed: {e}"
+                                );
+                            }
                         }
                     }
 
@@ -462,28 +535,34 @@ async fn collect_once(
 
     if !targets.batch.is_empty() {
         // 全实例 tag 打平一次批量读（跨 devid 共享 PLC 连接，一次网络往返）。
-        // 查找表 tag → (devid, field)：batch 结果带 tag 名但顺序不承诺（打包优化），
-        // 按 tag 名回填而非按位置 zip。
-        let mut by_tag: std::collections::HashMap<&str, (&str, &str)> =
+        // 查找表 tag → [(devid, field)]（A-5：同 tag 可挂多 devid——模型模板×params
+        // 展开下两设备引用同一物理 tag 是现实场景，此前单值 map 后插覆盖先插，
+        // 后者静默无数据）：batch 结果带 tag 名但顺序不承诺，按 tag 名回填。
+        let mut by_tag: std::collections::HashMap<&str, Vec<(&str, &str)>> =
             std::collections::HashMap::new();
         for (dev, pairs) in &targets.batch {
             for (field, tag) in pairs {
-                by_tag.insert(tag.as_str(), (dev.as_str(), field.as_str()));
+                by_tag
+                    .entry(tag.as_str())
+                    .or_default()
+                    .push((dev.as_str(), field.as_str()));
             }
         }
         let names: Vec<&str> = by_tag.keys().copied().collect();
         match client.read_tags_batch(&names).await {
             Ok(results) => {
                 for (tag, res) in results {
-                    let Some((dev, field)) = by_tag.get(tag.as_str()) else {
+                    let Some(pairs) = by_tag.get(tag.as_str()) else {
                         continue;
                     };
                     match res {
                         Ok(v) => {
-                            per_dev
-                                .entry((*dev).to_string())
-                                .or_default()
-                                .insert((*field).to_string(), plc_to_sample(&v));
+                            for (dev, field) in pairs {
+                                per_dev
+                                    .entry((*dev).to_string())
+                                    .or_default()
+                                    .insert((*field).to_string(), plc_to_sample(&v));
+                            }
                         }
                         Err(e) => {
                             tracing::warn!(
@@ -544,6 +623,26 @@ async fn collect_once(
         }
     }
 
+    // A-2：位寻址/成员路径单点读（批量路径返回父字整值，见 Targets::per_tag 注释）。
+    for (dev, pairs) in &targets.per_tag {
+        for (field, tag) in pairs {
+            match client.read_tag(tag).await {
+                Ok(v) => {
+                    per_dev
+                        .entry(dev.clone())
+                        .or_default()
+                        .insert(field.clone(), plc_to_sample(&v));
+                }
+                Err(e) => {
+                    if e.is_retriable() {
+                        return false;
+                    }
+                    tracing::warn!("[eipClient] inst {inst_id} tag '{tag}' read failed: {e}");
+                }
+            }
+        }
+    }
+
     let now = chrono::Local::now().timestamp();
     for (devid, mut values) in per_dev {
         if values.is_empty() {
@@ -598,13 +697,19 @@ async fn handle_write(client: &mut Option<EipClient>, data: &str) {
         Some(t) if t.eq_ignore_ascii_case("string")
     ) || (plc_type.is_none() && matches!(value, SampleValue::Str(_)));
 
+    // A-1（2026-11-01 审查）：`plc_type=string` + 非 Str 值此前走 `unreachable!`
+    // 直接 panic 杀实例——改为可读串化后正常写 STRING tag；未知 plc_type 拒写（A-6）。
     let result = if is_string {
-        let SampleValue::Str(s) = &value else {
-            unreachable!("is_string 为 true 时 value 必为 Str")
-        };
-        c.write_string_tag(tag, s).await
+        c.write_string_tag(tag, &sample_to_string_repr(&value))
+            .await
     } else {
-        c.write_tag(tag, plc_with_type(&value, plc_type)).await
+        match plc_with_type(&value, plc_type) {
+            Ok(pv) => c.write_tag(tag, pv).await,
+            Err(e) => {
+                tracing::warn!("[eipClient] write 拒写：{e}");
+                return;
+            }
+        }
     };
     match result {
         Ok(()) => tracing::debug!("[eipClient] write '{tag}' ok"),
@@ -674,51 +779,125 @@ mod tests {
     fn plc_with_type_defaults_and_explicit() {
         // 缺省推断：整数→Dint（AB 最常用）
         assert_eq!(
-            plc_with_type(&SampleValue::Int(42), None),
+            plc_with_type(&SampleValue::Int(42), None).unwrap(),
             PlcValue::Dint(42)
         );
         assert_eq!(
-            plc_with_type(&SampleValue::Float(1.5), None),
+            plc_with_type(&SampleValue::Float(1.5), None).unwrap(),
             PlcValue::Real(1.5)
         );
         assert_eq!(
-            plc_with_type(&SampleValue::Bool(false), None),
+            plc_with_type(&SampleValue::Bool(false), None).unwrap(),
             PlcValue::Bool(false)
         );
         assert_eq!(
-            plc_with_type(&SampleValue::Str("x".into()), None),
+            plc_with_type(&SampleValue::Str("x".into()), None).unwrap(),
             PlcValue::String("x".into())
         );
         // 显式 plc_type（大小写不敏感）
         assert_eq!(
-            plc_with_type(&SampleValue::Int(7), Some("LINT")),
+            plc_with_type(&SampleValue::Int(7), Some("LINT")).unwrap(),
             PlcValue::Lint(7)
         );
         assert_eq!(
-            plc_with_type(&SampleValue::Int(7), Some("uint")),
+            plc_with_type(&SampleValue::Int(7), Some("uint")).unwrap(),
             PlcValue::Uint(7)
         );
         assert_eq!(
-            plc_with_type(&SampleValue::Int(1), Some("bool")),
+            plc_with_type(&SampleValue::Int(1), Some("bool")).unwrap(),
             PlcValue::Bool(true)
         );
         assert_eq!(
-            plc_with_type(&SampleValue::Float(2.5), Some("lreal")),
+            plc_with_type(&SampleValue::Float(2.5), Some("lreal")).unwrap(),
             PlcValue::Lreal(2.5)
         );
+        // A-1：数值→string 转可读串（此前 Debug 格式会写入字面 "Int(5)" 进 PLC）
         assert_eq!(
-            plc_with_type(&SampleValue::Int(5), Some("string")),
-            PlcValue::String("Int(5)".into())
+            plc_with_type(&SampleValue::Int(5), Some("string")).unwrap(),
+            PlcValue::String("5".into())
         );
-        // 未知类型 → 默认推断
+        // A-6：未知类型拒写（此前静默回退默认推断——"dnit" 拼写错误按 Dint 写 PLC）
+        assert!(
+            plc_with_type(&SampleValue::Int(9), Some("nope")).is_err(),
+            "未知 plc_type 必须 Err"
+        );
+        // 空/空白 plc_type → 默认推断（显式空串视同缺省，不报错）
         assert_eq!(
-            plc_with_type(&SampleValue::Int(9), Some("nope")),
+            plc_with_type(&SampleValue::Int(9), Some("")).unwrap(),
             PlcValue::Dint(9)
         );
-        // 空 plc_type → 默认
         assert_eq!(
-            plc_with_type(&SampleValue::Int(9), Some("")),
+            plc_with_type(&SampleValue::Int(9), Some("  ")).unwrap(),
             PlcValue::Dint(9)
+        );
+    }
+
+    /// A-1：string 写的值串化——Str 原样、数值/布尔转可读串（写入 PLC STRING tag）。
+    #[test]
+    fn sample_to_string_repr_all_variants() {
+        assert_eq!(
+            sample_to_string_repr(&SampleValue::Str("abc".into())),
+            "abc"
+        );
+        assert_eq!(sample_to_string_repr(&SampleValue::Int(5)), "5");
+        assert_eq!(sample_to_string_repr(&SampleValue::Int(-5)), "-5");
+        assert_eq!(sample_to_string_repr(&SampleValue::Float(1.5)), "1.5");
+        assert_eq!(sample_to_string_repr(&SampleValue::Bool(true)), "true");
+        assert_eq!(sample_to_string_repr(&SampleValue::Bool(false)), "false");
+    }
+
+    /// A-2：含 `.` 的 tag（位寻址/成员路径）必须分流单点读，不得进批量路径
+    /// （库批量读对位寻址只取父字整值——静默错数据）。
+    #[test]
+    fn parse_targets_routes_dotted_tags_to_per_tag() {
+        use crate::types::{ChildSpec, DeviceSpec};
+        let devices = vec![DeviceSpec {
+            value: "d1".into(),
+            children: vec![
+                ChildSpec {
+                    value: "MyDint.5".into(),
+                    label: "bit5".into(),
+                    ..Default::default()
+                },
+                ChildSpec {
+                    value: "PlainTag".into(),
+                    label: "plain".into(),
+                    ..Default::default()
+                },
+                ChildSpec {
+                    value: "MyString".into(),
+                    label: "s".into(),
+                    r#type: "string".into(),
+                    ..Default::default()
+                },
+                ChildSpec {
+                    value: "Udt.Member".into(),
+                    label: "m".into(),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        }];
+        let t = parse_targets(&devices);
+        assert_eq!(
+            t.batch,
+            vec![("d1".into(), vec![("plain".into(), "PlainTag".into())])],
+            "无点 tag 进批量"
+        );
+        assert_eq!(
+            t.strings,
+            vec![("d1".into(), vec![("s".into(), "MyString".into())])],
+            "string 类型进专用路径"
+        );
+        let mut per = t.per_tag[0].1.clone();
+        per.sort();
+        assert_eq!(
+            per,
+            vec![
+                ("bit5".to_string(), "MyDint.5".to_string()),
+                ("m".to_string(), "Udt.Member".to_string()),
+            ],
+            "位寻址与成员路径都分流单点读"
         );
     }
 

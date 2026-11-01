@@ -144,17 +144,28 @@ pub(super) fn encode_value(
     p: &PointSpec,
     current_reg: Option<u16>,
 ) -> Result<WritePayload, String> {
-    let as_f = || match sv {
-        SampleValue::Float(f) => *f,
-        SampleValue::Int(i) => *i as f64,
-        SampleValue::Bool(b) => u8::from(*b) as f64,
-        SampleValue::Str(s) => s.parse().unwrap_or(0.0),
+    // C-4（2026-11-01 审查）：非数字字符串此前 `unwrap_or(0)` 静默向 PLC 写 0
+    // （工业写危险）——改为显式 Err 拒写。bool 分支的 "true"/"false" 串不受影响
+    // （as_b 自行匹配，不走数值路径）。
+    let as_f = || -> Result<f64, String> {
+        match sv {
+            SampleValue::Float(f) => Ok(*f),
+            SampleValue::Int(i) => Ok(*i as f64),
+            SampleValue::Bool(b) => Ok(u8::from(*b) as f64),
+            SampleValue::Str(s) => s
+                .parse()
+                .map_err(|_| format!("value 非数字字符串 {s:?}（拒写，不做 0 兜底）")),
+        }
     };
-    let as_i = || match sv {
-        SampleValue::Int(i) => *i,
-        SampleValue::Float(f) => *f as i64,
-        SampleValue::Bool(b) => u8::from(*b) as i64,
-        SampleValue::Str(s) => s.parse().unwrap_or(0),
+    let as_i = || -> Result<i64, String> {
+        match sv {
+            SampleValue::Int(i) => Ok(*i),
+            SampleValue::Float(f) => Ok(*f as i64),
+            SampleValue::Bool(b) => Ok(u8::from(*b) as i64),
+            SampleValue::Str(s) => s
+                .parse()
+                .map_err(|_| format!("value 非数字字符串 {s:?}（拒写，不做 0 兜底）")),
+        }
     };
     let as_b = || match sv {
         SampleValue::Bool(b) => *b,
@@ -176,19 +187,19 @@ pub(super) fn encode_value(
                 cur & !(1 << b)
             }]))
         }
-        (Func::Holding, Type::I16) => Ok(WritePayload::Regs(vec![as_i() as i16 as u16])),
-        (Func::Holding, Type::U16) => Ok(WritePayload::Regs(vec![as_i() as u16])),
+        (Func::Holding, Type::I16) => Ok(WritePayload::Regs(vec![as_i()? as i16 as u16])),
+        (Func::Holding, Type::U16) => Ok(WritePayload::Regs(vec![as_i()? as u16])),
         (Func::Holding, Type::I32) => Ok(WritePayload::Regs(
-            encode_u32(as_i() as i32 as u32, p.order).to_vec(),
+            encode_u32(as_i()? as i32 as u32, p.order).to_vec(),
         )),
         (Func::Holding, Type::U32) => Ok(WritePayload::Regs(
-            encode_u32(as_i() as u32, p.order).to_vec(),
+            encode_u32(as_i()? as u32, p.order).to_vec(),
         )),
         (Func::Holding, Type::F32) => Ok(WritePayload::Regs(
-            encode_u32((as_f() as f32).to_bits(), p.order).to_vec(),
+            encode_u32((as_f()? as f32).to_bits(), p.order).to_vec(),
         )),
         (Func::Holding, Type::F64) => Ok(WritePayload::Regs(
-            encode_u64(as_f().to_bits(), p.order).to_vec(),
+            encode_u64(as_f()?.to_bits(), p.order).to_vec(),
         )),
     }
 }

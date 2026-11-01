@@ -150,25 +150,37 @@ fn sample_value_to_variant(v: &SampleValue) -> Variant {
 ///
 /// OPC UA server 对 write 的类型严格匹配（Int32 节点写 Int64 会 BadTypeMismatch），
 /// 默认映射在真实场景常失败。`opc_type` 让调用方按节点实际类型构造 Variant。
-/// `opc_type = None` 退回 `sample_value_to_variant`（向后兼容）。
+/// `opc_type = None`（或空白）退回 `sample_value_to_variant`（向后兼容）。
 ///
 /// 支持类型（不区分大小写）：Boolean/SByte/Byte/Int16/UInt16/Int32/UInt32/
 /// Int64/UInt64/Float/Double/String。数值按目标类型截断；Bool 节点接受 0/非零或布尔。
-fn variant_with_type(v: &SampleValue, opc_type: Option<&str>) -> Variant {
+///
+/// **D-4（2026-11-01 审查）**：非数字字符串此前 `unwrap_or(0)` 静默写 0（工业写
+/// 危险）→ Err 拒写；**未知 opc_type** 此前静默回退默认推断（"It32" 拼写错误按
+/// Int64 写）→ Err 拒写（与 eip/s7 口径对齐）。
+fn variant_with_type(v: &SampleValue, opc_type: Option<&str>) -> Result<Variant, String> {
     let Some(t) = opc_type.map(str::trim).filter(|s| !s.is_empty()) else {
-        return sample_value_to_variant(v);
+        return Ok(sample_value_to_variant(v));
     };
-    let as_f = || match v {
-        SampleValue::Float(f) => *f,
-        SampleValue::Int(i) => *i as f64,
-        SampleValue::Bool(b) => u8::from(*b) as f64,
-        SampleValue::Str(s) => s.parse().unwrap_or(0.0),
+    let as_f = || -> Result<f64, String> {
+        match v {
+            SampleValue::Float(f) => Ok(*f),
+            SampleValue::Int(i) => Ok(*i as f64),
+            SampleValue::Bool(b) => Ok(u8::from(*b) as f64),
+            SampleValue::Str(s) => s
+                .parse()
+                .map_err(|_| format!("value 非数字字符串 {s:?}（拒写，不做 0 兜底）")),
+        }
     };
-    let as_i = || match v {
-        SampleValue::Int(i) => *i,
-        SampleValue::Float(f) => *f as i64,
-        SampleValue::Bool(b) => u8::from(*b) as i64,
-        SampleValue::Str(s) => s.parse().unwrap_or(0),
+    let as_i = || -> Result<i64, String> {
+        match v {
+            SampleValue::Int(i) => Ok(*i),
+            SampleValue::Float(f) => Ok(*f as i64),
+            SampleValue::Bool(b) => Ok(u8::from(*b) as i64),
+            SampleValue::Str(s) => s
+                .parse()
+                .map_err(|_| format!("value 非数字字符串 {s:?}（拒写，不做 0 兜底）")),
+        }
     };
     let as_b = || match v {
         SampleValue::Bool(b) => *b,
@@ -176,24 +188,35 @@ fn variant_with_type(v: &SampleValue, opc_type: Option<&str>) -> Variant {
         SampleValue::Float(f) => *f != 0.0,
         SampleValue::Str(s) => s.eq_ignore_ascii_case("true"),
     };
-    match t.to_lowercase().as_str() {
+    let out = match t.to_lowercase().as_str() {
         "boolean" => Variant::Boolean(as_b()),
-        "sbyte" => Variant::SByte(as_i() as i8),
-        "byte" => Variant::Byte(as_i() as u8),
-        "int16" => Variant::Int16(as_i() as i16),
-        "uint16" => Variant::UInt16(as_i() as u16),
-        "int32" => Variant::Int32(as_i() as i32),
-        "uint32" => Variant::UInt32(as_i() as u32),
-        "int64" => Variant::Int64(as_i()),
-        "uint64" => Variant::UInt64(as_i() as u64),
-        "float" => Variant::Float(as_f() as f32),
-        "double" => Variant::Double(as_f()),
-        "string" => match v {
-            SampleValue::Str(s) => Variant::String(s.as_str().into()),
-            _ => Variant::String(format!("{v:?}").as_str().into()),
-        },
-        _ => sample_value_to_variant(v),
-    }
+        "sbyte" => Variant::SByte(as_i()? as i8),
+        "byte" => Variant::Byte(as_i()? as u8),
+        "int16" => Variant::Int16(as_i()? as i16),
+        "uint16" => Variant::UInt16(as_i()? as u16),
+        "int32" => Variant::Int32(as_i()? as i32),
+        "uint32" => Variant::UInt32(as_i()? as u32),
+        "int64" => Variant::Int64(as_i()?),
+        "uint64" => Variant::UInt64(as_i()? as u64),
+        "float" => Variant::Float(as_f()? as f32),
+        "double" => Variant::Double(as_f()?),
+        "string" => Variant::String(
+            match v {
+                SampleValue::Str(s) => s.clone(),
+                SampleValue::Int(i) => i.to_string(),
+                SampleValue::Float(f) => f.to_string(),
+                SampleValue::Bool(b) => b.to_string(),
+            }
+            .as_str()
+            .into(),
+        ),
+        other => {
+            return Err(format!(
+                "未知 opc_type {other:?}（支持 boolean/sbyte/byte/int16/uint16/int32/uint32/int64/uint64/float/double/string）"
+            ));
+        }
+    };
+    Ok(out)
 }
 
 /// JSON → SampleValue（写命令的 value 字段）。
@@ -255,15 +278,53 @@ async fn connect(
         .into();
     let token = match (&cfg.username, &cfg.password) {
         (Some(u), Some(p)) => IdentityToken::UserName(u.clone(), Password(p.clone())),
-        _ => IdentityToken::Anonymous,
+        (None, None) => IdentityToken::Anonymous,
+        // D-3（2026-11-01 审查）：半配置静默降级 Anonymous 排障困难（表单漏填密码
+        // 常见）——大声 warn 指出缺哪个，仍保持兼容降级不拒连。
+        (Some(u), None) => {
+            tracing::warn!(
+                "[opcuaClient] username={u:?} 已配但 password 缺失——降级 Anonymous 连接（多为漏填，请补齐）"
+            );
+            IdentityToken::Anonymous
+        }
+        (None, Some(_)) => {
+            tracing::warn!(
+                "[opcuaClient] password 已配但 username 缺失——降级 Anonymous 连接（多为漏填，请补齐）"
+            );
+            IdentityToken::Anonymous
+        }
     };
 
-    let (session, event_loop) = client
-        .connect_to_matching_endpoint(endpoint, token)
-        .await
-        .map_err(|e| format!("connect {}: {e:?}", cfg.endpoint))?;
+    // D-1（2026-11-01 审查）：connect 全流程包超时——`connect_to_matching_endpoint`
+    // 内部含 OS 级 TCP connect（无超时）+ 端点发现往返，`wait_for_connection` 是
+    // 无时限 watch 等待；IP 配错且被 DROP 时分钟级阻塞 tick 分支，token/cmd 全停。
+    const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+    let (session, event_loop) = match tokio::time::timeout(
+        CONNECT_TIMEOUT,
+        client.connect_to_matching_endpoint(endpoint, token),
+    )
+    .await
+    {
+        Ok(r) => r.map_err(|e| format!("connect {}: {e:?}", cfg.endpoint))?,
+        Err(_) => {
+            return Err(format!(
+                "connect {}: timeout ({CONNECT_TIMEOUT:?})",
+                cfg.endpoint
+            ))
+        }
+    };
     let handle = event_loop.spawn();
-    session.wait_for_connection().await;
+    match tokio::time::timeout(CONNECT_TIMEOUT, session.wait_for_connection()).await {
+        Ok(_) => {}
+        Err(_) => {
+            // 中止 event loop task 防 handle 泄漏（重连循环里它不会自行退出）。
+            handle.abort();
+            return Err(format!(
+                "connect {}: wait_for_connection timeout ({CONNECT_TIMEOUT:?})",
+                cfg.endpoint
+            ));
+        }
+    }
     Ok((session, handle))
 }
 
@@ -357,12 +418,14 @@ impl Source for OpcuaClient {
                     break;
                 }
                 msg = cmd_rx.recv() => {
-                    if let Some(m) = msg {
-                        if m.cmd == "write" {
-                            handle_write(&session, &m.data).await;
-                        } else {
-                            tracing::info!("[opcuaClient] inst {inst_id} unknown cmd: {}", m.cmd);
-                        }
+                    // D-2（2026-11-01 审查）：通道关闭（stop 先 unregister 再 cancel）
+                    // 即退出——此前 None 空过会让 select 立即重 Poll 进入热循环
+                    //（与 modbus `Evt::Cmd(None) => break` 对齐）。
+                    let Some(m) = msg else { break };
+                    if m.cmd == "write" {
+                        handle_write(&session, &m.data).await;
+                    } else {
+                        tracing::info!("[opcuaClient] inst {inst_id} unknown cmd: {}", m.cmd);
                     }
                 }
                 _ = flush_ticker.tick() => {
@@ -515,7 +578,15 @@ async fn handle_write(session: &Option<std::sync::Arc<Session>>, data: &str) {
         }
     };
     let opc_type = req.get("opc_type").and_then(|v| v.as_str());
-    let wv = write_value(nid, variant_with_type(&value, opc_type));
+    // D-4：拒写（非数字串 / 未知 opc_type）在构造 Variant 前拦截。
+    let variant = match variant_with_type(&value, opc_type) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!("[opcuaClient] write 拒写：{e}");
+            return;
+        }
+    };
+    let wv = write_value(nid, variant);
     match s.write(&[wv]).await {
         Ok(results) => {
             for st in results {
@@ -621,38 +692,53 @@ mod tests {
     fn variant_with_type_matches_server_node_type() {
         // Int + Int32 → Int32（v1 默认 Int64 会 BadTypeMismatch，显式 Int32 解决）
         assert_eq!(
-            variant_with_type(&SampleValue::Int(42), Some("Int32")),
+            variant_with_type(&SampleValue::Int(42), Some("Int32")).unwrap(),
             Variant::Int32(42)
         );
         // 大小写不敏感
         assert_eq!(
-            variant_with_type(&SampleValue::Int(7), Some("uint16")),
+            variant_with_type(&SampleValue::Int(7), Some("uint16")).unwrap(),
             Variant::UInt16(7)
         );
         // Float + Float → Float(f32)
         assert_eq!(
-            variant_with_type(&SampleValue::Float(1.5), Some("Float")),
+            variant_with_type(&SampleValue::Float(1.5), Some("Float")).unwrap(),
             Variant::Float(1.5_f32)
         );
         // Bool from int
         assert_eq!(
-            variant_with_type(&SampleValue::Int(1), Some("Boolean")),
+            variant_with_type(&SampleValue::Int(1), Some("Boolean")).unwrap(),
             Variant::Boolean(true)
         );
         // 无 opc_type → 默认 Int64
         assert_eq!(
-            variant_with_type(&SampleValue::Int(9), None),
+            variant_with_type(&SampleValue::Int(9), None).unwrap(),
             Variant::Int64(9)
         );
         // 空 opc_type → 默认 Double
         assert_eq!(
-            variant_with_type(&SampleValue::Float(2.0), Some("")),
+            variant_with_type(&SampleValue::Float(2.0), Some("")).unwrap(),
             Variant::Double(2.0)
         );
-        // 未知 opc_type → 默认
+        // D-4：未知 opc_type 拒写（此前静默回退默认——"It32" 拼写错误按 Int64 写）
+        assert!(
+            variant_with_type(&SampleValue::Int(1), Some("unknown")).is_err(),
+            "未知 opc_type 必须 Err"
+        );
+        // D-4：非数字串拒写（此前 unwrap_or(0) 静默写 0）
+        assert!(
+            variant_with_type(&SampleValue::Str("1O".into()), Some("Int32")).is_err(),
+            "非数字字符串必须 Err"
+        );
+        // 数字串照常接受（兼容下行 JSON 值为字符串数字的既有用法）
         assert_eq!(
-            variant_with_type(&SampleValue::Int(1), Some("unknown")),
-            Variant::Int64(1)
+            variant_with_type(&SampleValue::Str("42".into()), Some("Int32")).unwrap(),
+            Variant::Int32(42)
+        );
+        // string 类型 + 数值 → 可读串（对齐 eip A-1：不写 Debug 字面 "Int(5)"）
+        assert_eq!(
+            variant_with_type(&SampleValue::Int(5), Some("String")).unwrap(),
+            Variant::String("5".into())
         );
     }
 

@@ -126,14 +126,20 @@ pub(super) fn parse_cfg(app: &serde_json::Value) -> Result<ModbusCfg, String> {
             (ep, None)
         }
     };
-    let baud_rate = app
-        .get("baud_rate")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(DEFAULT_BAUD_RATE) as u32;
-    let data_bits = app
-        .get("data_bits")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(DEFAULT_DATA_BITS) as u8;
+    // C-5（2026-11-01 审查）：数值键 `as` 截断改 try_from——越界显式 Err，
+    // 不再静默漂移（300 号 slave_id 截成 44 会打到错误从站）。
+    let baud_rate = u32::try_from(
+        app.get("baud_rate")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(DEFAULT_BAUD_RATE),
+    )
+    .map_err(|_| "baud_rate 超出 u32 范围".to_string())?;
+    let data_bits = u8::try_from(
+        app.get("data_bits")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(DEFAULT_DATA_BITS),
+    )
+    .map_err(|_| "data_bits 超出 u8 范围".to_string())?;
     if !matches!(data_bits, 5..=8) {
         return Err(format!("unsupported data_bits {data_bits}（5/6/7/8）"));
     }
@@ -143,10 +149,12 @@ pub(super) fn parse_cfg(app: &serde_json::Value) -> Result<ModbusCfg, String> {
         Some("none") | None => ParityKind::None,
         Some(other) => return Err(format!("unsupported parity '{other}'（none/even/odd）")),
     };
-    let stop_bits = app
-        .get("stop_bits")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(DEFAULT_STOP_BITS) as u8;
+    let stop_bits = u8::try_from(
+        app.get("stop_bits")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(DEFAULT_STOP_BITS),
+    )
+    .map_err(|_| "stop_bits 超出 u8 范围".to_string())?;
     if !matches!(stop_bits, 1 | 2) {
         return Err(format!("unsupported stop_bits {stop_bits}（1/2）"));
     }
@@ -160,29 +168,34 @@ pub(super) fn parse_cfg(app: &serde_json::Value) -> Result<ModbusCfg, String> {
             ))
         }
     };
-    let slave_id = app
-        .get("slave_id")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(DEFAULT_SLAVE_ID) as u8;
+    let slave_id = u8::try_from(
+        app.get("slave_id")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(DEFAULT_SLAVE_ID),
+    )
+    .map_err(|_| "slave_id 超出 0-255 范围（Modbus 从站号）".to_string())?;
     let period = app
         .get("period")
         .and_then(|v| v.as_u64())
         .unwrap_or(DEFAULT_PERIOD_SECS)
         .max(1);
-    let gap_threshold = app
-        .get("gap_threshold")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(DEFAULT_GAP_THRESHOLD) as u16;
+    let gap_threshold = u16::try_from(
+        app.get("gap_threshold")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(DEFAULT_GAP_THRESHOLD),
+    )
+    .map_err(|_| "gap_threshold 超出 u16 范围".to_string())?;
     let max_regs = app
         .get("max_regs")
         .and_then(|v| v.as_u64())
         .unwrap_or(DEFAULT_MAX_REGS)
-        .clamp(1, 125) as u16;
+        .clamp(1, 125) as u16; // clamp 在 u64 域完成，cast 无截断
+                               // C-6：上界 3600——重连退避 sleep 与 token 已竞争，但小时级退避等同静默瘫痪。
     let reconnect_secs = app
         .get("reconnect_secs")
         .and_then(|v| v.as_u64())
         .unwrap_or(DEFAULT_RECONNECT_SECS)
-        .max(1);
+        .clamp(1, 3600);
     let poll_strategy = match app.get("poll_strategy").and_then(|v| v.as_str()) {
         Some("round_robin") | None => PollStrategy::RoundRobin,
         Some("sequential") => PollStrategy::Sequential,

@@ -254,7 +254,10 @@ fn parse_kind(s: &str) -> Result<(Kind, u16), String> {
             let n = t[i + 1..t.len() - 1]
                 .parse::<u16>()
                 .map_err(|_| format!("bad kind length in '{s}'"))?;
-            (t[..i].to_string(), n.max(1))
+            // B-4（2026-11-01 审查）：钳到 S7 规范上限 254——库的 read/write_string
+            // 以 `max_len + 2`（u16）算总长，65535 会回绕成 1 → 写路径 `buf[1]`
+            // 越界 panic（release 无 overflow-checks 必崩）。
+            (t[..i].to_string(), n.clamp(1, DEFAULT_STRING_MAX_LEN))
         }
         _ => (t, DEFAULT_STRING_MAX_LEN),
     };
@@ -347,6 +350,29 @@ fn decode_item(kind: Kind, item: &DataItem) -> Option<SampleValue> {
         // string/wstring 走单点 API，不经此函数；0 字节防御分支已在 need 检查拦截。
         Kind::String | Kind::WString => return None,
     })
+}
+
+/// 会话期错误的连接致命性判定（B-2，2026-11-01 审查）。
+///
+/// 库的 `is_connection_error()` 只认 ConnectionRefused/Timeout/Closed/NotConnected
+/// 四变体——但会话期读错误实际产出是 `IoErr`（TCP RST）与 `Error("No data in read
+/// response" / "Actor disconnected")`（FIN/actor 退出），四变体一个都不会出现，
+/// 原判定恒 false → `conn_lost` 永不置位、插件重连是死代码（auto_reconnect=false
+/// 时一次断线即永久停摆）。此处补 `IoErr`；不可判别的 `Error(_)` 字符串类
+/// （actor 已死）由 [`CONSEC_FAIL_RECONNECT`] 连续失败计数兜底。
+fn conn_fatal(e: &S7Error) -> bool {
+    e.is_connection_error() || matches!(e, S7Error::IoErr(_))
+}
+
+/// 连续读失败 N 拍 → 视作连接失效拆连接重连（覆盖 `Error(_)` 形态的 actor 死亡）。
+const CONSEC_FAIL_RECONNECT: u32 = 3;
+
+/// 会话期单次 I/O 上限（B-1）：库的 `with_timeout` 只包 connect，会话期
+/// `read`/`write` 的 `framed` 收发无任何超时——半开连接（拔网线，无 RST/FIN）
+/// 会永久挂死 select 的 tick 分支，token/cmd 全停。插件侧统一包本上限，
+/// 超时视作连接失效（`conn_lost`）拆连接。
+fn io_timeout(cfg: &S7Cfg) -> Duration {
+    Duration::from_millis(cfg.timeout_ms.max(1))
 }
 
 /// 建立到 PLC 的 S7 连接（`with_plc_type` 自动填 rack/slot 默认；用户显式配则覆盖）。
@@ -475,6 +501,9 @@ impl Source for S7Client {
             ctx.lux.clone(),
         );
         let mut reconnects: u64 = 0;
+        // B-1/B-2：会话期 I/O 上限 + 连续失败计数（见两 helper 注释）。
+        let io_timeout = io_timeout(&cfg);
+        let mut consec_read_fails: u32 = 0;
         let mut flush_ticker = crate::plugin::stat_tracker::flush_ticker(inst_id.as_str());
         // 启动即落一次初始 stat（ticker 首拍带相位延迟，见 stat_tracker::flush_ticker）。
         tracker.flush().await;
@@ -490,7 +519,7 @@ impl Source for S7Client {
                 msg = cmd_rx.recv() => {
                     if let Some(m) = msg {
                         if m.cmd == "write" {
-                            handle_write(&client, &m.data).await;
+                            handle_write(&client, &m.data, io_timeout).await;
                         } else {
                             tracing::info!("[s7Client] inst {inst_id} unknown cmd: {}", m.cmd);
                         }
@@ -537,17 +566,21 @@ impl Source for S7Client {
 
                         // ① string/wstring 单点读（per-item 容错；连接错误中断）。
                         for (field, addr, kind, max_len) in &dev.strings {
-                            let r = if *kind == Kind::WString {
-                                c.read_wstring(addr, *max_len).await
-                            } else {
-                                c.read_string(addr, *max_len).await
-                            };
+                            // B-1：单点 string 读包 io_timeout（库会话期无超时）。
+                            let r = tokio::time::timeout(io_timeout, async {
+                                if *kind == Kind::WString {
+                                    c.read_wstring(addr, *max_len).await
+                                } else {
+                                    c.read_string(addr, *max_len).await
+                                }
+                            })
+                            .await;
                             match r {
-                                Ok(s) => {
+                                Ok(Ok(s)) => {
                                     values.insert(field.clone(), SampleValue::Str(s));
                                 }
-                                Err(e) => {
-                                    if e.is_connection_error() {
+                                Ok(Err(e)) => {
+                                    if conn_fatal(&e) {
                                         conn_lost = true;
                                         tracing::warn!(
                                             "[s7Client] inst {inst_id} string read lost connection: {e}"
@@ -557,6 +590,15 @@ impl Source for S7Client {
                                     tracing::warn!(
                                         "[s7Client] inst {inst_id} string '{addr}' read failed: {e}"
                                     );
+                                }
+                                Err(_) => {
+                                    // B-1：无响应（半开）——视作连接失效。
+                                    conn_lost = true;
+                                    tracing::warn!(
+                                        "[s7Client] inst {inst_id} string '{addr}' read timeout ({}ms)，拆连接",
+                                        cfg.timeout_ms
+                                    );
+                                    break;
                                 }
                             }
                         }
@@ -588,15 +630,19 @@ impl Source for S7Client {
                             .chunks(cfg.max_items_per_request)
                             .zip(ok_pts.chunks(cfg.max_items_per_request))
                         {
-                            match c.read(chunk_items.to_vec()).await {
-                                Ok(data_items) => {
+                            // B-1：批量读包 io_timeout（库会话期无超时，半开连接会
+                            // 永久挂死 tick 分支）。
+                            match tokio::time::timeout(io_timeout, c.read(chunk_items.to_vec()))
+                                .await
+                            {
+                                Ok(Ok(data_items)) => {
                                     for (p, di) in chunk_pts.iter().zip(data_items.iter()) {
                                         if let Some(v) = decode_item(p.2, di) {
                                             values.insert(p.0.clone(), v);
                                         }
                                     }
                                 }
-                                Err(e) => {
+                                Ok(Err(e)) => {
                                     read_failed = true;
                                     tracker.tick_fail(&format!("read failed: {e}"));
                                     tracing::warn!(
@@ -604,9 +650,21 @@ impl Source for S7Client {
                                     );
                                     // 连接类错误：drop 旧 client，下个 tick 重连（库的
                                     // auto_reconnect 也可能在后台恢复，此处兜底）。
-                                    if e.is_connection_error() {
+                                    // B-2：is_connection_error 会话期恒 false（见
+                                    // conn_fatal 注释），IoErr 一并计入。
+                                    if conn_fatal(&e) {
                                         conn_lost = true;
                                     }
+                                    break;
+                                }
+                                Err(_) => {
+                                    read_failed = true;
+                                    conn_lost = true;
+                                    tracker.tick_fail("read timeout");
+                                    tracing::warn!(
+                                        "[s7Client] inst {inst_id} read timeout ({}ms)，拆连接",
+                                        cfg.timeout_ms
+                                    );
                                     break;
                                 }
                             }
@@ -636,6 +694,18 @@ impl Source for S7Client {
                     }
                     if tick_ok {
                         tracker.tick_ok(started.elapsed().as_millis() as u64);
+                        consec_read_fails = 0;
+                    } else {
+                        // B-2 兜底：错误形态不可判别（`Error(_)` 字符串类，如 actor
+                        // 已死后的 "Actor disconnected"）时靠连续失败计数拆连接——
+                        // 否则 auto_reconnect=false 下一次断线即永久停摆。
+                        consec_read_fails = consec_read_fails.saturating_add(1);
+                        if consec_read_fails >= CONSEC_FAIL_RECONNECT && client.is_some() {
+                            tracing::warn!(
+                                "[s7Client] inst {inst_id} 连续 {consec_read_fails} 拍读失败（错误形态不可判别，视作连接失效重连）"
+                            );
+                            client = None;
+                        }
                     }
                     if tracker.should_flush() {
                         tracker.flush().await;
@@ -645,7 +715,9 @@ impl Source for S7Client {
         }
 
         if let Some(mut c) = client {
-            let _ = c.disconnect().await;
+            // B-3：disconnect 包 1s 上限——库 actor 在重连循环中时 Disconnect 要等
+            // 重连成功才被处理，PLC 不可达即无限期挂起（stop 已 3s 超时返回，task 泄漏）。
+            let _ = tokio::time::timeout(Duration::from_secs(1), c.disconnect()).await;
         }
         tracing::info!("[s7Client] inst {inst_id} exited");
 
@@ -660,7 +732,7 @@ impl Source for S7Client {
 /// `kind` 缺省时按 value 类型推断（bool→Bool、浮点→F64、整数→I64）。写方向用库 typed
 /// 单点方法（库内部处理大端编码），不批量——写命令单点语义清晰。string 写额外支持
 /// `"max_len":254`（缺省 254，须与 PLC 声明一致——写入头的 max_len 字段）。
-async fn handle_write(client: &Option<S7Conn>, data: &str) {
+async fn handle_write(client: &Option<S7Conn>, data: &str, io_timeout: Duration) {
     let c = match client {
         Some(c) => c,
         None => {
@@ -703,8 +775,16 @@ async fn handle_write(client: &Option<S7Conn>, data: &str) {
     if let Some(n) = req.get("max_len").and_then(|v| v.as_u64()) {
         max_len = u16::try_from(n).unwrap_or(DEFAULT_STRING_MAX_LEN);
     }
-    if let Err(e) = write_typed(c, address, kind, max_len, &value).await {
-        tracing::warn!("[s7Client] write failed: {e}");
+    // B-1：写路径同款 io_timeout（库会话期写无超时，半开连接会把 handle_write
+    // 连同整个 select 挂死）。超时后连接由下个读 tick 的失败计数接管拆连接。
+    match tokio::time::timeout(io_timeout, write_typed(c, address, kind, max_len, &value)).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => {
+            tracing::warn!("[s7Client] write failed: {e}");
+        }
+        Err(_) => {
+            tracing::warn!("[s7Client] write '{address}' timeout ({io_timeout:?})");
+        }
     }
 }
 
@@ -825,6 +905,14 @@ mod tests {
         assert_eq!(parse_kind("string[0]").unwrap(), (Kind::String, 1));
         // 无闭合括号
         assert!(parse_kind("string[64").is_err());
+        // B-4：超 S7 规范上限 254 的声明长度钳到 254——库 read/write_string 以
+        // `max_len + 2`（u16）算总长，65535 回绕成 1 会让写路径 buf[1] 越界 panic。
+        assert_eq!(
+            parse_kind("string[65535]").unwrap(),
+            (Kind::String, DEFAULT_STRING_MAX_LEN),
+            "65535 必须钳到 254（防库内 u16 回绕 panic）"
+        );
+        assert_eq!(parse_kind("wstring[9999]").unwrap(), (Kind::WString, 254));
     }
 
     #[test]
