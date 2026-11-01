@@ -63,3 +63,22 @@ test:
 [group('quality')]
 check-s7-eip:
     cargo test --features "s7,eip" --test s7_e2e --test eip_client_e2e --test feature_gate_e2e
+
+# ── 编译缓存维护（2026-11-01 实测 target/debug 积到 132G：换 feature 组合会累积
+#    新 deps，旧产物 cargo 永不回收；全盘 81% 用量就是这么来的）─────────────────
+
+# 硬清：删 target/debug（可重建，下次 cargo test 冷构建约 3~5 分钟）。
+# 保留 target/release——dev 栈（warden dev-rs-iot/dev-gateway）正从它运行。
+# 注意：simulator 的 release 因 IEC104 依赖仓缺失不可重编，本配方绝不动本仓之外的 target。
+[group('maintenance')]
+clean-cache:
+    @echo "删除 target/debug（下次 cargo test 冷构建约 3~5 分钟）..."
+    @rm -rf target/debug
+    @du -sh target 2>/dev/null || echo "target/ 已不存在"
+    @df -h / | tail -1
+
+# 温和清：只删 N 天未访问的陈旧产物（保留近期热缓存；需 cargo-sweep，
+# 安装：cargo binstall cargo-sweep）。建议季度跑一次，替代 clean-cache 的大轰炸。
+[group('maintenance')]
+sweep days="30":
+    cargo sweep --time {{days}}
