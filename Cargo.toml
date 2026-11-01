@@ -99,6 +99,11 @@ mime_guess = "2"
 
 # OPC UA 南向插件（async-opcua：freeopcua 社区接棒 locka99 的现代纯 async 实现）
 async-opcua = { version = "0.19", default-features = false, features = ["client"], optional = true }
+# 进程内 OPC UA server（opcuaClient OPC-9 订阅 e2e 用）。放 [dependencies] 而
+# 非 [dev-dependencies] 是因为 cargo 不允许 dev-deps optional——用 optional +
+# feature `opcua-e2e` 门控达到等价效果：default/裁剪构建不编译，lib 代码不引用它，
+# release 依赖面零变化；与 async-opcua(client) 同源共用 opcua-types。
+async-opcua-server = { version = "0.19", optional = true }
 
 # 文件日志（tokio-rs 官方 appender，RollingFileAppender daily 轮转 + non_blocking）
 tracing-appender = "0.2"
@@ -179,6 +184,10 @@ eip = ["dep:rust-ethernet-ip"]
 # L1 编译期开关（L2=[history].enabled、L3=TagProps.history）；不进 default，
 # 默认/裁剪构建不拉 tsink。见 docs/designs/2026-08-25-history-write-path-plan.md。
 history = ["dep:tsink"]
+# opcuaClient 订阅 e2e（OPC-9）：进程内 async-opcua-server 真实联调（订阅首值/
+# 变化推送/写回执）。测试专用，不进 default；需与 opcua 同开（`--features
+# "opcua,opcua-e2e"`），默认 feature 面已含 opcua。
+opcua-e2e = ["dep:async-opcua-server"]
 # 预留（后续里程碑）：
 # local-broker = ["dep:rumqttd"]
 # analytics = ["dep:datafusion"]

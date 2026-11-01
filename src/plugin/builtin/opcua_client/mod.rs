@@ -3,6 +3,11 @@
 //! 周期连接外部 UA Server，按 `devices` 配置读取 NodeId 值，组装 `Sample` 推入 hub。
 //! 同时消费下行命令（`cmd="write"`）写回 Server item。
 //!
+//! 采集模式（OPC-9）：`acquisition_mode` = `"auto"`（缺省，先试订阅、服务不支持降级轮询）
+//! | `"subscription"`（强制订阅，失败拆会话重试）| `"polling"`（纯轮询，行为同旧版）。
+//! 订阅参数：`publishing_interval_ms`（1000）、`sampling_interval_ms`（0=随发布间隔）、
+//! `queue_size`（1）、`subscription_watchdog_secs`（60，无任何消息含 keep-alive 即重连）。
+//!
 //! 配置（`InstConfig::app_config` JSON）：
 //! ```json
 //! {
@@ -12,6 +17,7 @@
 //!                                    // 非 none 一律 SignAndEncrypt（无 Sign-only 模式）
 //!   "username": null, "password": null,
 //!   "period": 3,
+//!   "acquisition_mode": "auto",      // auto | subscription | polling（OPC-9，缺省 auto）
 //!   "request_timeout_ms": 10000,     // 单次 read/write 超时（100..120000）；超时视为会话失效，下拍重连
 //!   "trust_server_certs": true,      // 默认 true（兼容）：跳过证书有效期/主机名校验；
 //!                                    // security_policy=none 时通道无加密（用户名/密码明文）并 warn
@@ -35,6 +41,7 @@
 
 mod convert;
 mod node;
+mod subscription;
 #[cfg(test)]
 mod tests;
 
@@ -58,6 +65,10 @@ use std::ops::Range;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use subscription::{
+    aggregate_notifications, setup_subscription, watchdog_expired, AcquisitionMode, SubMsg,
+    SubRuntime, SubscriptionParams, DEFAULT_MAX_MONITORED_ITEMS_PER_CALL,
+};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -95,6 +106,10 @@ struct OpcuaCfg {
     username: Option<String>,
     password: Option<String>,
     period: u64,
+    /// 采集模式（OPC-9）：auto（缺省）= 先试订阅，服务不支持降级轮询。
+    acquisition_mode: AcquisitionMode,
+    /// 订阅参数（OPC-9；仅订阅路径使用）。
+    subscription: SubscriptionParams,
     /// 单次 read/write 超时（毫秒）。
     request_timeout_ms: u64,
     /// 是否信任任意服务端证书（跳过有效期/主机名/ApplicationUri 校验）。
@@ -131,6 +146,8 @@ fn parse_cfg(app: &serde_json::Value) -> Result<OpcuaCfg, String> {
         .and_then(|v| v.as_u64())
         .unwrap_or(DEFAULT_PERIOD_SECS)
         .max(1);
+    // OPC-9：采集模式与订阅参数（夹紧 + warn 在 subscription 模块内）。
+    let (acquisition_mode, subscription) = subscription::parse_subscription(app)?;
     // OPC-10：读写请求超时（库默认 60s 不可配 → 一轮读超 period 无告警、select 被堵）。
     let request_timeout_ms = match app.get("request_timeout_ms").and_then(|v| v.as_u64()) {
         Some(v) if !(MIN_REQUEST_TIMEOUT_MS..=MAX_REQUEST_TIMEOUT_MS).contains(&v) => {
@@ -158,6 +175,8 @@ fn parse_cfg(app: &serde_json::Value) -> Result<OpcuaCfg, String> {
         username,
         password,
         period,
+        acquisition_mode,
+        subscription,
         request_timeout_ms,
         trust_server_certs,
         verify_server,
@@ -359,7 +378,34 @@ fn format_endpoint_list(eps: &[EndpointDescription], limit: usize) -> String {
 /// 读 ServerCapabilities/OperationLimits 下的标准变量 `i=11705`。读不到/为 0 →
 /// [`DEFAULT_MAX_NODES_PER_READ`]（服务端未声明上限时的保守分批）。
 async fn probe_max_nodes_per_read(session: &Session, timeout: Duration) -> usize {
-    let node = NodeId::from(VariableId::Server_ServerCapabilities_OperationLimits_MaxNodesPerRead);
+    probe_operation_limit(
+        session,
+        VariableId::Server_ServerCapabilities_OperationLimits_MaxNodesPerRead,
+        DEFAULT_MAX_NODES_PER_READ,
+        timeout,
+    )
+    .await
+}
+
+/// 读服务端 `MaxMonitoredItemsPerCall`（OPC-9；标准变量 `i=11714`，探测方式同上）。
+async fn probe_max_monitored_items_per_call(session: &Session, timeout: Duration) -> usize {
+    probe_operation_limit(
+        session,
+        VariableId::Server_ServerCapabilities_OperationLimits_MaxMonitoredItemsPerCall,
+        DEFAULT_MAX_MONITORED_ITEMS_PER_CALL,
+        timeout,
+    )
+    .await
+}
+
+/// 读 OperationLimits 标准变量的通用探测（读不到/为 0 → `default`）。
+async fn probe_operation_limit(
+    session: &Session,
+    var: VariableId,
+    default: usize,
+    timeout: Duration,
+) -> usize {
+    let node = NodeId::from(var);
     let req = [ReadValueId::from(node)];
     match tokio::time::timeout(
         timeout,
@@ -374,8 +420,8 @@ async fn probe_max_nodes_per_read(session: &Session, timeout: Duration) -> usize
             .and_then(variant_as_u64)
             .map(|n| n as usize)
             .filter(|n| *n > 0)
-            .unwrap_or(DEFAULT_MAX_NODES_PER_READ),
-        _ => DEFAULT_MAX_NODES_PER_READ,
+            .unwrap_or(default),
+        _ => default,
     }
 }
 
@@ -677,6 +723,20 @@ impl Source for OpcuaClient {
         // 启动即落一次初始 stat（ticker 首拍带相位延迟，见 stat_tracker::flush_ticker）。
         tracker.flush().await;
 
+        // OPC-9 订阅模式运行态。
+        // mode_eff：本连接生效模式——auto 降级后为 Polling，重连成功时重置
+        //（服务端升级/更换后自动恢复订阅，不自锁在轮询）。
+        let mut mode_eff = cfg.acquisition_mode;
+        // 通知通道跨连接复用（回调桥只持 sender；旧会话 drop 时 sender 随之释放）。
+        let (notify_tx, mut notify_rx) = mpsc::unbounded_channel::<SubMsg>();
+        let mut sub: Option<SubRuntime> = None;
+        let mut subscription_fallbacks: u64 = 0;
+        let mut subscription_bad_items: u64 = 0;
+        let mut sub_idle_ticks: u64 = 0;
+        let watchdog = Duration::from_secs(cfg.subscription.watchdog_secs);
+        let mut last_activity = Instant::now();
+        let mut saw_activity = false;
+
         let mut session: Option<Arc<Session>> = None;
         let mut ev_handle: Option<JoinHandle<StatusCode>> = None;
         let mut namespaces: Option<NamespaceMap> = None;
@@ -722,9 +782,100 @@ impl Source for OpcuaClient {
                             }
                             prepared = None;
                             namespaces = None;
+                            // 订阅随会话失效（服务端自清），本地映射一并作废
+                            sub = None;
                         }
                     } else {
                         tracing::info!("[opcuaClient] inst {inst_id} unknown cmd: {}", m.cmd);
+                    }
+                }
+                // OPC-9：订阅通知（guard：仅订阅已建立时启用；通道关闭见 None 分支）
+                msg = notify_rx.recv(), if sub.is_some() => {
+                    let (mut batch, mut statuses) = (Vec::new(), Vec::new());
+                    match msg {
+                        Some(SubMsg::Data { client_handle, value }) => {
+                            batch.push((client_handle, value));
+                        }
+                        Some(SubMsg::KeepAlive) => {}
+                        Some(SubMsg::Status(st)) => statuses.push(st),
+                        None => {
+                            // 订阅已建立但发送端全没了 = 会话内部订阅状态已销毁；
+                            // 拆会话走重连（防 recv 空转热循环，也不静默滞留）
+                            tracing::warn!(
+                                "[opcuaClient] inst {inst_id} 订阅通知通道关闭（会话订阅状态已销毁），拆会话重连"
+                            );
+                            close_session(&mut session, &mut ev_handle, &inst_id).await;
+                            prepared = None;
+                            namespaces = None;
+                            sub = None;
+                            continue;
+                        }
+                    }
+                    // 连续 drain 同批通知（一次 publish 的多点变化聚成尽量少的 Sample）
+                    loop {
+                        match notify_rx.try_recv() {
+                            Ok(SubMsg::Data { client_handle, value }) => {
+                                batch.push((client_handle, value))
+                            }
+                            Ok(SubMsg::KeepAlive) => {}
+                            Ok(SubMsg::Status(st)) => statuses.push(st),
+                            Err(_) => break,
+                        }
+                    }
+                    // 任何消息（数据/keep-alive/状态）都证明订阅活着
+                    saw_activity = true;
+                    last_activity = Instant::now();
+                    if !batch.is_empty() {
+                        let (by_dev, bad_keys) = {
+                            let Some(rt) = sub.as_ref() else { continue };
+                            aggregate_notifications(batch, &rt.handles)
+                        };
+                        bad_quality_total += bad_keys.len() as u64;
+                        for key in &bad_keys {
+                            if bad_warn.allow(key) {
+                                tracing::warn!(
+                                    "[opcuaClient] inst {inst_id} 点 {key} 坏质量（订阅通知，同点位 60s 内仅记一条）"
+                                );
+                            }
+                        }
+                        // OPC-3 同口径：接收时刻；每 devid 一个 Sample（F-9：values 至少 1 项）
+                        let now_ts = chrono::Local::now().timestamp();
+                        let mut send_failed = false;
+                        for (devid, values) in by_dev {
+                            let sample = Sample {
+                                hwid: ctx.hwid.clone(),
+                                devid,
+                                values,
+                                timestamp: now_ts,
+                            };
+                            if tx.send(sample).await.is_err() {
+                                send_failed = true;
+                                break;
+                            }
+                        }
+                        if send_failed {
+                            // hub 已关闭：实例退出（与轮询路径同口径）
+                            break;
+                        }
+                    }
+                    // 状态变化：非 Good（BadTimeout=服务端删订阅 等）→ 拆会话重连
+                    for st in statuses {
+                        if st.is_good() {
+                            tracing::debug!(
+                                "[opcuaClient] inst {inst_id} 订阅状态变化: {st}"
+                            );
+                            continue;
+                        }
+                        let msg = format!("subscription status change: {st}");
+                        tracing::warn!(
+                            "[opcuaClient] inst {inst_id} {msg}，拆会话重连（服务端已终止订阅）"
+                        );
+                        tracker.tick_fail(&msg);
+                        close_session(&mut session, &mut ev_handle, &inst_id).await;
+                        prepared = None;
+                        namespaces = None;
+                        sub = None;
+                        break;
                     }
                 }
                 _ = flush_ticker.tick() => {
@@ -788,6 +939,99 @@ impl Source for OpcuaClient {
                                 ));
                                 session = Some(s);
                                 ev_handle = Some(h);
+                                // OPC-9：订阅模式（auto 先试订阅）——建订阅 + 全量
+                                // monitored items；失败按模式裁决（降级/拆会话）。
+                                if mode_eff != AcquisitionMode::Polling {
+                                    // 重连重置生效模式：auto 每个新连接重试订阅
+                                    //（服务端升级/更换后自愈，不锁死在轮询）。
+                                    mode_eff = cfg.acquisition_mode;
+                                    // 通道复用：清上一连接残留通知（旧 handle 映射已作废）
+                                    while notify_rx.try_recv().is_ok() {}
+                                    let max_mi = probe_max_monitored_items_per_call(
+                                        session.as_ref().expect("just set"),
+                                        request_timeout,
+                                    )
+                                    .await;
+                                    tracker.extra_insert(
+                                        "max_monitored_items_per_call",
+                                        serde_json::json!(max_mi),
+                                    );
+                                    let setup = setup_subscription(
+                                        session.as_ref().expect("just set"),
+                                        prepared.as_ref().expect("just set"),
+                                        &cfg.subscription,
+                                        notify_tx.clone(),
+                                        max_mi,
+                                        request_timeout,
+                                    )
+                                    .await;
+                                    match setup {
+                                        Ok(rt) => {
+                                            subscription_bad_items += rt.rejected.len() as u64;
+                                            for (key, st) in &rt.rejected {
+                                                if bad_warn.allow(key) {
+                                                    tracing::warn!(
+                                                        "[opcuaClient] inst {inst_id} 点 {key} monitored item 被拒 {st}（同点位 60s 内仅记一条；会话保留）"
+                                                    );
+                                                }
+                                            }
+                                            tracing::info!(
+                                                "[opcuaClient] inst {inst_id} subscription={} 建立（{} 点，{} 点被拒）",
+                                                rt.subscription_id,
+                                                rt.handles.len(),
+                                                rt.rejected.len()
+                                            );
+                                            sub = Some(rt);
+                                            // 建立本身即活动：首个心跳不判 idle
+                                            last_activity = Instant::now();
+                                            saw_activity = true;
+                                            tracker.extra_insert(
+                                                "subscription_bad_items",
+                                                serde_json::json!(subscription_bad_items),
+                                            );
+                                        }
+                                        Err(f) => {
+                                            let downgrade = f.error().is_some_and(|e| {
+                                                subscription::fallback_to_polling(mode_eff, e)
+                                            });
+                                            if downgrade {
+                                                // auto + 服务不支持：本连接降级轮询（会话保留）
+                                                subscription_fallbacks += 1;
+                                                tracker.extra_insert(
+                                                    "subscription_fallbacks",
+                                                    serde_json::json!(subscription_fallbacks),
+                                                );
+                                                tracing::warn!(
+                                                    "[opcuaClient] inst {inst_id} 服务端不支持订阅（{}），本连接降级轮询",
+                                                    f.message()
+                                                );
+                                                mode_eff = AcquisitionMode::Polling;
+                                                sub = None;
+                                            } else {
+                                                // subscription 模式 / 非支持类错误：失败可见化 + 拆会话重试
+                                                let msg =
+                                                    format!("subscription setup failed: {}", f.message());
+                                                tracker.tick_fail(&msg);
+                                                tracing::warn!(
+                                                    "[opcuaClient] inst {inst_id} {msg}，拆会话重试"
+                                                );
+                                                close_session(
+                                                    &mut session,
+                                                    &mut ev_handle,
+                                                    &inst_id,
+                                                )
+                                                .await;
+                                                prepared = None;
+                                                namespaces = None;
+                                                sub = None;
+                                                if tracker.should_flush() {
+                                                    tracker.flush().await;
+                                                }
+                                                continue;
+                                            }
+                                        }
+                                    }
+                                }
                             }
                             Err(e) => {
                                 tracker.tick_fail(&format!("connect failed: {e}"));
@@ -798,6 +1042,60 @@ impl Source for OpcuaClient {
                                 continue;
                             }
                         }
+                    }
+                    if session.is_none() {
+                        // connect 失败 / 订阅建立失败：本拍已 tick_fail + flush
+                        continue;
+                    }
+                    if sub.is_some() {
+                        // ---------- OPC-9 订阅模式心跳 ----------
+                        // F-7 overrun 警告不适用：本模式无周期采集拍，服务端慢表现为
+                        // keep-alive/数据间隔变长，由看门狗统一判定，不再按拍读。
+                        if saw_activity {
+                            tracker.tick_ok(period.as_millis() as u64);
+                            saw_activity = false;
+                            sub_idle_ticks = 0;
+                        } else {
+                            sub_idle_ticks += 1;
+                        }
+                        tracker.extra_insert(
+                            "subscription_idle_ticks",
+                            serde_json::json!(sub_idle_ticks),
+                        );
+                        tracker.extra_insert(
+                            "bad_quality",
+                            serde_json::json!(bad_quality_total),
+                        );
+                        tracker.extra_insert(
+                            "request_timeouts",
+                            serde_json::json!(request_timeouts_total),
+                        );
+                        tracker.extra_insert(
+                            "subscription_fallbacks",
+                            serde_json::json!(subscription_fallbacks),
+                        );
+                        tracker.extra_insert(
+                            "subscription_bad_items",
+                            serde_json::json!(subscription_bad_items),
+                        );
+                        // 看门狗：无任何消息（含 keep-alive）超窗 → 订阅失效，拆会话
+                        //（走现有重连路径重建订阅+映射）。检测粒度 = 心跳拍 period。
+                        if watchdog_expired(Instant::now(), last_activity, watchdog) {
+                            let msg = format!(
+                                "subscription watchdog: {}s 无任何消息（含 keep-alive），订阅失效",
+                                cfg.subscription.watchdog_secs
+                            );
+                            tracker.tick_fail(&msg);
+                            tracing::warn!("[opcuaClient] inst {inst_id} {msg}");
+                            close_session(&mut session, &mut ev_handle, &inst_id).await;
+                            prepared = None;
+                            namespaces = None;
+                            sub = None;
+                        }
+                        if tracker.should_flush() {
+                            tracker.flush().await;
+                        }
+                        continue;
                     }
                     let Some(s) = session.clone() else { continue };
                     let mut total_points = 0usize;

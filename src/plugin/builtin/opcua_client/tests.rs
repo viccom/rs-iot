@@ -13,8 +13,8 @@ use super::convert::{
 use super::node::{parse_node_spec, resolve_write_target, RawDevice, RawPoint};
 use super::*;
 use opcua::types::{
-    AttributeId, DataValue, EndpointDescription, MessageSecurityMode, NamespaceMap, NodeId,
-    NumericRange, StatusCode, Variant,
+    AttributeId, DataValue, EndpointDescription, MessageSecurityMode, MonitoringMode, NamespaceMap,
+    NodeId, NumericRange, StatusCode, Variant,
 };
 use std::time::Duration;
 
@@ -761,4 +761,268 @@ fn rate_limit_suppresses_repeats_within_window() {
     let mut rl0 = RateLimit::new(Duration::ZERO);
     assert!(rl0.allow("k"));
     assert!(rl0.allow("k"), "零窗口 = 不抑制");
+}
+
+// ---------- OPC-9 Subscription（订阅/monitored items） ----------
+
+use super::subscription::{
+    aggregate_notifications, build_monitored_items, fallback_to_polling, watchdog_expired,
+    AcquisitionMode, HandleAllocator,
+};
+use opcua::types::Error;
+
+#[test]
+fn parse_cfg_subscription_defaults_and_clamps() {
+    // 缺省：auto 模式 + 订阅参数缺省值
+    let cfg = parse_cfg(&serde_json::json!({"endpoint":"opc.tcp://x:1234"})).unwrap();
+    assert_eq!(cfg.acquisition_mode, AcquisitionMode::Auto);
+    assert_eq!(cfg.subscription.publishing_interval_ms, 1000);
+    assert_eq!(cfg.subscription.sampling_interval_ms, 0);
+    assert_eq!(cfg.subscription.queue_size, 1);
+    assert_eq!(cfg.subscription.watchdog_secs, 60);
+
+    // 三种模式词表
+    for (word, mode) in [
+        ("auto", AcquisitionMode::Auto),
+        ("subscription", AcquisitionMode::Subscription),
+        ("polling", AcquisitionMode::Polling),
+    ] {
+        let cfg = parse_cfg(&serde_json::json!({
+            "endpoint":"x", "acquisition_mode": word
+        }))
+        .unwrap();
+        assert_eq!(cfg.acquisition_mode, mode, "{word}");
+    }
+    // 未知模式词 → 配置错误（不静默回退，拼写错误必须显式暴露）
+    assert!(
+        parse_cfg(&serde_json::json!({"endpoint":"x","acquisition_mode":"sub"})).is_err(),
+        "未知 acquisition_mode 必须 Err"
+    );
+
+    // 各参数夹紧（publishing 50..=60000 / sampling 0..=60000 / queue 1..=100 / watchdog 10..=3600）
+    let cfg = parse_cfg(&serde_json::json!({
+        "endpoint":"x",
+        "publishing_interval_ms": 10,
+        "sampling_interval_ms": 99999,
+        "queue_size": 0,
+        "subscription_watchdog_secs": 5,
+    }))
+    .unwrap();
+    assert_eq!(
+        cfg.subscription.publishing_interval_ms, 50,
+        "publishing 下限 50"
+    );
+    assert_eq!(
+        cfg.subscription.sampling_interval_ms, 60_000,
+        "sampling 上限 60000"
+    );
+    assert_eq!(cfg.subscription.queue_size, 1, "queue 下限 1");
+    assert_eq!(cfg.subscription.watchdog_secs, 10, "watchdog 下限 10");
+
+    let cfg = parse_cfg(&serde_json::json!({
+        "endpoint":"x",
+        "publishing_interval_ms": 99999,
+        "queue_size": 200,
+        "subscription_watchdog_secs": 99999,
+    }))
+    .unwrap();
+    assert_eq!(
+        cfg.subscription.publishing_interval_ms, 60_000,
+        "publishing 上限 60000"
+    );
+    assert_eq!(cfg.subscription.queue_size, 100, "queue 上限 100");
+    assert_eq!(cfg.subscription.watchdog_secs, 3600, "watchdog 上限 3600");
+
+    // 合法原值不动（含 sampling=0 语义"随发布间隔"）
+    let cfg = parse_cfg(&serde_json::json!({
+        "endpoint":"x",
+        "publishing_interval_ms": 200,
+        "sampling_interval_ms": 0,
+        "queue_size": 5,
+        "subscription_watchdog_secs": 30,
+    }))
+    .unwrap();
+    assert_eq!(cfg.subscription.publishing_interval_ms, 200);
+    assert_eq!(cfg.subscription.sampling_interval_ms, 0);
+    assert_eq!(cfg.subscription.queue_size, 5);
+    assert_eq!(cfg.subscription.watchdog_secs, 30);
+}
+
+#[test]
+fn fallback_to_polling_classifies_service_errors() {
+    let mk = |st: StatusCode| Error::new(st, "test");
+    // auto + 服务不支持类 → 降级轮询
+    for st in [
+        StatusCode::BadServiceUnsupported,
+        StatusCode::BadNotSupported,
+        StatusCode::BadNotImplemented,
+        StatusCode::BadOutOfService,
+    ] {
+        assert!(
+            fallback_to_polling(AcquisitionMode::Auto, &mk(st)),
+            "{st} 在 auto 模式应降级轮询"
+        );
+    }
+    // auto + 非服务不支持（传输错误/业务错误）→ 不降级（走拆会话重试）
+    for st in [
+        StatusCode::BadTimeout,
+        StatusCode::BadConnectionClosed,
+        StatusCode::BadNodeIdUnknown,
+        StatusCode::BadTooManyOperations,
+    ] {
+        assert!(
+            !fallback_to_polling(AcquisitionMode::Auto, &mk(st)),
+            "{st} 不应触发降级"
+        );
+    }
+    // subscription 模式永不降级（显式要求订阅，失败拆会话重试）
+    assert!(!fallback_to_polling(
+        AcquisitionMode::Subscription,
+        &mk(StatusCode::BadServiceUnsupported)
+    ));
+    // polling 模式不进订阅路径
+    assert!(!fallback_to_polling(
+        AcquisitionMode::Polling,
+        &mk(StatusCode::BadServiceUnsupported)
+    ));
+}
+
+#[test]
+fn watchdog_expired_strictly_after_timeout() {
+    let now = Instant::now();
+    let timeout = Duration::from_secs(60);
+    // 恰好等于窗口不算过期（下一拍仍可等 keep-alive）
+    assert!(!watchdog_expired(now, now - timeout, timeout));
+    // 超过窗口 → 过期
+    assert!(watchdog_expired(
+        now,
+        now - timeout - Duration::from_millis(1),
+        timeout
+    ));
+    // 有活动 → 不过期
+    assert!(!watchdog_expired(now, now, timeout));
+}
+
+#[test]
+fn handle_allocator_starts_at_one_and_is_unique() {
+    // client_handle=0 被库保留为"自动分配"标记，插件必须自己分配非 0 且唯一
+    let mut alloc = HandleAllocator::new();
+    let mut seen = std::collections::HashSet::new();
+    for expected in 1..=100u32 {
+        let h = alloc.next_handle();
+        assert_eq!(h, expected, "单调递增从 1 开始");
+        assert!(seen.insert(h), "handle 必须唯一: {h}");
+    }
+}
+
+#[test]
+fn build_monitored_items_maps_handles_to_devices_and_fields() {
+    let devices = vec![
+        PreparedDevice {
+            devid: "d1".to_string(),
+            points: vec![
+                (
+                    "temp".to_string(),
+                    parse_node_spec("ns=2;s=Temp", None).unwrap(),
+                ),
+                (
+                    "arr".to_string(),
+                    parse_node_spec("ns=2;s=Arr[1:3]", None).unwrap(),
+                ),
+            ],
+        },
+        PreparedDevice {
+            devid: "d2".to_string(),
+            points: vec![("pump".to_string(), parse_node_spec("i=2258", None).unwrap())],
+        },
+    ];
+    let mut alloc = HandleAllocator::new();
+    let (reqs, handles) = build_monitored_items(&devices, 0.0, 2, &mut alloc);
+
+    // 全部点位各一个请求；跨设备进同一订阅（扁平列表）
+    assert_eq!(reqs.len(), 3);
+    assert_eq!(handles.len(), 3);
+    // handle → (devid, field) 映射完整且与请求一一对应
+    let mut by_handle: std::collections::BTreeMap<u32, (String, String)> =
+        handles.iter().map(|(h, v)| (*h, v.clone())).collect();
+    for req in &reqs {
+        let h = req.requested_parameters.client_handle;
+        assert!(h != 0, "client_handle 不得为 0（库保留字）");
+        let (devid, field) = by_handle.remove(&h).expect("请求 handle 必须在映射中");
+        // 每个请求的 item_to_monitor 与点表 NodeId/下标范围一致
+        assert_eq!(req.item_to_monitor.attribute_id, AttributeId::Value as u32);
+        match (devid.as_str(), field.as_str()) {
+            ("d1", "temp") => assert_eq!(req.item_to_monitor.node_id, NodeId::new(2, "Temp")),
+            ("d1", "arr") => {
+                assert_eq!(req.item_to_monitor.node_id, NodeId::new(2, "Arr"));
+                assert_eq!(req.item_to_monitor.index_range, NumericRange::Range(1, 3));
+            }
+            ("d2", "pump") => assert_eq!(req.item_to_monitor.node_id, NodeId::new(0, 2258u32)),
+            other => panic!("未知映射 {other:?}"),
+        }
+        // 监控参数：Reporting + 采样间隔透传 + 队列 + 丢旧
+        assert_eq!(req.monitoring_mode, MonitoringMode::Reporting);
+        assert_eq!(req.requested_parameters.sampling_interval, 0.0);
+        assert_eq!(req.requested_parameters.queue_size, 2);
+        assert!(req.requested_parameters.discard_oldest);
+        assert!(req.requested_parameters.filter.is_null());
+    }
+    assert!(by_handle.is_empty(), "映射无孤儿: {by_handle:?}");
+
+    // 按服务端 MaxMonitoredItemsPerCall 分批（探测缺省 1000 → 一批）
+    assert_eq!(chunk_nodes(reqs.len(), 1000).len(), 1);
+    // 声明 2 → 两批（3 点 → 2+1），绝不空批
+    assert_eq!(
+        chunk_nodes(3, 2),
+        vec![0..2, 2..3],
+        "monitored items 按服务端上限分批"
+    );
+}
+
+#[test]
+fn aggregate_notifications_groups_by_devid_with_bad_quality_null() {
+    let handles: std::collections::HashMap<u32, (String, String)> = [
+        (1u32, ("d1".to_string(), "temp".to_string())),
+        (2u32, ("d1".to_string(), "big".to_string())),
+        (3u32, ("d2".to_string(), "msg".to_string())),
+        (4u32, ("d1".to_string(), "temp".to_string())),
+    ]
+    .into_iter()
+    .collect();
+    let batch = vec![
+        // 好值（Double → Float）
+        (1, dv(Some(Variant::Double(1.5)), None)),
+        // 坏质量 → Null + 计入坏点清单（复用 OPC-1 语义）
+        (
+            2,
+            dv(Some(Variant::UInt64(9)), Some(StatusCode::BadTimeout)),
+        ),
+        // 字符串
+        (3, dv(Some(Variant::String("hi".into())), None)),
+        // 同点后到覆盖先到（queue>1 或跨 publish 时"最新值胜出"）
+        (4, dv(Some(Variant::Double(9.9)), None)),
+        // 未知 handle（上一连接残留）→ 丢弃不出现在结果
+        (99, dv(Some(Variant::Int32(1)), None)),
+    ];
+    let (by_dev, bad_keys) = aggregate_notifications(batch, &handles);
+    let d1 = by_dev.get("d1").expect("d1 聚合");
+    assert_eq!(d1.get("temp"), Some(&SampleValue::Float(9.9)), "后到值覆盖");
+    assert_eq!(
+        d1.get("big"),
+        Some(&SampleValue::Null),
+        "坏质量 → Null（OPC-1 语义在订阅路径同样成立）"
+    );
+    let d2 = by_dev.get("d2").expect("d2 聚合");
+    assert_eq!(d2.get("msg"), Some(&SampleValue::Str("hi".into())));
+    assert_eq!(by_dev.len(), 2, "未知 handle 不产生分组");
+    assert_eq!(bad_keys, vec!["d1.big".to_string()], "坏点键 = devid.field");
+
+    // UInt64 → UInt（F-5：不 as i64 符号翻转）
+    let batch = vec![(2, dv(Some(Variant::UInt64(u64::MAX)), None))];
+    let (by_dev, bad) = aggregate_notifications(batch, &handles);
+    assert_eq!(
+        by_dev.get("d1").and_then(|m| m.get("big")),
+        Some(&SampleValue::UInt(u64::MAX))
+    );
+    assert!(bad.is_empty(), "Good 状态的 UInt64 不是坏点");
 }
