@@ -265,6 +265,10 @@ impl Source for SelfMonitor {
             inst.inst_id
         );
 
+        // F-2（2026-11-01 协议语义审查）：声明本实例支持写回执——REST 写入口
+        // 据此在窗口内等待 handle 结果（未声明的实例保持"投递即 200"旧契约）。
+        ctx.ctl_registry.declare_write_ack(inst.inst_id.as_ref());
+
         loop {
             tokio::select! {
                 _ = token.cancelled() => {
@@ -274,52 +278,60 @@ impl Source for SelfMonitor {
                 msg = cmd_rx.recv() => {
                     // G-2（2026-11-01 审查）：通道关闭即退出（None 空过会热转）。
                     let Some(m) = msg else { break };
-                    {
+                    // F-2：写回执——成功/失败都回流给 REST 写入口（无 request_id
+                    // 的旁路通道为 no-op）。
+                    let result = {
                         if m.cmd != "write" {
-                            tracing::warn!("[selfMonitor] inst {} unknown cmd: {}", inst.inst_id, m.cmd);
-                            continue;
-                        }
-                        match apply_write(&m.data) {
-                            Ok(writes) => {
-                                for w in writes {
-                                    match w {
-                                        SelfWrite::Watchdog(v) => {
-                                            watchdog = Some(v);
-                                            tracing::info!("[selfMonitor] write watchdog={v}");
-                                        }
-                                        SelfWrite::Note { value, truncated } => {
-                                            if truncated {
-                                                tracing::warn!(
-                                                    "[selfMonitor] note 超 {NOTE_MAX_CHARS} 字符，已截断"
-                                                );
+                            let e = format!("unknown cmd: {}", m.cmd);
+                            tracing::warn!("[selfMonitor] inst {} {e}", inst.inst_id);
+                            Err(e)
+                        } else {
+                            match apply_write(&m.data) {
+                                Ok(writes) => {
+                                    for w in writes {
+                                        match w {
+                                            SelfWrite::Watchdog(v) => {
+                                                watchdog = Some(v);
+                                                tracing::info!("[selfMonitor] write watchdog={v}");
                                             }
-                                            tracing::info!(
-                                                "[selfMonitor] write note={}",
-                                                display_trunc(&value, NOTE_LOG_DISPLAY_CHARS)
-                                            );
-                                            note = Some(value);
-                                        }
-                                        SelfWrite::ReportPeriod { value, clamped } => {
-                                            if clamped {
-                                                tracing::warn!(
-                                                    "[selfMonitor] report_period 越界，已钳到 {value}s"
+                                            SelfWrite::Note { value, truncated } => {
+                                                if truncated {
+                                                    tracing::warn!(
+                                                        "[selfMonitor] note 超 {NOTE_MAX_CHARS} 字符，已截断"
+                                                    );
+                                                }
+                                                tracing::info!(
+                                                    "[selfMonitor] write note={}",
+                                                    display_trunc(&value, NOTE_LOG_DISPLAY_CHARS)
                                                 );
+                                                note = Some(value);
                                             }
-                                            tracing::info!(
-                                                "[selfMonitor] write report_period={value}s (下一 tick 生效)"
-                                            );
-                                            report_period = value;
+                                            SelfWrite::ReportPeriod { value, clamped } => {
+                                                if clamped {
+                                                    tracing::warn!(
+                                                        "[selfMonitor] report_period 越界，已钳到 {value}s"
+                                                    );
+                                                }
+                                                tracing::info!(
+                                                    "[selfMonitor] write report_period={value}s (下一 tick 生效)"
+                                                );
+                                                report_period = value;
+                                            }
                                         }
                                     }
+                                    // 设计如此：写后不立即上报，随下一 tick 全量标签出——
+                                    // rtdata 回读验证的正是完整写回环（含周期节拍）。
+                                    Ok(())
                                 }
-                                // 设计如此：写后不立即上报，随下一 tick 全量标签出——
-                                // rtdata 回读验证的正是完整写回环（含周期节拍）。
-                            }
-                            Err(reason) => {
-                                tracing::warn!("[selfMonitor] write rejected: {reason}");
+                                Err(reason) => {
+                                    tracing::warn!("[selfMonitor] write rejected: {reason}");
+                                    Err(reason)
+                                }
                             }
                         }
-                    }
+                    };
+                    ctx.ctl_registry
+                        .finish_write(m.request_id.as_deref(), result);
                 }
                 _ = flush_ticker.tick() => {
                     tracker.flush_if_due().await;
@@ -403,6 +415,10 @@ pub(crate) enum SelfWrite {
 /// 多个**已知**键的合法载荷逐键产出（一命令写多标签可用）。
 fn apply_write(data: &str) -> Result<Vec<SelfWrite>, String> {
     let v: serde_json::Value = serde_json::from_str(data).map_err(|e| format!("bad json: {e}"))?;
+    // F-1（2026-11-01 协议语义审查）：HMI 写入口只发 `{"tag":"点位名","value":…}`，
+    // 与 selfMonitor 的"顶层键分派"契约不匹配 → 直接拒。此处把 HMI 形态归一成
+    // 单键对象（`{"tag":"watchdog","value":30}` → `{"watchdog":30}`），原生形态不变。
+    let v = normalize_hmi_payload(v);
     let obj = v.as_object().ok_or("payload is not a json object")?;
     if obj.is_empty() {
         return Err("empty payload (no writable tag)".into());
@@ -439,6 +455,25 @@ fn apply_write(data: &str) -> Result<Vec<SelfWrite>, String> {
         }
     }
     Ok(out)
+}
+
+/// HMI 写契约归一（F-1）：`{"tag":"watchdog","value":30}` → `{"watchdog":30}`。
+///
+/// 只在 payload 恰好是 `tag`(+`value`) 两键时转换，避免误吞原生多键载荷。
+fn normalize_hmi_payload(v: serde_json::Value) -> serde_json::Value {
+    let Some(obj) = v.as_object() else { return v };
+    let Some(tag) = obj.get("tag").and_then(|t| t.as_str()) else {
+        return v;
+    };
+    let Some(value) = obj.get("value") else {
+        return v;
+    };
+    if obj.len() > 2 {
+        return v;
+    }
+    let mut m = serde_json::Map::new();
+    m.insert(tag.to_string(), value.clone());
+    serde_json::Value::Object(m)
 }
 
 /// 钳制上报周期到合法区间，返回 (钳后值, 是否发生钳制)。
@@ -836,6 +871,29 @@ mod tests {
     }
 
     // ---- apply_write（三可写标签写命令解析，纯函数） ----
+
+    /// F-1：HMI 契约 `{"tag","value"}` 归一为顶层键形态；原生形态与多键载荷不受影响。
+    #[test]
+    fn apply_write_accepts_hmi_tag_value_contract() {
+        assert_eq!(
+            apply_write(r#"{"tag":"watchdog","value":30}"#).unwrap(),
+            vec![SelfWrite::Watchdog(30)]
+        );
+        match apply_write(r#"{"tag":"note","value":"机房A"}"#)
+            .unwrap()
+            .as_slice()
+        {
+            [SelfWrite::Note { value, truncated }] => {
+                assert_eq!(value, "机房A");
+                assert!(!truncated);
+            }
+            other => panic!("应是 Note：{other:?}"),
+        }
+        // 带额外字段（非纯 tag/value）不归一 → 仍按未知标签整条拒绝
+        assert!(apply_write(r#"{"tag":"watchdog","value":1,"x":2}"#).is_err());
+        // 归一后未知标签仍拒
+        assert!(apply_write(r#"{"tag":"nope","value":1}"#).is_err());
+    }
 
     /// ReportPeriod 臂的 (value, clamped) 简取。
     fn period_of(out: &[SelfWrite]) -> (u64, bool) {
