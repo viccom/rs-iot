@@ -20,21 +20,9 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 
-/// 插件实例运行状态。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum InstState {
-    /// 正在启动。
-    Starting,
-    /// 运行中。
-    Running,
-    /// 正在停止。
-    Stopping,
-    /// 已停止。
-    Stopped,
-    /// 失败。
-    Failed,
-}
+// 状态枚举定义在 `types`（共享载荷：event_bus 的 `EventPayload::State` 同用），
+// 此处重导出保持既有 `plugin::instance::InstState` 路径可用。
+pub use crate::types::InstState;
 
 #[derive(Debug)]
 struct InstanceHandle {

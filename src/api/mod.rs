@@ -39,6 +39,11 @@ pub mod routes_user;
 pub mod rtdata_watch;
 
 /// axum 共享状态。
+///
+/// 与 `HostContext` 有 4 个同源字段（`lux`/`hwid`/`metrics`/`trace_registry`）与同一个
+/// `EventBus`（此处名 `event_bus`）——两处由 `lib.rs` 分别装配。合并/抽 `CoreServices`
+/// 需先收窄 `HostContext`（73 处测试构造点），登记为技术债，见
+/// `docs/designs/2026-11-01-layering-coupling-review.md` §5。
 #[derive(Clone)]
 pub struct AppState {
     pub lux: EmbeddedClient,

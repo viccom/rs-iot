@@ -8,6 +8,9 @@ pub(crate) mod engine;
 pub(crate) mod hotload;
 pub(crate) mod io_engine;
 pub(crate) mod loader;
+/// 对外管理面：REST（`api::routes_lua`）唯一入口——api 不直接引用 loader/stdlib/
+/// stdlib_sync/reload 内部（分层门禁 `scripts/check_layers.py`）。
+pub(crate) mod manage;
 pub(crate) mod manifest;
 /// R2 频控（通用件，阶段 D 起双消费者）：http 能力（`api/http.rs`，lua-http 门控）
 /// 与告警 fire_event（`api/alarm.rs`，lua 门控 20/s）共用——纯 std 实现（原子计数

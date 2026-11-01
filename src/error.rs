@@ -56,7 +56,7 @@ pub enum RsIotError {
 
     /// 设备模型/注册表校验错误（结构或引用完整性）。
     #[error("model error: {0}")]
-    Model(#[from] crate::model::validate::ModelError),
+    Model(#[from] ModelError),
 
     /// 历史引擎初始化/关闭失败（tsink 错误串化）。
     ///
@@ -68,3 +68,121 @@ pub enum RsIotError {
 
 /// 库统一 Result 别名。
 pub type TResult<T> = std::result::Result<T, RsIotError>;
+
+// ---------- 模型/设备校验错误 ----------
+//
+// 原定义在 `model::validate`，被 `RsIotError::Model(#[from] …)` 引用，形成
+// `error <-> model` 模块环（error 是底层，却依赖域模块）。2026-11-01 分层耦合
+// 审查把类型上移到本模块——`model::validate` 保留 `pub use` 兼容既有路径。
+// 判据同 `InstanceAlreadyRunning`：进入本 crate 错误分类法的域错误，归此一处。
+
+/// 模型/设备校验错误（结构 + 引用两族；`#[non_exhaustive]` 允许后续期新增变体）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ModelError {
+    /// id/tag 名为空或含非法字符（空白与 `. * { } ,`——分别与 tag_key 层级、
+    /// glob 通配、地址占位符语法、wire 串接冲突）。
+    InvalidId {
+        /// 语义名（"model_id"/"devid"/"tag"…）。
+        what: &'static str,
+        /// 非法值。
+        value: String,
+    },
+    /// tag 名模型内重复。
+    DuplicateTag {
+        /// 模型 id。
+        model: String,
+        /// 重复 tag 名。
+        tag: String,
+    },
+    /// 模板 addr 占位符未在模型 params 声明。
+    UndeclaredParam {
+        /// 模型 id。
+        model: String,
+        /// tag 名。
+        tag: String,
+        /// 未声明的参数名。
+        param: String,
+    },
+    /// 模板 addr 本身非法（未闭合括号等；转 `model::addr::AddrError` 文案）。
+    BadAddr {
+        /// 模型 id。
+        model: String,
+        /// tag 名。
+        tag: String,
+        /// 非法原因。
+        reason: String,
+    },
+    /// devreg 引用的模型不存在（store 写入时查表）。
+    ModelNotFound {
+        /// 设备 id。
+        devid: String,
+        /// 引用的模型 id。
+        model: String,
+    },
+    /// 设备 params 缺模型声明的参数（齐套校验：模型 params ⊆ 设备 params）。
+    MissingDeviceParam {
+        /// 设备 id。
+        devid: String,
+        /// 缺失参数名。
+        param: String,
+    },
+    /// 设备覆盖的 tag 不在模型 tags。
+    UnknownTagOverride {
+        /// 设备 id。
+        devid: String,
+        /// 覆盖键（tag 名）。
+        tag: String,
+    },
+    /// extra 扩展槽键违反命名契约（设计 §4.1：`^x_[A-Za-z0-9_]+$`）。
+    BadExtraKey {
+        /// 模型 id。
+        model: String,
+        /// 所属 tag 名（模型级 extra 无 tag → None）。
+        tag: Option<String>,
+        /// 违规键名。
+        key: String,
+    },
+}
+
+impl std::fmt::Display for ModelError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidId { what, value } => {
+                write!(
+                    f,
+                    "{what} {value:?} 非法：须非空且不含空白与 . * {{ }} , 字符"
+                )
+            }
+            Self::DuplicateTag { model, tag } => write!(f, "模型 {model} 的 tag {tag:?} 重复"),
+            Self::UndeclaredParam { model, tag, param } => write!(
+                f,
+                "模型 {model} 的 tag {tag:?} 地址引用了未声明参数 {{{param}}}"
+            ),
+            Self::BadAddr { model, tag, reason } => {
+                write!(f, "模型 {model} 的 tag {tag:?} 地址模板非法：{reason}")
+            }
+            Self::ModelNotFound { devid, model } => {
+                write!(f, "设备 {devid} 引用的模型 {model:?} 不存在")
+            }
+            Self::MissingDeviceParam { devid, param } => {
+                write!(f, "设备 {devid} 缺模型声明参数 {{{param}}}")
+            }
+            Self::UnknownTagOverride { devid, tag } => {
+                write!(f, "设备 {devid} 覆盖的 tag {tag:?} 不在其模型 tags")
+            }
+            Self::BadExtraKey { model, tag, key } => match tag {
+                Some(tag) => write!(
+                    f,
+                    "模型 {model} 的 tag {tag:?} 扩展键 {key:?} 非法：须匹配 ^x_[A-Za-z0-9_]+$"
+                ),
+                None => write!(
+                    f,
+                    "模型 {model} 的扩展键 {key:?} 非法：须匹配 ^x_[A-Za-z0-9_]+$"
+                ),
+            },
+        }
+    }
+}
+
+impl std::error::Error for ModelError {}

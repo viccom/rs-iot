@@ -10,12 +10,11 @@
 //! - 无消费者（启动期 / 无 SSE 连接）→ `send` 返 `Err`，`publish` 静默，零开销。
 //! - `EventPayload::Log` 用 `Arc<LogEntry>`：N 客户端共享同一份日志，避免深拷贝。
 //!
-//! 模块依赖：log_ringbuffer（`LogEntry`）与 event_bus（`EventPayload::Log`）双向引用，
-//! crate 内合法（无循环 crate 依赖，仅模块间 use）。
+//! 模块依赖：载荷类型（`LogEntry`/`InstState`）定义在 `types` 共享内核——早期它们
+//! 定义在生产者模块（`log_ringbuffer`/`plugin::instance`），导致 `event_bus` 反向
+//! 引用生产方形成模块环（2026-11-01 分层耦合审查修复）。本模块只依赖 `types`。
 
-use crate::log_ringbuffer::LogEntry;
-use crate::plugin::instance::InstState;
-use crate::types::{HostKind, SampleValue};
+use crate::types::{HostKind, InstState, LogEntry, SampleValue};
 use std::collections::BTreeMap;
 use tokio::sync::broadcast;
 

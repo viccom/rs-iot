@@ -53,12 +53,12 @@ pub struct SaveScriptReq {
 /// `POST /api/v1/lua/reload?inst_id=<inst>` → 手动重载（stop + start，spec §5.3）。
 ///
 /// 仅对 `app_code == "luaClient"` 实例生效（端点语义）。实例不在 lux `instances` 表 → 404；
-/// 非 lua 实例 → 400。核心在 [`crate::plugin::lua_core::reload::reload_lua_inst`]
+/// 非 lua 实例 → 400。核心在 [`crate::plugin::lua_core::manage::reload_lua_inst`]
 /// （T10 移入 lua_core：`_lib/` 全局 watcher 共用，端点只做 HTTP 映射）；
 /// handler 依赖 lua_core → lua feature 门控（路由注册同门控，见 `build_router`）。
 #[cfg(feature = "lua")]
 pub async fn reload(State(st): State<AppState>, Query(q): Query<InstQuery>) -> Response {
-    use crate::plugin::lua_core::reload::{reload_lua_inst, ReloadOutcome};
+    use crate::plugin::lua_core::manage::{reload_lua_inst, ReloadOutcome};
     match reload_lua_inst(&st.lux, &st.mgr, &q.inst_id).await {
         ReloadOutcome::Ok => Json(serde_json::json!({"status": "ok"})).into_response(),
         ReloadOutcome::NotFound => err(StatusCode::NOT_FOUND, "instance not found"),
@@ -343,13 +343,13 @@ fn lib_seg_ok(s: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }
 
-/// 保留段判定（D11 封闭集，单一事实源 `loader::RESERVED_TOP`）。lua feature 关闭时
+/// 保留段判定（D11 封闭集，单一事实源经 `lua_core::manage` 收口）。lua feature 关闭时
 /// require 路由层整体缺席、保留段语义无从谈起 → false（kind=lib 退化为纯文件
 /// 管理不拒保留段；标准构建 lua 默认开启，拒绝路径有测试锁定）。
 fn is_reserved_lib_top(seg: &str) -> bool {
     #[cfg(feature = "lua")]
     {
-        crate::plugin::lua_core::loader::RESERVED_TOP.contains(&seg)
+        crate::plugin::lua_core::manage::is_reserved_top(seg)
     }
     #[cfg(not(feature = "lua"))]
     {
@@ -605,7 +605,7 @@ pub async fn stdlib_list(State(_st): State<AppState>) -> Json<serde_json::Value>
 /// router 级测试基建，逻辑收敛于此做函数级覆盖）。
 #[cfg(feature = "lua")]
 fn stdlib_list_payload(scripts_root: &Path) -> serde_json::Value {
-    let (version, files) = crate::plugin::lua_core::stdlib_sync::inventory(scripts_root);
+    let (version, files) = crate::plugin::lua_core::manage::stdlib_inventory(scripts_root);
     let files: Vec<serde_json::Value> = files
         .iter()
         .map(|e| serde_json::to_value(e).unwrap_or(serde_json::Value::Null))
@@ -649,14 +649,14 @@ fn resolve_effective_pin(
 /// 本地已装 stdlib 版本（`_stdlib/.index.json`；缺失 → None）。
 #[cfg(feature = "lua-http")]
 fn read_installed_version(scripts_root: &Path) -> Option<String> {
-    crate::plugin::lua_core::stdlib_sync::read_index(scripts_root).map(|i| i.version)
+    crate::plugin::lua_core::manage::installed_stdlib_version(scripts_root)
 }
 
 /// `POST /api/v1/lua/stdlib/sync` → 验签同步官方源/镜像（§3.6 D1）+ 全实例 reload（Q11）。
 ///
 /// 流程：拉 index+sig → ed25519 验签 → min_api_ver/pin 预检 → 逐文件 sha256 →
 /// `_stdlib.tmp/` → 原子替换 → 返回 `SyncReport`，随后全实例 reload
-/// （`lua_core::reload::reload_all_lua_instances`，T10 移入的公共 helper）触发全部
+/// （`lua_core::manage::reload_all_lua_instances`，T10 移入的公共 helper）触发全部
 /// 运行中 luaClient 实例的 VM 级热加载（失败自动回退旧 VM，Q11）。任一步失败 →
 /// 502（upstream/验签域错误，本地 `_stdlib/` 未动）。成功/失败均落审计日志（§3.7）。
 /// 需要 reqwest（feature lua-http 门控，无此 feature 端点缺席）。
@@ -674,7 +674,7 @@ pub async fn stdlib_sync(State(st): State<AppState>, body: Option<Json<SyncReq>>
     );
     // §3.7 同步审计日志：who 由 JWT 访问日志侧承载，此处落 what/when/result。
     tracing::info!("[lua][audit] stdlib sync 开始：upstream={upstream}，pin 策略={pin_desc}");
-    match crate::plugin::lua_core::stdlib_sync::sync(
+    match crate::plugin::lua_core::manage::stdlib_sync(
         &upstream,
         Path::new("scripts"),
         pin.as_deref(),
@@ -683,7 +683,7 @@ pub async fn stdlib_sync(State(st): State<AppState>, body: Option<Json<SyncReq>>
     {
         Ok(report) => {
             let reloaded =
-                crate::plugin::lua_core::reload::reload_all_lua_instances(&st.lux, &st.mgr).await;
+                crate::plugin::lua_core::manage::reload_all_lua_instances(&st.lux, &st.mgr).await;
             tracing::info!(
                 "[lua][audit] stdlib sync 成功：{upstream} → v{}（+{}/~{}/-{}），reload 触发 {} 个运行中实例",
                 report.version,
@@ -935,7 +935,7 @@ mod tests {
     #[cfg(feature = "lua")]
     #[test]
     fn stdlib_list_payload_seed_and_synced_badges() {
-        let seeds = crate::plugin::lua_core::stdlib::SEED_MODULES.len();
+        let seeds = crate::plugin::lua_core::manage::seed_module_count();
         let tmp = fresh_tmp("stdlib-list");
 
         // 冷启动：无 _stdlib/.index.json → 纯种子视图
@@ -1000,7 +1000,7 @@ mod tests {
     #[cfg(feature = "lua")]
     #[test]
     fn lib_path_rejects_reserved_top() {
-        for r in crate::plugin::lua_core::loader::RESERVED_TOP {
+        for r in crate::plugin::lua_core::manage::reserved_top() {
             assert!(
                 resolve_lib_path(&format!("{r}/evil.lua")).is_err(),
                 "保留段首段应被拒：{r}"

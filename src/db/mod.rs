@@ -1,3 +1,16 @@
+//! lux 存储层。
+//!
+//! 目录内实际混居三类职责（2026-11-01 分层耦合审查记录；拆目录要动 100+ 调用点，
+//! 暂不实施——新增模块请按此归类，别再扩大混居面）：
+//!
+//! - **基础设施**：`build_lux_config` / `shutdown_lux`（lux 生命周期）、`identity`（引导）；
+//! - **存储原语**（纯读写，无外部副作用）：`rtdata` / `luakv` / `stat` / `secrets`；
+//! - **领域服务**（跨表级联或发 EventBus）：`alarms`（fire/clear + SSE 事件）、
+//!   `ext_token`（签发/校验/吊销）、`dev_registry`（dev2inst 归属治理）。
+//!
+//! 判据：新增函数若发 EventBus 或做跨表级联，属领域服务——理想位置是顶层域模块，
+//! 退而求其次也要与纯存储原语在文档/命名上可区分（`alarms.rs` 头注即此先例）。
+
 pub mod alarms;
 pub mod dev_registry;
 pub mod ext_token;

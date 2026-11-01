@@ -1,7 +1,7 @@
 //! 核心数据类型。对标 Lite_IOT `pluginM.QueueData` / `CtlMessage` / `sysutil.InstConfig`。
 
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 
 // ---------- newtype：用类型隔离不同语义的字符串 ID ----------
@@ -208,6 +208,50 @@ impl HostKind {
             Self::External => "external",
         }
     }
+}
+
+// ---------- 跨层共享载荷类型 ----------
+//
+// 以下两类是**事件总线的载荷**，定义在本共享内核而非其"归属"模块，原因是
+// 它们同时被生产方与消费方引用：定义在任一方都会造成 `event_bus <-> plugin`
+// 或 `event_bus <-> log_ringbuffer` 模块环（2026-11-01 分层耦合审查）。
+// 判据：纯数据、无逻辑、无本 crate 依赖——满足才可放这里。
+
+/// 插件实例运行状态。
+///
+/// 生产者：`plugin::instance`（生命周期迁移）；消费者：`event_bus`
+/// （`EventPayload::State`）、REST（`/inststatus`、`/metrics`）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum InstState {
+    /// 正在启动。
+    Starting,
+    /// 运行中。
+    Running,
+    /// 正在停止。
+    Stopping,
+    /// 已停止。
+    Stopped,
+    /// 失败。
+    Failed,
+}
+
+/// 一条日志(结构化,tracing event 经 Visit 收集)。
+///
+/// 生产者：`log_ringbuffer`（RingBufferLayer 截获）；消费者：`event_bus`
+/// （`EventPayload::Log`）、`GET /api/v1/logs/recent`。
+#[derive(Debug, Clone, Serialize)]
+pub struct LogEntry {
+    /// 时间戳(ISO8601 / RFC3339)。
+    pub ts: String,
+    /// 级别("ERROR"/"WARN"/"INFO"/"DEBUG"/"TRACE")。
+    pub level: String,
+    /// target(模块路径,如 "io_trace"、"modbus_client")。
+    pub target: String,
+    /// 格式化可读文本(tracing message 字段经 display 包装)。
+    pub message: String,
+    /// 结构化字段(Visit 收集,值统一 String)。
+    pub fields: HashMap<String, String>,
 }
 
 /// 设备规格（旧内联点表形态；M-2 起仅迁移命令消费 + `model::expand` 合成

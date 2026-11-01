@@ -172,6 +172,14 @@ impl BridgeRegistry {
 
 /// 注入给每个插件 task 的宿主能力。
 ///
+/// 字段分三组（2026-11-01 分层审查记录；收窄需先抽 `for_test` 构造器——当前 73 处
+/// 测试字面量构造，见 `docs/designs/2026-11-01-layering-coupling-review.md` §5）：
+/// - **插件面**（所有 Source/Sink 可读）：`lux` / `hwid` / `metrics` / `event_tx` /
+///   `trace_registry` / `history`（后者只经 [`HostContext::archive_counters`] 读）；
+/// - **仅 `InstanceManager` 使用**：`shutdown`（子 token 源）、`ctl_registry`（命令路由）——
+///   插件读它们是死面，勿新增用途；
+/// - **仅 `sidecarClient` 使用**：`bridge_registry`（外部连接分发）。
+///
 /// `lux::EmbeddedClient` 未实现 `Debug`，故以 `expect` 放行 `missing_debug_implementations`
 ///（若未来 EmbeddedClient 补 Debug，编译器会提示移除该 expect）。
 #[expect(missing_debug_implementations)]
@@ -198,6 +206,40 @@ pub struct HostContext {
     /// P6 无条件编译——history feature 关闭（或 L2 enabled=false / 引擎初始化
     /// 失败 fail-soft）时恒 `None`，热路径判空零开销，主链路不受旁路影响。
     pub history: Option<crate::history::rows::HistoryHandle>,
+}
+
+/// 历史归档计数快照（只读三元组）。
+///
+/// 插件（selfMonitor）只关心这三个总量，不该知道 `history::rows::HistoryStats`
+/// 的其余十余个分桶字段——早期直接读 `ctx.history.stats.*` 造成 `plugin -> history`
+/// 横向依赖（2026-11-01 分层耦合审查）。快照在 host 侧一次 load，引擎缺席时全 0
+/// （与"缺数据=0"口径一致）。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ArchiveCounters {
+    /// fan_out 满即丢行数（累计）。
+    pub dropped: u64,
+    /// insert_rows 失败行数（累计）。
+    pub errors: u64,
+    /// 写入成功行数（累计）。
+    pub written: u64,
+}
+
+impl HostContext {
+    /// 取历史归档计数快照（引擎缺席 → 全 0）。
+    ///
+    /// 这是插件侧读历史计数的**唯一入口**：插件层因此不需要 `use crate::history`，
+    /// 模块图保持无环（门禁见 `scripts/check_layers.py` 的 FORBIDDEN 规则）。
+    pub fn archive_counters(&self) -> ArchiveCounters {
+        use std::sync::atomic::Ordering;
+        self.history
+            .as_ref()
+            .map(|h| ArchiveCounters {
+                dropped: h.stats.dropped.load(Ordering::Relaxed),
+                errors: h.stats.errors.load(Ordering::Relaxed),
+                written: h.stats.written.load(Ordering::Relaxed),
+            })
+            .unwrap_or_default()
+    }
 }
 
 #[cfg(test)]

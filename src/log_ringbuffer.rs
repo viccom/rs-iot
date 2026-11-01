@@ -7,20 +7,9 @@ use std::sync::Mutex;
 use tracing::field::{Field, Visit};
 use tracing_subscriber::layer::Layer;
 
-/// 一条日志(结构化,tracing event 经 Visit 收集)。
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct LogEntry {
-    /// 时间戳(ISO8601 / RFC3339)。
-    pub ts: String,
-    /// 级别("ERROR"/"WARN"/"INFO"/"DEBUG"/"TRACE")。
-    pub level: String,
-    /// target(模块路径,如 "io_trace"、"modbus_client")。
-    pub target: String,
-    /// 格式化可读文本(tracing message 字段经 display 包装)。
-    pub message: String,
-    /// 结构化字段(Visit 收集,值统一 String)。
-    pub fields: HashMap<String, String>,
-}
+// 日志记录类型定义在 `types`（共享载荷：event_bus 的 `EventPayload::Log` 同用），
+// 此处重导出保持既有 `log_ringbuffer::LogEntry` 路径可用。
+pub use crate::types::LogEntry;
 
 /// level 字符串 → 数字(ERROR=1 < WARN=2 < INFO=3 < DEBUG=4 < TRACE=5)。未知当 INFO(3)。
 fn level_num(s: &str) -> u8 {

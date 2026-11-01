@@ -537,6 +537,10 @@ fn observe_light(
     note: Option<String>,
 ) -> SelfObservation {
     let (cpu, mem_bytes) = crate::process_metrics::sample_process_resource();
+    // T16 历史三计数：HostContext::archive_counters 快照（与 pipeline fan_out 同一
+    // 共享句柄）。插件层只认这个窄视图、不依赖 history 模块；引擎缺席恒 0
+    //（feature off / L2 disabled / init_failed fail-soft，缺数据=0 同 dbsize 口径）。
+    let archive = ctx.archive_counters();
     SelfObservation {
         hwid: ctx.hwid.to_string(),
         version: env!("CARGO_PKG_VERSION").to_string(),
@@ -560,25 +564,10 @@ fn observe_light(
             .metrics
             .hub_depth_last
             .load(std::sync::atomic::Ordering::Relaxed),
-        // T16 历史三计数：ctx.history（pipeline fan_out 同一共享句柄）的
-        // HistoryStats 原子快照——与 sysstatus//metrics 同源，writer 增量即时
-        // 可见。引擎缺席（feature off/L2 disabled/init_failed fail-soft）时
-        // history=None → 恒 0（缺数据=0，同 dbsize 读失败口径）。
-        history_dropped: ctx
-            .history
-            .as_ref()
-            .map(|h| h.stats.dropped.load(std::sync::atomic::Ordering::Relaxed))
-            .unwrap_or(0),
-        history_errors: ctx
-            .history
-            .as_ref()
-            .map(|h| h.stats.errors.load(std::sync::atomic::Ordering::Relaxed))
-            .unwrap_or(0),
-        history_written: ctx
-            .history
-            .as_ref()
-            .map(|h| h.stats.written.load(std::sync::atomic::Ordering::Relaxed))
-            .unwrap_or(0),
+        // T16 历史三计数：快照见函数头 `archive`（host 侧一次 load）。
+        history_dropped: archive.dropped,
+        history_errors: archive.errors,
+        history_written: archive.written,
         watchdog,
         note,
     }
