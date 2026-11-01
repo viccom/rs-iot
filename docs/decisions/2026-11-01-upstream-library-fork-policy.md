@@ -1,7 +1,9 @@
 # 上游库缺陷处置策略（插件规避 / 最小 fork / 上游 PR）
 
-> **状态**：accepted（策略已决；tokio-s7 fork 补丁已备好并本地验证，远程仓与 `[patch]` 接入待执行，见 §9）
+> **状态**：implemented（三层策略落地：插件规避全部完成、tokio-s7 fork 已建仓并经 `[patch.crates-io]` 接入；CI 可达性与上游 PR 待办，见 §9）
 > **日期**：2026-11-01
+> **实施**：2026-11-01（规避批次 `a27328b`；fork 接入 `832c8e2`）
+> **代码**：`Cargo.toml`（`[patch.crates-io] tokio-s7 → git.metme.top/viccom/tokio-s7@rs-iot/fixes`）、fork 仓 4 补丁（S-1/S-4/S-5/S-9，各带单测）、插件侧规避见台账 §9.1
 > **来源**：协议插件协议语义审查（见 [台账](../designs/2026-11-01-protocol-semantics-audit.md)）中 21 条上游库条目的处置裁决
 > **关联**：`Cargo.toml` 依赖段（`lux`/`tsink_fork` path 依赖先例、`tokio-s7`/`rust-ethernet-ip` 版本约束）、`.github/workflows/ci.yml` 的私有 path 依赖 checkout 先例
 
@@ -93,27 +95,17 @@ tokio-s7 = { git = "https://git.metme.top/viccom/tokio-s7.git", branch = "rs-iot
 
 **回退**：删 `[patch.crates-io]` 段即回到 crates.io 版本；fork 补丁对 rs-iot 插件侧无 API 变化（仅行为修正），回退不破坏插件代码。
 
-## 9. 执行进展（2026-11-01 第二批）
+## 9. 执行进展（2026-11-01 第二批；fork 已接入）
 
 - **插件侧规避已全部落地**（见台账 §9）：S-2/S-3、S-6~S-8、S-10~S-15、S-17~S-21、E 全部可规避项、OPC 全部库相关项。
-- **tokio-s7 fork 已备好并本地验证**：`dist/vendor/tokio-s7-fork`（git 仓，基线 0.1.7 + 4 补丁 commit），补丁与单测：
+- **tokio-s7 fork 已建仓并接入**（`832c8e2`）：远程 `git.metme.top/viccom/tokio-s7` 分支 `rs-iot/fixes`（基线 0.1.7 + 4 补丁 commit，`#b04826c`）：
   - S-1 写应答 item 级 return code 校验（`client.rs:check_write_return_items`，mock PLC 单测）；
   - S-4 头级错误区按 `(class, code)` 两字节解析（`header.rs`，`0x85/0x04` 帧单测）；
   - S-5 STRING Latin-1 解码（`read_string`，`0xB0 0x43 → "°C"` 单测）；
   - S-9 `connection_type` 编入 local TSAP（`tsaps()`，三连接类型单测）。
-  - 验证：fork 内 `cargo test` 11 绿；rs-iot 以临时 path `[patch]` 联调 `s7_client` 40 绿 + `s7_e2e` 4 绿；试验后 `Cargo.toml/Cargo.lock` 已逐字节还原（未提交 path patch）。
-- **未接入的原因**：`git.metme.top/viccom/tokio-s7` 尚不存在；创建远程仓属对外动作，待用户批准。
-- **接入步骤**（用户建仓后）：
-  ```bash
-  cd dist/vendor/tokio-s7-fork
-  git remote add origin https://git.metme.top/viccom/tokio-s7.git
-  git branch -m rs-iot/fixes
-  git push -u origin rs-iot/fixes
-  ```
-  ```toml
-  # rs-iot/Cargo.toml
-  [patch.crates-io]
-  tokio-s7 = { git = "https://git.metme.top/viccom/tokio-s7.git", branch = "rs-iot/fixes" }
-  ```
-- **S-1 过渡防线**：在 fork 接入前，S7 插件 `verify_write`（默认 true）已消除"写失败静默成功"（写后读回校验）。
+- **接入验证**：`cargo tree -i tokio-s7` 实证 git 源生效；fork 仓 `cargo test` 11 绿；rs-iot 接入后 `s7_client` 单测 40 绿 + `s7_e2e` 4 绿 + `cargo check --all-targets --all-features` 无错。本地留档 `dist/vendor/tokio-s7-fork`（远程的推送源）。
+- **⚠ CI 可达性（待办）**：`viccom/tokio-s7` 当前为**私有仓**（匿名 `git ls-remote` 被拒）——GitHub Actions 的 `--all-features` 档（含 s7）拉取该 git 依赖会失败。二选一：
+  1. 把 fork 仓在 git.metme.top 设为公开（推荐；代码是 Apache-2.0 上游 + 补丁，公开合规）；
+  2. CI 注入凭据（`CARGO_NET_GIT_FETCH_WITH_CLI` + secret，或镜像到 GitHub 私有仓走 Plan B checkout）。
+- **S-1 防线分层**：fork 已根治（写失败返回 Err）；插件 `verify_write`（默认 true）保留为可选第二防线——上游 fork 生效后现场可按需关闭省一次读回。
 - **rust-ethernet-ip**：E-2/E-3/E-16 的插件侧拒绝已落地；上游 issue/PR 尚未提（需 GitHub 凭据/网络，待用户授权）。

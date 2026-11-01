@@ -56,7 +56,7 @@
 | [2026-08-26-default-compile-surface.md](decisions/2026-08-26-default-compile-surface.md) | 默认编译面收敛：default=[lua,lua-http,opcua,modbus]，s7/eip/transform 显式启用 | 已实施 |
 | [2026-08-31-n5-longrun-degradation-fixes.md](decisions/2026-08-31-n5-longrun-degradation-fixes.md) | 长跑退化 n5 修复决策：长时运行下采集/管道/告警域的退化修复取舍 | 已实施 |
 | [2026-08-27-model-extension-slot.md](decisions/2026-08-27-model-extension-slot.md) | 设备模型开放扩展槽（extra）与 `x_` 键契约：前向兼容信封 + 宿主不解释 + 外置应用定位边界 | 已实施 |
-| [2026-11-01-upstream-library-fork-policy.md](decisions/2026-11-01-upstream-library-fork-policy.md) | 上游库缺陷处置策略：三层（插件规避 / 最小 fork / 上游 PR）；tokio-s7 fork 4 补丁（S-1/S-4/S-5/S-9）、rust-ethernet-ip 先规避+PR、async-opcua/tokio-modbus 不 fork；含 `[patch.crates-io]` 形态、CI 适配、治理与退出条件 | **待实施** |
+| [2026-11-01-upstream-library-fork-policy.md](decisions/2026-11-01-upstream-library-fork-policy.md) | 上游库缺陷处置策略：三层（插件规避 / 最小 fork / 上游 PR）；tokio-s7 fork 4 补丁（S-1/S-4/S-5/S-9）、rust-ethernet-ip 先规避+PR、async-opcua/tokio-modbus 不 fork；含 `[patch.crates-io]` 形态、CI 适配、治理与退出条件 | **已实施**（fork 已接入 832c8e2；CI 可达性/上游 PR 待办） |
 
 ## designs/ — 设计定稿（怎么做，日期命名）
 

@@ -2,10 +2,10 @@
 
 > **状态**：implemented（修复已落地并通过门禁；未闭环项与原因见 §9）
 > **日期**：2026-11-01
-> **实施**：2026-11-01（`a27328b` 框架+四协议插件、`a4b6c1b` selfMonitor；tokio-s7 fork 补丁另备）
-> **代码**：`src/types.rs`、`src/host.rs`、`src/api/routes_command.rs`、`src/db/rtdata.rs`、`src/history/writer.rs`、`src/model/expand.rs`、`src/lib.rs`、`src/plugin/builtin/{modbus_client,opcua_client,s7_client,eip_client,self_monitor}/`
-> **测试**：各插件新增单测（modbus 64 / opcua 31 / s7 40 / eip 29 / selfMonitor 21）+ `cargo test --all-features` 全绿
-> **残留**：F-3 前端质量位、OPC-9 Subscription、S-4/S-5/S-9 fork 接入（见 §9.2）
+> **实施**：2026-11-01（`a27328b` 框架+四协议插件、`a4b6c1b` selfMonitor、`832c8e2` tokio-s7 fork 接入）
+> **代码**：`src/types.rs`、`src/host.rs`、`src/api/routes_command.rs`、`src/db/rtdata.rs`、`src/history/writer.rs`、`src/model/expand.rs`、`src/lib.rs`、`src/plugin/builtin/{modbus_client,opcua_client,s7_client,eip_client,self_monitor}/`、`Cargo.toml`（`[patch.crates-io]`）
+> **测试**：各插件新增单测（modbus 64 / opcua 31 / s7 40 / eip 29 / selfMonitor 21）+ `cargo test --all-features` 全绿（1036 通过）+ fork 仓 11 绿 + git 源联调 s7 单测/e2e 复跑
+> **残留**：F-3 前端质量位、OPC-9 Subscription（见 §9.2）
 > **来源**：协议插件协议业务语义深度审查（Modbus / OPC UA / S7 / EtherNet/IP）；逐行核对插件代码与上游库源码；S7 项另有进程内 mock PLC 探针实测（`/tmp/s7probe`，仓库零改动，未提交）
 > **分类口径**：**框架** = rs-iot 跨插件基础设施 / 共享类型 / 跨仓契约；**插件** = `src/plugin/builtin/<protocol>` 自身实现（含对库缺陷的未规避）；**上游库** = 第三方 crate 行为与协议语义冲突，插件无法经正常 API 获得正确信息（需 fork / 升级 / 配置规避）
 > **范围说明**：不复述 2026-11-01 内置插件审查已修的 28 项（见 [2026-11-01-plugin-audit-fix-plan.md](2026-11-01-plugin-audit-fix-plan.md)）；本台账只记**协议语义**问题。`target/release/rs-iot`（11-01 11:32 构建）已编入 s7、未编入 eip（`strings` 计数 eipClient=0），EIP 侧问题尚未在生产路径暴露。
@@ -200,7 +200,7 @@
 | 框架 | F-1、F-2、F-4、F-5、F-6、F-8、F-9 | `src/types.rs`（`SampleValue::{UInt,Null}`、`CtlMessage.request_id`）、`src/host.rs`（`WriteAcks`）、`src/api/routes_command.rs`（12s 回执 / 422 / 504）、`src/db/rtdata.rs`（空批跳过、坏值不覆盖）、`src/history/writer.rs`（U64 车道、Null 不归档）、`src/model/expand.rs`（`slave_id` 装配期校验）、`src/lib.rs`（`LogTracer`） |
 | Modbus | MB-1~MB-8 | `modbus_client/{codec,config,merge,address,mod}.rs`：越界拒写、布尔词表、slave 范围、地址溢出、写归属校验、coil 2000 上限、IllegalDataAddress 对半拆分、RTU `request_gap_ms` |
 | OPC UA | OPC-1~OPC-8、OPC-10~OPC-17 | `opcua_client/{convert,node,mod}.rs`：坏质量 Null、`MaxNodesPerRead` 分批、Display 文本、写值 checked、点表类型默认、`nsu=`、请求超时、6 策略、CloseSession/重连计数、端点列表、index_range、日志限流、JSON null/u64 |
-| S7 | S-1（临时防线）、S-2、S-3、S-6~S-8、S-10~S-15、S-17~S-21 | `s7_client/{mod,address}.rs`：先 disconnect 再放下、按协商 PDU 分片、`verify_write` 读回校验、kind 从点表推断、STRING 长度交叉校验、`ubyte`/`raw:N`、写值 checked、地址严格校验、区域缺口显式拒绝、单点失败 Null+限流、响应项数校验、endpoint 拆分、配置 checked |
+| S7 | S-1~S-21（S-4/S-5/S-9 经 tokio-s7 fork 根治，`832c8e2` 接入） | `s7_client/{mod,address}.rs`：先 disconnect 再放下、按协商 PDU 分片、kind 从点表推断、STRING 长度交叉校验、`ubyte`/`raw:N`、写值 checked、地址严格校验、区域缺口显式拒绝、单点失败 Null+限流、响应项数校验、endpoint 拆分、配置 checked；`verify_write` 读回校验保留为可选防线 |
 | EIP | E-1~E-8、E-10~E-19（上游项为规避/拒绝） | `eip_client/{mod,route,failure,value,write}.rs`：传输错误重建连接、类型码/位路径/STRING 数组元素配置期拒绝、分流精确化、写值 checked、真实健康读、字节预算切包、0x06 降半重试、探测缓存、endpoint DNS、整轮预算、BatchConfig、16B 估算 |
 | 前端契约 | F-1/F-2 用户可见语义 | hmi-studio `src/lib/{command,bridge}.ts`：等待 15s（后端 12s 窗口）、422 透传后端 `error` 文本、504 显示"结果未知（超时）" |
 
@@ -215,8 +215,8 @@
 | OPC-15 | 部分 | `[n]`/`[a:b]` index_range 读写完成；按结构字段名读写未做 |
 | E-13 | 部分 | 探测降为每 base 每 tick 一次；库内 `read_array_range` 自带探测无法经公开 API 消除 |
 | E-17 | 部分 | 步骤边界预算（非硬超时；库内单次调用仍可能 10s） |
-| S-1 | 部分 | 插件侧 `verify_write` 默认开启（写失败不再静默成功）；根治需 tokio-s7 fork 接入 |
-| S-4 / S-5 / S-9 | 未闭环 | fork 补丁已备好并本地验证（`dist/vendor/tokio-s7-fork`，4 补丁 + 6 新单测），待 `viccom/tokio-s7` 远程仓创建后接 `[patch.crates-io]` |
+| S-1 | 已闭环 | tokio-s7 fork 补丁逐项校验写应答 return code（`832c8e2` 接入，git 源 `#b04826c`）；插件 `verify_write` 保留为可选第二防线（现场可关） |
+| S-4 / S-5 / S-9 | 已闭环 | fork `rs-iot/fixes` 分支根治（`git.metme.top/viccom/tokio-s7`），fork 内各带单测；`[patch.crates-io]` 已生效（`cargo tree` 实证 git 源） |
 | E-2 / E-3 / E-6 / E-16、S-13 | 规避 | 配置期拒绝 / 运行期 Null，未根治；上游 issue/PR 待提 |
 | E-9 / E-20 | 记录不修 | 台账原裁决 `N`（上游注释自述非原子 / 设备保序假设） |
 
