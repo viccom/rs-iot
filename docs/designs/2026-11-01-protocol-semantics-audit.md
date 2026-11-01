@@ -216,7 +216,7 @@
 | E-13 | 部分 | 探测降为每 base 每 tick 一次；库内 `read_array_range` 自带探测无法经公开 API 消除 |
 | E-17 | 部分 | 步骤边界预算（非硬超时；库内单次调用仍可能 10s） |
 | S-1 | 已闭环 | tokio-s7 fork 补丁逐项校验写应答 return code（`832c8e2` 接入，git 源 `#b04826c`）；插件 `verify_write` 保留为可选第二防线（现场可关） |
-| S-4 / S-5 / S-9 | 已闭环 | fork `rs-iot/fixes` 分支根治（`git.metme.top/viccom/tokio-s7`），fork 内各带单测；`[patch.crates-io]` 已生效（`cargo tree` 实证 git 源） |
+| S-4 / S-5 / S-9 | 已闭环 | fork `rs-iot/fixes` 分支根治（GitHub 公开镜像 `github.com/viccom/tokio-s7` 为 `[patch]` 源 + `git.metme.top` 内部镜像，同 rev `#b04826c`），fork 内各带单测；`cargo tree` 实证 git 源生效 |
 | E-2 / E-3 / E-6 / E-16、S-13 | 规避 | 配置期拒绝 / 运行期 Null，未根治；上游 issue/PR 待提 |
 | E-9 / E-20 | 记录不修 | 台账原裁决 `N`（上游注释自述非原子 / 设备保序假设） |
 

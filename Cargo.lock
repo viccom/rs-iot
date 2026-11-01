@@ -4319,7 +4319,7 @@ dependencies = [
 [[package]]
 name = "tokio-s7"
 version = "0.1.7"
-source = "git+https://git.metme.top/viccom/tokio-s7.git?branch=rs-iot%2Ffixes#b04826c4456a30920c665e4d364c07f87181f899"
+source = "git+https://github.com/viccom/tokio-s7.git?branch=rs-iot%2Ffixes#b04826c4456a30920c665e4d364c07f87181f899"
 dependencies = [
  "env_logger",
  "futures",

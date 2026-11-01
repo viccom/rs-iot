@@ -1,6 +1,6 @@
 # 上游库缺陷处置策略（插件规避 / 最小 fork / 上游 PR）
 
-> **状态**：implemented（三层策略落地：插件规避全部完成、tokio-s7 fork 已建仓并经 `[patch.crates-io]` 接入；CI 可达性与上游 PR 待办，见 §9）
+> **状态**：implemented（三层策略落地：插件规避全部完成、tokio-s7 fork 已建仓（GitHub 公开镜像为 `[patch]` 源）并接入；上游 PR 待办，见 §9）
 > **日期**：2026-11-01
 > **实施**：2026-11-01（规避批次 `a27328b`；fork 接入 `832c8e2`）
 > **代码**：`Cargo.toml`（`[patch.crates-io] tokio-s7 → git.metme.top/viccom/tokio-s7@rs-iot/fixes`）、fork 仓 4 补丁（S-1/S-4/S-5/S-9，各带单测）、插件侧规避见台账 §9.1
@@ -98,14 +98,18 @@ tokio-s7 = { git = "https://git.metme.top/viccom/tokio-s7.git", branch = "rs-iot
 ## 9. 执行进展（2026-11-01 第二批；fork 已接入）
 
 - **插件侧规避已全部落地**（见台账 §9）：S-2/S-3、S-6~S-8、S-10~S-15、S-17~S-21、E 全部可规避项、OPC 全部库相关项。
-- **tokio-s7 fork 已建仓并接入**（`832c8e2`）：远程 `git.metme.top/viccom/tokio-s7` 分支 `rs-iot/fixes`（基线 0.1.7 + 4 补丁 commit，`#b04826c`）：
+- **tokio-s7 fork 已建仓并接入**（`832c8e2` 起，源切 GitHub 见后续提交）：双远程同分支 `rs-iot/fixes`（基线 0.1.7 + 4 补丁 commit，`#b04826c`）——`github.com/viccom/tokio-s7`（公开，`[patch]` 源）与 `git.metme.top/viccom/tokio-s7`（内部镜像）：
   - S-1 写应答 item 级 return code 校验（`client.rs:check_write_return_items`，mock PLC 单测）；
   - S-4 头级错误区按 `(class, code)` 两字节解析（`header.rs`，`0x85/0x04` 帧单测）；
   - S-5 STRING Latin-1 解码（`read_string`，`0xB0 0x43 → "°C"` 单测）；
   - S-9 `connection_type` 编入 local TSAP（`tsaps()`，三连接类型单测）。
-- **接入验证**：`cargo tree -i tokio-s7` 实证 git 源生效；fork 仓 `cargo test` 11 绿；rs-iot 接入后 `s7_client` 单测 40 绿 + `s7_e2e` 4 绿 + `cargo check --all-targets --all-features` 无错。本地留档 `dist/vendor/tokio-s7-fork`（远程的推送源）。
-- **⚠ CI 可达性（待办）**：`viccom/tokio-s7` 当前为**私有仓**（匿名 `git ls-remote` 被拒）——GitHub Actions 的 `--all-features` 档（含 s7）拉取该 git 依赖会失败。二选一：
-  1. 把 fork 仓在 git.metme.top 设为公开（推荐；代码是 Apache-2.0 上游 + 补丁，公开合规）；
-  2. CI 注入凭据（`CARGO_NET_GIT_FETCH_WITH_CLI` + secret，或镜像到 GitHub 私有仓走 Plan B checkout）。
+- **接入验证**：git.metme.top 源与 GitHub 源各跑一轮——`cargo tree` 实证源生效、fork 仓 `cargo test` 11 绿、`s7_client` 单测 40 绿 + `s7_e2e` 4 绿 + `cargo check --all-targets --all-features` 无错。本地留档 `dist/vendor/tokio-s7-fork`（双远程的推送源，remote：origin=git.metme.top、github=SSH 443）。
+- **CI 可达性（已解决）**：`[patch]` 源指向 **GitHub 公开镜像 `github.com/viccom/tokio-s7`**（同分支同 rev `#b04826c`，匿名 API 实证 `private=false`）——GitHub Actions 的 `--all-features` 档可匿名拉取；`git.metme.top/viccom/tokio-s7` 保留为内部镜像（团队直连域）。
+- **本机拉取路径（中国大陆网络）**：github.com HTTPS 在本机常被 TLS 重置，`git fetch` 走不通 → 三件套（新机器按此配置，约 2 分钟）：
+  1. 仓本地 `.cargo/config.toml`（被 .gitignore 的 `config.toml` 规则忽略，不入库）：
+     `[net]` / `git-fetch-with-cli = true`（cargo 经 git CLI 拉取，才吃得到 git 的 URL 改写）；
+  2. `git config --global url.ssh://git@ssh.github.com:443/viccom/tokio-s7.git.insteadOf https://github.com/viccom/tokio-s7.git`（仅精确匹配本仓 URL，无全局副作用）；
+  3. 该 GitHub 仓已挂 **repo 级 deploy key**（RW，key id 168369516，私钥 = 本机 `~/.ssh/id_ed25519`）——SSH 443 可直连（HTTPS 被重置时仍可用）。
+  实证：`cargo tree -i tokio-s7` 解析为 `https://github.com/viccom/tokio-s7.git?branch=rs-iot%2Ffixes#b04826c`，`cargo check/test` 全绿。
 - **S-1 防线分层**：fork 已根治（写失败返回 Err）；插件 `verify_write`（默认 true）保留为可选第二防线——上游 fork 生效后现场可按需关闭省一次读回。
 - **rust-ethernet-ip**：E-2/E-3/E-16 的插件侧拒绝已落地；上游 issue/PR 尚未提（需 GitHub 凭据/网络，待用户授权）。

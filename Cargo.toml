@@ -189,8 +189,11 @@ history = ["dep:tsink"]
 # S-5（STRING UTF-8 lossy）/ S-9（connection_type 死配置）。fork 版本号保持 0.1.7，
 # 只覆盖来源；上游合入后删本段即回退 crates.io。详见
 # docs/decisions/2026-11-01-upstream-library-fork-policy.md §4/§9。
+# 源用 GitHub 公开镜像（CI 匿名可达）；内部镜像同步在
+# git.metme.top/viccom/tokio-s7（同分支）。本机拉取走 git CLI + SSH 443
+# （.cargo/config.toml + git insteadOf，见决策 §9）。
 [patch.crates-io]
-tokio-s7 = { git = "https://git.metme.top/viccom/tokio-s7.git", branch = "rs-iot/fixes" }
+tokio-s7 = { git = "https://github.com/viccom/tokio-s7.git", branch = "rs-iot/fixes" }
 
 [profile.release]
 # workspace 层共享（rs-iot + rsiot-mcp + rsiot-gateway 复用同一 release 配置）。
