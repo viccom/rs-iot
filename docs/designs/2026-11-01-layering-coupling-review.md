@@ -1,10 +1,10 @@
 # rs-iot 分层耦合专项审查与修复（2026-11-01）
 
-> **状态**：implemented（三条类型回边已切 + 分层门禁上线 + 两处越层收口）
+> **状态**：implemented（三条类型回边已切 + 分层门禁上线 + 两处越层收口 + 上线 e2e 揪出装配顺序 bug 并修复）
 > **日期**：2026-11-01
-> **实施**：2026-11-01（本次改动；提交后回写 commit）
-> **代码**：`src/types.rs`（InstState/LogEntry）、`src/error.rs`（ModelError）、`src/host.rs`（ArchiveCounters）、`src/plugin/lua_core/manage.rs`（Lua 管理面）、`scripts/check_layers.py`、`justfile`（`just layers`）
-> **测试**：`scripts/check_layers.py`（无环+越层门禁）、`cargo test --lib`、`cargo test --tests --no-default-features --features lua`
+> **实施**：2026-11-01（本次改动 + 上线复测修复）
+> **代码**：`src/types.rs`（InstState/LogEntry）、`src/error.rs`（ModelError）、`src/host.rs`（ArchiveCounters）、`src/plugin/lua_core/manage.rs`（Lua 管理面）、`src/lib.rs`（装配顺序修复）、`scripts/check_layers.py`、`justfile`（`just layers`）
+> **测试**：`scripts/check_layers.py`（无环+越层门禁）、`cargo test --lib`（679）、生产 e2e 11 项（见 §7）
 > **遗留**：`HostContext`/`AppState` 收窄（受 73 处测试构造点约束）、`db/` 目录拆分（100+ 调用点）、`api` 模块 pub 面收敛
 
 ## 1. 一句话结论
@@ -78,3 +78,34 @@
   重跑与后续全量均 5/5 通过），未复现，属既有时间敏感用例，未在本次范围内处理。
 - `cargo test --features "s7,eip" --test s7_e2e --test eip_client_e2e --test feature_gate_e2e`：通过。
 - `python3 scripts/check_docs.py`：OK（72 个 md）。
+
+## 7. 上线 e2e 与装配顺序 bug（2026-11-01 追加）
+
+分层重构上线（重编 release + warden 重启 dev-rs-iot）后的生产 e2e 对照**揪出一个
+既有 bug**——正是本审查登记的「装配顺序契约只存在于注释」的直接后果：
+
+**现象**：`/sysstatus` 直读 `HistoryStats` 的 `written` 正常增长（855→2197→2854），
+而 selfMonitor 同源三计数 `rsiot.history_written_total` 恒 0（采集时间戳新鲜）。
+
+**根因**（`src/lib.rs` 装配顺序）：`InstanceManager::new(ctx.clone(), hub_tx)` 在
+`ctx.history = parts.handle` **之前**构造——mgr 把这份 `history=None` 的副本 clone
+给每个插件 task，所以**所有插件**的 history 槽从未接通（T16 上线以来即如此；旧代码
+`ctx.history.as_ref().map(...)` 同样得 None→0，非本次重构引入）。pipeline 拿到的
+是注入后的 ctx（sysstatus/metrics 正常），两条读径分叉即本次对照的来源。
+
+**修复**：把「ensure_sys_model_registered → cache::reload → discovery::load →
+history init → ctx.history 注入」整段挪到 `InstanceManager::new` 之前（mgr 构造
+点即「插件面 ctx 定格点」，注释已写明后续加能力必须在此之前注入）。该段只依赖
+lux client 与 effective，前移无依赖冲突；默认北向/自动启动实例本就在 mgr 之后。
+
+**复测**（重启后生产 e2e 11 项全过）：`sysstatus written=381` ↔
+`selfMonitor written_total=370`（采集时刻差几秒，同源同步），dropped/errors 双 0；
+11 项 = inststatus/plugins/实时数据新鲜度/三计数/history 读/KPI/engine 状态/SSE/
+lua stdlib 门面/lua scripts。ModelError 文案（`model error: …`，HTTP 400）重启后
+复测不变。启动日志：优雅停机（writer 排空→close→锁释放）→ 重启 → 北向/管线/REST
+就绪，顺序调整无副作用。
+
+**教训**：单测里 observe_light 用注入了假 HistoryHandle 的 HostContext 验证过
+wiring（所以单测全绿），但**生产装配点给的是另一份 ctx**——模块图看不见这类
+「同一抽象、两处装配」的分叉。收敛方向即技术债 4（HostContext/AppState 单一
+装配源）；在机械化之前，跨装配点的共享可变注入必须有对照断言。

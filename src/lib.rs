@@ -262,7 +262,9 @@ pub async fn run_app_with_shutdown(
     // with_sender 注入事件总线：dump 激活时扇出 Packet 到 SSE。
     let trace_registry = crate::io_trace::TraceRegistry::with_sender(event_bus.clone());
     // history 先置 None：引擎初始化在 cache::reload 之后（effective 物化才可
-    // 校准 cardinality），init 区再统一注入 ctx.history（见下方 pipeline spawn 前）。
+    // 校准 cardinality），init 区统一注入 ctx.history（见下方 InstanceManager
+    // 构造之前——mgr 把 ctx clone 给每个插件 task，注入前 clone 的 history=None，
+    // 插件侧历史三计数会恒 0：2026-11-01 上线 e2e 实锤并修复，见下方注释）。
     let mut ctx = host::HostContext {
         lux: client.clone(),
         hwid: hwid.clone(),
@@ -275,6 +277,55 @@ pub async fn run_app_with_shutdown(
         history: None,
     };
 
+    // selfMonitor 隐式模型注册（M-2 T5）：`_sys_rsiot` 模型 + devreg 设备 rsiot
+    // 幂等入册——运行时设备也走模型的完整性验证。须在 effective 装载**之前**
+    // （缓存含 rsiot 标签）。
+    crate::plugin::builtin::self_monitor::ensure_sys_model_registered(&client).await;
+    // 设备模型注册表 effective 物化缓存装载（M-1 T8；模型∪覆盖 → tag_key →
+    // TagProps，Phase 1b 历史/死区与发现引擎的 O(1) 读侧；fail-soft）。
+    match model::cache::reload(&client).await {
+        Ok(m) => tracing::debug!("[model] effective 物化缓存装载 {} 条", m.len()),
+        Err(e) => tracing::warn!("[model] effective 物化缓存装载失败(空快照): {e}"),
+    }
+    // 发现队列启动装载（M-4 T1）：lux discoveries → 内存计数缓冲（count 接续）。
+    match model::discovery::load(&client).await {
+        Ok(n) => tracing::debug!("[discovery] 发现队列装载 {n} 条"),
+        Err(e) => tracing::warn!("[discovery] 发现队列装载失败(计数重新累计): {e}"),
+    }
+    // 历史引擎初始化 + 编排件提取（Phase 1b/审计 B7）：cache::reload 之后
+    //（auto cardinality 读 effective）。P8 fail-soft：init 失败仅 error! 停用
+    // 归档；三态推导与四件套提取收敛在 history::EngineParts（引擎所有权留此
+    // ——D10 关停序需要 &mut close）。
+    #[cfg(feature = "history")]
+    let mut history_engine = history::engine::maybe_init(&cfg.history, &model::cache::effective())
+        .and_then(|r| match r {
+            Ok(e) => Some(e),
+            Err(e) => {
+                tracing::error!("[history] 引擎初始化失败,归档停用: {e}");
+                None
+            }
+        });
+    #[cfg(not(feature = "history"))]
+    if cfg.history.enabled {
+        // P7：L1/L2 正交——feature off 而 enabled=true 是配置错误，告警并忽略。
+        tracing::warn!("[history] 配置 enabled=true 但编译未含 history feature,忽略");
+    }
+    #[cfg(feature = "history")]
+    let parts = history::EngineParts::of(history_engine.as_ref(), &cfg.history, hwid.as_str());
+    #[cfg(not(feature = "history"))]
+    let parts = history::EngineParts::disabled();
+    ctx.history = parts.handle;
+    let history_stats = parts.stats;
+    let history_engine_state = parts.state;
+    let history_reader = parts.reader;
+    let history_telemetry = parts.telemetry;
+
+    // hub + InstanceManager：**必须在 ctx.history 注入之后构造**——mgr 把 ctx
+    // clone 给每个插件 task（start_source/start_sink），注入前构造的 mgr 会让
+    // 所有插件的 history 槽恒 None：T16 的 selfMonitor 历史三计数自上线起在生产
+    // 链路恒 0（sysstatus 直读同源计数器正常增长），2026-11-01 上线 e2e 对照
+    // 实锤后把本段从 history 注入前移到注入后。插件面 ctx 此后不再变——后续
+    // 如需给插件加能力，必须在本构造点之前完成注入。
     let (hub_tx, hub_rx) = tokio::sync::mpsc::channel::<types::Sample>(512);
     let mgr = Arc::new(plugin::instance::InstanceManager::new(ctx.clone(), hub_tx));
 
@@ -319,49 +370,6 @@ pub async fn run_app_with_shutdown(
     // 数据加工走 luaTransform 订阅型实例（阶段 C），Processor 插槽留给未来 Rust 原生处理器。
     let processor: Arc<dyn plugin::traits::Processor> =
         Arc::new(transform::passthrough::Passthrough);
-    // selfMonitor 隐式模型注册（M-2 T5）：`_sys_rsiot` 模型 + devreg 设备 rsiot
-    // 幂等入册——运行时设备也走模型的完整性验证。须在 effective 装载**之前**
-    // （缓存含 rsiot 标签）。
-    crate::plugin::builtin::self_monitor::ensure_sys_model_registered(&client).await;
-    // 设备模型注册表 effective 物化缓存装载（M-1 T8；模型∪覆盖 → tag_key →
-    // TagProps，Phase 1b 历史/死区与发现引擎的 O(1) 读侧；fail-soft）。
-    match model::cache::reload(&client).await {
-        Ok(m) => tracing::debug!("[model] effective 物化缓存装载 {} 条", m.len()),
-        Err(e) => tracing::warn!("[model] effective 物化缓存装载失败(空快照): {e}"),
-    }
-    // 发现队列启动装载（M-4 T1）：lux discoveries → 内存计数缓冲（count 接续）。
-    match model::discovery::load(&client).await {
-        Ok(n) => tracing::debug!("[discovery] 发现队列装载 {n} 条"),
-        Err(e) => tracing::warn!("[discovery] 发现队列装载失败(计数重新累计): {e}"),
-    }
-    // 历史引擎初始化 + 编排件提取（Phase 1b/审计 B7）：cache::reload 之后
-    //（auto cardinality 读 effective）、pipeline spawn 之前（handle 注入
-    // HostContext）。P8 fail-soft：init 失败仅 error! 停用归档；三态推导与
-    // 四件套提取收敛在 history::EngineParts（引擎所有权留此——D10 关停序
-    // 需要 &mut close）。
-    #[cfg(feature = "history")]
-    let mut history_engine = history::engine::maybe_init(&cfg.history, &model::cache::effective())
-        .and_then(|r| match r {
-            Ok(e) => Some(e),
-            Err(e) => {
-                tracing::error!("[history] 引擎初始化失败,归档停用: {e}");
-                None
-            }
-        });
-    #[cfg(not(feature = "history"))]
-    if cfg.history.enabled {
-        // P7：L1/L2 正交——feature off 而 enabled=true 是配置错误，告警并忽略。
-        tracing::warn!("[history] 配置 enabled=true 但编译未含 history feature,忽略");
-    }
-    #[cfg(feature = "history")]
-    let parts = history::EngineParts::of(history_engine.as_ref(), &cfg.history, hwid.as_str());
-    #[cfg(not(feature = "history"))]
-    let parts = history::EngineParts::disabled();
-    ctx.history = parts.handle;
-    let history_stats = parts.stats;
-    let history_engine_state = parts.state;
-    let history_reader = parts.reader;
-    let history_telemetry = parts.telemetry;
     // 内建丢弃水位告警（Task 18，P6 收官）：引擎在场才起——engine=None
     //（feature off / L2 disabled / init_failed）时 dropped 恒 0，判定无意义，
     // 不 spawn（最小面）。独立任务而非 pipeline worker 上下文：worker 是 N 路
