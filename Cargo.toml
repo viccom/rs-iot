@@ -184,6 +184,14 @@ history = ["dep:tsink"]
 # analytics = ["dep:datafusion"]
 # windows-svc = ["dep:windows-service"]
 
+# 第三方库最小 fork（2026-11-01 协议语义审查决策）：tokio-s7 0.1.7 的 4 处上游缺陷
+# S-1（写应答 item 级 return code 被丢弃）/ S-4（头级错误区解析错位）/
+# S-5（STRING UTF-8 lossy）/ S-9（connection_type 死配置）。fork 版本号保持 0.1.7，
+# 只覆盖来源；上游合入后删本段即回退 crates.io。详见
+# docs/decisions/2026-11-01-upstream-library-fork-policy.md §4/§9。
+[patch.crates-io]
+tokio-s7 = { git = "https://git.metme.top/viccom/tokio-s7.git", branch = "rs-iot/fixes" }
+
 [profile.release]
 # workspace 层共享（rs-iot + rsiot-mcp + rsiot-gateway 复用同一 release 配置）。
 opt-level = 3

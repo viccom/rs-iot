@@ -4319,8 +4319,7 @@ dependencies = [
 [[package]]
 name = "tokio-s7"
 version = "0.1.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9a42aecc6332b8c71e53637a28bc19d7edf803e72842ef46388fec3522024d43"
+source = "git+https://git.metme.top/viccom/tokio-s7.git?branch=rs-iot%2Ffixes#b04826c4456a30920c665e4d364c07f87181f899"
 dependencies = [
  "env_logger",
  "futures",
