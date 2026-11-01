@@ -99,6 +99,7 @@
 | [2026-08-27-model-extension-slot-design.md](designs/2026-08-27-model-extension-slot-design.md) | 设备模型域扩展性设计（DeviceModel/TagTemplate 开放扩展槽）：flatten 语义/wire 形态/`x_` 键契约与毕业机制/报警外置与存储梯度定位边界/场景驱动演进路线 | **已实施**（扩展槽+键契约+读透出面：REST 校验/MCP 两读工具/前端只读展示） |
 | [2026-10-30-screen-versioning-design.md](designs/2026-10-30-screen-versioning-design.md) | 画面/主题文档版本管理与并发控制（routes_meta 演进）：`sv:` 键族 + 内容判重 + if_version 乐观锁 + rollback + SSE screen 事件 + embedded 无事务的失败矩阵 | **已实施**（166fe25/40698d4；2026-10-30 复审修复：锁序/回滚 no-op/错误路径） |
 | [2026-10-30-screen-versioning-plan.md](designs/2026-10-30-screen-versioning-plan.md) | 画面/主题版本管理实施计划（P0 第 1 轮 TDD 任务表 A1~A9 + 开工基线漂移记录） | **已实施**（166fe25/40698d4：11 组测试 + §6 六实测全符） |
+| [2026-11-01-layering-coupling-review.md](designs/2026-11-01-layering-coupling-review.md) | 分层耦合专项：实测 10 模块强连通分量 → 切三条类型回边（InstState/LogEntry/ModelError 上移）+ 分层门禁 `scripts/check_layers.py` + plugin→history / api→lua_core 收口 | **已实施**（2026-11-01） |
 
 ## ops/ — 部署与运维（怎么跑起来）
 

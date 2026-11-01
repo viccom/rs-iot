@@ -8,7 +8,7 @@
 ## 〇、一键门禁（首选）
 
 ```bash
-just check          # fmt + docs + clippy 三档 + 单测/e2e（本机实测基线：全绿）
+just check          # fmt + docs + layers + clippy 三档 + 单测/e2e（本机实测基线：全绿）
 just check-s7-eip   # s7/eip 裁剪档 e2e（出默认 feature，需显式档）
 ```
 
@@ -17,6 +17,7 @@ just check-s7-eip   # s7/eip 裁剪档 e2e（出默认 feature，需显式档）
 ```bash
 just fmt                     # cargo fmt --all --check
 just docs                    # python3 scripts/check_docs.py（文档宪法）
+just layers                  # python3 scripts/check_layers.py（模块图无环 + 禁止越层引用）
 just lint                    # clippy 默认档 + lua-only 档（均 -- -D warnings）
 just test                    # cargo test --lib + cargo test --tests --no-default-features --features lua
 ```
