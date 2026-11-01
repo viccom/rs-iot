@@ -497,6 +497,11 @@ impl AppConfig {
                     RsIotError::Config(format!("parse config {}: {e}", p.display()))
                 })?;
                 cfg.meta.sanitize();
+                // H-4（2026-11-01 审查）：bridge 零值钳制——max_connections=0 会让
+                // Semaphore::new(0) 全部握手永久等待（bridge 静默瘫痪）；
+                // accept_hello_timeout_secs=0 会让每个握手立即超时（fail-closed 全拒）。
+                cfg.bridge.max_connections = cfg.bridge.max_connections.max(1);
+                cfg.bridge.accept_hello_timeout_secs = cfg.bridge.accept_hello_timeout_secs.max(1);
                 Ok(cfg)
             }
             _ => Ok(Self::default()),

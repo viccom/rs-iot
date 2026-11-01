@@ -393,6 +393,10 @@ impl Source for SidecarClient {
         // （外部一次一个连接；重连时若 task 未取走上一个，dispatch 报 Full，acceptor
         // 回 ack 让外部稍后重试）。
         let (slot_tx, mut slot_rx) = mpsc::channel::<BridgeConn>(1);
+        // H-3（2026-11-01 审查）：保留自己的 slot_tx 克隆，退出时按句柄比对删除——
+        // 此前无条件 unregister，stop 3s 超时放行旧 task 后、新 task 已注册的 slot
+        // 会被旧 task 收尾时误删（外部连接永久 NoSlot，实例状态却显示 Running）。
+        let my_slot_tx = slot_tx.clone();
         ctx.bridge_registry.register(&inst_id, slot_tx);
 
         // observed StatTracker（M4）：外部进程不写 lux，bridge 观察派生指标——
@@ -664,7 +668,8 @@ impl Source for SidecarClient {
         tracker.set_status("stopped");
         tracker.flush().await;
 
-        ctx.bridge_registry.unregister(&inst_id);
+        ctx.bridge_registry
+            .unregister_if_same(&inst_id, &my_slot_tx);
         tracing::info!("[sidecarClient] inst {inst_id} exited");
     }
 }
@@ -713,7 +718,12 @@ pub async fn acceptor(
                         handle_connect(stream, addr, lux, secret, registry, hello_timeout).await;
                     });
                 }
-                Err(e) => tracing::warn!("[sidecarClient] accept failed: {e}"),
+                Err(e) => {
+                    // H-2（2026-11-01 审查）：accept 错误退避——EMFILE 等场景 accept
+                    // 立即持续 Err，裸循环会单核热转 + 无限速 warn。
+                    tracing::warn!("[sidecarClient] accept failed: {e}（100ms 退避）");
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                }
             },
         }
     }
@@ -748,9 +758,13 @@ async fn handle_connect(
         let msg = format!(
             "不支持的协议版本 v{}；本宿主支持 {:?}（当前 v{CURRENT_VERSION}）。\
              v2 载荷：devices[].tags[] 模型点表；v3 追加 app_config 与 devices[].bind",
-            hello.ver, SUPPORTED_VERSIONS
+            trunc_log(&hello.ver, 64),
+            SUPPORTED_VERSIONS
         );
-        tracing::warn!("[sidecarClient] {addr} inst {} {msg}", hello.inst_id);
+        tracing::warn!(
+            "[sidecarClient] {addr} inst {} {msg}",
+            trunc_log(&hello.inst_id, 64)
+        );
         let p = encode_payload(T_HELLO_ACK, &serde_json::json!({"ok": false, "msg": msg}));
         let _ = write_one_frame(&mut stream, &p).await;
         return;
@@ -762,7 +776,7 @@ async fn handle_connect(
     if !ok {
         tracing::warn!(
             "[sidecarClient] {addr} inst {} token verify failed",
-            hello.inst_id
+            trunc_log(&hello.inst_id, 64)
         );
         let p = encode_payload(
             T_HELLO_ACK,
@@ -802,9 +816,39 @@ inventory::submit! {
     }
 }
 
+/// H-1（2026-11-01 审查）：未认证阶段的攻击者可控字段日志截断——Hello 的
+/// inst_id/ver 可填满至 MAX_FRAME(4MiB)，token 校验前的 warn 整段落盘会撑爆
+/// 日志盘；照 selfMonitor display_trunc 先例截定长（按 char 边界，防切 UTF-8 半字）。
+fn trunc_log(s: &str, max: usize) -> std::borrow::Cow<'_, str> {
+    if s.chars().count() <= max {
+        return std::borrow::Cow::Borrowed(s);
+    }
+    std::borrow::Cow::Owned(format!(
+        "{}…(截断，{} chars)",
+        s.chars().take(max).collect::<String>(),
+        s.chars().count()
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// H-1（2026-11-01 审查）：未认证阶段日志截断——Hello 的 inst_id/ver 攻击者
+    /// 可控且可达 MAX_FRAME(4MiB)，token 校验前的 warn 不再整段落盘。
+    #[test]
+    fn trunc_log_limits_and_keeps_short() {
+        assert_eq!(trunc_log("short", 64).as_ref(), "short");
+        let long = "x".repeat(300);
+        let out = trunc_log(&long, 64).into_owned();
+        assert!(out.starts_with(&"x".repeat(64)), "保留前 64 字符");
+        assert!(out.contains("截断"), "截断标记可见");
+        // 多字节字符不切半字（按 char 边界）
+        let cjk = "中".repeat(100);
+        assert!(trunc_log(&cjk, 10)
+            .into_owned()
+            .starts_with(&"中".repeat(10)));
+    }
 
     #[test]
     fn decode_heartbeat_empty_body() {

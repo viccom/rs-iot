@@ -272,7 +272,9 @@ impl Source for SelfMonitor {
                     break;
                 }
                 msg = cmd_rx.recv() => {
-                    if let Some(m) = msg {
+                    // G-2（2026-11-01 审查）：通道关闭即退出（None 空过会热转）。
+                    let Some(m) = msg else { break };
+                    {
                         if m.cmd != "write" {
                             tracing::warn!("[selfMonitor] inst {} unknown cmd: {}", inst.inst_id, m.cmd);
                             continue;
@@ -582,10 +584,11 @@ fn observe_light(
 async fn instance_stats(
     lux: &lux::EmbeddedClient,
 ) -> (usize, usize, usize, std::collections::HashSet<String>) {
-    let configured = std::collections::HashSet::new();
     let arr = match lux.execute_value("HGETALL", &["instances"]).await {
         Ok(lux::EmbeddedValue::Array(a)) => a,
-        _ => return (0, 0, 0, configured),
+        // G-3（2026-11-01 审查）：删除此前被立即遮蔽的死变量（原顶部
+        // `let configured = HashSet::new()`），早退路径就地构造空集。
+        _ => return (0, 0, 0, std::collections::HashSet::new()),
     };
     let mut collectors = 0;
     let mut configured = std::collections::HashSet::new();

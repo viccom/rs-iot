@@ -76,16 +76,17 @@ impl Source for DataSim {
             period_secs
         );
 
-        loop {
+        'run: loop {
             tokio::select! {
                 _ = token.cancelled() => {
                     tracing::info!("[dataSim] inst {} stopping", inst.inst_id);
-                    break;
+                    break 'run;
                 }
                 msg = cmd_rx.recv() => {
-                    if let Some(m) = msg {
-                        tracing::info!("[dataSim] inst {} cmd: {} (devid={})", inst.inst_id, m.cmd, m.devid);
-                    }
+                    // G-2（2026-11-01 审查）：通道关闭即退出（对齐 selfMonitor/sidecar；
+                    // None 空过会让 select 立即重 Poll 热转）。
+                    let Some(m) = msg else { break 'run };
+                    tracing::info!("[dataSim] inst {} cmd: {} (devid={})", inst.inst_id, m.cmd, m.devid);
                 }
                 _ = flush_ticker.tick() => {
                     tracker.flush_if_due().await;
@@ -111,8 +112,11 @@ impl Source for DataSim {
                             timestamp: now,
                         };
                         if tx.send(sample).await.is_err() {
-                            // pipeline 已关闭
-                            break;
+                            // pipeline 已关闭。G-1（2026-11-01 审查）：退出整个循环
+                            // ——此前只 break 内层 for，task 每 tick 空转零输出、无
+                            // Failed 信号（selfMonitor/sidecar 同场景都是退出）。
+                            tracing::warn!("[dataSim] inst {} hub 已关闭，退出", inst.inst_id);
+                            return;
                         }
                     }
                     tracker.tick_ok(started.elapsed().as_millis() as u64);

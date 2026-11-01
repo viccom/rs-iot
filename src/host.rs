@@ -143,8 +143,25 @@ impl BridgeRegistry {
     }
 
     /// 注销（实例停止时）。
+    ///
+    /// 注意：这是**无条件删除**——仅应由确定自己是当前注册者的路径调用。
+    /// 插件 task 自行收尾请用 [`BridgeRegistry::unregister_if_same`]
+    /// （H-3，2026-11-01 审查：stop 3s 超时放行旧 task 后、新 task 已注册的
+    /// slot 会被旧 task 无条件 unregister 误删——外部连接永久 NoSlot）。
     pub fn unregister(&self, inst: &str) {
         self.map.remove(inst);
+    }
+
+    /// 按句柄比对注销：仅当当前注册的 sender 与 `tx` 同一通道时才删除。
+    /// 旧 task 退出时调用——若 slot 已被新 task 顶替（`register` 覆盖），
+    /// 此调用 no-op，后继注册得以保留。
+    pub fn unregister_if_same(&self, inst: &str, tx: &mpsc::Sender<BridgeConn>) {
+        if let Some(cur) = self.map.get(inst) {
+            if cur.value().same_channel(tx) {
+                drop(cur); // 先释放 shard 读锁再 remove
+                self.map.remove(inst);
+            }
+        }
     }
 
     /// 是否有实例在等连接。
@@ -280,6 +297,32 @@ mod tests {
         assert!(r.send("full", dummy()), "满丢仍返 true（对标 Go default）");
         assert!(r.send("full", dummy()), "第二次满");
         assert_eq!(r.metrics.ctl_dropped_count.load(Ordering::Relaxed), 1);
+    }
+
+    /// H-3（2026-11-01 审查）：unregister_if_same 只删自己的注册——stop 3s 超时
+    /// 放行旧 task 后新 task 顶替 slot，旧 task 收尾的注销不得误删后继注册。
+    #[tokio::test]
+    async fn bridge_unregister_if_same_keeps_successor() {
+        let r = BridgeRegistry::new();
+        let (old_tx, _old_rx) = mpsc::channel::<BridgeConn>(1);
+        r.register("i1", old_tx.clone());
+        // 旧 task 保留的克隆与注册同一通道 → 正常删除
+        r.unregister_if_same("i1", &old_tx);
+        assert!(!r.contains("i1"), "自己的注册应被删除");
+
+        // 重叠场景：旧 task 未退，新 task 已 register 顶替
+        let (old_tx2, _old_rx2) = mpsc::channel::<BridgeConn>(1);
+        let (new_tx, _new_rx) = mpsc::channel::<BridgeConn>(1);
+        r.register("i1", old_tx2.clone());
+        r.register("i1", new_tx.clone()); // 顶替
+        r.unregister_if_same("i1", &old_tx2); // 旧 task 收尾
+        assert!(
+            r.contains("i1"),
+            "后继注册必须保留（此前被无条件 unregister 误删）"
+        );
+        // 新 task 自己退 → 删除
+        r.unregister_if_same("i1", &new_tx);
+        assert!(!r.contains("i1"));
     }
 
     #[test]
