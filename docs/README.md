@@ -102,7 +102,7 @@
 | [2026-10-30-screen-versioning-plan.md](designs/2026-10-30-screen-versioning-plan.md) | 画面/主题版本管理实施计划（P0 第 1 轮 TDD 任务表 A1~A9 + 开工基线漂移记录） | **已实施**（166fe25/40698d4：11 组测试 + §6 六实测全符） |
 | [2026-11-01-layering-coupling-review.md](designs/2026-11-01-layering-coupling-review.md) | 分层耦合专项：实测 10 模块强连通分量 → 切三条类型回边（InstState/LogEntry/ModelError 上移）+ 分层门禁 `scripts/check_layers.py` + plugin→history / api→lua_core 收口 | **已实施**（2026-11-01） |
 | [2026-11-01-plugin-audit-fix-plan.md](designs/2026-11-01-plugin-audit-fix-plan.md) | 内置插件审查修复跟踪（10 插件 28 项真 BUG：四协议 I/O 超时/RTU 串扰/eip 位寻址+panic/luaTransform 饿死/luaNorth 等待环/静默写 0 拒写/sidecar 日志与注册竞态等）+ 定性不修清单 | **已实施**（A~H 八批 + 门禁全绿） |
-| [2026-11-01-protocol-semantics-audit.md](designs/2026-11-01-protocol-semantics-audit.md) | 协议插件协议语义审查台账（Modbus/OPC UA/S7/EtherNet/IP 73 条）：逐条定级 + 框架/插件/上游库归责 + 库源码与探针证据；含 HMI 写通道失效、S7 重连风暴与写应答丢弃、EIP 批量失败不重连、OPC UA 60s 阻塞等 | **待实施** |
+| [2026-11-01-protocol-semantics-audit.md](designs/2026-11-01-protocol-semantics-audit.md) | 协议插件协议语义审查台账（Modbus/OPC UA/S7/EtherNet/IP 73 条）：逐条定级 + 框架/插件/上游库归责 + 库源码与探针证据；含 HMI 写通道失效、S7 重连风暴与写应答丢弃、EIP 批量失败不重连、OPC UA 60s 阻塞等 | **已实施**（a27328b/a4b6c1b；未闭环项见 §9.2） |
 
 ## ops/ — 部署与运维（怎么跑起来）
 

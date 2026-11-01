@@ -1,6 +1,6 @@
 # 上游库缺陷处置策略（插件规避 / 最小 fork / 上游 PR）
 
-> **状态**：accepted（策略已决；fork 与补丁尚未落地，执行顺序见 §8）
+> **状态**：accepted（策略已决；tokio-s7 fork 补丁已备好并本地验证，远程仓与 `[patch]` 接入待执行，见 §9）
 > **日期**：2026-11-01
 > **来源**：协议插件协议语义审查（见 [台账](../designs/2026-11-01-protocol-semantics-audit.md)）中 21 条上游库条目的处置裁决
 > **关联**：`Cargo.toml` 依赖段（`lux`/`tsink_fork` path 依赖先例、`tokio-s7`/`rust-ethernet-ip` 版本约束）、`.github/workflows/ci.yml` 的私有 path 依赖 checkout 先例
@@ -92,3 +92,28 @@ tokio-s7 = { git = "https://git.metme.top/viccom/tokio-s7.git", branch = "rs-iot
 4. **落 `UPSTREAM.md` 与季度巡检**（可并入 warden 的运维日历或 CI 提醒）。
 
 **回退**：删 `[patch.crates-io]` 段即回到 crates.io 版本；fork 补丁对 rs-iot 插件侧无 API 变化（仅行为修正），回退不破坏插件代码。
+
+## 9. 执行进展（2026-11-01 第二批）
+
+- **插件侧规避已全部落地**（见台账 §9）：S-2/S-3、S-6~S-8、S-10~S-15、S-17~S-21、E 全部可规避项、OPC 全部库相关项。
+- **tokio-s7 fork 已备好并本地验证**：`dist/vendor/tokio-s7-fork`（git 仓，基线 0.1.7 + 4 补丁 commit），补丁与单测：
+  - S-1 写应答 item 级 return code 校验（`client.rs:check_write_return_items`，mock PLC 单测）；
+  - S-4 头级错误区按 `(class, code)` 两字节解析（`header.rs`，`0x85/0x04` 帧单测）；
+  - S-5 STRING Latin-1 解码（`read_string`，`0xB0 0x43 → "°C"` 单测）；
+  - S-9 `connection_type` 编入 local TSAP（`tsaps()`，三连接类型单测）。
+  - 验证：fork 内 `cargo test` 11 绿；rs-iot 以临时 path `[patch]` 联调 `s7_client` 40 绿 + `s7_e2e` 4 绿；试验后 `Cargo.toml/Cargo.lock` 已逐字节还原（未提交 path patch）。
+- **未接入的原因**：`git.metme.top/viccom/tokio-s7` 尚不存在；创建远程仓属对外动作，待用户批准。
+- **接入步骤**（用户建仓后）：
+  ```bash
+  cd dist/vendor/tokio-s7-fork
+  git remote add origin https://git.metme.top/viccom/tokio-s7.git
+  git branch -m rs-iot/fixes
+  git push -u origin rs-iot/fixes
+  ```
+  ```toml
+  # rs-iot/Cargo.toml
+  [patch.crates-io]
+  tokio-s7 = { git = "https://git.metme.top/viccom/tokio-s7.git", branch = "rs-iot/fixes" }
+  ```
+- **S-1 过渡防线**：在 fork 接入前，S7 插件 `verify_write`（默认 true）已消除"写失败静默成功"（写后读回校验）。
+- **rust-ethernet-ip**：E-2/E-3/E-16 的插件侧拒绝已落地；上游 issue/PR 尚未提（需 GitHub 凭据/网络，待用户授权）。
