@@ -10,9 +10,9 @@ set shell := ["bash", "-c"]
 default:
     @just check
 
-# 全套：格式 + 文档 + lint 三档（含 workspace）+ 单测 + s7/eip 显式档
+# 全套：格式 + 文档 + 分层 + lint 三档（含 workspace）+ 单测 + s7/eip 显式档
 [group('quality')]
-check: fmt docs lint test check-s7-eip
+check: fmt docs layers lint test check-s7-eip
     @echo "✅ rs-iot 本地门禁全过"
 
 # 全 workspace 门禁（含 crates/rsiot-mcp 与 crates/rsiot-gateway）
@@ -29,6 +29,11 @@ fmt:
 [group('quality')]
 docs:
     python3 scripts/check_docs.py
+
+# 分层依赖门禁：生产段模块图必须无环 + 禁止越层引用（2026-11-01 耦合审查）
+[group('quality')]
+layers:
+    python3 scripts/check_layers.py
 
 # lint 双档：默认裁剪面（现场形态）+ 全开。history 档依赖 tsink path 依赖，
 # 本机若为 stub 则跳过并显式提示（不是静默通过）。

@@ -11,18 +11,29 @@
 
 use rs_iot::config::{AppConfig, LuxConfig};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+/// 进程内唯一序号：`SystemTime` 分辨率不足时（同微秒内并发调用）仍保证目录名不撞。
+/// 曾致 `events_e2e` 偶发 `Resource temporarily unavailable`（同 binary 内多测试
+/// 同时起 lux；2026-11-01 修复）。
+static DIR_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// 为测试创建独立 data_dir（临时目录，按 name 隔离）。
 ///
 /// lux ≥0.37.1 对 data_dir 持排他锁——同名目录并发打开直接 AlreadyExists 拒启。
-/// 因此每次调用都拼 pid + 纳秒时钟保证唯一；同测试内跨 start/stop 重启复用
-/// **同一 PathBuf 变量**（kill 恢复/持久化类用例的既有惯例），不重复调用本函数。
+/// 因此每次调用都拼 pid + 纳秒时钟 + 进程内序号保证唯一（时钟分辨率不足时序号兜底）；
+/// 同测试内跨 start/stop 重启复用**同一 PathBuf 变量**（kill 恢复/持久化类用例的既有
+/// 惯例），不重复调用本函数。
 pub fn test_data_dir(name: &str) -> PathBuf {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    std::env::temp_dir().join(format!("rsiot-it-{name}-{}-{nanos}", std::process::id()))
+    let seq = DIR_SEQ.fetch_add(1, Ordering::Relaxed);
+    std::env::temp_dir().join(format!(
+        "rsiot-it-{name}-{}-{nanos}-{seq}",
+        std::process::id()
+    ))
 }
 
 /// 启动测试 lux 实例：端口 0 由 OS 分配（见 lux `ServerConfig::port` 文档），

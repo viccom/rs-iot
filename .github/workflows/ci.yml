@@ -188,7 +188,8 @@ jobs:
 
   docs:
     # 文档体系校验：头部状态块/实施块字段/索引登记与状态对齐/相对链接有效性。
-    # 规则见 docs/conventions/documentation.md；不依赖 lux/rust，秒级完成。
+    # 分层依赖门禁：生产段模块图无环 + 禁止越层引用。
+    # 规则见 docs/conventions/documentation.md 与 docs/architecture.md §四；不依赖 lux/rust，秒级完成。
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -196,6 +197,7 @@ jobs:
         with:
           python-version: "3.12"
       - run: python scripts/check_docs.py
+      - run: python scripts/check_layers.py
 
   audit:
     runs-on: ubuntu-latest
