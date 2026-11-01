@@ -56,6 +56,8 @@ enum Lane {
     I64,
     /// 布尔车道。
     Bool,
+    /// 无符号整数车道（SampleValue::UInt → tsink Value::U64）。
+    U64,
     /// 字符串车道。
     String,
 }
@@ -326,6 +328,12 @@ impl Writer {
                     continue;
                 }
             }
+            // 0b. 坏质量/无值（Null，F-3）：本拍没有可信测量值——不得把上次值
+            //     当作本拍数据归档。计入 nonfinite_skipped（同一"无效值"语义域）。
+            if let SampleValue::Null = &row.value {
+                self.stats.nonfinite_skipped.fetch_add(1, Ordering::SeqCst);
+                continue;
+            }
             let lane = lane_of(&row.value);
             let st = series_state(&mut self.series, &row.devid, &row.tag);
             // 1. lane 型变剔除（首见 lane=None 恒过）
@@ -502,29 +510,35 @@ fn lane_of(v: &SampleValue) -> Lane {
     match v {
         SampleValue::Float(_) => Lane::F64,
         SampleValue::Int(_) => Lane::I64,
+        SampleValue::UInt(_) => Lane::U64,
         SampleValue::Bool(_) => Lane::Bool,
         SampleValue::Str(_) => Lane::String,
+        // Null 在 flush 第 0 步已剔行（见 flush 文档），不会走到车道判定。
+        SampleValue::Null => Lane::String,
     }
 }
 
-/// 数值视图（P4：deadband 仅作用于 Float/Int；Bool/Str 返回 None 恒档）。
+/// 数值视图（P4：deadband 仅作用于 Float/Int/UInt；Bool/Str 返回 None 恒档）。
 #[cfg(feature = "history")]
 fn numeric(v: &SampleValue) -> Option<f64> {
     match v {
         SampleValue::Float(x) => Some(*x),
         SampleValue::Int(x) => Some(*x as f64),
-        SampleValue::Bool(_) | SampleValue::Str(_) => None,
+        SampleValue::UInt(x) => Some(*x as f64),
+        SampleValue::Bool(_) | SampleValue::Str(_) | SampleValue::Null => None,
     }
 }
 
-/// D4 类型保真映射：Float→F64、Int→I64、Bool→Bool、Str→String。
+/// D4 类型保真映射：Float→F64、Int→I64、UInt→U64、Bool→Bool、Str→String。
 #[cfg(feature = "history")]
 fn to_tsink_value(v: SampleValue) -> TsinkValue {
     match v {
         SampleValue::Float(x) => TsinkValue::F64(x),
         SampleValue::Int(x) => TsinkValue::I64(x),
+        SampleValue::UInt(x) => TsinkValue::U64(x),
         SampleValue::Bool(b) => TsinkValue::Bool(b),
         SampleValue::Str(s) => TsinkValue::String(s),
+        SampleValue::Null => TsinkValue::String(String::new()),
     }
 }
 
@@ -919,6 +933,59 @@ mod tests {
             "落盘值必须保持首行 Float(1.0)"
         );
         assert_eq!(pts[0].timestamp, ts_float);
+        reopened.close().expect("重开实例 close");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// F-5/F-3（协议语义审查）：UInt 独立 U64 车道（超 2^63 不符号翻转、不降 f64）；
+    /// Null（坏质量/无值）不落盘，计入 nonfinite_skipped。
+    #[test]
+    fn writer_uint_lane_and_null_skipped() {
+        let dir = unique_dir("uint_null");
+        let cfg = cfg_with_dir(&dir);
+        let storage = build_storage(&cfg, 8).expect("build_storage 必须成功");
+        let (handle, joins) =
+            spawn_writer(storage, &cfg).expect("测试环境 spawn history writer 线程必须成功");
+        let stats = handle.stats.clone();
+
+        let ts = now_ms();
+        handle
+            .send(row("u", ts, SampleValue::UInt(u64::MAX), None))
+            .expect("send 必须成功");
+        handle
+            .send(row("n", ts, SampleValue::Null, None))
+            .expect("send 必须成功");
+        assert!(
+            poll_until(Duration::from_secs(5), || {
+                stats.written.load(Ordering::SeqCst) == 1
+                    && stats.nonfinite_skipped.load(Ordering::SeqCst) == 1
+            }),
+            "UInt 应落盘 1 行、Null 应跳过 1 行，实际 written={} nonfinite_skipped={}",
+            stats.written.load(Ordering::SeqCst),
+            stats.nonfinite_skipped.load(Ordering::SeqCst)
+        );
+
+        drop(handle);
+        joins_with_timeout(
+            joins,
+            Duration::from_secs(10),
+            "writer_uint_lane_and_null_skipped",
+        );
+
+        let reopened = build_storage(&cfg, 8).expect("writer close 后同目录重开必须成功");
+        let pts = reopened
+            .select("u", &series_labels(), 0, i64::MAX)
+            .expect("重开后 select 必须成功");
+        assert_eq!(pts.len(), 1, "UInt 系列应有单点");
+        assert_eq!(
+            pts[0].value,
+            Value::U64(u64::MAX),
+            "超 2^63 的 u64 必须保真为 U64（不得翻转/降精度）"
+        );
+        let null_pts = reopened
+            .select("n", &series_labels(), 0, i64::MAX)
+            .expect("重开后 select 必须成功");
+        assert!(null_pts.is_empty(), "Null 行不得归档");
         reopened.close().expect("重开实例 close");
         let _ = std::fs::remove_dir_all(&dir);
     }

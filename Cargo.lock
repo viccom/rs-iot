@@ -3317,6 +3317,7 @@ dependencies = [
  "tower-http",
  "tracing",
  "tracing-appender",
+ "tracing-log",
  "tracing-subscriber",
  "tsink",
  "windows-service",

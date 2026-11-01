@@ -774,6 +774,7 @@ async fn ctl_reload_message_triggers_vm_reload() {
             devid: String::new(),
             cmd: "reload".into(),
             data: String::new(),
+            request_id: None,
         })
         .await
         .unwrap();

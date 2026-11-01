@@ -585,6 +585,7 @@ pub(crate) fn register(lua: &Lua, ac: &ApiCtx<'_>) -> mlua::Result<()> {
                     devid: devid.to_string_lossy().to_string(),
                     cmd: cmd.to_string_lossy().to_string(),
                     data: data.to_string_lossy().to_string(),
+                    request_id: None,
                 };
                 let inst_str = msg.instance.to_string();
                 Ok(ctl.send(&inst_str, msg))

@@ -9,6 +9,65 @@ use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+/// 写命令回执注册表（F-2）。
+///
+/// 背景：REST `POST /api/v1/command/send` 此前"投递即 200"，插件 `handle_write`
+/// 的成败只落一条 warn，前端随即显示"命令已下发"——控制不生效时现场无从得知。
+/// 本注册表让写入口在有限窗口内等待插件回报业务结果（成功 / 失败原因 / 超时）。
+///
+/// 生命周期：
+/// 1. 实现写语义的插件在 `run()` 启动时 [`WriteAcks::declare`]；未声明的实例保持
+///    原"投递即 200"契约（外部插件等不引入无谓等待）；
+/// 2. HTTP 侧 [`WriteAcks::begin`] 挂 oneshot 槽 → 投递带 `request_id` 的 CtlMessage；
+/// 3. 插件 `handle_write` 完成后 [`WriteAcks::finish`]；HTTP 返回 200 / 422；
+/// 4. 超时或实例退出 → [`WriteAcks::cancel`] 清槽（插件迟到 finish 为 no-op）。
+#[derive(Clone, Debug, Default)]
+pub struct WriteAcks {
+    pending: Arc<DashMap<String, tokio::sync::oneshot::Sender<Result<(), String>>>>,
+    declared: Arc<DashMap<String, ()>>,
+}
+
+impl WriteAcks {
+    /// 声明某实例支持写回执（插件 run 启动时调用，幂等）。
+    pub fn declare(&self, inst: &str) {
+        self.declared.insert(inst.to_string(), ());
+    }
+
+    /// 撤销声明（实例停止/注销时；防重启后旧声明误让新实例走等待路径）。
+    pub fn undeclare(&self, inst: &str) {
+        self.declared.remove(inst);
+    }
+
+    /// 实例是否声明了写回执（HTTP 写入口据此决定是否等待）。
+    pub fn is_declared(&self, inst: &str) -> bool {
+        self.declared.contains_key(inst)
+    }
+
+    /// 为一次写命令挂回执槽，返回接收端。调用方保证 `id` 唯一（同时刻同实例）。
+    pub fn begin(&self, id: &str) -> tokio::sync::oneshot::Receiver<Result<(), String>> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.pending.insert(id.to_string(), tx);
+        rx
+    }
+
+    /// 插件回报写结果。未知 id（超时已清槽 / 无回执通道）静默忽略。
+    pub fn finish(&self, id: &str, result: Result<(), String>) {
+        if let Some((_, tx)) = self.pending.remove(id) {
+            let _ = tx.send(result);
+        }
+    }
+
+    /// 超时/中止清槽（插件迟到回报为 no-op）。
+    pub fn cancel(&self, id: &str) {
+        self.pending.remove(id);
+    }
+
+    /// 未完成槽数量（测试与诊断用）。
+    pub fn pending_len(&self) -> usize {
+        self.pending.len()
+    }
+}
+
 /// 命令路由注册表：`instId` → 命令 channel。
 ///
 /// 对标 Lite_IOT `pluginM.handlers map[string]chan CtlMessage` +
@@ -19,6 +78,8 @@ pub struct CtlRegistry {
     map: Arc<DashMap<String, mpsc::Sender<CtlMessage>>>,
     /// 进程级指标（M4）：send/dropped/not_found 分类计数。
     metrics: Arc<crate::process_metrics::ProcessMetrics>,
+    /// 写命令回执槽（F-2）。
+    acks: WriteAcks,
 }
 
 impl CtlRegistry {
@@ -27,6 +88,29 @@ impl CtlRegistry {
         Self {
             map: Arc::new(DashMap::new()),
             metrics,
+            acks: WriteAcks::default(),
+        }
+    }
+
+    /// 写回执注册表（插件 run 启动时 `declare`，写入口 `begin/finish`）。
+    pub fn write_acks(&self) -> &WriteAcks {
+        &self.acks
+    }
+
+    /// 声明实例支持写回执（插件侧便捷入口）。
+    pub fn declare_write_ack(&self, inst: &str) {
+        self.acks.declare(inst);
+    }
+
+    /// 实例是否支持写回执（HTTP 写入口用）。
+    pub fn write_ack_supported(&self, inst: &str) -> bool {
+        self.acks.is_declared(inst)
+    }
+
+    /// 插件回报一次写命令的业务结果；`None` = 无回执通道（MQTT 等）。
+    pub fn finish_write(&self, request_id: Option<&str>, result: Result<(), String>) {
+        if let Some(id) = request_id {
+            self.acks.finish(id, result);
         }
     }
 
@@ -35,9 +119,10 @@ impl CtlRegistry {
         self.map.insert(inst.to_string(), tx);
     }
 
-    /// 注销（实例停止时）。
+    /// 注销（实例停止时）。同时撤销写回执声明，防旧实例能力残留。
     pub fn unregister(&self, inst: &str) {
         self.map.remove(inst);
+        self.acks.undeclare(inst);
     }
 
     /// 投递命令到指定实例。返回是否找到实例并尝试投递（channel 满仍 `try_send` 丢弃，
@@ -276,6 +361,7 @@ mod tests {
             devid: "d".into(),
             cmd: "write".into(),
             data: String::new(),
+            request_id: None,
         }
     }
 
@@ -297,6 +383,45 @@ mod tests {
         assert!(r.send("full", dummy()), "满丢仍返 true（对标 Go default）");
         assert!(r.send("full", dummy()), "第二次满");
         assert_eq!(r.metrics.ctl_dropped_count.load(Ordering::Relaxed), 1);
+    }
+
+    /// F-2：写回执槽的完整生命周期——declare/begin/finish 成功、失败透传、
+    /// 超时 cancel 后迟到 finish 为 no-op、unregister 撤销声明。
+    #[tokio::test]
+    async fn write_ack_lifecycle() {
+        let r = registry();
+        assert!(!r.write_ack_supported("i1"), "未声明 = 不支持回执");
+        r.declare_write_ack("i1");
+        assert!(r.write_ack_supported("i1"));
+
+        // 成功路径
+        let rx = r.write_acks().begin("i1-1");
+        assert_eq!(r.write_acks().pending_len(), 1);
+        r.finish_write(Some("i1-1"), Ok(()));
+        assert_eq!(rx.await.unwrap(), Ok(()));
+        assert_eq!(r.write_acks().pending_len(), 0);
+
+        // 失败路径（错误文本原样回给 HTTP 422）
+        let rx = r.write_acks().begin("i1-2");
+        r.finish_write(Some("i1-2"), Err("slave exception".into()));
+        assert_eq!(rx.await.unwrap(), Err("slave exception".to_string()));
+
+        // 无 request_id → 不挂槽（MQTT 等旁路）
+        r.finish_write(None, Ok(()));
+        assert_eq!(r.write_acks().pending_len(), 0);
+
+        // 超时 cancel 后插件迟到回报 no-op（不 panic、不泄漏）
+        let rx = r.write_acks().begin("i1-3");
+        r.write_acks().cancel("i1-3");
+        r.finish_write(Some("i1-3"), Ok(()));
+        assert!(rx.await.is_err(), "取消后接收端应断开");
+        assert_eq!(r.write_acks().pending_len(), 0);
+
+        // unregister 撤销声明
+        let (tx, _rx) = mpsc::channel::<CtlMessage>(1);
+        r.register("i1", tx);
+        r.unregister("i1");
+        assert!(!r.write_ack_supported("i1"), "停止实例不得残留回执能力");
     }
 
     /// H-3（2026-11-01 审查）：unregister_if_same 只删自己的注册——stop 3s 超时

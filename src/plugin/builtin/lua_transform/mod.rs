@@ -542,9 +542,15 @@ async fn call_on_rtdata(
 fn sample_to_lua(lua: &mlua::Lua, v: &SampleValue) -> mlua::Result<mlua::Value> {
     Ok(match v {
         SampleValue::Int(i) => mlua::Value::Integer(*i),
+        // Lua 整数是 i64：u64 超 i64::MAX 时退化为 Number（损精度但不错符号）。
+        SampleValue::UInt(u) => match i64::try_from(*u) {
+            Ok(i) => mlua::Value::Integer(i),
+            Err(_) => mlua::Value::Number(*u as f64),
+        },
         SampleValue::Float(f) => mlua::Value::Number(*f),
         SampleValue::Bool(b) => mlua::Value::Boolean(*b),
         SampleValue::Str(s) => mlua::Value::String(lua.create_string(s.as_bytes())?),
+        SampleValue::Null => mlua::Value::Nil,
     })
 }
 

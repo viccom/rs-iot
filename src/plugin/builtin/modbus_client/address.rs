@@ -158,13 +158,24 @@ pub(super) fn parse_point(s: &str) -> Result<PointSpec, String> {
             }
         }
     }
-    Ok(PointSpec {
+    let spec = PointSpec {
         func,
         addr,
         typ,
         order,
         bit,
-    })
+    };
+    // MB-4（2026-11-01 协议语义审查）：地址 + 类型宽度越界此前静默丢点——
+    // `holding:65535:i32` 的区间 end 被 `saturating_add` 截断成 65535（长度 1），
+    // `decode_point` 永远 `None`。装配期直接拒绝，错误信息给出越界末地址。
+    let last = u32::from(addr) + u32::from(spec.width()) - 1;
+    if last > u32::from(u16::MAX) {
+        return Err(format!(
+            "地址越界：'{s}' 需要到 {last}，超出 Modbus 地址空间 0-65535（地址 {addr} + 宽度 {}）",
+            spec.width()
+        ));
+    }
+    Ok(spec)
 }
 
 /// func 的可读名（日志用）。
@@ -184,5 +195,40 @@ pub(super) fn addr_fc(f: Func) -> u8 {
         Func::Discrete => 2,
         Func::Holding => 3,
         Func::Input => 4,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// MB-4：地址 + 类型宽度越界必须 Err——此前 `holding:65535:i32` 合并出的区间
+    /// 长 1（`saturating_add` 截断），`decode_point` 永远 `None`，点位静默丢失。
+    #[test]
+    fn parse_point_rejects_address_plus_width_overflow() {
+        assert!(
+            parse_point("holding:65535:i32").is_err(),
+            "65535 + 2 - 1 越界"
+        );
+        assert!(
+            parse_point("holding:65535:f64").is_err(),
+            "65535 + 4 - 1 越界"
+        );
+        assert!(
+            parse_point("holding:65533:f64").is_err(),
+            "65533 + 4 - 1 越界"
+        );
+        assert!(parse_point("input:65535:u32").is_err(), "input 同理");
+        // 恰好到 65535 的合法（不得被误拒）
+        assert!(parse_point("holding:65535:u16").is_ok());
+        assert!(parse_point("holding:65535:bit:15").is_ok());
+        assert!(parse_point("holding:65534:i32").is_ok(), "65534+2-1=65535");
+        assert!(parse_point("holding:65532:f64").is_ok(), "65532+4-1=65535");
+        assert!(parse_point("coil:65535:bool").is_ok(), "bit 类型宽度 1");
+        let e = parse_point("holding:65535:f64").unwrap_err();
+        assert!(
+            e.contains("65535") && e.contains("地址"),
+            "错误信息应给出地址空间范围：{e}"
+        );
     }
 }

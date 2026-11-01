@@ -286,6 +286,7 @@ impl InstanceManager {
                 devid: String::new(),
                 cmd: cmd.to_string(),
                 data: data.to_string(),
+                request_id: None,
             },
         )
     }
@@ -338,6 +339,21 @@ impl InstanceManager {
     /// channel 满仍 `try_send` 丢弃（对标 Go 版 `default` 非阻塞），此时返回 `true`。
     pub fn send_ctl(&self, inst: &str, msg: CtlMessage) -> bool {
         self.ctx.ctl_registry.send(inst, msg)
+    }
+
+    /// 实例是否声明了写回执（REST 写入口据此决定是否等待插件业务结果）。
+    pub fn write_ack_supported(&self, inst: &str) -> bool {
+        self.ctx.ctl_registry.write_ack_supported(inst)
+    }
+
+    /// 挂一次写命令的回执槽（F-2），返回接收端。
+    pub fn begin_write_ack(&self, id: &str) -> tokio::sync::oneshot::Receiver<Result<(), String>> {
+        self.ctx.ctl_registry.write_acks().begin(id)
+    }
+
+    /// 超时/中止清理回执槽（插件迟到回报为 no-op）。
+    pub fn cancel_write_ack(&self, id: &str) {
+        self.ctx.ctl_registry.write_acks().cancel(id);
     }
 
     /// 取实例配置快照（/inst/stats 分类用：app_code + host_kind）。

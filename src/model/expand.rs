@@ -81,6 +81,27 @@ pub async fn expand_binding(
     })?;
     // 装配期全量校验：params 齐套 + 地址可解析（坏配置拒启动，不带病运行）。
     crate::model::validate::validate_device_entry(&entry, &model)?;
+    // F-6（2026-11-01 协议语义审查）：bind.slave_id 旧实现 `parse().ok()` 静默
+    // 回退实例默认值——`{"slave_id":"300"}` 会退化成 1 号从站，读写打到错设备。
+    // 配置错误必须在装配期暴露：非整数直接拒；合法区间按 Modbus 单播地址
+    // 1-247（0 是广播，读必超时；248-255 保留）。
+    if let Some(raw) = b.bind.get("slave_id") {
+        let raw = raw.trim();
+        if !raw.is_empty() {
+            let n: u8 = raw.parse().map_err(|_| {
+                RsIotError::Config(format!(
+                    "设备 {} 的 bind.slave_id={raw:?} 不是 0-255 的整数",
+                    b.devid
+                ))
+            })?;
+            if !(1..=247).contains(&n) {
+                return Err(RsIotError::Config(format!(
+                    "设备 {} 的 bind.slave_id={n} 超出 Modbus 从站地址 1-247（0=广播、248-255 保留）",
+                    b.devid
+                )));
+            }
+        }
+    }
     for t in &model.tags {
         if let Some(a) = &t.addr {
             addr::resolve(a, &entry.params).map_err(|e| {
@@ -298,5 +319,45 @@ mod tests {
     async fn empty_bindings_expand_to_empty() {
         let c = test_client("empty").await;
         assert!(expand_to_specs(&c, &[]).await.unwrap().is_empty());
+    }
+
+    /// F-6 回归锁：bind.slave_id 非法时**装配期拒启动**，不得静默回退实例默认值
+    /// （旧实现 `parse().ok()` → None → 读写打到 1 号从站）。
+    #[tokio::test]
+    async fn expand_rejects_bad_slave_id() {
+        let c = test_client("badslave").await;
+        seed(&c).await;
+        for bad in ["300", "abc", "-1", "0", "248", "255"] {
+            let err = expand_to_specs(
+                &c,
+                &[DeviceBinding {
+                    devid: "ex1".into(),
+                    bind: [("slave_id".to_string(), bad.to_string())].into(),
+                }],
+            )
+            .await
+            .unwrap_err();
+            assert!(
+                matches!(err, RsIotError::Config(_)),
+                "slave_id={bad:?} 应配置错误拒绝，实际: {err:?}"
+            );
+            assert!(
+                err.to_string().contains("slave_id"),
+                "错误信息应点名 slave_id: {err}"
+            );
+        }
+        // 合法边界 1 / 247 放行。
+        for ok in ["1", "247"] {
+            let specs = expand_to_specs(
+                &c,
+                &[DeviceBinding {
+                    devid: "ex1".into(),
+                    bind: [("slave_id".to_string(), ok.to_string())].into(),
+                }],
+            )
+            .await
+            .unwrap();
+            assert_eq!(specs[0].slave_id, ok.parse::<u8>().ok());
+        }
     }
 }

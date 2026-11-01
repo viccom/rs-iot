@@ -628,6 +628,7 @@ async fn s7_write_roundtrip() {
         devid: "devS7".into(),
         cmd: "write".into(),
         data: json!({"address":"DB1.DBD0","value":42.5,"kind":"f32"}).to_string(),
+        request_id: None,
     };
     assert!(
         env.mgr.send_ctl("s7write", msg),

@@ -84,11 +84,24 @@ impl Processor for RhaiProcessor {
                 SampleValue::Int(i) => {
                     scope.push(name, *i);
                 }
+                // rhai 只有 i64 整数：u64 超界退化为 f64（损精度但不错符号）。
+                SampleValue::UInt(u) => match i64::try_from(*u) {
+                    Ok(i) => {
+                        scope.push(name, i);
+                    }
+                    Err(_) => {
+                        scope.push(name, *u as f64);
+                    }
+                },
                 SampleValue::Bool(b) => {
                     scope.push(name, *b);
                 }
                 SampleValue::Str(s) => {
                     scope.push(name, s.clone());
+                }
+                // 坏质量/无值：以 unit 注入（脚本可用 is_unit 判空）。
+                SampleValue::Null => {
+                    scope.push_dynamic(name, rhai::Dynamic::UNIT);
                 }
             }
         }

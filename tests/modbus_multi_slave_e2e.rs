@@ -197,7 +197,10 @@ async fn fault_isolation_unresponsive_slave() {
     });
     let devices = vec![mk_dev("m1", 1), mk_dev("m2", 2), mk_dev("m3", 3)];
     // unit2 不响应 → 每 tick 多耗 ~1s（超时），给足 deadline。
-    let got = collect_samples("ms2", app, devices, 2, 12).await;
+    // F-3（2026-11-01 协议语义审查，有意变更）：失败点位不再静默丢点，而是投
+    // `SampleValue::Null`（坏质量显式化，rtdata 跳过不覆盖上次有效值）。故这里
+    // 要等到 3 个 key（m1 + m2 Null + m3），且断言 m2 是 Null 而不是"不存在"。
+    let got = collect_samples("ms2", app, devices, 3, 12).await;
     assert!(
         got.contains_key("m1.v0"),
         "故障隔离：slave1 仍应入库: {got:?}"
@@ -206,7 +209,11 @@ async fn fault_isolation_unresponsive_slave() {
         got.contains_key("m3.v0"),
         "故障隔离：slave3 仍应入库: {got:?}"
     );
-    assert!(!got.contains_key("m2.v0"), "故障 slave2 不应入库: {got:?}");
+    assert_eq!(
+        got.get("m2.v0").map(String::as_str),
+        Some("Null"),
+        "故障 slave2 应显式标 Null（不再静默丢点）: {got:?}"
+    );
 }
 
 #[tokio::test]
@@ -288,11 +295,17 @@ async fn sequential_breaks_on_timeout_skipping_dead_slave_remaining_regions() {
         slave_id: Some(2),
     };
     let devices = vec![mk_dev("m1", 1), m2, mk_dev("m3", 3)];
-    let got = collect_samples("ms5", app, devices, 2, 8).await;
+    // F-3（有意变更）：死从站点位现在标 Null（显式坏质量）而非静默丢点——
+    // 收齐 m1 + m2.v0/m2.v1（Null）+ m3 共 4 个 key。
+    let got = collect_samples("ms5", app, devices, 4, 8).await;
     assert!(got.contains_key("m1.v0"), "slave1 入库: {got:?}");
     assert!(got.contains_key("m3.v0"), "slave3 入库: {got:?}");
-    assert!(
-        !got.contains_key("m2.v0") && !got.contains_key("m2.v1"),
-        "死从站 m2 不应入库: {got:?}"
+    assert_eq!(
+        (
+            got.get("m2.v0").map(String::as_str),
+            got.get("m2.v1").map(String::as_str)
+        ),
+        (Some("Null"), Some("Null")),
+        "死从站 m2 应显式标 Null: {got:?}"
     );
 }

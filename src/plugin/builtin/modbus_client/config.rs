@@ -71,6 +71,9 @@ pub(super) struct ModbusCfg {
     pub(super) poll_strategy: PollStrategy,
     /// 单次读请求超时（秒）。slave 无响应时跳过该请求（故障隔离），默认 2。
     pub(super) request_timeout_secs: u64,
+    /// region 请求之间的帧间静默（毫秒）。RTU 类建议 4（t3.5）；0 = 关闭。
+    /// 仅 rtu_serial/rtu_tcp/rtu_udp 生效（TCP 无帧间静默语义）。
+    pub(super) request_gap_ms: u64,
 }
 
 // ---------- 表单默认值（单一事实源；前端 pluginSchemas.ts modbusClient 镜像
@@ -86,6 +89,10 @@ pub(super) const DEFAULT_GAP_THRESHOLD: u64 = 16;
 pub(super) const DEFAULT_MAX_REGS: u64 = 100;
 pub(super) const DEFAULT_RECONNECT_SECS: u64 = 2;
 pub(super) const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 2;
+/// region 请求间隔默认值（0 = 关闭；RTU 现场建议 4）。
+pub(super) const DEFAULT_REQUEST_GAP_MS: u64 = 0;
+/// region 请求间隔上界：超过 1s 已不是帧间静默而是停采（配置错也钳住）。
+pub(super) const MAX_REQUEST_GAP_MS: u64 = 1000;
 // match None 分支的默认（parity/flow_control/poll_strategy 无 unwrap_or
 // 字面量，语义即缺省）：parity=none / flow=none / poll=round_robin。
 
@@ -174,6 +181,14 @@ pub(super) fn parse_cfg(app: &serde_json::Value) -> Result<ModbusCfg, String> {
             .unwrap_or(DEFAULT_SLAVE_ID),
     )
     .map_err(|_| "slave_id 超出 0-255 范围（Modbus 从站号）".to_string())?;
+    // MB-3（2026-11-01 协议语义审查）：只接受单播地址 1..=247。0 是广播——库对
+    // `Slave(0)` 无广播分支，读必超时、写发出却等不到响应（随后拆 session）；
+    // 248-255 是保留区。两者都是配置错误，必须在装配期拒绝而不是带病运行。
+    if !(1..=247).contains(&slave_id) {
+        return Err(format!(
+            "slave_id={slave_id} 超出 Modbus 单播从站地址 1-247（0=广播、248-255 保留）"
+        ));
+    }
     let period = app
         .get("period")
         .and_then(|v| v.as_u64())
@@ -185,12 +200,15 @@ pub(super) fn parse_cfg(app: &serde_json::Value) -> Result<ModbusCfg, String> {
             .unwrap_or(DEFAULT_GAP_THRESHOLD),
     )
     .map_err(|_| "gap_threshold 超出 u16 范围".to_string())?;
+    // MB-6（2026-11-01 协议语义审查）：上界放宽到 2000——FC01/02（coil/discrete）
+    // 单请求上限 2000，此前统一 clamp 125 让大布尔点表被多切成数十个请求。
+    // 寄存器类（FC03/04 上限 125）的收窄在 merge_regions 按功能再钳。
     let max_regs = app
         .get("max_regs")
         .and_then(|v| v.as_u64())
         .unwrap_or(DEFAULT_MAX_REGS)
-        .clamp(1, 125) as u16; // clamp 在 u64 域完成，cast 无截断
-                               // C-6：上界 3600——重连退避 sleep 与 token 已竞争，但小时级退避等同静默瘫痪。
+        .clamp(1, 2000) as u16; // clamp 在 u64 域完成，cast 无截断
+                                // C-6：上界 3600——重连退避 sleep 与 token 已竞争，但小时级退避等同静默瘫痪。
     let reconnect_secs = app
         .get("reconnect_secs")
         .and_then(|v| v.as_u64())
@@ -210,6 +228,14 @@ pub(super) fn parse_cfg(app: &serde_json::Value) -> Result<ModbusCfg, String> {
         .and_then(|v| v.as_u64())
         .unwrap_or(DEFAULT_REQUEST_TIMEOUT_SECS)
         .max(1);
+    // MB-8（2026-11-01 协议语义审查）：RTU 主站不实现帧间静默 t3.5（上游库
+    // 无请求间隔逻辑），慢从站偶发丢帧。此项让现场自行插入 region 间静默；
+    // 0 保持旧行为。
+    let request_gap_ms = app
+        .get("request_gap_ms")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(DEFAULT_REQUEST_GAP_MS)
+        .min(MAX_REQUEST_GAP_MS);
     Ok(ModbusCfg {
         transport,
         endpoint,
@@ -226,6 +252,7 @@ pub(super) fn parse_cfg(app: &serde_json::Value) -> Result<ModbusCfg, String> {
         reconnect_secs,
         poll_strategy,
         request_timeout_secs,
+        request_gap_ms,
     })
 }
 
@@ -252,5 +279,60 @@ mod tests {
         assert!(matches!(cfg.parity, super::ParityKind::None));
         assert!(matches!(cfg.flow_control, super::FlowKind::None));
         assert!(matches!(cfg.poll_strategy, super::PollStrategy::RoundRobin));
+    }
+
+    /// MB-3（2026-11-01 协议语义审查）：实例级 slave_id 只允许单播地址 1..=247。
+    /// 0 是广播（库无广播分支：读必超时、写等不到响应拆 session），248-255 保留。
+    #[test]
+    fn parse_cfg_rejects_slave_id_outside_unicast_range() {
+        for bad in [0u64, 248, 255, 300] {
+            let err = parse_cfg(&serde_json::json!({
+                "endpoint": "127.0.0.1:502", "slave_id": bad
+            }))
+            .expect_err("越界 slave_id 必须 Err");
+            assert!(
+                err.contains("slave_id"),
+                "错误信息应点名 slave_id 字段：{err}"
+            );
+        }
+        for ok in [1u64, 247] {
+            let cfg = parse_cfg(&serde_json::json!({
+                "endpoint": "127.0.0.1:502", "slave_id": ok
+            }))
+            .expect("单播地址合法");
+            assert_eq!(u64::from(cfg.slave_id), ok);
+        }
+    }
+
+    /// MB-6：max_regs 上界放宽到 2000（FC01/02 coil/discrete 上限）；寄存器类
+    /// 在 merge 期再钳到 125（FC03/04 上限），见 merge.rs 单测。
+    #[test]
+    fn max_regs_upper_bound_covers_coil_limit() {
+        let cfg = parse_cfg(&serde_json::json!({"endpoint": "x", "max_regs": 2000})).unwrap();
+        assert_eq!(cfg.max_regs, 2000);
+        let cfg = parse_cfg(&serde_json::json!({"endpoint": "x", "max_regs": 9999})).unwrap();
+        assert_eq!(cfg.max_regs, 2000, "上界 2000（更大的单请求会被从站拒绝）");
+        let cfg = parse_cfg(&serde_json::json!({"endpoint": "x", "max_regs": 0})).unwrap();
+        assert_eq!(cfg.max_regs, 1, "下界 1");
+    }
+
+    /// MB-8：RTU 主站帧间静默 `request_gap_ms`（默认 0 = 关闭；RTU 现场建议 4ms）。
+    #[test]
+    fn request_gap_ms_defaults_and_clamped() {
+        let cfg = parse_cfg(&serde_json::json!({"endpoint": "127.0.0.1:502"})).unwrap();
+        assert_eq!(cfg.request_gap_ms, 0, "默认关闭（TCP 无帧间静默语义）");
+        let cfg = parse_cfg(&serde_json::json!({
+            "kind": "rtu_serial", "serial_port": "COM3", "request_gap_ms": 4
+        }))
+        .unwrap();
+        assert_eq!(cfg.request_gap_ms, 4);
+        let cfg = parse_cfg(&serde_json::json!({
+            "kind": "rtu_tcp", "endpoint": "x:502", "request_gap_ms": 99999
+        }))
+        .unwrap();
+        assert_eq!(
+            cfg.request_gap_ms, 1000,
+            "上界 1000ms（更大的间隔等同停采）"
+        );
     }
 }

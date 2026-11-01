@@ -65,13 +65,23 @@ pub async fn write_batch(
     for s in samples {
         let entry = by_devid.entry(s.devid.as_str()).or_default();
         for (tag, val) in &s.values {
-            let field = crate::types::tag_key(&s.devid, tag);
+            // F-3/F-4：坏质量标记（Null）与非有限浮点（NaN/±Inf）不覆盖实时值——
+            // 保留上次有效值与它的时间戳（ts 不前进即"陈旧"，可据此判活），
+            // 不把 "NaN" 写进实时面冒充新鲜数据。历史侧另有 nonfinite 防线。
             let val_str = match val {
-                crate::types::SampleValue::Float(f) => f.to_string(),
+                crate::types::SampleValue::Float(f) => {
+                    if !f.is_finite() {
+                        continue;
+                    }
+                    f.to_string()
+                }
                 crate::types::SampleValue::Int(i) => i.to_string(),
+                crate::types::SampleValue::UInt(u) => u.to_string(),
                 crate::types::SampleValue::Bool(b) => b.to_string(),
                 crate::types::SampleValue::Str(st) => st.clone(),
+                crate::types::SampleValue::Null => continue,
             };
+            let field = crate::types::tag_key(&s.devid, tag);
             let cell =
                 serde_json::to_string(&serde_json::json!([s.timestamp, local_time, val_str]))?;
             entry.push((field, cell));
@@ -81,6 +91,12 @@ pub async fn write_batch(
     // per-devid 容错(I1):单个 devid execute 失败不丢整批,记入失败集 + continue。
     let mut outcome = WriteBatchOutcome::default();
     for (devid, pairs) in &by_devid {
+        // F-9：整批点都是坏质量时 pairs 为空——lux `HSET key`（0 field）会报
+        // `ERR wrong number of arguments`，把"本拍没有有效值"伪装成存储失败。
+        // 空批跳过（不建空 entry，不改上次有效值）。
+        if pairs.is_empty() {
+            continue;
+        }
         let key = format!("rtdata:{devid}");
         let mut argv: Vec<String> = Vec::with_capacity(1 + pairs.len() * 2);
         argv.push(key);
@@ -314,5 +330,83 @@ mod batch_tests {
                 .contains(&"d2.t2".to_string()),
             "d2 rtdata 不受影响"
         );
+    }
+
+    /// HGETALL → (field, cell JSON) 映射（测试断言用）。
+    async fn cells(
+        c: &lux::EmbeddedClient,
+        devid: &str,
+    ) -> std::collections::BTreeMap<String, serde_json::Value> {
+        let arr = c
+            .execute_value("HGETALL", &[&format!("rtdata:{devid}")])
+            .await
+            .unwrap();
+        let mut out = std::collections::BTreeMap::new();
+        if let lux::EmbeddedValue::Array(a) = &arr {
+            for pair in a.chunks(2) {
+                let to_s = |v: &lux::EmbeddedValue| match v {
+                    lux::EmbeddedValue::Bulk(b) => Some(String::from_utf8_lossy(b).to_string()),
+                    lux::EmbeddedValue::Simple(s) => Some(s.clone()),
+                    _ => None,
+                };
+                if let (Some(f), Some(v)) =
+                    (pair.first().and_then(to_s), pair.get(1).and_then(to_s))
+                {
+                    out.insert(
+                        f,
+                        serde_json::from_str(&v).unwrap_or(serde_json::Value::Null),
+                    );
+                }
+            }
+        }
+        out
+    }
+
+    /// F-9 回归锁：空 values 的 Sample（全坏质量）不得触发 `HSET key`（0 field）。
+    ///
+    /// 旧实现 `by_devid` 里留下空 Vec → `execute("HSET", ["rtdata:d1"])` →
+    /// lux `ERR wrong number of arguments` → 计入 failed_devids → 监控表现为
+    /// "采集正常但存储一直报错"。
+    #[tokio::test]
+    async fn write_batch_empty_values_noop_no_hset() {
+        let (_h, c) = start_lux("empty_vals").await;
+        let s = sample("d_empty", &[]);
+        let o = write_batch(&c, std::slice::from_ref(&s)).await.unwrap();
+        assert!(o.all_ok(), "空 values 不应被记为写失败: {o:?}");
+        let arr = c
+            .execute_value("HGETALL", &["rtdata:d_empty"])
+            .await
+            .unwrap();
+        assert!(
+            matches!(&arr, lux::EmbeddedValue::Array(a) if a.is_empty()),
+            "空 values 不应创建 rtdata entry，实际: {arr:?}"
+        );
+    }
+
+    /// F-3/F-4 回归锁：坏质量（Null）与非有限 Float 不覆盖上次有效值——
+    /// 保留原值与**原时间戳**（ts 不前进 = 陈旧，可据此判活），实时面不出现 "NaN"。
+    #[tokio::test]
+    async fn write_batch_bad_values_keep_last_good() {
+        let (_h, c) = start_lux("bad_quality").await;
+        let good = sample("d1", &[("t1", 1.0)]);
+        write_batch(&c, std::slice::from_ref(&good)).await.unwrap();
+        let mut bad = sample("d1", &[]);
+        bad.timestamp = 1_700_000_050;
+        bad.values
+            .insert("t1".to_string(), SampleValue::Float(f64::NAN));
+        bad.values.insert("t2".to_string(), SampleValue::Null);
+        bad.values
+            .insert("t3".to_string(), SampleValue::Float(f64::INFINITY));
+        write_batch(&c, std::slice::from_ref(&bad)).await.unwrap();
+        let cells = cells(&c, "d1").await;
+        let t1 = cells.get("d1.t1").expect("t1 保留上次有效值");
+        assert_eq!(t1[2], serde_json::json!("1"), "NaN 不得覆盖有效值");
+        assert_eq!(
+            t1[0],
+            serde_json::json!(1_700_000_000),
+            "ts 不前进（陈旧可判）"
+        );
+        assert!(!cells.contains_key("d1.t2"), "Null 点不落 rtdata");
+        assert!(!cells.contains_key("d1.t3"), "Inf 点不落 rtdata");
     }
 }

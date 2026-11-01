@@ -136,6 +136,7 @@ async fn lua_modbus_collect_and_write_roundtrip() {
         devid: "devM".into(),
         cmd: "write".into(),
         data: json!({"addr": 0, "value": 1}).to_string(),
+        request_id: None,
     };
     assert!(
         mgr.send_ctl("lua-it-modbus", msg),

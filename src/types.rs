@@ -114,12 +114,21 @@ pub struct Sample {
 pub enum SampleValue {
     /// 浮点采样值。
     Float(f64),
-    /// 整数采样值。
+    /// 有符号整数采样值。
     Int(i64),
+    /// 无符号整数采样值（u64：OPC UA UInt64 / S7 U64 / EtherNet/IP LINT 等）。
+    /// 独立变体而非 `Int` 饱和：超 2^63 的计数类点位不允静默符号翻转（F-5）。
+    UInt(u64),
     /// 布尔采样值。
     Bool(bool),
     /// 字符串采样值。
     Str(String),
+    /// 无效值 / 坏质量（点级读失败、状态码非 Good、未就绪）。
+    ///
+    /// 语义：**不是有效测量值**——插件用它显式标记"本拍没有可信值"（F-3），
+    /// 而不是静默丢点让下游误以为旧值仍新鲜。落盘侧：rtdata 跳过该 field
+    /// （保留上次有效值与时间戳），历史归档跳过该行。
+    Null,
 }
 
 /// 标签全局属性（lux Hash `tags`；设计见 docs/designs/2026-08-24-tag-registry-plan.md）。
@@ -173,6 +182,11 @@ pub struct CtlMessage {
     pub cmd: String,
     /// 命令负载（自由文本/JSON）。
     pub data: String,
+    /// 写回执关联 ID（F-2）：REST 写入口生成并在等待窗口内挂一次性回执槽，
+    /// 插件 `handle_write` 完成后经 `CtlRegistry::finish_write` 回报业务成败。
+    /// `None` = 不要求回执（MQTT / 批量 reload 等旁路通道）。
+    #[serde(default)]
+    pub request_id: Option<String>,
 }
 
 /// 插件方向。

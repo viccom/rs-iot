@@ -128,6 +128,14 @@ pub fn init_tracing(
     );
 
     let _ = tracing_subscriber::registry().with(layers).try_init();
+    // F-8：上游协议库（tokio-s7 全篇 log::info!/warn!、tokio-modbus 等）用的是
+    // `log` 门面；未装 LogTracer 时这些记录没有 logger 消费者，被静默丢弃
+    // （现场表现为"S7 连不上但一条库日志都没有"）。桥进 tracing 后与自有日志
+    // 同管道（级别过滤/文件/ring buffer/SSE 一致）。重复初始化返回 Err（已有
+    // 全局 logger，如宿主进程已装）——忽略，首装者继续生效。
+    if let Err(e) = tracing_log::LogTracer::init() {
+        tracing::debug!("LogTracer 未安装（已有全局 logger）：{e}");
+    }
     (guard, ring_buffer, event_bus)
 }
 

@@ -38,6 +38,9 @@ tokio-stream = { version = "0.1", features = ["sync"] }
 # 日志
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# log → tracing 桥（F-8）：上游协议库（tokio-s7 全篇 log::info!/warn! 等）的日志
+# 只有装了 LogTracer 才能进 tracing subscriber，否则静默丢弃。
+tracing-log = "0.2"
 
 # 错误
 anyhow = "1"

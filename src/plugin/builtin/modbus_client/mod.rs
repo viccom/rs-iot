@@ -59,14 +59,25 @@
 //! 的逆，单测以 round-trip 为金标准。
 //!
 //! **批量合并**：`gap_threshold` 约束相邻两点**最大单空洞**（非未用总数）；`max_regs`
-//! 约束单区间最大单元数（coil/discrete 为 bit 数，holding/input 为寄存器数；协议上限 125，
-//! 真实设备常更低，遇 IllegalDataAddress 往下调）。
+//! 约束单区间最大单元数（coil/discrete 为 bit 数，holding/input 为寄存器数；协议上限
+//! 寄存器类 125、coil/discrete 2000，真实设备常更低，遇 IllegalDataAddress 自动对半降级）。
 //!
-//! **写命令**（`data` JSON `{"address":"holding:0:f32:ABCD","value":12.34}`）：
+//! **写命令**（`data` JSON，两种契约等价，`address` 优先；成功/失败经 `finish_write`
+//! 回报 REST 写入口）：
+//! - 原生：`{"address":"holding:0:f32:ABCD","value":12.34}`
+//! - HMI：`{"tag":"点位显示名","value":12.34}`（按 `msg.devid` + tag 查启动期索引，
+//!   全表唯一 tag 可跨 devid 兜底）
 //! - coil → FC05（单）/ FC0F（多）
 //! - holding u16/i16/bit → FC06；i32/u32/f32/f64 → FC16；bit 走 RMW（读-改-写，单 task 内
-//!   原子但非事务，部分失败仅 warn）
+//!   原子但非事务）
 //! - discrete/input 只读，写拒绝
+//! - 写值按点位类型 checked 校验：越界/非有限浮点/无法识别的布尔串一律拒写并回报原因
+//!   （不做 `as` 回绕、不做 0 兜底）
+//! - `data.slave_id` 不得覆盖设备归属（devid 已映射到 slave A 时只允许 A）
+//!
+//! **读降级**：region 读失败（异常/超时/transport）为其所有点位投递 `SampleValue::Null`
+//! （坏质量标记）；`IllegalDataAddress` 额外把该 region 按点位对半拆，下一 tick 用细分
+//! 区间（单点位后停止拆分）。
 //!
 //! **传输边界**：TCP / RTU(serial / over-tcp / over-udp) 四种均产出统一 `Context`，
 //! 采集/写逻辑同构；ASCII 暂不支持（tokio-modbus 无，未来可借 `rmodbus` codec 后置）。
@@ -87,7 +98,7 @@ use crate::types::{CtlMessage, DeviceSpec, InstConfig, Sample, SampleValue};
 use address::{addr_fc, addr_func_name, parse_point, Func, PointSpec, Type};
 use async_trait::async_trait;
 use codec::{decode_point, encode_value, Buf, WritePayload};
-use config::{parse_cfg, PollStrategy};
+use config::{parse_cfg, PollStrategy, Transport};
 use merge::{merge_regions, Region};
 use std::collections::{BTreeMap, HashMap};
 use std::time::Duration;
@@ -105,7 +116,7 @@ use address::Order;
 #[cfg(test)]
 use codec::{decode_f32, decode_u32, decode_u64, encode_u32, encode_u64, extract_bit};
 #[cfg(test)]
-use config::{FlowKind, ParityKind, Transport};
+use config::{FlowKind, ParityKind};
 #[cfg(test)]
 use tokio::net::UdpSocket;
 #[cfg(test)]
@@ -227,6 +238,222 @@ fn build_poll_order(plans: &[SlavePlan], strategy: PollStrategy) -> Vec<(usize, 
     order
 }
 
+/// 写目标索引（F-1，2026-11-01 协议语义审查）：点位显示名（tag）→ 已解析的绝对地址规约。
+///
+/// HMI 只发 `{"tag":点位显示名,"value":…}`（`hmi-studio/src/lib/command.ts`），
+/// 而向从站写必须知道绝对地址。索引在启动期由 `plan_devices` 的产物构建——
+/// 即 `inst.devices` 经绑定展开后的绝对地址（含 `slave_id` 解析结果）。
+#[derive(Debug, Default)]
+struct WriteIndex {
+    /// devid → (tag → 点位规约)：本设备命中优先（防同名 tag 跨设备歧义）。
+    by_devid: HashMap<String, HashMap<String, PointSpec>>,
+    /// tag → [(devid, 点位规约)]：供"全表唯一 tag"跨 devid 兜底与歧义判定。
+    global: HashMap<String, Vec<(String, PointSpec)>>,
+}
+
+impl WriteIndex {
+    /// 从采集计划建索引：各 region 的 `(field, spec)` 即（Sample key = label, 绝对地址）。
+    fn from_plans(plans: &[SlavePlan]) -> Self {
+        let mut idx = Self::default();
+        for plan in plans {
+            for reg in &plan.regions {
+                for (field, spec) in &reg.points {
+                    idx.by_devid
+                        .entry(plan.devid.clone())
+                        .or_default()
+                        .insert(field.clone(), spec.clone());
+                    idx.global
+                        .entry(field.clone())
+                        .or_default()
+                        .push((plan.devid.clone(), spec.clone()));
+                }
+            }
+        }
+        idx
+    }
+
+    /// 按 devid + tag 解析目标；本设备未命中时，仅当 tag 全表唯一才兜底（有歧义就拒）。
+    fn resolve(&self, devid: &str, tag: &str) -> Result<(String, PointSpec), String> {
+        if let Some(spec) = self.by_devid.get(devid).and_then(|m| m.get(tag)) {
+            return Ok((devid.to_string(), spec.clone()));
+        }
+        match self.global.get(tag).map(Vec::as_slice) {
+            Some([(d, spec)]) => Ok((d.clone(), spec.clone())),
+            Some(hits) => Err(format!(
+                "写命令 tag '{tag}' 在设备 {devid} 不存在，且全表有 {} 处同名点位（{:?}），无法确定目标",
+                hits.len(),
+                hits.iter().map(|(d, _)| d.as_str()).collect::<Vec<_>>()
+            )),
+            None => Err(format!("写命令 tag '{tag}' 在设备 {devid} 与全表均无此点位")),
+        }
+    }
+}
+
+/// 解析写命令目标（F-1）：原生 `address` 优先（旧契约行为不变），缺失时用 `tag` 查索引。
+///
+/// 返回 `(目标 devid, 点位规约)`——跨 devid 兜底时目标 devid 随之切换（决定 slave 归属）。
+fn resolve_write_target(
+    req: &serde_json::Value,
+    devid: &str,
+    index: &WriteIndex,
+) -> Result<(String, PointSpec), String> {
+    if let Some(addr) = req.get("address").and_then(|v| v.as_str()) {
+        let p = parse_point(addr).map_err(|e| format!("写命令 address '{addr}' 非法: {e}"))?;
+        return Ok((devid.to_string(), p));
+    }
+    let tag = req.get("tag").and_then(|v| v.as_str()).ok_or_else(|| {
+        "写命令缺少 address/tag（HMI 发 tag=点位显示名，原生客户端发 address）".to_string()
+    })?;
+    index.resolve(devid, tag)
+}
+
+/// 解析写命令的目标从站（MB-5，2026-11-01 协议语义审查）。
+///
+/// - devid 已映射到 slave A：`data.slave_id` 只允许等于 A（显式同值视为冗余），否则 Err
+///   ——此前 `data.slave_id` 优先于 devid 映射，可向总线上任意从站写；
+/// - devid 未映射（设备无点位，如纯软设备）：允许显式单播地址 1..=247；
+/// - 两者都无 → Err。
+fn resolve_write_slave(
+    devid: &str,
+    req: &serde_json::Value,
+    devid_to_slave: &HashMap<String, u8>,
+) -> Result<u8, String> {
+    let explicit = match req.get("slave_id") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(v) => {
+            let n = v
+                .as_u64()
+                .and_then(|n| u8::try_from(n).ok())
+                .filter(|n| (1..=247).contains(n))
+                .ok_or_else(|| format!("写命令 slave_id={v} 非法（Modbus 单播从站地址 1-247）"))?;
+            Some(n)
+        }
+    };
+    match (devid_to_slave.get(devid).copied(), explicit) {
+        (Some(mapped), Some(req_slave)) if mapped != req_slave => Err(format!(
+            "写命令 slave_id={req_slave} 与设备 {devid} 归属的 slave {mapped} 冲突（拒写，不得向任意从站写）"
+        )),
+        (Some(mapped), _) => Ok(mapped),
+        (None, Some(s)) => Ok(s),
+        (None, None) => Err(format!(
+            "写命令无法确定 slave_id（devid={devid} 未在 devices 配置，data 也无 slave_id）"
+        )),
+    }
+}
+
+/// F-3（2026-11-01 协议语义审查）：region 读失败时为其所有点位投递
+/// `SampleValue::Null`（坏质量标记）——不再静默跳过，让下游把旧值当成本拍新鲜值。
+/// 落盘侧（rtdata/历史）跳过 Null，不覆盖上次有效值。
+fn mark_region_null(
+    acc: &mut BTreeMap<String, BTreeMap<String, SampleValue>>,
+    devid: &str,
+    reg: &Region,
+) {
+    let entry = acc.entry(devid.to_string()).or_default();
+    for (field, _) in &reg.points {
+        entry.insert(field.clone(), SampleValue::Null);
+    }
+}
+
+/// MB-7（2026-11-01 协议语义审查）：把 region 按点位对半拆成两个子区间（纯函数）。
+///
+/// 按**点位**切分而非地址中点：多寄存器点位（i32/u32/f32/f64）跨切点会读不完整，
+/// 点位切分保证每个子区间内的点位都被完整覆盖（区间内空隙作废，只少读几个地址）。
+/// 点位数 < 2 时无法再拆（已到单点位 = 保底 1 个单元）→ `None`，即拆分终止。
+fn split_region(reg: &Region) -> Option<(Region, Region)> {
+    if reg.points.len() < 2 {
+        return None;
+    }
+    let mid = reg.points.len() / 2;
+    let make = |pts: &[(String, PointSpec)]| -> Option<Region> {
+        let start = pts.iter().map(|(_, p)| p.addr).min()?;
+        let end = pts
+            .iter()
+            .map(|(_, p)| p.addr.saturating_add(p.width() - 1))
+            .max()?;
+        Some(Region {
+            func: reg.func,
+            start,
+            end,
+            points: pts.to_vec(),
+        })
+    };
+    Some((make(&reg.points[..mid])?, make(&reg.points[mid..])?))
+}
+
+/// 应用一个 tick 收集到的拆分请求（MB-7）：把对应 region 替换为两个子区间。
+///
+/// 同一 plan 命中多个 region 时按 region 下标**降序**处理（一处替换为两处会挤后
+/// 其后的下标）。返回是否发生变化（变了要重建轮询顺序）；不可再拆的请求记一条
+/// warn 后保持原样（异常计数继续累加）。
+fn apply_region_splits(plans: &mut [SlavePlan], reqs: Vec<(usize, usize)>, inst_id: &str) -> bool {
+    let mut reqs = reqs;
+    reqs.sort_unstable();
+    reqs.dedup();
+    let mut changed = false;
+    for (pi, ri) in reqs.into_iter().rev() {
+        let Some(plan) = plans.get_mut(pi) else {
+            continue;
+        };
+        let Some(reg) = plan.regions.get(ri).cloned() else {
+            continue;
+        };
+        match split_region(&reg) {
+            Some((a, b)) => {
+                tracing::warn!(
+                    "[modbusClient] inst {inst_id} slave {} read {}+{} IllegalDataAddress：拆分为 {}+{} / {}+{}（下一 tick 生效）",
+                    plan.slave_id,
+                    reg.start,
+                    reg.len(),
+                    a.start,
+                    a.len(),
+                    b.start,
+                    b.len()
+                );
+                plan.regions.splice(ri..=ri, [a, b]);
+                changed = true;
+            }
+            None => tracing::warn!(
+                "[modbusClient] inst {inst_id} slave {} read {}+{} IllegalDataAddress 且已无法再拆（单点位），继续按异常计数",
+                plan.slave_id,
+                reg.start,
+                reg.len()
+            ),
+        }
+    }
+    changed
+}
+
+/// tick 耗时超过 period 的告警限流窗口（F-7，2026-11-01 协议语义审查）。
+const OVERRUN_WARN_INTERVAL: Duration = Duration::from_secs(60);
+
+/// tick 超时告警状态（F-7）。
+///
+/// `MissedTickBehavior::Skip` 会静默丢拍：一轮轮询慢于 period 时采集频率悄悄低于
+/// 配置值而无人知晓。这里按 [`OVERRUN_WARN_INTERVAL`] 限流 warn（防每拍刷屏），
+/// 计数进 tracker extra（`tick_overrun_count`）供运维观察。
+#[derive(Debug, Default)]
+struct OverrunWarn {
+    /// 累计超时次数（进 extra，不受限流影响）。
+    count: u64,
+    /// 上次告警时刻（限流窗口起点）。
+    last: Option<std::time::Instant>,
+}
+
+impl OverrunWarn {
+    /// 记录一次超时；返回本次是否应打 warn（首拍或距上次 ≥ 窗口）。
+    fn record(&mut self, now: std::time::Instant) -> bool {
+        self.count = self.count.saturating_add(1);
+        let due = self
+            .last
+            .is_none_or(|t| now.duration_since(t) >= OVERRUN_WARN_INTERVAL);
+        if due {
+            self.last = Some(now);
+        }
+        due
+    }
+}
+
 /// 一次 region 读结果（区分三类失败，驱动故障隔离决策）。
 ///
 /// `Timeout` 在调用方由 `tokio::time::timeout` 包装产生（`read_region` 本身不超时）。
@@ -310,9 +537,19 @@ impl Source for ModbusClient {
             }
         };
         // 预解析 devices → SlavePlan（每 slave 独立 regions + slave_id）+ 轮询顺序。
-        let plans = plan_devices(&devices, cfg.gap_threshold, cfg.max_regs, cfg.slave_id);
-        let poll_order = build_poll_order(&plans, cfg.poll_strategy);
+        // plans/poll_order 可变：MB-7 的 IllegalDataAddress 降级会在运行期把一个 region
+        // 拆成两个并重建轮询顺序。
+        let mut plans = plan_devices(&devices, cfg.gap_threshold, cfg.max_regs, cfg.slave_id);
+        let mut poll_order = build_poll_order(&plans, cfg.poll_strategy);
         let req_timeout = Duration::from_secs(cfg.request_timeout_secs);
+        // MB-8（2026-11-01 协议语义审查）：RTU 类传输的 region 间帧间静默（上游库无 t3.5）。
+        // 0 或 TCP 不插 sleep（TCP 无帧间静默语义）。
+        let request_gap = match cfg.transport {
+            Transport::Tcp => None,
+            Transport::RtuSerial | Transport::RtuTcp | Transport::RtuUdp => {
+                (cfg.request_gap_ms > 0).then(|| Duration::from_millis(cfg.request_gap_ms))
+            }
+        };
         // C-3（2026-11-01 审查）：per-plan 连续超时计数。RTU 帧无事务 ID——读超时后
         // 迟到的响应会串到下个同功能码请求（tick N 的 region A 响应被当作
         // tick N+1 的 region B 数据解码发布，**静默错值**）。Timeout 分支此前
@@ -326,6 +563,12 @@ impl Source for ModbusClient {
             .iter()
             .map(|p| (p.devid.clone(), p.slave_id))
             .collect();
+        // F-1：写目标索引（devid → tag → 绝对地址），供 HMI 的 {"tag","value"} 写命令反查。
+        let write_index = WriteIndex::from_plans(&plans);
+        // F-2：声明本实例支持写回执——REST 写入口据此在窗口内等待 handle_write 的业务
+        // 结果（成功 200 / 明确失败 422 / 无回报 504）。放在装配成功之后：配置/绑定失败
+        // 直接返回的实例不声明能力（避免写入口白等）。
+        ctx.ctl_registry.declare_write_ack(inst_id.as_str());
 
         let period = Duration::from_secs(cfg.period);
         // jitter 相位：FNV-1a(inst_id) % period，多实例首次 tick 散布，削整点脉冲。
@@ -340,6 +583,8 @@ impl Source for ModbusClient {
         );
         // exception（modbus 协议层错误码）独立计数——与 transport 失败区分（后者拆 session）。
         let mut exceptions: u64 = 0;
+        // F-7：tick 超 period 的告警限流状态。
+        let mut overrun = OverrunWarn::default();
         let mut flush_ticker = crate::plugin::stat_tracker::flush_ticker(inst_id.as_str());
         // 启动即落一次初始 stat（ticker 首拍带相位延迟，见 stat_tracker::flush_ticker）。
         tracker.flush().await;
@@ -358,18 +603,31 @@ impl Source for ModbusClient {
             };
             match evt {
                 Evt::Cmd(Some(m)) => {
-                    if m.cmd == "write" {
+                    // F-2：每条命令处理后回报业务结果（成功/失败原因），REST 写入口据此
+                    // 返回 200/422；无回执通道（request_id=None）时 finish_write 是 no-op。
+                    let result = if m.cmd == "write" {
                         handle_write(
                             &mut session,
                             &m.data,
                             &m.devid,
+                            &write_index,
                             &devid_to_slave,
                             req_timeout,
                         )
-                        .await;
+                        .await
                     } else {
                         tracing::info!("[modbusClient] inst {inst_id} unknown cmd: {}", m.cmd);
+                        Err(format!("实例不支持命令 '{}'（仅 write）", m.cmd))
+                    };
+                    if let Err(e) = &result {
+                        tracing::warn!(
+                            "[modbusClient] inst {inst_id} cmd {} devid {} 失败: {e}",
+                            m.cmd,
+                            m.devid
+                        );
                     }
+                    ctx.ctl_registry
+                        .finish_write(m.request_id.as_deref(), result);
                 }
                 Evt::Cmd(None) => break,
                 Evt::Tick => {
@@ -410,9 +668,28 @@ impl Source for ModbusClient {
                     // slave」；RoundRobin 同样受益——死从站后续 region 也大概率超时，跳过省时，
                     // 避免死从站 K region 付 K×timeout 拖垮整轮）。换 slave（pi 变）自然解除。
                     let mut timed_out_slave: Option<usize> = None;
-                    for (pi, ri) in &poll_order {
+                    // MB-7：本 tick 命中 IllegalDataAddress 且还能拆的 region（tick 末统一应用，
+                    // 避免遍历 poll_order 期间改 plans 造成借用冲突）。
+                    let mut split_requests: Vec<(usize, usize)> = Vec::new();
+                    for (step, (pi, ri)) in poll_order.iter().enumerate() {
                         if timed_out_slave.is_some_and(|s| s == *pi) {
+                            // F-3：该 slave 已超时，本 region 不再发请求——点位同样没有可信值，
+                            // 一并标 Null（否则这些点静默保留旧值，正是 F-3 的问题）。
+                            mark_region_null(
+                                &mut acc,
+                                plans[*pi].devid.as_str(),
+                                &plans[*pi].regions[*ri],
+                            );
                             continue;
+                        }
+                        // MB-8：相邻 region 请求之间插入帧间静默（仅 RTU 类 + 显式配置 >0）。
+                        if step > 0 {
+                            if let Some(gap) = request_gap {
+                                tokio::select! {
+                                    _ = token.cancelled() => break,
+                                    _ = tokio::time::sleep(gap) => {}
+                                }
+                            }
                         }
                         let plan = &plans[*pi];
                         let reg = &plan.regions[*ri];
@@ -445,6 +722,13 @@ impl Source for ModbusClient {
                                     reg.start,
                                     reg.len()
                                 );
+                                // F-3：失败 region 的点位投递 Null（坏质量），不静默跳过。
+                                mark_region_null(&mut acc, &plan.devid, reg);
+                                // MB-7：IllegalDataAddress = 请求区间超出从站实际点表，对半拆
+                                // 后退让；其他异常码不是地址问题，拆了也没用（保持计数+warn）。
+                                if exc == ExceptionCode::IllegalDataAddress {
+                                    split_requests.push((*pi, *ri));
+                                }
                             }
                             ReadOutcome::Timeout => {
                                 timed_out_slave = Some(*pi);
@@ -455,6 +739,8 @@ impl Source for ModbusClient {
                                     reg.len(),
                                     cfg.request_timeout_secs
                                 );
+                                // F-3：超时 region 的点位同样标 Null。
+                                mark_region_null(&mut acc, &plan.devid, reg);
                                 // C-3：连续 2 次超时拆 session——迟到响应串扰下一请求
                                 // 的风险只在「超时后继续复用同一 session」时存在。
                                 timeout_streak[*pi] = timeout_streak[*pi].saturating_add(1);
@@ -474,10 +760,19 @@ impl Source for ModbusClient {
                                     reg.start,
                                     reg.len()
                                 );
+                                // F-3：失败 region 的点位投递 Null（断连时整轮中断，
+                                // 未尝试的 region 不标——下 tick 重连后重采）。
+                                mark_region_null(&mut acc, &plan.devid, reg);
                                 transport_failed = true;
                                 break;
                             }
                         }
+                    }
+                    // MB-7：应用拆分并重建轮询顺序——下一 tick 用细分区间，终止于单点位。
+                    if !split_requests.is_empty()
+                        && apply_region_splits(&mut plans, split_requests, inst_id.as_str())
+                    {
+                        poll_order = build_poll_order(&plans, cfg.poll_strategy);
                     }
                     if transport_failed {
                         // transport 失败可能因断连：drop Context，下 tick 重连。
@@ -503,7 +798,24 @@ impl Source for ModbusClient {
                     if transport_failed {
                         tracker.tick_fail("transport failed");
                     } else {
-                        tracker.tick_ok(tick_started.elapsed().as_millis() as u64);
+                        let elapsed = tick_started.elapsed();
+                        tracker.tick_ok(elapsed.as_millis() as u64);
+                        // F-7：一轮轮询超过 period（MissedTickBehavior::Skip 已静默丢拍）——
+                        // warn 限流 60s 一条，计数进 extra 供运维观察采集频率是否达标。
+                        if elapsed > period {
+                            if overrun.record(std::time::Instant::now()) {
+                                tracing::warn!(
+                                    "[modbusClient] inst {inst_id} tick 耗时 {}ms > period {}ms（MissedTickBehavior::Skip 已丢拍，采集频率低于配置），累计 {} 次",
+                                    elapsed.as_millis(),
+                                    period.as_millis(),
+                                    overrun.count
+                                );
+                            }
+                            tracker.extra_insert(
+                                "tick_overrun_count",
+                                serde_json::json!(overrun.count),
+                            );
+                        }
                     }
                     if tracker.should_flush() {
                         tracker.flush().await;
@@ -518,75 +830,47 @@ impl Source for ModbusClient {
     }
 }
 
-/// 处理 write 命令：`data` = JSON `{"address":"holding:0:f32:ABCD","value":12.34}`。
+/// 处理 write 命令并回报业务成败（F-2，2026-11-01 协议语义审查）。
+///
+/// `data` 兼容两种契约（`address` 优先，旧行为不变）：
+/// - 原生：`{"address":"holding:0:f32:ABCD","value":12.34}`；
+/// - HMI：`{"tag":"点位显示名","value":12.34}`——按 `inst.devid` + tag 查启动期索引，
+///   全表唯一 tag 可跨 devid 兜底（F-1）。
 ///
 /// coil → FC05/0F；holding u16/i16/bit → FC06，i32/u32/f32/f64 → FC16，bit 走 RMW；
-/// discrete/input 只读拒绝。写失败仅 warn，不拆 session（读 tick 兜底发现断连）。
+/// discrete/input 只读拒绝。
+///
+/// 返回 `Result<(), String>`：成功 `Ok(())`；任何业务失败（JSON/地址/tag 未命中/只读/
+/// 缺 value/取值越界/slave 归属冲突/未连接/从站异常/超时）→ `Err(原因)`，由 run() 经
+/// `finish_write` 回给 REST 写入口（422）。技术细节只在此处返回、由 run() 统一记一条
+/// warn，避免双层重复日志。
 async fn handle_write(
     session: &mut Option<Context>,
     data: &str,
     devid: &str,
+    index: &WriteIndex,
     devid_to_slave: &HashMap<String, u8>,
     req_timeout: Duration,
-) {
-    let req: serde_json::Value = match serde_json::from_str(data) {
-        Ok(v) => v,
-        Err(e) => {
-            tracing::warn!("[modbusClient] write bad json: {e}");
-            return;
-        }
-    };
-    let addr = match req.get("address").and_then(|v| v.as_str()) {
-        Some(a) => a,
-        None => {
-            tracing::warn!("[modbusClient] write missing address");
-            return;
-        }
-    };
-    let p = match parse_point(addr) {
-        Ok(p) => p,
-        Err(e) => {
-            tracing::warn!("[modbusClient] write bad address '{addr}': {e}");
-            return;
-        }
-    };
+) -> Result<(), String> {
+    let req: serde_json::Value =
+        serde_json::from_str(data).map_err(|e| format!("写命令 data 非 JSON: {e}"))?;
+    let (target_devid, p) = resolve_write_target(&req, devid, index)?;
     if p.func.is_readonly() {
-        tracing::warn!(
-            "[modbusClient] write rejected: {}(FC0{}) 只读",
+        return Err(format!(
+            "写命令目标 {}(FC0{}) 只读，不可写",
             addr_func_name(p.func),
             addr_fc(p.func)
-        );
-        return;
+        ));
     }
     let value = match req.get("value") {
         Some(v) => json_to_sample_value(v),
-        None => {
-            tracing::warn!("[modbusClient] write missing value");
-            return;
-        }
+        None => return Err("写命令缺少 value".to_string()),
     };
-    let sess = match session {
-        Some(s) => s,
-        None => {
-            tracing::warn!("[modbusClient] write ignored: not connected");
-            return;
-        }
-    };
-    // 按 devid 反查 slave_id（data 可显式带 slave_id 覆盖）。
-    let slave_id = req
-        .get("slave_id")
-        .and_then(|v| v.as_u64())
-        .and_then(|v| u8::try_from(v).ok())
-        .or_else(|| devid_to_slave.get(devid).copied());
-    let slave_id = match slave_id {
-        Some(s) => s,
-        None => {
-            tracing::warn!(
-                "[modbusClient] write 无法确定 slave_id（devid={devid} 未在 devices 配置，data 也无 slave_id）"
-            );
-            return;
-        }
-    };
+    // MB-5：slave 归属校验放在任何 I/O 之前（越权写必须连请求都不发）。
+    let slave_id = resolve_write_slave(&target_devid, &req, devid_to_slave)?;
+    let sess = session
+        .as_mut()
+        .ok_or_else(|| "写命令丢弃：实例未连接从站（下个采集 tick 重连）".to_string())?;
     sess.set_slave(Slave(slave_id));
     // C-1（2026-11-01 审查）：写路径（RMW 读 + 写）统一包 req_timeout——读路径早有
     // 超时，写路径此前裸 await：slave 收包不回（TCP 半开）会把 handle_write 连同
@@ -594,19 +878,22 @@ async fn handle_write(
     // 超时即拆 session：RTU 下在途响应若迟到，也不能留给下一请求串扰。
     let mut drop_sess = false;
     // 仅 holding bit 写需 RMW（coil 直接写单 coil，无需读当前值）。
+    let mut rmw_err: Option<String> = None;
     let current_reg = if p.func == Func::Holding && p.typ == Type::Bit {
         match tokio::time::timeout(req_timeout, sess.read_holding_registers(p.addr, 1)).await {
             Ok(Ok(Ok(buf))) => buf.first().copied(),
             Ok(Ok(Err(exc))) => {
-                tracing::warn!("[modbusClient] bit write RMW read exception: {exc:?}");
-                return;
+                rmw_err = Some(format!("bit 写 RMW 读从站异常 {exc:?}"));
+                None
             }
             Ok(Err(e)) => {
-                tracing::warn!("[modbusClient] bit write RMW read failed: {e:?}");
-                return;
+                rmw_err = Some(format!("bit 写 RMW 读 transport 失败: {e:?}"));
+                None
             }
             Err(_) => {
-                tracing::warn!("[modbusClient] bit write RMW read timeout ({req_timeout:?})");
+                rmw_err = Some(format!(
+                    "bit 写 RMW 读超时（{req_timeout:?}），已拆 session"
+                ));
                 drop_sess = true;
                 None
             }
@@ -614,13 +901,14 @@ async fn handle_write(
     } else {
         None
     };
-    let payload = match encode_value(&value, &p, current_reg) {
-        Ok(p) => p,
-        Err(e) => {
-            tracing::warn!("[modbusClient] write encode failed: {e}");
-            return;
+    if let Some(e) = rmw_err {
+        if drop_sess {
+            *session = None;
         }
-    };
+        return Err(e);
+    }
+    let payload =
+        encode_value(&value, &p, current_reg).map_err(|e| format!("写值编码失败: {e}"))?;
     let result = match payload {
         WritePayload::Coils(c) if c.len() == 1 => {
             tokio::time::timeout(req_timeout, sess.write_single_coil(p.addr, c[0])).await
@@ -635,18 +923,19 @@ async fn handle_write(
             tokio::time::timeout(req_timeout, sess.write_multiple_registers(p.addr, &r)).await
         }
     };
-    match result {
-        Ok(Ok(Ok(()))) => {}
-        Ok(Ok(Err(exc))) => tracing::warn!("[modbusClient] write exception: {exc:?}"),
-        Ok(Err(e)) => tracing::warn!("[modbusClient] write failed: {e:?}"),
+    let res = match result {
+        Ok(Ok(Ok(()))) => Ok(()),
+        Ok(Ok(Err(exc))) => Err(format!("从站拒绝写（异常 {exc:?}）")),
+        Ok(Err(e)) => Err(format!("写请求 transport 失败: {e:?}")),
         Err(_) => {
-            tracing::warn!("[modbusClient] write timeout ({req_timeout:?})，拆 session");
             drop_sess = true;
+            Err(format!("写请求超时（{req_timeout:?}），已拆 session"))
         }
-    }
+    };
     if drop_sess {
         *session = None;
     }
+    res
 }
 
 // 静态注册到 inventory（编译期，编进单一二进制）
@@ -749,7 +1038,10 @@ mod tests {
         let cfg2 =
             parse_cfg(&serde_json::json!({"endpoint":"x","period":0,"max_regs":9999})).unwrap();
         assert_eq!(cfg2.period, 1, "period 0 clamp 1");
-        assert_eq!(cfg2.max_regs, 125, "max_regs clamp 125");
+        // MB-6（2026-11-01 协议语义审查，**有意行为变更**）：max_regs 上界由 125
+        // 放宽到 2000——coil/discrete 走 FC01/02，协议上限 2000；寄存器类的 125
+        // 上限改在 merge_regions 按功能钳（见 merge::tests::merge_regions_caps_max_units_per_func）。
+        assert_eq!(cfg2.max_regs, 2000, "max_regs clamp 2000（原 125）");
     }
 
     #[test]
@@ -1465,5 +1757,337 @@ mod tests {
     fn build_poll_order_empty_when_no_plans() {
         let plans: Vec<SlavePlan> = vec![];
         assert!(build_poll_order(&plans, PollStrategy::RoundRobin).is_empty());
+    }
+
+    // ---------- 以下为 2026-11-01 协议语义审查修复的测试 ----------
+
+    /// 构造测试设备（devid + [(label, 地址串)] + 可选 slave_id）。
+    fn mk_device(devid: &str, slave: Option<u8>, tags: &[(&str, &str)]) -> DeviceSpec {
+        DeviceSpec {
+            label: devid.into(),
+            value: devid.into(),
+            children: tags
+                .iter()
+                .map(|(label, addr)| ChildSpec {
+                    label: (*label).into(),
+                    value: (*addr).into(),
+                    r#type: String::new(),
+                    props: None,
+                })
+                .collect(),
+            slave_id: slave,
+        }
+    }
+
+    /// F-1（2026-11-01 协议语义审查）：HMI 只发 `{"tag":点位显示名,"value":…}`。
+    /// 写目标按 devid + tag 反查绝对地址，全表唯一 tag 可跨 devid 兜底；
+    /// 原生 `address` 字段保留且优先（旧契约行为不变）。
+    #[test]
+    fn write_index_resolves_tag_per_devid_and_global_unique() {
+        let devices = vec![
+            mk_device(
+                "devA",
+                Some(1),
+                &[("temp", "holding:0:u16"), ("speed", "holding:1:u16")],
+            ),
+            mk_device("devB", Some(2), &[("level", "holding:2:f32")]),
+        ];
+        let plans = plan_devices(&devices, 16, 100, 1);
+        let index = WriteIndex::from_plans(&plans);
+
+        // devid 命中（同名 tag 优先本设备）
+        let (d, p) = resolve_write_target(
+            &serde_json::json!({"tag": "temp", "value": 1}),
+            "devA",
+            &index,
+        )
+        .unwrap();
+        assert_eq!((d.as_str(), p.addr), ("devA", 0));
+
+        // msg.devid 不匹配但 tag 全表唯一 → 跨 devid 兜底
+        let (d, p) =
+            resolve_write_target(&serde_json::json!({"tag": "level"}), "other", &index).unwrap();
+        assert_eq!((d.as_str(), p.addr), ("devB", 2));
+
+        // tag 不存在 → Err
+        assert!(
+            resolve_write_target(&serde_json::json!({"tag": "nope"}), "devA", &index).is_err(),
+            "未知 tag 必须 Err"
+        );
+
+        // 原生 address 优先于 tag（旧契约不变）
+        let (d, p) = resolve_write_target(
+            &serde_json::json!({"address": "holding:9:u16", "tag": "temp"}),
+            "devA",
+            &index,
+        )
+        .unwrap();
+        assert_eq!((d.as_str(), p.addr), ("devA", 9));
+        // 只给 address 照常工作
+        assert!(resolve_write_target(
+            &serde_json::json!({"address": "holding:9:u16"}),
+            "devA",
+            &index
+        )
+        .is_ok());
+        // 两者都缺 → Err
+        assert!(resolve_write_target(&serde_json::json!({"value": 1}), "devA", &index).is_err());
+    }
+
+    /// F-1 续：跨设备重名 tag 不得兜底（有歧义就拒，不猜目标）。
+    #[test]
+    fn write_index_rejects_ambiguous_cross_device_tag() {
+        let devices = vec![
+            mk_device("devA", Some(1), &[("temp", "holding:0:u16")]),
+            mk_device("devB", Some(2), &[("temp", "holding:5:u16")]),
+        ];
+        let plans = plan_devices(&devices, 16, 100, 1);
+        let index = WriteIndex::from_plans(&plans);
+        // 本设备命中照常
+        let (d, p) =
+            resolve_write_target(&serde_json::json!({"tag": "temp"}), "devB", &index).unwrap();
+        assert_eq!((d.as_str(), p.addr), ("devB", 5));
+        // 第三个 devid + 重名 tag → 歧义拒写
+        let err =
+            resolve_write_target(&serde_json::json!({"tag": "temp"}), "devX", &index).unwrap_err();
+        assert!(err.contains("temp"), "{err}");
+    }
+
+    /// MB-5（2026-11-01 协议语义审查）：`data.slave_id` 不得覆盖设备归属——
+    /// devid 已映射到 slave A 时只允许等于 A（此前可向任意从站写）。
+    #[test]
+    fn resolve_write_slave_guards_device_ownership() {
+        let mapped: HashMap<String, u8> = [("devA".to_string(), 3u8)].into_iter().collect();
+        // 与设备映射一致：允许（显式同值不改变目标）
+        assert_eq!(
+            resolve_write_slave("devA", &serde_json::json!({"slave_id": 3}), &mapped).unwrap(),
+            3
+        );
+        // 与设备映射冲突：Err
+        let err =
+            resolve_write_slave("devA", &serde_json::json!({"slave_id": 9}), &mapped).unwrap_err();
+        assert!(
+            err.contains("slave_id") && err.contains('9'),
+            "冲突错误要点名请求值与设备归属：{err}"
+        );
+        // 无显式：用设备映射
+        assert_eq!(
+            resolve_write_slave("devA", &serde_json::json!({}), &mapped).unwrap(),
+            3
+        );
+        // devid 未映射（设备无点位）：允许显式单播地址
+        assert_eq!(
+            resolve_write_slave("devB", &serde_json::json!({"slave_id": 7}), &mapped).unwrap(),
+            7
+        );
+        // 未映射且无显式 → Err
+        assert!(resolve_write_slave("devB", &serde_json::json!({}), &mapped).is_err());
+        // 显式越界/广播/保留 → Err
+        for bad in [0u64, 248, 300] {
+            assert!(
+                resolve_write_slave("devB", &serde_json::json!({"slave_id": bad}), &mapped)
+                    .is_err(),
+                "slave_id={bad} 必须 Err"
+            );
+        }
+    }
+
+    /// F-2（2026-11-01 协议语义审查）：`handle_write` 返回 `Result<(), String>`——
+    /// 业务失败必须回流 REST 写入口（422），不再只是 warn 后 200。
+    /// 本例覆盖全部纯校验失败分支（不触网：session=None）。
+    #[tokio::test]
+    async fn handle_write_reports_business_errors() {
+        let devices = vec![
+            mk_device("devA", Some(3), &[("temp", "holding:0:u16")]),
+            mk_device("devR", Some(4), &[("di", "discrete:0:bool")]),
+        ];
+        let plans = plan_devices(&devices, 16, 100, 1);
+        let index = WriteIndex::from_plans(&plans);
+        let mapped: HashMap<String, u8> = [("devA".to_string(), 3u8)].into_iter().collect();
+        let mut none: Option<Context> = None;
+        let t = Duration::from_millis(10);
+
+        // data 不是 JSON
+        assert!(
+            handle_write(&mut none, "not-json", "devA", &index, &mapped, t)
+                .await
+                .is_err()
+        );
+        // 缺 address/tag
+        let e = handle_write(&mut none, r#"{"value":1}"#, "devA", &index, &mapped, t)
+            .await
+            .unwrap_err();
+        assert!(e.contains("address") || e.contains("tag"), "{e}");
+        // tag 未命中
+        assert!(handle_write(
+            &mut none,
+            r#"{"tag":"nope","value":1}"#,
+            "devA",
+            &index,
+            &mapped,
+            t
+        )
+        .await
+        .is_err());
+        // 只读功能码
+        let e = handle_write(
+            &mut none,
+            r#"{"tag":"di","value":true}"#,
+            "devR",
+            &index,
+            &mapped,
+            t,
+        )
+        .await
+        .unwrap_err();
+        assert!(e.contains("只读"), "{e}");
+        // 缺 value
+        let e = handle_write(&mut none, r#"{"tag":"temp"}"#, "devA", &index, &mapped, t)
+            .await
+            .unwrap_err();
+        assert!(e.contains("value"), "{e}");
+        // slave_id 越权（MB-5 经 handle_write 生效）
+        let e = handle_write(
+            &mut none,
+            r#"{"tag":"temp","value":1,"slave_id":9}"#,
+            "devA",
+            &index,
+            &mapped,
+            t,
+        )
+        .await
+        .unwrap_err();
+        assert!(e.contains("slave_id"), "{e}");
+        // 合法写但因未连接失败（错误必须带原因，不是静默 200）
+        let e = handle_write(
+            &mut none,
+            r#"{"tag":"temp","value":1}"#,
+            "devA",
+            &index,
+            &mapped,
+            t,
+        )
+        .await
+        .unwrap_err();
+        assert!(e.contains("连接"), "{e}");
+    }
+
+    /// F-3：region 读失败必须为其所有点位投递 `SampleValue::Null`（坏质量标记），
+    /// 不再静默跳过。
+    #[test]
+    fn mark_region_null_marks_every_point() {
+        let pairs = vec![
+            ("a".into(), parse_point("holding:0:u16").unwrap()),
+            ("b".into(), parse_point("holding:1:f32").unwrap()),
+        ];
+        let regions = merge_regions(&pairs, 16, 100);
+        let mut acc: BTreeMap<String, BTreeMap<String, SampleValue>> = BTreeMap::new();
+        acc.entry("d1".into())
+            .or_default()
+            .insert("a".into(), SampleValue::Int(7));
+        mark_region_null(&mut acc, "d1", &regions[0]);
+        let vals = &acc["d1"];
+        assert_eq!(vals["a"], SampleValue::Null, "本拍失败点覆盖为 Null");
+        assert_eq!(vals["b"], SampleValue::Null);
+    }
+
+    /// MB-7（2026-11-01 协议语义审查）：IllegalDataAddress 时 region 对半拆分，
+    /// 逐层拆到单点位（保底 1 个单元）后终止。
+    #[test]
+    fn split_region_halves_points_until_single() {
+        let pairs: Vec<(String, PointSpec)> = (0..8)
+            .map(|i| {
+                (
+                    format!("c{i}"),
+                    parse_point(&format!("coil:{i}:bool")).unwrap(),
+                )
+            })
+            .collect();
+        let regions = merge_regions(&pairs, 16, 100);
+        assert_eq!(regions.len(), 1, "8 个连续 coil 合 1 区");
+        let (a, b) = split_region(&regions[0]).expect("8 点可拆");
+        assert_eq!((a.start, a.end, a.points.len()), (0, 3, 4));
+        assert_eq!((b.start, b.end, b.points.len()), (4, 7, 4));
+        // 第二层：a → 2+2
+        let (a1, a2) = split_region(&a).expect("4 点可拆");
+        assert_eq!((a1.points.len(), a2.points.len()), (2, 2));
+        // 第三层：a1 → 1+1
+        let (a11, a12) = split_region(&a1).expect("2 点可拆");
+        assert_eq!((a11.points.len(), a12.points.len()), (1, 1));
+        assert_eq!(a11.start, 0);
+        assert_eq!(a11.end, 0);
+        // 终止：单点位无法再拆（保底 1 个单元）
+        assert!(split_region(&a11).is_none(), "单点位拆分终止");
+        assert!(split_region(&a12).is_none());
+    }
+
+    /// MB-7 续：多寄存器点位（f32）不得被拆点切断——按点位对半切，子区间各自完整。
+    #[test]
+    fn split_region_keeps_multiregister_points_whole() {
+        let pairs = vec![
+            ("a".into(), parse_point("holding:0:u16").unwrap()),
+            ("b".into(), parse_point("holding:1:f32").unwrap()),
+            ("c".into(), parse_point("holding:3:u16").unwrap()),
+        ];
+        let regions = merge_regions(&pairs, 16, 100);
+        assert_eq!(regions[0].len(), 4);
+        let (l, r) = split_region(&regions[0]).unwrap();
+        assert_eq!(l.points.len(), 1, "左侧只含 a");
+        assert_eq!((l.start, l.end), (0, 0));
+        assert_eq!(r.points.len(), 2, "右侧含 b(f32 占 1-2) + c");
+        assert_eq!((r.start, r.end), (1, 3));
+        assert!(l.end < r.start, "两子区间不重叠");
+    }
+
+    /// MB-7 续：把拆分请求应用到计划表（替换 1 个为 2 个子区间；不可拆时不变）。
+    #[test]
+    fn apply_region_splits_replaces_region() {
+        let devices = vec![mk_device(
+            "devA",
+            Some(1),
+            &[
+                ("a", "holding:0:u16"),
+                ("b", "holding:1:u16"),
+                ("c", "holding:2:u16"),
+            ],
+        )];
+        let mut plans = plan_devices(&devices, 16, 100, 1);
+        assert_eq!(plans[0].regions.len(), 1);
+        assert!(
+            apply_region_splits(&mut plans, vec![(0, 0)], "test"),
+            "3 点区间可拆"
+        );
+        assert_eq!(plans[0].regions.len(), 2, "1 个区间替换为 2 个");
+        assert_eq!(
+            plans[0]
+                .regions
+                .iter()
+                .map(|r| r.points.len())
+                .sum::<usize>(),
+            3,
+            "点位不丢"
+        );
+        // 只剩单点位的区间：拆分请求为 no-op（终止），返回 false
+        let devices = vec![mk_device("devB", Some(2), &[("only", "holding:0:u16")])];
+        let mut single = plan_devices(&devices, 16, 100, 1);
+        assert!(!apply_region_splits(&mut single, vec![(0, 0)], "test"));
+        assert_eq!(single[0].regions.len(), 1, "不可拆则保持原区间");
+    }
+
+    /// F-7：tick 实际耗时 > period 的告警限流（每 60s 一条），计数不受限流影响。
+    #[test]
+    fn overrun_warn_is_rate_limited() {
+        let base = std::time::Instant::now();
+        let mut w = OverrunWarn::default();
+        assert!(w.record(base), "首次超时告警");
+        assert!(
+            !w.record(base + Duration::from_secs(59)),
+            "60s 窗口内不重复告警"
+        );
+        assert!(
+            w.record(base + Duration::from_secs(60)),
+            "满 60s 再告警一次"
+        );
+        assert_eq!(w.count, 3, "计数不受限流影响（进 tracker extra）");
     }
 }

@@ -494,6 +494,7 @@ async fn eip_write_command_round_trip() {
             devid: "plc".into(),
             cmd: "write".into(),
             data: r#"{"tag":"SP_TAG","value":777,"plc_type":"dint"}"#.into(),
+            request_id: None,
         },
     );
     assert!(ok, "send_ctl 应投递成功（实例运行中）");

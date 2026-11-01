@@ -251,6 +251,7 @@ async fn sidecar_dataup_and_command_roundtrip() {
         devid: "devS".into(),
         cmd: "write".into(),
         data: r#"{"address":"x","value":1}"#.into(),
+        request_id: None,
     };
     assert!(
         env.mgr.send_ctl("sc1", msg),

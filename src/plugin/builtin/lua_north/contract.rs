@@ -749,9 +749,11 @@ fn sample_value_to_json(v: &crate::types::SampleValue) -> serde_json::Value {
     use crate::types::SampleValue;
     match v {
         SampleValue::Int(i) => serde_json::json!(i),
+        SampleValue::UInt(u) => serde_json::json!(u),
         SampleValue::Float(f) => serde_json::json!(f),
         SampleValue::Bool(b) => serde_json::json!(b),
         SampleValue::Str(s) => serde_json::json!(s),
+        SampleValue::Null => serde_json::Value::Null,
     }
 }
 
