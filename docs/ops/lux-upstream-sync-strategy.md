@@ -80,7 +80,7 @@ git branch -vv          # 看 main 相对 origin/main ahead/behind
 
 ## 四、当前本地补丁清单
 
-本地 `main` 领先 `origin/main` 3 个提交（2026-11-09 复核；`mine/main` 与本地同步，`bf32c25` 待推送）：
+本地 `main` 领先 `origin/main` 3 个提交（2026-11-09 复核；`mine/main` 已同步含 `bf32c25`，官方源不推——无写权限且不接收 Agent 修复）：
 
 | commit | 用途 | 改动文件 | 冲突热点 | 丢弃条件 |
 |---|---|---|---|---|
