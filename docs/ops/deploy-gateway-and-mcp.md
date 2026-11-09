@@ -3,7 +3,7 @@
 > **状态**：implemented（注意：写于 2026-08-12，早于 2026-08-18 gateway-core 拆分，产物结构待核对更新）
 > v3 AI Agent 集成的现场部署。三件套：rsiot-mcp（MCP server 子进程）+ rsiot-gateway（API Gateway）+ reasonix serve（AI agent）。
 > 前置：rs-iot 主程序已部署运行（:8790）。设计见 `../designs/2026-08-11-ai-agent-integration-v3-design.md` + `../decisions/2026-08-12-gateway-tech-selection.md`。
-> **版本兼容**：本文 §三.1 按 reasonix **v1.25.3** 基线原样保留；**v2.35.0** 起行为有变（[serve] token 失效 / MCP 审批门 / --config 移除），差异与对策见 §三.2 与权威文档 [reasonix-version-compat.md](reasonix-version-compat.md)。
+> **版本兼容**：本文 §三.1 按 reasonix **v1.25.3** 基线原样保留；**v2.35.0** 起行为有变（[serve] token 失效 / MCP 审批门 / --config 移除），差异与对策见 §三.2 与权威文档 [reasonix-version-compat.md](reasonix-version-compat.md)。本机 reasonix 已到 **v2.58.1**：§三.2 三条对策经代码核对仍成立；另 `-dir` flag 可显式指定项目根（v2.43.0 起已有，相对本文基线 v2.35.0 是新增）、v2.58.0 移除了一批任务/配置键（rs-iot 模板未用到）；v2.58.1 下未复跑端到端，详见兼容文档 §四。
 
 ## 一、二进制构建
 
@@ -98,7 +98,7 @@ network        = true                     # 允许连模型 API
 
 > **RSIOT_JWT**：rs-iot 主进程签发一次（登录后取 token），写入此处。rsiot-mcp 用它调 rs-iot REST（层2 Authorization）。
 
-### 3.2 v2.35.0 差异（2026-10-11 实测，模板见 `field-kit/config/reasonix-v2.35.toml.template`）
+### 3.2 v2.35.0+ 差异（2026-10-11 实测；v2.58.1 代码核对仍成立，模板见 `field-kit/config/reasonix-v2.35.toml.template`）
 
 相对 §3.1 的四点变更（细节与证据见 [reasonix-version-compat.md](reasonix-version-compat.md) §三）：
 
@@ -107,13 +107,22 @@ network        = true                     # 允许连模型 API
 3. **`--config` 参数已移除**：OS 服务 unit 用 `WorkingDirectory=` 指到运行目录（项目 reasonix.toml 所在），去掉 `--config`。
 4. **监听地址只用 `-addr`**：`[serve].addr` 不是配置键（§3.1 中该行仅 v1.25.3 语义）。
 
-systemd 示例（v2.35.0）：
+systemd 示例（v2.35.0；v2.58.1 仍适用）：
 
 ```ini
 [Service]
 WorkingDirectory=/opt/rs-iot
 ExecStart=/opt/rs-iot/reasonix serve -addr 127.0.0.1:8787 -token-file /opt/rs-iot/serve-token.txt
 ```
+
+`-dir <项目根>` flag（v2.43.0 起已有，相对 v2.35.0 基线是新增；项目根可显式指定，不必依赖进程 cwd），故也可写成：
+
+```ini
+[Service]
+ExecStart=/opt/rs-iot/reasonix serve -dir /opt/rs-iot -addr 127.0.0.1:8787 -token-file /opt/rs-iot/serve-token.txt
+```
+
+两种写法择一，均需保证项目 `reasonix.toml` 在所指目录下可被发现。
 
 部署后验证除 §四 外加一步：`curl -H "Cookie: reasonix_token=<token>" http://127.0.0.1:8787/status` 返回 JSON（401 = token 未对齐，回查 §三.2 第 1 条）。
 

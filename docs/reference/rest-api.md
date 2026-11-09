@@ -429,7 +429,7 @@ curl -X POST -H "Authorization: Bearer $JWT" -H "Content-Type: application/json"
 
 | 层 | 粒度 | 开关 | 默认 |
 |---|---|---|---|
-| L1 | 编译期 | Cargo feature `history` | **off**（裁剪构建不编入 tsink 依赖，需同级 `../tsink_fork` checkout `rs-iot-1b-baseline`） |
+| L1 | 编译期 | Cargo feature `history` | **off**（裁剪构建不编入 tsink 依赖，需同级 `../tsink_fork`；本地验证 pin `3a2c31e`，CI 仍 pin 标签 `rs-iot-1b-baseline`=`277e744`，两者已相差 96 个修复提交） |
 | L2 | 部署期 | `config.toml [history] enabled` | `false`（不初始化引擎、不获取 `.tsink.lock`） |
 | L3 | 标签期 | `TagProps.history`（effective 合并视图，过滤只认 effective） | `false`（逐标签白名单，默认零归档；批量操作面 = §4.15 `POST /api/v1/tag/batch`） |
 

@@ -1,7 +1,11 @@
 # 决策：历史时序存储选型 tsink（内嵌形态）与单机 10 万点位级定位
 
-> **状态**：accepted
+> **状态**：implemented（选型已落地；Phase 1b/2/3 实施见总设计路线图）
 > **日期**：2026-08-24
+> **实施**：2026-08-25 `aedd1cf`（Phase 1b 写路径）→ `feat/history-read-sub`（Phase 2）→ `feat/history-phase3`（Phase 3，2026-08-26）
+> **代码**：`src/history/`、`src/api/routes_history.rs`、`src/api/rtdata_watch.rs`
+> **测试**：`tests/history_*_e2e.rs` + `tests/rtdata_{subscribe,watch}_e2e.rs`
+> **遗留**：Phase 4/5（见 [总设计与路线图](../designs/2026-08-24-history-storage-master-plan.md)）
 > **决策**：rs-iot 的历史时序存储选用 **tsink 核心库（内嵌形态，fork 自管）**，不选独立 tsink-server、不选外部时序库、暂不启用 lux 原生时序；产品定位目标为**单机 10 万点位级轻量边缘 SCADA/遥测平台**（纯 WEB + 功能组件独立二进制）。总设计见 [2026-08-24-history-storage-master-plan.md](../designs/2026-08-24-history-storage-master-plan.md)；前置地基 Tag Registry 已实施（[2026-08-24-tag-registry-plan.md](../designs/2026-08-24-tag-registry-plan.md)，merge bd8e027）。
 
 ## 1. 背景与需求

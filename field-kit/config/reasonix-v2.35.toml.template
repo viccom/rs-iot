@@ -1,5 +1,9 @@
-# reasonix project config (rs-iot field) - template for REASONIX v2.35.0+
+# reasonix project config (rs-iot field) - template for REASONIX v2.35.0+ (incl. v2.58.1)
 # (v1.25.3 baseline template: reasonix.toml.template - kept unchanged)
+# Filename is historical: the three contract notes below were re-checked against
+# v2.58.1 source and still hold; v2.58.1 also adds an optional `-dir <project root>`
+# serve flag (available since v2.43.0, i.e. new relative to this template's v2.35.0 baseline).
+# v2.58.1 has NOT been end-to-end re-tested - see docs/ops/reasonix-version-compat.md.
 # Placeholders: __ROOT__ -> field root (forward slashes), __JWT__ -> rs-iot login token (fresh each start)
 #
 # v2.35.0 contract changes vs v1.25.3 (see docs/ops/reasonix-version-compat.md):

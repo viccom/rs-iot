@@ -254,6 +254,8 @@ python scripts/test_serve_e2e.py "按顺序执行：1) 先调用 todo_write 建�
 > **版本边界**：本节及全文脚本编排按 **v1.25.3** 行为编写（含上文 yolo、§七.4 提交准入等）。
 > reasonix **v2.35.0** 起 `[serve]` token / MCP 审批门 / `--config` 行为有变，升级前必读
 > [reasonix-version-compat.md](reasonix-version-compat.md)（配 `field-kit/config/reasonix-v2.35.toml.template`）。
+> 本机 reasonix 已到 **v2.58.1**：兼容文档 §四 已按代码核对确认上述对策仍成立，并登记 `-dir` flag
+> （v2.43.0 起已有）、v2.58.0 移除的任务/配置键等变化；**v2.58.1 下未复跑端到端**，现场升级后需按兼容文档 §五 的闭环复验。
 
 ## 六、脚本清单（端到端测试涉及）
 

@@ -2,6 +2,7 @@
 
 > **状态**：implemented（扩展槽 + 键契约于本文档定稿日落地；读透出面同批对齐）
 > **日期**：2026-08-27
+> **实施**：2026-08-27 `3c59989`（扩展槽 + `x_` 键契约 + MCP 读工具/前端展示）
 > **代码**：`src/model/types.rs`（`DeviceModel.extra` / `TagTemplate.extra`）、`src/model/validate.rs`（键契约校验）、`src/model/store.rs`（写入口把关）
 > **前置**：[2026-08-25-device-model-registry.md](../decisions/2026-08-25-device-model-registry.md)（物模型注册表，D-M1/D-M2）、[2026-08-24-tag-registry-plan.md](2026-08-24-tag-registry-plan.md)（TagProps 起源）
 > **关联**：[2026-08-21-alarm-minimal-loop-design.md](2026-08-21-alarm-minimal-loop-design.md)（报警边界，本文 §5.1 重述）、[2026-08-24-history-storage-master-plan.md](2026-08-24-history-storage-master-plan.md)（存储梯度，本文 §5.2 引用）

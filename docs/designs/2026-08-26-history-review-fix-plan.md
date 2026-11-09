@@ -2,6 +2,10 @@
 
 > **状态**：implemented（2026-08-26 收口；High×5 + Medium×11 全修，Low×17 延后见 §七/backlog）
 > **日期**：2026-08-26
+> **实施**：2026-08-26 `b81ce26` 验收回填 + `941b5fb` 收口（clippy/fmt 三件 + 门禁实测回填）
+> **代码**：`src/history/`、`src/api/routes_history.rs`、`src/config.rs`（健康/告警阈值键）、`src/model/cache.rs`
+> **测试**：`tests/history_*_e2e.rs` + `src/history/` 内单测
+> **遗留**：Low×17（§七 backlog 登记，未实施）
 > **来源**：Phase 1/2/3 深度代码审查（三路并行审查 + 主会话逐项复核，**16/16 复核成立**，无一推翻；Low 17 项延后见 §七）
 > **范围**：仅 High×5 + Medium×11；不动 Low；不动数据面架构（写路径 D1-D11 ADR 不变）
 

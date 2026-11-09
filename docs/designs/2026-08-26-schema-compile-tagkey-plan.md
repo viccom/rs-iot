@@ -1,6 +1,11 @@
 # C1-C3：schema 默认值单源 / 默认编译面收敛 / tag_key 串扰修复
 
 > **状态**：implemented（2026-08-26 收口；C1-C3 全修，四档门禁全绿）
+> **日期**：2026-08-26
+> **实施**：2026-08-26 `4127441`（计划）→ 修复批 → `3a25959`（验收回填）
+> **代码**：`src/config.rs`（DEFAULT_* 常量）、`Cargo.toml`（default feature 面）、`src/model/`（tag_key 生成）
+> **测试**：`frontend/src/**/schema-values.test.ts` + modbus 后端锁定测 + 四档门禁
+> **遗留**：无
 
 ## 验收记录
 

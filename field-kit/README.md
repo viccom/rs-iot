@@ -12,7 +12,7 @@
 | `stop-rsiot.bat` | 一键全停（stop-all 优雅 + 杀 warden，Job Object 连带清进程树） |
 | `config/services.toml.template` | warden 服务定义模板（`__ROOT__` 占位，启动时生成） |
 | `config/reasonix.toml.template` | reasonix 项目配置模板（`__ROOT__`/`__JWT__` 占位，启动时生成）——**v1.25.3 基线** |
-| `config/reasonix-v2.35.toml.template` | reasonix **v2.35.0+** 配置模板（token 走 `-token` flag、需 `reasonix mcp enable rsiot`、无 `--config`；差异详见 [docs/ops/reasonix-version-compat.md](../docs/ops/reasonix-version-compat.md)） |
+| `config/reasonix-v2.35.toml.template` | reasonix **v2.35.0+**（含 v2.58.1）配置模板（token 走 `-token` flag、需 `reasonix mcp enable rsiot`、无 `--config`；文件名是历史命名、未按版本改名；v2.58.1 代码核对该三条对策仍成立，另可选 `-dir` 指定项目根；差异详见 [docs/ops/reasonix-version-compat.md](../docs/ops/reasonix-version-compat.md)） |
 | `config/rsiot-config.toml` | rs-iot 主程序配置（REST 8790 / lux 6390 / MQTT 公共 broker） |
 | `config/gateway.toml.example` | rsiot-gateway 配置模板（jwt_secret 与 rsiot-config.toml 同值；含可选 `[reasonix]` 供应商管理段。部署时复制为 `gateway.toml` 并替换 `__ROOT__`） |
 | `config/simulator-config.yaml` | 设备模拟器配置（REST 8090 避让 gateway / RTU 从站 COM3） |
@@ -43,7 +43,7 @@ start-rsiot.bat
 |---|---|
 | rs-iot 三件套 | 本仓库 `cargo build -j 2 --release -p rs-iot -p rsiot-gateway -p rsiot-mcp` |
 | warden.exe | warden 仓库 `cargo build --release` |
-| reasonix.exe | Reasonix 官方发布（**v1.25.3** 为本套件基线；**v2.35.0+** 换用 `reasonix-v2.35.toml.template` 并按 [版本兼容文档](../docs/ops/reasonix-version-compat.md) 调整启动参数与 MCP 审批步骤） |
+| reasonix.exe | Reasonix 官方发布（**v1.25.3** 为本套件基线；**v2.35.0+ / v2.58.1** 换用 `reasonix-v2.35.toml.template` 并按 [版本兼容文档](../docs/ops/reasonix-version-compat.md) 调整启动参数与 MCP 审批步骤；v2.58.1 为代码核对，现场升级后需复验端到端） |
 | simulator-dist.zip | simulator 仓库（github.com/viccom/simulator）发行包 |
 | com0com 驱动包 | SourceForge com0com（或既有驱动目录拷贝） |
 

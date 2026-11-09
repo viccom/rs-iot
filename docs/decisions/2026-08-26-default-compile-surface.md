@@ -1,5 +1,12 @@
 # 默认编译面收敛（datasim/lua/modbus/opcua）
 
+> **状态**：implemented（default 收敛为 lua/lua-http/opcua/modbus；s7/eip/transform 显式启用）
+> **日期**：2026-08-26
+> **实施**：2026-08-26 `cfd6ded` 默认编译面收敛 + ticker 提顶级
+> **代码**：`Cargo.toml`（`[features]` 默认面）、`src/ticker.rs`
+> **测试**：`tests/{s7,eip_client,feature_gate}_e2e.rs`
+> **遗留**：无
+
 - **日期**：2026-08-26
 - **裁决**：用户（项目负责人）明示——"插件体系不需要每次都编译，目前默认编译 datasim、lua 脚本、Modbus、opcua 即可"
 - **变更**：`Cargo.toml` default 自 `["transform","lua","lua-http","opcua","modbus","s7","eip"]` 收敛为 `["lua","lua-http","opcua","modbus"]`
