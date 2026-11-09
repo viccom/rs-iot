@@ -1,0 +1,31 @@
+# reasonix project config (rs-iot field) - template for REASONIX v2.35.0+
+# (v1.25.3 baseline template: reasonix.toml.template - kept unchanged)
+# Placeholders: __ROOT__ -> field root (forward slashes), __JWT__ -> rs-iot login token (fresh each start)
+#
+# v2.35.0 contract changes vs v1.25.3 (see docs/ops/reasonix-version-compat.md):
+#   1. [serve] token in PROJECT config is IGNORED -> pass token via serve flag:
+#        reasonix serve -addr 127.0.0.1:8787 -token "<same value as gateway.toml serve_token>"
+#      (or -token-file <path>). gateway.toml serve_token must equal the effective token.
+#   2. MCP servers declared in project config need one-time approval BEFORE first use:
+#        reasonix mcp enable rsiot        (run in this config's directory; persistent)
+#   3. `serve --config <file>` flag no longer exists -> run serve with WorkingDirectory
+#      set to this file's directory (project config discovered by cwd).
+#   4. Listen address only via -addr flag ([serve] has no addr key).
+#   5. sandbox.network=true in project config is ignored (project may only narrow);
+#      set network in user config (~/.reasonix/config.toml) if needed.
+# Pitfalls: TOML strings must use forward slashes.
+
+[serve]
+auth_mode = "token"   # informational; effective token comes from -token/-token-file flag
+
+[[plugins]]
+name    = "rsiot"
+command = "__ROOT__/bin/rsiot-mcp.exe"
+args    = []
+env     = { RSIOT_BASE = "http://127.0.0.1:8790", RSIOT_JWT = "__JWT__" }
+
+[sandbox]
+workspace_root = "__ROOT__/work"
+allow_write    = ["__ROOT__/scripts"]
+forbid_read    = ["__ROOT__/data"]
+bash           = "off"

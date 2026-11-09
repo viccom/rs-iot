@@ -251,6 +251,10 @@ python scripts/test_serve_e2e.py "按顺序执行：1) 先调用 todo_write 建�
 ```
 注意 `rsiot_send_device_command` 的 `data` 参数必须传 **JSON 字符串**（不能传对象）。
 
+> **版本边界**：本节及全文脚本编排按 **v1.25.3** 行为编写（含上文 yolo、§七.4 提交准入等）。
+> reasonix **v2.35.0** 起 `[serve]` token / MCP 审批门 / `--config` 行为有变，升级前必读
+> [reasonix-version-compat.md](reasonix-version-compat.md)（配 `field-kit/config/reasonix-v2.35.toml.template`）。
+
 ## 六、脚本清单（端到端测试涉及）
 
 | 脚本 | 位置 | 用途 |
