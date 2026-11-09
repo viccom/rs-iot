@@ -119,7 +119,7 @@ fn err(code: StatusCode, msg: &str) -> Response {
 mod tests {
     use super::*;
 
-    async fn test_client(tag: &str) -> lux::EmbeddedClient {
+    async fn test_client(tag: &str) -> crate::db::TestLux {
         let data_dir =
             std::env::temp_dir().join(format!("routes-secret-{tag}-{}", std::process::id()));
         // 满载 flaky 加固（终审计杂项登记）：data_dir 键含 pid，pid 回收复用时上一轮
@@ -137,7 +137,7 @@ mod tests {
         let handle = lux::run_with_config(crate::db::build_lux_config(&cfg))
             .await
             .expect("lux");
-        handle.client()
+        crate::db::TestLux::new(handle)
     }
 
     /// 验证意图（D6）：list 只返 `{ref, masked}`——明文绝不出现在组装结果；

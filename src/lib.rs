@@ -10,6 +10,10 @@
     missing_debug_implementations,
     unreachable_pub
 )]
+// async-trait 0.1.91 宏展开给 `async fn` 自动加 `#[must_use]`，而 rustc 1.99 的
+// clippy 认为 `Pin<Box<dyn Future>>` 已是 must_use 类型 → `double_must_use`。
+// 属宏与工具链的已知不兼容，非本仓代码问题；待 async-trait 上游适配后移除本行。
+#![allow(clippy::double_must_use)]
 
 pub mod api;
 /// 应用配置（toml 加载，`AppConfig`）。

@@ -55,7 +55,7 @@ mod tests {
     use crate::model::store;
     use crate::model::types::{DeviceEntry, DeviceModel, TagOverride, TagTemplate};
 
-    async fn test_client(tag: &str) -> lux::EmbeddedClient {
+    async fn test_client(tag: &str) -> crate::db::TestLux {
         let cfg = crate::config::AppConfig {
             lux: crate::config::LuxConfig {
                 port: 0,
@@ -71,7 +71,7 @@ mod tests {
         let handle = lux::run_with_config(crate::db::build_lux_config(&cfg))
             .await
             .expect("lux");
-        handle.client()
+        crate::db::TestLux::new(handle)
     }
 
     /// 注意：CACHE 是进程级全局，测试并行共享——各用例用互不重叠的

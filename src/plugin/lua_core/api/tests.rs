@@ -1675,7 +1675,10 @@ async fn fire_event_rate_limited_returns_false() {
     let (lua, _rx, ctx_host, alarm, handle, data_dir) = alarm_vm(
         "alarm-rate",
         Role::Collector,
-        Some(std::sync::Arc::new(super::alarm::AlarmState::new(2))),
+        Some(std::sync::Arc::new(super::alarm::AlarmState::with_window(
+            2,
+            std::time::Duration::from_secs(60),
+        ))),
     )
     .await;
     for k in ["k0", "k1"] {
@@ -1718,7 +1721,10 @@ async fn clear_event_rate_limited_returns_false() {
     let (lua, _rx, ctx_host, alarm, handle, data_dir) = alarm_vm(
         "alarm-clear-rate",
         Role::Collector,
-        Some(std::sync::Arc::new(super::alarm::AlarmState::new(2))),
+        Some(std::sync::Arc::new(super::alarm::AlarmState::with_window(
+            2,
+            std::time::Duration::from_secs(60),
+        ))),
     )
     .await;
     // 占满额度：fire + clear（同桶）各一次。

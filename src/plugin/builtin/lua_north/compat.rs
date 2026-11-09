@@ -252,7 +252,7 @@ mod tests {
     // ===== 测试基建（照 contract.rs T7 测试模式）=====
 
     /// 起独立 lux（port 0 + 独立 temp data_dir），返回 (client, data_dir)。
-    async fn test_lux(tag: &str) -> (lux::EmbeddedClient, String) {
+    async fn test_lux(tag: &str) -> (crate::db::TestLux, String) {
         let data_dir = std::env::temp_dir()
             .join(format!("lua-compat-{tag}-{}-{tag}", std::process::id()))
             .to_str()
@@ -269,7 +269,7 @@ mod tests {
         let handle = lux::run_with_config(crate::db::build_lux_config(&cfg))
             .await
             .expect("lux");
-        (handle.client(), data_dir)
+        (crate::db::TestLux::new(handle), data_dir)
     }
 
     /// 独立 temp scripts 根（先清再建，测试间互不污染）。

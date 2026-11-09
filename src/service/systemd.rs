@@ -4,7 +4,7 @@ use std::path::Path;
 
 const UNIT_PATH: &str = "/etc/systemd/system/rs-iot.service";
 
-pub fn install(exe: &Path) -> anyhow::Result<()> {
+pub(crate) fn install(exe: &Path) -> anyhow::Result<()> {
     let unit = format!(
         "[Unit]\n\
          Description=rs-iot industrial IoT edge framework\n\
@@ -27,7 +27,7 @@ pub fn install(exe: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub fn uninstall() -> anyhow::Result<()> {
+pub(crate) fn uninstall() -> anyhow::Result<()> {
     let _ = std::fs::remove_file(UNIT_PATH);
     println!("已删除 {UNIT_PATH}");
     println!("请执行: sudo systemctl disable rs-iot");

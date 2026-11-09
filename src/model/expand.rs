@@ -134,7 +134,7 @@ mod tests {
     use crate::model::types::{DeviceEntry, TagOverride, TagTemplate};
     use crate::types::TagProps;
 
-    async fn test_client(tag: &str) -> lux::EmbeddedClient {
+    async fn test_client(tag: &str) -> crate::db::TestLux {
         let cfg = crate::config::AppConfig {
             lux: crate::config::LuxConfig {
                 port: 0,
@@ -150,7 +150,7 @@ mod tests {
         let handle = lux::run_with_config(crate::db::build_lux_config(&cfg))
             .await
             .expect("lux");
-        handle.client()
+        crate::db::TestLux::new(handle)
     }
 
     /// 模型：参数化 modbus 地址 + 纯软 tag（addr=None）。

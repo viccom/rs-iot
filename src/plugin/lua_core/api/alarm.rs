@@ -48,6 +48,18 @@ impl AlarmState {
         }
     }
 
+    /// 测试专用：自定义频控窗口（防并行负载下用例跨 1s 窗口边界偶发假绿/假红，
+    /// 见 [`RateLimiter::with_window`]）。
+    #[cfg(test)]
+    pub(crate) fn with_window(rate_per_sec: u32, window: std::time::Duration) -> Self {
+        Self {
+            rl: RateLimiter::with_window(rate_per_sec, window),
+            rate_limited: AtomicU64::new(0),
+            hash_capped: AtomicU64::new(0),
+            last_publish: Mutex::new(HashMap::new()),
+        }
+    }
+
     /// 频控检查：放行 true；超限 false 且 `rate_limited` 计数 +1。
     pub(crate) fn check(&self) -> bool {
         if self.rl.check() {

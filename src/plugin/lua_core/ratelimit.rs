@@ -29,6 +29,17 @@ impl RateLimiter {
         }
     }
 
+    /// 测试专用：自定义窗口长度。
+    ///
+    /// 断言「窗口内第 N 次超限」的用例在并行负载下两次调用可能跨过 1s 窗口
+    /// 边界（真实时钟），导致偶发假绿/假红；注入长窗口把判定钉在同一窗口内。
+    #[cfg(test)]
+    pub(crate) fn with_window(limit: u32, window: std::time::Duration) -> Self {
+        let mut rl = Self::new(limit);
+        rl.window = window;
+        rl
+    }
+
     /// 本次调用是否放行（窗口内第 1..=limit 次 true，超出 false）。
     ///
     /// 窗口过期则先归零开新窗（起点持锁期间重置 + 判定，窗口口径一致）；

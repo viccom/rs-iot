@@ -10,9 +10,30 @@ use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
 use serde::{Deserialize, Serialize};
+use std::sync::Once;
 
 use crate::api::{is_public, AppState};
 use crate::error::TResult;
+
+/// 显式选定 jsonwebtoken 的进程级 `CryptoProvider`（幂等，可重复调用）。
+///
+/// lux 自 v0.37.1（更新后的 mine/main）把 `jsonwebtoken` feature 从
+/// `rust_crypto` 改成 `aws_lc_rs`，而 rs-iot 自己声明 `rust_crypto`；Cargo
+/// feature 统一后两个 provider 同时启用，jsonwebtoken 10.4 无法自动判定，
+/// 任何 encode/decode 都会 panic（`Could not automatically determine the
+/// process-level CryptoProvider`）。官方给宿主的解法即
+/// `CryptoProvider::install_default()`（进程内至多成功一次）。
+///
+/// 选 `rust_crypto`：与 rs-iot 自身依赖声明及旧 lux 一致，HS256 签发/校验
+/// 语义不变。`pub` 供不经过本模块 `encode_token`/`verify_token` 的调用方
+/// （如集成测试里自行签发 JWT 的 `make_jwt`）在 encode 前调用。
+static CRYPTO_PROVIDER: Once = Once::new();
+
+pub fn install_jwt_crypto_provider() {
+    CRYPTO_PROVIDER.call_once(|| {
+        let _ = jsonwebtoken::crypto::rust_crypto::DEFAULT_PROVIDER.install_default();
+    });
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Claims {
@@ -23,6 +44,7 @@ pub struct Claims {
 }
 
 pub fn encode_token(user_id: &str, secret: &str) -> TResult<String> {
+    install_jwt_crypto_provider();
     let exp = chrono::Local::now().timestamp() as usize + 24 * 3600;
     let claims = Claims {
         sub: user_id.to_string(),
@@ -36,6 +58,7 @@ pub fn encode_token(user_id: &str, secret: &str) -> TResult<String> {
 }
 
 pub fn verify_token(token: &str, secret: &str) -> Option<String> {
+    install_jwt_crypto_provider();
     let data = decode::<Claims>(
         token,
         &DecodingKey::from_secret(secret.as_bytes()),

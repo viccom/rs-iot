@@ -15,7 +15,14 @@ use tower::ServiceExt;
 
 /// 构造一个真实状态的 axum app（lux + bootstrap + mgr）。
 async fn test_app() -> (axum::Router, lux::ServerHandle) {
-    let data_dir = common::test_data_dir("api");
+    // 唯一 data_dir：本文件多个测试并行各起 lux，固定目录会撞 lux 的持久化
+    // 目录锁（already in use or cannot be locked）。这些用例只测 JWT 鉴权，
+    // 不依赖跨测试的持久化复用。
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let data_dir = common::test_data_dir(&format!("api-{}-{nanos}", std::process::id()));
     let (handle, client) = common::start_lux(data_dir.to_str().expect("utf8")).await;
     rs_iot::db::identity::bootstrap(&client)
         .await

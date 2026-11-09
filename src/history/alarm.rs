@@ -310,7 +310,7 @@ mod tests {
     use crate::event_bus::EventPayload;
 
     /// 唯一临时 data_dir（tag 区分用例，防并行测试互扰；照 db/alarms::tests 模式）。
-    async fn test_client(tag: &str) -> EmbeddedClient {
+    async fn test_client(tag: &str) -> crate::db::TestLux {
         let cfg = crate::config::AppConfig {
             lux: crate::config::LuxConfig {
                 port: 0,
@@ -326,7 +326,7 @@ mod tests {
         let handle = lux::run_with_config(crate::db::build_lux_config(&cfg))
             .await
             .expect("lux");
-        handle.client()
+        crate::db::TestLux::new(handle)
     }
 
     /// 带一个 SSE 订阅者的总线（捕获 Fire 帧断言 publish 面）。

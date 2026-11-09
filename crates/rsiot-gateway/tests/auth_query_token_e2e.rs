@@ -53,6 +53,7 @@ fn valid_jwt() -> String {
         sub: "test-user".into(),
         exp: (chrono::Local::now().timestamp() as usize) + 3600,
     };
+    rsiot_gateway::auth::install_jwt_crypto_provider();
     encode(
         &Header::default(),
         &claims,

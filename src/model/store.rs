@@ -269,7 +269,7 @@ mod tests {
     use crate::types::TagProps;
 
     /// 唯一临时 data_dir（tag 区分用例防并行互扰；dev_registry::tests 模式）。
-    async fn test_client(tag: &str) -> lux::EmbeddedClient {
+    async fn test_client(tag: &str) -> crate::db::TestLux {
         let cfg = crate::config::AppConfig {
             lux: crate::config::LuxConfig {
                 port: 0,
@@ -285,7 +285,7 @@ mod tests {
         let handle = lux::run_with_config(crate::db::build_lux_config(&cfg))
             .await
             .expect("lux");
-        handle.client()
+        crate::db::TestLux::new(handle)
     }
 
     fn sample_model() -> DeviceModel {

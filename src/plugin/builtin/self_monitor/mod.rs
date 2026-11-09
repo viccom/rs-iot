@@ -1005,7 +1005,7 @@ mod tests {
             .store(7_512_345, std::sync::atomic::Ordering::Relaxed);
         let handle = crate::history::rows::HistoryHandle::new(vec![tx], stats);
 
-        let ctx = host_ctx_with_history(c.clone(), Some(handle));
+        let ctx = host_ctx_with_history(c.client(), Some(handle));
         let obs = observe_light(&ctx, &Aggregates::default(), None, None);
         assert_eq!(
             obs.history_dropped, 6_550_001,
@@ -1017,7 +1017,7 @@ mod tests {
             "written 必须来自 ctx.history.stats"
         );
 
-        let ctx = host_ctx_with_history(c, None);
+        let ctx = host_ctx_with_history(c.client(), None);
         let obs = observe_light(&ctx, &Aggregates::default(), None, None);
         assert_eq!(
             (obs.history_dropped, obs.history_errors, obs.history_written),
@@ -1028,7 +1028,7 @@ mod tests {
     // ---- instance_health 口径（配置白名单）----
 
     /// 唯一临时 data_dir（照 db/alarms::tests 模式，tag 防并行互扰）。
-    async fn test_client(tag: &str) -> lux::EmbeddedClient {
+    async fn test_client(tag: &str) -> crate::db::TestLux {
         let cfg = crate::config::AppConfig {
             lux: crate::config::LuxConfig {
                 port: 0,
@@ -1044,7 +1044,7 @@ mod tests {
         let handle = lux::run_with_config(crate::db::build_lux_config(&cfg))
             .await
             .expect("lux");
-        handle.client()
+        crate::db::TestLux::new(handle)
     }
 
     /// 残留 stat 键（无配置实例，如旧版 sim1 被杀进程未落 stopped）不计入健康

@@ -16,7 +16,7 @@ use tower::ServiceExt;
 
 /// 构造带（可选）预写 stat 的 app。
 async fn app_with_stat(stat_inst: &str) -> (axum::Router, lux::ServerHandle) {
-    let data_dir = common::test_data_dir("lua-api");
+    let data_dir = common::unique_test_data_dir("lua-api");
     let (handle, client) = common::start_lux(data_dir.to_str().expect("utf8")).await;
     rs_iot::db::identity::bootstrap(&client)
         .await

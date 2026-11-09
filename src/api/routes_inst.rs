@@ -380,7 +380,7 @@ mod tests {
     async fn start_lux(name: &str) -> (lux::ServerHandle, lux::EmbeddedClient) {
         let dir = std::env::temp_dir().join(format!("purge-test-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        crate::db::prepare_lux_data_dir(&dir).unwrap();
         let mut sc = lux::ServerConfig::default();
         sc.port = 0;
         sc.data_dir = dir.to_str().unwrap().to_string();

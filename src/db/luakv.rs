@@ -93,12 +93,20 @@ mod tests {
         assert!(validate_key(&"x".repeat(129)).is_err(), "超长应拒");
     }
 
-    async fn test_client() -> lux::EmbeddedClient {
+    async fn test_client() -> crate::db::TestLux {
         let cfg = crate::config::AppConfig {
             lux: crate::config::LuxConfig {
                 port: 0,
+                // 唯一 data_dir：同模块多测试并行共用固定目录会撞 lux 的持久化锁。
                 data_dir: std::env::temp_dir()
-                    .join(format!("luakv-{}", std::process::id()))
+                    .join(format!(
+                        "luakv-{}-{}",
+                        std::process::id(),
+                        std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap()
+                            .as_nanos()
+                    ))
                     .to_str()
                     .unwrap()
                     .to_string(),
@@ -109,7 +117,7 @@ mod tests {
         let handle = lux::run_with_config(crate::db::build_lux_config(&cfg))
             .await
             .expect("lux");
-        handle.client()
+        crate::db::TestLux::new(handle)
     }
 
     #[tokio::test]

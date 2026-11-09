@@ -229,7 +229,11 @@ async fn rest_startinst_north_dispatches_to_start_sink() {
 
 /// mqtt-north 最小脚本（T6 骨架契约）：manifest 头 + auth/up 必需回调 +
 /// 顶层能力探针（register 先于 load_main ——探针失败 = 加载失败 = 不进 Running）。
-const NORTH_SCRIPT: &str = r#"
+/// 端口由测试注入（进程内 broker 随机端口），其余缺省断言保持（host 来自
+/// app_config、batch/client_id 缺省派生）。
+fn north_script(port: u16) -> String {
+    format!(
+        r#"
 -- @role mqtt-north
 -- 能力包探针（§5.2 矩阵 mqtt-north 列）：C1 不注入；C0/C2/C4/C6 与 send_command 在。
 assert(ctx.request == nil, "north ctx 应无 request（C1 裁剪）")
@@ -238,31 +242,39 @@ assert(type(ctx.set_value) == "function", "north ctx 应有 set_value")
 assert(type(ctx.kv_get) == "function", "north ctx 应有 kv_get")
 assert(type(ctx.secret_get) == "function", "north ctx 应有 secret_get")
 assert(type(ctx.send_command) == "function", "north ctx 应有 send_command")
--- cfg 全局表（Q5 宿主注入）：有效配置可见（port/batch 缺省 1883/50，period 显式 1）。
+-- cfg 全局表（Q5 宿主注入）：有效配置可见（port 显式注入，batch 缺省 50，period 显式 1）。
 assert(cfg ~= nil, "cfg 全局表应注入")
 assert(cfg.host == "127.0.0.1", "cfg.host 应来自 app_config")
-assert(cfg.port == 1883, "cfg.port 缺省 1883")
+assert(cfg.port == {port}, "cfg.port 应来自 app_config")
 assert(cfg.batch_max_count == 50, "cfg.batch_max_count 缺省 50")
 assert(cfg.batch_max_secs == 1, "cfg.batch_max_secs 缺省取 period（1）")
 assert(cfg.client_id == "it-hwid-north-1", "cfg.client_id 缺省 hwid-<inst_id>")
-function auth(c) return {} end
-function up(batch) return {} end
-"#;
+function auth(c) return {{}} end
+function up(batch) return {{}} end
+"#
+    )
+}
 
 /// 正向生命周期（T1 计划的正向断言，T6 luaNorth 注册后启用）：lux 写入 north
 /// 实例 → startinst（lux 读取 + North→start_sink 分发）→ Running →
 /// `/inst/stats` 有 stat（script_version 已埋）→ stopinst → Stopped（stat
 /// status=stopped，退出路径 flush 已跑）。
+///
+/// 必须连真实 broker（进程内 rumqttd）：连不上时实例仍进入运行态，但 MQTT 侧
+/// 立即 Disconnected → status=degraded（stat_tracker `status_dirty` 下拍即落），
+/// 断言 running 会随落盘时序漂移而红——broker 在场才锚得住「连接成功 → 稳定
+/// running」这条本测试要覆盖的语义。
 #[tokio::test]
 async fn north_lifecycle_running_stats_stop() {
     let (app, mgr, handle) = test_app("lua_north_t6").await;
     let token = login_token(app.clone()).await;
+    let broker_port = common::spawn_inproc_broker("lua-north-t6");
 
     // 临时脚本目录（mqtt-north 最小契约 + 能力探针）。
     let scripts = std::env::temp_dir().join(format!("lua-north-{}", std::process::id()));
     let script_dir = scripts.join("n1");
     std::fs::create_dir_all(&script_dir).expect("mkdir");
-    std::fs::write(script_dir.join("main.lua"), NORTH_SCRIPT).expect("write");
+    std::fs::write(script_dir.join("main.lua"), north_script(broker_port)).expect("write");
 
     let inst = north_inst(
         "north-1",
@@ -270,6 +282,7 @@ async fn north_lifecycle_running_stats_stop() {
         serde_json::json!({
             "script": "n1",
             "host": "127.0.0.1",
+            "port": broker_port,
             "period": 1,
             "scripts_root": scripts.to_str().expect("utf8"),
         }),

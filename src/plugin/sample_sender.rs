@@ -149,7 +149,7 @@ mod tests {
     use super::*;
 
     /// 唯一临时 data_dir（tag 区分用例，防并行测试互扰；照 db/dev_registry 模式）。
-    async fn test_client(tag: &str) -> EmbeddedClient {
+    async fn test_client(tag: &str) -> crate::db::TestLux {
         let cfg = crate::config::AppConfig {
             lux: crate::config::LuxConfig {
                 port: 0,
@@ -165,7 +165,7 @@ mod tests {
         let handle = lux::run_with_config(crate::db::build_lux_config(&cfg))
             .await
             .expect("lux");
-        handle.client()
+        crate::db::TestLux::new(handle)
     }
 
     /// 最小 Sample（单 tag 占位值）。

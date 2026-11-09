@@ -100,7 +100,7 @@ async fn collect_pushes_sample_to_hub() {
     let lux_client = mock_lux().await;
     seed_model(&lux_client).await;
     let ctx = HostContext {
-        lux: lux_client,
+        lux: lux_client.client(),
         hwid: Hwid::new("it"),
         shutdown: CancellationToken::new(),
         ctl_registry: CtlRegistry::new(std::sync::Arc::new(
@@ -358,12 +358,21 @@ async fn seed_model(client: &lux::EmbeddedClient) {
     }
 }
 
-async fn mock_lux() -> lux::EmbeddedClient {
+async fn mock_lux() -> crate::db::TestLux {
     let cfg = crate::config::AppConfig {
         lux: crate::config::LuxConfig {
             port: 0,
+            // 唯一 data_dir：多个测试并行共用固定目录会触发 lux 的持久化目录锁
+            // （already in use or cannot be locked），按仓内惯例加纳秒后缀隔离。
             data_dir: std::env::temp_dir()
-                .join(format!("lua-run-{}", std::process::id()))
+                .join(format!(
+                    "lua-run-{}-{}",
+                    std::process::id(),
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_nanos()
+                ))
                 .to_str()
                 .unwrap()
                 .to_string(),
@@ -373,7 +382,7 @@ async fn mock_lux() -> lux::EmbeddedClient {
     };
     let lux_cfg = crate::db::build_lux_config(&cfg);
     let handle = lux::run_with_config(lux_cfg).await.expect("lux");
-    handle.client()
+    crate::db::TestLux::new(handle)
 }
 
 // --- T11 manifest dry-run 集成（Q1/§2.2/§4.4）---
@@ -403,7 +412,7 @@ async fn lua_host_ctx() -> HostContext {
     let lux_client = mock_lux().await;
     seed_model(&lux_client).await;
     HostContext {
-        lux: lux_client,
+        lux: lux_client.client(),
         hwid: Hwid::new("it"),
         shutdown: CancellationToken::new(),
         ctl_registry: CtlRegistry::new(std::sync::Arc::new(

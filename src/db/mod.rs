@@ -9,7 +9,87 @@ pub mod stat;
 
 use crate::config::AppConfig;
 use lux::{ServerConfig, StorageConfig, StorageMode};
+use std::path::Path;
 use std::time::Duration;
+
+/// 单元测试用的 lux client 包装。
+///
+/// lux `3f75c17`（shutdown durability barrier）起，丢弃 `ServerHandle` 会让
+/// `shutdown_rx` 的 Sender 全部释放 → server 判定关闭 → `accepting_work=false`，
+/// 之后所有命令返回 `SERVER shutting down; new work is not accepted`。官方
+/// embedded 用法（README）要求把 handle 持有到显式 `shutdown_and_wait()`。
+///
+/// 旧测试辅助函数只返回 `handle.client()` 并把 handle 当场丢弃；部分辅助函数
+/// （`lua_host_ctx` 等）只把 clone 出的 client 塞进 `HostContext`，包装本体同样
+/// 活不过函数返回。故 `new` 把 handle 注册到进程级表中持有到测试进程结束——
+/// 无论包装本体是否被丢弃，server 都保持接单。测试进程退出时表随进程回收。
+/// `Deref<Target = EmbeddedClient>` 保持所有既有调用点零改动。仅 `#[cfg(test)]`
+/// 构建存在，不进 release 产物。
+#[cfg(test)]
+pub struct TestLux {
+    client: lux::EmbeddedClient,
+}
+
+#[cfg(test)]
+static TEST_LUX_HANDLES: std::sync::Mutex<Vec<lux::ServerHandle>> =
+    std::sync::Mutex::new(Vec::new());
+
+#[cfg(test)]
+impl std::fmt::Debug for TestLux {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("TestLux { .. }")
+    }
+}
+
+#[cfg(test)]
+impl TestLux {
+    /// 从 `ServerHandle` 构造：把 handle 注册进进程级表持有到测试结束，
+    /// 返回只暴露 client 的包装（避免 handle 被回收后 server 停止接单）。
+    pub fn new(handle: lux::ServerHandle) -> Self {
+        let client = handle.client();
+        TEST_LUX_HANDLES
+            .lock()
+            .expect("test lux handle registry poisoned")
+            .push(handle);
+        Self { client }
+    }
+
+    /// 供需要按值拥有 `EmbeddedClient` 的调用点（如 `HostContext.lux`）取克隆。
+    /// 克隆出的 client 与本体共享同一 runtime（lux `EmbeddedClient::clone` 语义）。
+    pub fn client(&self) -> lux::EmbeddedClient {
+        self.client.clone()
+    }
+}
+
+#[cfg(test)]
+impl std::ops::Deref for TestLux {
+    type Target = lux::EmbeddedClient;
+
+    fn deref(&self) -> &Self::Target {
+        &self.client
+    }
+}
+
+/// 为 lux 启动准备 state 目录：预建根目录并收紧到 owner-only。
+///
+/// lux 自 `827d1dd` 起在 `ensure_dir` 中校验 state 路径，`mode & 0o022 != 0` 即拒
+/// （`unsafe state path: directory is writable by another user`）。本地 lux 补丁
+/// （`src/file_security.rs::create_dir_all_private`）已改为用 `DirBuilder::mode(0o700)`
+/// 创建缺失目录（含 `shard_*/journal/storage` 子目录），不再受进程 umask 影响。
+///
+/// 本函数保留为**调用侧防御**：预建根目录并显式 chmod 0o700，使旧版 lux
+/// （无补丁）在根目录一层也能通过，同时避免在进程级改 umask（旧实现曾
+/// `umask(0o077)`，会影响本进程后续所有文件创建，副作用过大）。
+pub fn prepare_lux_data_dir(path: impl AsRef<Path>) -> std::io::Result<()> {
+    let path = path.as_ref();
+    std::fs::create_dir_all(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
+}
 
 /// D-LUX-1：非 loopback 绑定强制认证的启动校验（纯函数便于单测）。
 ///
@@ -52,6 +132,12 @@ pub fn build_lux_config(cfg: &AppConfig) -> ServerConfig {
     if let Err(msg) = validate_lux_bind(&cfg.lux.bind_host, &cfg.lux.password) {
         panic!("lux RESP bind rejected: {msg}");
     }
+    // lux 827d1dd 起校验 state 目录必须 owner-only（详见 prepare_lux_data_dir）。
+    // run_app 生产路径已 create_dir_all，此处补齐权限收紧；测试辅助函数直接调
+    // 本函数时亦一并满足前置条件。
+    prepare_lux_data_dir(&cfg.lux.data_dir).unwrap_or_else(|e| {
+        panic!("prepare lux data_dir {}: {e}", cfg.lux.data_dir);
+    });
     let non_loopback = !cfg.lux.password.is_empty();
     let mut sc = ServerConfig::default();
     sc.bind_host = cfg.lux.bind_host.clone();
@@ -139,6 +225,28 @@ pub async fn hget(lux: &lux::EmbeddedClient, key: &str, field: &str) -> Option<S
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// lux 827d1dd 起要求 state 目录 owner-only；helper 必须建出 0o700 根目录。
+    /// 子目录（`shard_*/journal/storage`）由 lux 本地补丁
+    /// `create_dir_all_private` 以 0o700 创建（见 Cargo.toml 注释），本测不重复断言。
+    #[test]
+    fn prepare_lux_data_dir_is_owner_only() {
+        let dir =
+            std::env::temp_dir().join(format!("rsiot-prepare-lux-dir-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        prepare_lux_data_dir(&dir).expect("prepare");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&dir).unwrap().permissions().mode();
+            assert_eq!(
+                mode & 0o022,
+                0,
+                "state dir must not be group/other writable"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// 照 routes_sys.rs 测试惯例：用 toml 构造配置（避免 field_reassign_with_default lint）。
     fn cfg_with(lux_toml: &str) -> crate::config::AppConfig {

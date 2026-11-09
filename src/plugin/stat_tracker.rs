@@ -171,12 +171,20 @@ mod tests {
     // EmbeddedClient 无 Default 实现，沿用 db::stat / db::luakv 的测试范式：
     // 起 lux（port 0 + 独立 temp data_dir）取 client。本模块单测不调 flush，
     // 仅验证 tick 计数/状态语义，但构造 tracker 仍需真实 EmbeddedClient。
-    async fn tracker() -> StatTracker {
+    async fn tracker() -> (StatTracker, crate::db::TestLux) {
         let cfg = crate::config::AppConfig {
             lux: crate::config::LuxConfig {
                 port: 0,
+                // 唯一 data_dir：同模块多测试并行共用固定目录会撞 lux 的持久化锁。
                 data_dir: std::env::temp_dir()
-                    .join(format!("stattracker-{}", std::process::id()))
+                    .join(format!(
+                        "stattracker-{}-{}",
+                        std::process::id(),
+                        std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap()
+                            .as_nanos()
+                    ))
                     .to_str()
                     .unwrap()
                     .to_string(),
@@ -187,12 +195,15 @@ mod tests {
         let handle = lux::run_with_config(crate::db::build_lux_config(&cfg))
             .await
             .expect("lux");
-        StatTracker::new("t".into(), handle.client())
+        (
+            StatTracker::new("t".into(), handle.client()),
+            crate::db::TestLux::new(handle),
+        )
     }
 
     #[tokio::test]
     async fn tick_ok_increments_and_clears_err() {
-        let mut t = tracker().await;
+        let (mut t, _lux) = tracker().await;
         t.tick_fail("e");
         t.tick_ok(10);
         assert_eq!(t.tick_count(), 1);
@@ -201,7 +212,7 @@ mod tests {
 
     #[tokio::test]
     async fn tick_fail_degrades_after_threshold() {
-        let mut t = tracker().await;
+        let (mut t, _lux) = tracker().await;
         for _ in 0..3 {
             t.tick_fail("e");
         }
@@ -211,7 +222,7 @@ mod tests {
 
     #[tokio::test]
     async fn tick_ok_resets_degraded() {
-        let mut t = tracker().await;
+        let (mut t, _lux) = tracker().await;
         for _ in 0..3 {
             t.tick_fail("e");
         }
@@ -222,7 +233,7 @@ mod tests {
 
     #[tokio::test]
     async fn should_flush_at_every_50_boundary() {
-        let mut t = tracker().await;
+        let (mut t, _lux) = tracker().await;
         assert!(!t.should_flush(), "tick=0 不 flush");
         for _ in 0..50 {
             t.tick_ok(1);
@@ -235,7 +246,7 @@ mod tests {
     /// 状态变更（running→degraded→running）标 dirty → flush_if_due 下拍即落并清脏。
     #[tokio::test]
     async fn status_change_marks_dirty_and_flush_clears() {
-        let mut t = tracker().await;
+        let (mut t, _lux) = tracker().await;
         t.flush().await; // 初始落盘（last_flush 推进、dirty 清）
         assert!(!t.status_dirty_for_test());
 
@@ -259,7 +270,7 @@ mod tests {
     /// dirty 分支行为（aged 分支由 last_flush=None 同一表达式覆盖，30s 真实等待不进单测）。
     #[tokio::test]
     async fn flush_if_due_dirty_branch_only_until_max_interval() {
-        let mut t = tracker().await;
+        let (mut t, _lux) = tracker().await;
         // 构造后未落盘：dirty=false 但 last_flush=None → due（表达式 map_or 分支）
         t.set_status("stopped");
         assert!(t.status_dirty_for_test(), "set_status 实际变更标脏");

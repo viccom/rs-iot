@@ -77,7 +77,7 @@ pub async fn delete(c: &EmbeddedClient, inst_id: &str) -> Result<(), RsIotError>
 mod tests {
     use super::*;
 
-    async fn client() -> EmbeddedClient {
+    async fn client() -> crate::db::TestLux {
         // 唯一 data_dir（pid + 纳秒）：同模块多个测试并行各起 lux server，固定目录
         // 会让 server 间经持久化文件串数据（存量 flaky：instances_are_isolated 偶发
         // 读到 delete 测试写入的 "b"），照仓内"唯一临时目录防并发互扰"惯例隔离。
@@ -103,7 +103,7 @@ mod tests {
         let handle = lux::run_with_config(crate::db::build_lux_config(&cfg))
             .await
             .expect("lux");
-        handle.client()
+        crate::db::TestLux::new(handle)
     }
 
     fn sample() -> InstanceStat {

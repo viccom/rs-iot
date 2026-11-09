@@ -7,6 +7,10 @@
 //! session/transport/paths/sql_risk/mongo/redis/LocalBackend（rs-iot 用不上），
 //! 只保留 server（工具声明 + 三档 risk）+ backend（WebBackend JWT 版）+ main（stdio 入口）。
 
+// async-trait 0.1.91 宏展开给 `async fn` 自动加 `#[must_use]`，rustc 1.99 的
+// clippy 判定为 double_must_use；待 async-trait 上游适配后移除（同主 crate）。
+#![allow(clippy::double_must_use)]
+
 pub mod backend;
 pub mod server;
 

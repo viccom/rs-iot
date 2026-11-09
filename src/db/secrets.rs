@@ -227,7 +227,7 @@ mod tests {
     use super::*;
 
     /// 唯一临时 data_dir（tag 区分用例，防并行测试互扰；照 luakv::tests 模式）。
-    async fn test_client(tag: &str) -> lux::EmbeddedClient {
+    async fn test_client(tag: &str) -> crate::db::TestLux {
         let cfg = crate::config::AppConfig {
             lux: crate::config::LuxConfig {
                 port: 0,
@@ -243,7 +243,7 @@ mod tests {
         let handle = lux::run_with_config(crate::db::build_lux_config(&cfg))
             .await
             .expect("lux");
-        handle.client()
+        crate::db::TestLux::new(handle)
     }
 
     // ---- 掩码规则（D6：list 回显的唯一形态）----

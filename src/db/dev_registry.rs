@@ -137,7 +137,7 @@ mod tests {
     use super::*;
 
     /// 唯一临时 data_dir（tag 区分用例，防并行测试互扰；照 alarms::tests 模式）。
-    async fn test_client(tag: &str) -> lux::EmbeddedClient {
+    async fn test_client(tag: &str) -> crate::db::TestLux {
         let cfg = crate::config::AppConfig {
             lux: crate::config::LuxConfig {
                 port: 0,
@@ -153,7 +153,7 @@ mod tests {
         let handle = lux::run_with_config(crate::db::build_lux_config(&cfg))
             .await
             .expect("lux");
-        handle.client()
+        crate::db::TestLux::new(handle)
     }
 
     /// 新 devid 首次 note：field 建立，单宿主无分隔符。
