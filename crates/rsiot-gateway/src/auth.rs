@@ -8,7 +8,7 @@
 //! PUBLIC_PATHS：gateway 自有的 `/api/gw/health` 免鉴权（健康探针用）。
 //! 此外，**所有非 `/api/` 开头的路径**（静态前端 SPA）一律免鉴权——见 `is_public`。
 
-use std::sync::Arc;
+use std::sync::{Arc, Once};
 
 use axum::extract::{Request, State};
 use axum::http::StatusCode;
@@ -18,6 +18,20 @@ use jsonwebtoken::{decode, DecodingKey, Validation};
 use serde::{Deserialize, Serialize};
 
 use crate::proxy::GwState;
+
+/// 显式选定 jsonwebtoken 的进程级 `CryptoProvider`（幂等）。
+///
+/// 全工作区（lux ≥0.37.1 / rs-iot 主 crate / 本 crate）的 `jsonwebtoken` feature
+/// 已统一为 `aws_lc_rs`——单一 provider 时 jsonwebtoken 10.4 可自动判定，此调用
+/// 是幂等兜底（防御未来某侧再引回第二 provider 导致的双提供方运行时 panic）。
+/// `pub` 供不经过 `verify_token` 的调用方（集成测试自行签发 JWT）调用。
+static CRYPTO_PROVIDER: Once = Once::new();
+
+pub fn install_jwt_crypto_provider() {
+    CRYPTO_PROVIDER.call_once(|| {
+        let _ = jsonwebtoken::crypto::aws_lc::DEFAULT_PROVIDER.install_default();
+    });
+}
 
 /// JWT claims（与 rs-iot `src/api/auth.rs:17` 同结构，sub=userId）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -45,6 +59,7 @@ fn is_public(path: &str) -> bool {
 ///
 /// 与 rs-iot `verify_token` 同逻辑（HS256 + 默认 Validation），共享 secret。
 pub fn verify_token(token: &str, secret: &str) -> Option<String> {
+    install_jwt_crypto_provider();
     let data = decode::<Claims>(
         token,
         &DecodingKey::from_secret(secret.as_bytes()),

@@ -13,7 +13,7 @@ lux = { path = "../lux" }
 ```
 
 - 纯路径依赖,**无 `version` / 无 `features`**
-- Cargo.lock 记录 lux 当前版本(`0.37.0`),但实际编译用本地 working tree
+- Cargo.lock 记录 lux 当前版本(`0.37.1`),但实际编译用本地 working tree
 - lux 必须位于 rs-iot **同级目录**(任何机器/任何盘符均可,路径是相对的),修改 lux 直接影响 rs-iot 编译与行为
 
 **路径约定**(本文所有命令用变量,按机器实际位置设置):
@@ -80,22 +80,27 @@ git branch -vv          # 看 main 相对 origin/main ahead/behind
 
 ## 四、当前本地补丁清单
 
-本地 `main` 领先 `origin/main` 2 个提交(2026-08-17 仓库重建,mlua 补丁以新 hash 重放并已同步 `mine`):
+本地 `main` 领先 `origin/main` 3 个提交（2026-11-09 复核；`mine/main` 已同步含 `bf32c25`，官方源不推——无写权限且不接收 Agent 修复）：
 
 | commit | 用途 | 改动文件 | 冲突热点 | 丢弃条件 |
 |---|---|---|---|---|
-| `fed8471` | mlua 0.10→0.12 对齐 rs-iot | `Cargo.toml`(mlua 版本 1 行) + `Cargo.lock` + `src/lua.rs`(3 处 `String`→`LuaString` + `set_hook` 返回 `Result`) | mlua 版本行、lua.rs API 改名 | 官方 lux 升 mlua ≥ 0.12 |
-| `f745e5f` | Windows 测试套件修复（**已缩水**） | `tests/common/mod.rs`(`find_lux_binary` 加 `EXE_SUFFIX`) + `tests/public_api.rs`(bind 冲突断言接受 `PermissionDenied`) | `find_lux_binary` 函数体 | 官方处理 exe 后缀 |
+| `fed8471` | mlua 0.10→0.12 对齐 rs-iot | `Cargo.toml` + `Cargo.lock` + `src/lua.rs`（`String`→`LuaString` + `set_hook` 返回 `Result`） | mlua 版本行、lua.rs API 改名 | 官方 lux 升 mlua ≥ 0.12 |
+| `f745e5f` | Windows 测试套件修复 | `tests/common/mod.rs` + `tests/public_api.rs` | 测试辅助函数 | 官方修了同问题 |
+| `bf32c25` | state 目录 owner-only 创建（与进程 umask 无关） | `src/file_security.rs`（`create_dir_all_private` + 3 个测试） | `ensure_dir` 创建路径 | 官方改用 `DirBuilder::mode(0o700)` 或等价实现 |
 
-**2026-10-27 升级到 main `759c027`（v0.37.1+9 月加固套件）时的变化**：
+**关键**：三个补丁都在 lux **内部**（lua 引擎 / 测试 / 文件安全），**完全不碰 rs-iot 耦合面**（`ServerConfig`/`EmbeddedClient`/`EmbeddedValue` 等）。所以补丁本身不会让 rs-iot 代码失效。
 
-- 补丁 2（原 `206bc22`）的 `src/disk.rs` 部分（`Wal` 两阶段 reopen truncate）**已按决策树丢弃**——官方 `replace_with` 用 tmp 文件 + rename 原子替换 + WAL generation 校验，方案更完备地修复了同一 Windows bug。只剩两个测试侧修复。
-- 官方行为收紧（下次同步后若测试爆红，先对照这两条）：
-  1. **`ServerHandle` drop = 发起优雅停机**（`shutdown_tx` watch sender 全部消失即停机信号）——测试 helper"起 lux 只回 client"必须 `std::mem::forget(handle)`（async helper 栈帧随 future 完成销毁，`let _keep = handle` 绑定保活**无效**）；rs-iot 生产代码持有 handle 到 shutdown，不受影响。
-  2. **data_dir 排他锁**——同名目录并发打开直接 `AlreadyExists` 拒启。测试目录须每次调用唯一（pid+nanos）。
-- 依赖对齐：lux 的 `jsonwebtoken` 已切 `aws_lc_rs` feature——rs-iot 侧必须同 feature（两个 provider 并存 → 运行时 panic，jsonwebtoken 10 的二选一约束）。
+`bf32c25` 背景：`ensure_dir` 先 `create_dir_all`（按 umask 得 0o775/0o755）再 `validate_directory`（`mode & 0o022 != 0` 拒绝）最后才 chmod 0o700——顺序错误使 Linux 首次启动必败（`state/shard_0/journal` 等子目录同病）。补丁把创建改为 `DirBuilder::recursive(true).mode(0o700)`，umask 无法放宽 owner-only 位。
 
-**关键**:两个补丁都在 lux **内部**(lua 引擎 / 测试基建),**完全不碰 rs-iot 耦合面**(`ServerConfig`/`EmbeddedClient`/`EmbeddedValue` 等)。所以补丁本身不会让 rs-iot 代码失效。
+### 四.5、行为契约适配（rs-iot 侧，不改 lux 签名）
+
+lux 升级还可能改变**运行期契约**，`cargo build` 不报错，需按清单核对：
+
+| lux 变更 | 影响 | rs-iot 适配 |
+|---|---|---|
+| `3f75c17` shutdown 变持久化屏障 | 丢弃 `ServerHandle` → `accepting_work=false`，后续 client 调用报 "SERVER shutting down" | 测试统一用 `crate::db::TestLux`（进程级 handle 注册表，持有到测试结束）；生产路径始终持有 handle 到 `shutdown_and_wait` |
+| v0.37.1 `jsonwebtoken` feature 由 `rust_crypto` 改 `aws_lc_rs` | 与 rs-iot 声明的 `rust_crypto` 经 Cargo feature 统一后双 provider 同时启用 → encode/decode panic | `api::auth::install_jwt_crypto_provider()` 与 `crates/rsiot-gateway/src/auth.rs` 同名函数显式 `install_default()`（幂等；自行签发 JWT 的测试也调用） |
+| `827d1dd` state 目录 owner-only 校验 | 新建 state 子目录按 umask 取权限，0o775 被拒 | 本地补丁 `bf32c25` + rs-iot `prepare_lux_data_dir` 预建根目录并 chmod 0o700（不再改进程 umask，避免全局副作用） |
 
 ## 五、同步策略:rebase(非 merge)
 
@@ -172,6 +177,8 @@ cargo test -j 2 --test dataflow --test api_flow --test sidecar_e2e
 
 全量 `cargo test --all-targets --all-features` 留到最后,且**务必 `-j 2`**。
 
+**umask 注意（2026-11-09 实测）**：lux lib 测试大量用 `tempfile::tempdir()` 作 state 根，其权限为 `0o777 & !umask`；在 **umask 0o002** 的机器上根目录为 0o775，会被 state 目录校验拒绝（84 例环境性失败，与代码无关）。跑 lux 自身测试前先 `umask 022`（CI 默认即此）；`bf32c25` 已把 `file_security` 相关 4 例改为显式收紧 tempdir，但仍建议整体在 0o022 下跑。rs-iot 侧不受影响：`prepare_lux_data_dir` 预建根目录并 chmod 0o700。
+
 ## 九、push 私人 fork 备份
 
 rebase 成功后,把含补丁的 main 推到 `mine`(云端备份,防本地丢失):
@@ -211,13 +218,13 @@ git cherry-pick 206bc22       # 一个一个来(补丁 hash 见 §四)
 
 ## 十二、补丁生命周期管理
 
-两个补丁都是"**临时桥接**",会被官方吸收:
+本地补丁都是"**临时桥接**",会被官方吸收:
 
 - 每次同步官方,**第一步判断"补丁还要不要"**(而非"怎么解冲突")
 - 官方已等效实现 → 丢弃(`rebase --skip`),补丁从本地历史移除
 - 官方未修 → 继续背,rebase 到新 base
 
-预期:mlua 升级是时间问题(社区已到 0.12),Windows WAL truncate 是真 bug(官方迟早修)。**这俩补丁不会永久背在本地**。
+预期:mlua 升级是时间问题(社区已到 0.12),Windows 测试修复与 state 目录 owner-only 创建同样是上游迟早要修的问题。**补丁不会永久背在本地**。
 
 ## 十三、速查(下次同步 3 步)
 

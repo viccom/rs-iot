@@ -1,8 +1,11 @@
 # 2026-08-31 N5 长跑退化修复的执行决策记录
 
-> **状态**：implemented（2026-08-31 裁决并落地；长跑退化修复批）
-> **实施**：2026-08-31 裁决并落地（长跑退化 n5 修复批）
-> **代码**：见正文各条锚点（采集/管道/告警域）
+> **状态**：implemented（D-N5-1/D-N5-2/D-N5-4 采纳并落地；D-N5-3 登记不做；D-N5-5 为澄清）
+> **日期**：2026-08-31
+> **实施**：2026-08-31 `c7c4016` / `8bff576`（tsink_fork 修复批）；2026-09-01 `4b06aa3`（rs-iot 复验收口）
+> **代码**：`../tsink_fork` 的 compaction/Drop/quarantine 路径；`src/config.rs`（WAL 缺省值口径）
+> **测试**：tsink reliability 测试 `flush_pipeline_tolerates_concurrent_compaction_replacement_race` 等
+> **遗留**：D-N5-3 tiering sweep 与 `Storage::flush()` 并发风险（rs-iot 未开 tiering，登记不做）
 
 ## D-N5-1｜锁解耦放大既存竞态的自愈加固（采纳）
 

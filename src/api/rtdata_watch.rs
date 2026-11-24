@@ -715,7 +715,7 @@ mod tests {
         let dir =
             std::env::temp_dir().join(format!("rtdata-watch-test-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        crate::db::prepare_lux_data_dir(&dir).unwrap();
         let mut sc = lux::ServerConfig::default();
         sc.port = 0; // OS 分配空闲端口，避免与运行中 rs-iot/redis 冲突
         sc.data_dir = dir.to_str().unwrap().to_string();

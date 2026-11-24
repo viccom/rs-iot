@@ -281,6 +281,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .as_nanos();
     let data_dir = std::env::temp_dir().join(format!("rs-iot-bench-{pid}-{ts}"));
     std::fs::create_dir_all(&data_dir)?;
+    rs_iot::db::prepare_lux_data_dir(&data_dir)?;
 
     let cfg = build_cfg(data_dir.to_string_lossy().into_owned());
     let handle = lux::run_with_config(cfg).await?;

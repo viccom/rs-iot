@@ -1,7 +1,6 @@
 # 历史存储部署调参指南（10 万点/秒量级）
 
-> **状态**：reference（10 万点位调优实测记录，长期参考）
-
+> **状态**：活文档（随压测结论与调参面演进；当前基线 2026-08-29/30）
 > 基于 2026-08-29/30 压测与修复（T1-T21、N1-N4）的实测结论。适用 `--features history` 构建。
 > 实测基线：100,001 series（1000 设备 × 100 tag + 1 对照）、100K pts/s 持续写入、10 分钟窗口（T21b）。
 
@@ -59,13 +58,13 @@ partition_secs = 0              # 默认 1h，一般无需调
 
 - **冷启动爬坡**：启动后 ~15 秒内 writer 排空未满速，此间有少量 dropped（T21b 实测 4.2M，全程占比 ~7%）；属冷启动特征，稳态零丢。接受不了再立项优化（identity cache 预热）。
 - **kill -9 恢复**：N1/N4 修复后**一次重启成功**，恢复时间 ≈ WAL 稳态水位回放（实测 ~25 秒 @百MB 级 WAL）；数据零丢失（Periodic 500ms 档最多丢强杀前 500ms 尾部）。
-- **优雅关停**：close 排空有看门狗超时（`close_timeout_secs`，代码默认 **15s**（`config.rs:280`））。短窗健康引擎实测 80ms 完成；但**大积压规模长跑会超时退化**——第 3 轮复验（N7，6h @100K pts/s）30s 超时后放弃等待、部分 writer 线程脱落，退 WAL 回放兜底（数据安全，代价是下次启动多回放 ~1GB WAL、恢复变慢）。**长跑/大积压部署建议 `close_timeout_secs ≥ 120`**；tsink 侧 drain-then-close 改进登记为后续小项。
+- **优雅关停**：close 排空有看门狗超时（`close_timeout_secs`，默认 30s）。短窗健康引擎实测 80ms 完成；但**大积压规模长跑会超时退化**——第 3 轮复验（N7，6h @100K pts/s）30s 超时后放弃等待、部分 writer 线程脱落，退 WAL 回放兜底（数据安全，代价是下次启动多回放 ~1GB WAL、恢复变慢）。**长跑/大积压部署建议 `close_timeout_secs ≥ 120`**；tsink 侧 drain-then-close 改进登记为后续小项。
 - **已知边界**（低风险登记）：blob lane 启用但永无 blob 数据的部署，重启仍全量回放（tsink floor=0 保守口径）；`/metrics` 在 10 万 series 下 0.3s（T4 O(1) 化后正常）。
 - **部署顺序**：建模（devmodel/devreg/inst）与启动顺序已无约束（T19 热校准兜底）；历史数据目录需独占（.tsink.lock 进程锁）。
 
 ## 六、相关文档
 
-- 实施计划与门禁对照：`docs/designs/2026-08-29-history-100k-improvement-plan.md`
+- 实施计划与门禁对照：`docs/plans/2026-08-29-history-100k-improvement-plan.md`
 - 配置键全清单：`docs/reference/rest-api.md` §4.1
 - tsink 引擎侧调参：`../tsink_fork/docs/performance-tuning.md`
 - 压测工件（脚本+指标）：`bench/history-100k/`

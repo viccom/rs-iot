@@ -1,8 +1,11 @@
 # C1-C3：schema 默认值单源 / 默认编译面收敛 / tag_key 串扰修复
 
 > **状态**：implemented（2026-08-26 收口；C1-C3 全修，四档门禁全绿）
-> **实施**：2026-08-26 并入（C1-C3，commit 对照见下表）
-> **代码**：Cargo.toml（default 面）+ src/model/（schema 单源）+ src/types.rs（tag_key）
+> **日期**：2026-08-26
+> **实施**：2026-08-26 `4127441`（计划）→ 修复批 → `3a25959`（验收回填）
+> **代码**：`src/config.rs`（DEFAULT_* 常量）、`Cargo.toml`（default feature 面）、`src/model/`（tag_key 生成）
+> **测试**：`frontend/src/**/schema-values.test.ts` + modbus 后端锁定测 + 四档门禁
+> **遗留**：无
 
 ## 验收记录
 
@@ -37,7 +40,7 @@
 - Cargo.toml：default 改 `["lua", "lua-http", "opcua", "modbus"]`；s7/eip 注释更新（非默认，显式 `--features s7,eip`）；transform 注释补 Q7 冻结+默认移出。
 - src/plugin/ticker.rs → src/ticker.rs（crate::ticker）；消费点 use 改（pipeline.rs、各 source、transform）。
 - 门禁矩阵扩：新增 `cargo test -j 2 --features "s7,eip"` 档跑 s7_e2e/eip_client_e2e/feature_gate_e2e（防裁剪后测试失明）；minimal 档保持。
-- docs/decisions/ 追加 ADR默认编译面变更记录（用户裁决）。
+- docs/decisions.md 追加默认编译面变更记录（用户裁决）。
 
 ### C3：tag_key 碰撞 fail-closed + 前端精确反解析
 - model/effective.rs `effective_all`：构建时记录每个 key 的首个 (devid,tag) 源；后续插入遇同 key 不同源 → **剔除该 key** + 收集冲突对，构建完成 warn 列出（join 碰撞与 contains 直通碰撞同检）。

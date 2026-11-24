@@ -95,7 +95,7 @@ src/plugin/builtin/lua_client/
   engine.rs     VM 创建（Lua::new_with 沙箱）+ 指令 hook + 内存限额 + 注册全部 ctx host API
   io_engine.rs  channel + 独占 IO task + serial/tcp/udp 三传输（复用 modbus_client 的 AsyncRead+AsyncWrite+Unpin+Send transport 模式）
   api.rs        ctx 对象（UserData）+ L1-L6 host 函数实现
-  script.rs     脚本加载/编译 + notify 热加载（notify-debouncer-mini 去抖 + 重建 VM + 失败回退）
+  script.rs     脚本加载/编译 + notify 热加载（Access 事件过滤 + 200ms 去抖 + 重建 VM + 失败回退）
   loader.rs     scripts/<name>/ 目录约定解析（main.lua + 本地 lib/*.lua require 限定在目录内）
 src/plugin/builtin/mod.rs            +pub mod lua_client;            （一行，触发 inventory）
 src/db/luakv.rs                       kv 持久化（lux Hash luakv:<inst_id> 读写）
@@ -139,7 +139,7 @@ scripts/<name>/
 7. 进入主循环（§5.4）。
 
 ### 5.3 热加载
-- `notify::RecommendedWatcher` 监听 `scripts/`，经 `notify-debouncer-mini` 去抖 200ms（编辑器一次保存常触发多次事件）。
+- `notify::RecommendedWatcher` 监听 `scripts/`，hotload 内**过滤 `EventKind::Access`** 并做 200ms 静默去抖（编辑器一次保存常触发多次事件；2026-11-09 起不用 notify-debouncer-mini——Linux inotify 对读文件也报事件，reload 自身读脚本会形成自激循环）。
 - 收到 `<name>/` 改动事件 → 在该实例的 Source task 内：编译新脚本到**新 VM**（沙箱+hook）→ 跑 dry-run（on_init + 一次 collect 带严格 hook，验证不死循环）→ 成功则 `CancellationToken` 旧 VM 优雅退出并切换 → 失败 `warn!`，**旧 VM 继续跑，永不半生效**。
 - 与 `InstanceManager` 的 stop/start 同构（VM 替换 ≈ 轻量重启 instance）。
 
@@ -491,13 +491,12 @@ MQTT <hwid>/command 或 POST /api/v1/command/send
 ```toml
 [features]
 # default = [..., "lua", "lua-http"]   # 实现时按现有 Cargo.toml 的 default 结构对齐（与 transform 并列）
-lua = ["dep:notify", "dep:notify-debouncer-mini", "dep:mlua"]
+lua = ["dep:notify", "dep:mlua"]
 lua-http = ["lua", "dep:reqwest"]      # ctx:http_*；独立可关
 
 [dependencies]
 mlua = { version = "0.12", features = ["lua54", "vendored", "async", "send", "serde", "macros"], optional = true }
 notify = { version = "8", optional = true }
-notify-debouncer-mini = { version = "0.7", optional = true }   # 0.7 依赖 notify ^8.2；0.5 要 notify 7 会冲突（已核实 crates.io）
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"], optional = true }  # lua-http；rustls-tls 独立不拉 OpenSSL，json 供 http_post body 序列化
 # tokio-serial 已被 modbus_client 引入，复用
 ```
@@ -589,7 +588,7 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 
 - mlua 0.12 docs：https://docs.rs/mlua/0.12.0/mlua/
 - mlua GitHub：https://github.com/mlua-rs/mlua（v0.12.0 tag 源码）
-- crates.io：mlua / notify / notify-debouncer-mini / reqwest / tokio-serial
+- crates.io：mlua / notify / reqwest / tokio-serial
 - rs-freeioe 实战佐证：`D:\rs_codes\rs-freeioe\crates\ioe-app-sdk\src\lua_port.rs`、`ioe-runtime\src\lua_actor.rs`、`ioe-lua\tests\async_bridge.rs`、`.remember\remember.md`
 - rs-iot runtime：`src\main.rs:44`、`Cargo.toml:15,68`、`src\plugin\builtin\modbus_client\transport.rs:47-55`
 

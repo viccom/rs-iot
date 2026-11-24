@@ -22,7 +22,7 @@ use tower::ServiceExt;
 
 /// 建测试 app + 真 EventBus（三方共享：HostContext/AppState/TraceRegistry）。
 async fn test_app() -> (axum::Router, lux::ServerHandle, EventBus) {
-    let data_dir = common::test_data_dir("sse");
+    let data_dir = common::unique_test_data_dir("sse");
     let (handle, client) = common::start_lux(data_dir.to_str().expect("utf8")).await;
     rs_iot::db::identity::bootstrap(&client)
         .await

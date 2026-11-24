@@ -616,6 +616,9 @@ async fn spawn_axum(state: AppState) -> (String, tokio::task::JoinHandle<()>) {
 #[cfg(feature = "modbus")]
 fn make_jwt(secret: &str, username: &str, ttl_secs: u64) -> String {
     use jsonwebtoken::{encode, EncodingKey, Header};
+    // 直接调 jsonwebtoken::encode（不经 api::auth），须先显式选定 provider：
+    // lux 更新后两个 crypto feature 同时启用，否则此处 panic。
+    rs_iot::api::auth::install_jwt_crypto_provider();
     let exp = (chrono::Utc::now().timestamp() as u64).saturating_add(ttl_secs);
     let claims = serde_json::json!({
         "sub": username,

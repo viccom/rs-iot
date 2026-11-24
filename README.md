@@ -31,7 +31,7 @@ cargo build             # debug
 cargo build --release   # release（lto + strip）
 ```
 
-> 依赖 `lux = { path = "../lux" }`（v0.37.0），需 lux 源码在同级 `../lux`。lux 强制带入 tokio[full]/mlua(vendored)/ring/reqwest，首次编译约 1–2 分钟。
+> 依赖 `lux = { path = "../lux" }`（v0.37.1 + 本地补丁 `bf32c25`，见 `docs/ops/lux-upstream-sync-strategy.md`），需 lux 源码在同级 `../lux`。lux 强制带入 tokio[full]/mlua(vendored)/ring/reqwest，首次编译约 1–2 分钟。
 
 ## 运行
 

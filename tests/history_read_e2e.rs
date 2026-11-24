@@ -60,7 +60,7 @@ async fn test_app(
     history_reader: Option<Arc<dyn HistoryReader>>,
     history_engine_state: Arc<str>,
 ) -> (axum::Router, lux::ServerHandle) {
-    let data_dir = common::test_data_dir("hist_read");
+    let data_dir = common::unique_test_data_dir("hist_read");
     let (handle, client) = common::start_lux(data_dir.to_str().expect("utf8")).await;
     rs_iot::db::identity::bootstrap(&client)
         .await

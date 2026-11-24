@@ -15,10 +15,11 @@
 | 南向协议接入 | [feature 裁剪](decisions/2026-08-07-feature-gating-protocols.md)（已实施） | [eipClient](designs/2026-08-17-eip-client-design.md)（已实施·真机待验） | `src/plugin/builtin/{opcua,modbus,s7,eip}_client/` | `tests/{s7,modbus_multi_slave,eip_client,feature_gate}_e2e.rs` | AGENTS.md 验证规则节 |
 | Lua 脚本系统 | [扩展策略](decisions/2026-08-07-plugin-extension-strategy.md)（已实施） | [采集系统](designs/2026-08-06-lua-script-collector-design.md)（已实施）→ [平台演进](designs/2026-08-18-lua-script-system-evolution-design.md)（已实施·阶段 A/B/C） | `src/plugin/lua_core/` + `src/plugin/builtin/{lua_client,lua_north,lua_transform}/` | `tests/lua_*_e2e.rs` + lua_core 内单测 | [lua-script-guide](guides/lua-script-guide.md) |
 | 外部插件 bridge | [扩展策略](decisions/2026-08-07-plugin-extension-strategy.md)（已实施） | —（[协议规约](reference/external-plugin-protocol.md)即设计） | `src/plugin/builtin/sidecar_client/` | `tests/sidecar_e2e.rs` | [开发指南](guides/external-plugin-dev-guide.md)、`examples/ext-plugin-*` |
+| 插件内核演进 | [扩展策略](decisions/2026-08-07-plugin-extension-strategy.md)（已实施） | [plugin-kernel-evolution](designs/2026-11-04-plugin-kernel-evolution-design.md)（讨论中） | 目标 `src/plugin/{descriptor,runtime,catalog}.rs`（未实施） | 随实施建立 | [plugin-development-guide](guides/plugin-development-guide.md) |
 | 可观测性（M4+P1） | — | [packet-trace](designs/2026-08-10-packet-trace-design.md)（部分实施）· [log-ringbuffer](designs/2026-08-10-log-ringbuffer-design.md)（已实施） | `src/io_trace.rs`、`src/log_ringbuffer.rs`、`src/api/routes_{metrics,trace,logs}.rs` | `tests/{trace,log,metrics}_e2e.rs` | [埋点规范](conventions/instrumentation-conventions.md)、[rest-api](reference/rest-api.md) §4.10+ |
-| AI 网关集成 | [技术选型](decisions/2026-08-12-gateway-tech-selection.md)（已实施） | [v3 设计](designs/2026-08-11-ai-agent-integration-v3-design.md)（已实施）→ [分层演进](designs/2026-08-18-multi-system-gateway-design.md)（**待实施**） | `crates/rsiot-gateway/`、`crates/rsiot-mcp/` | gateway/mcp crate 内单测 | [部署指南](ops/deploy-gateway-and-mcp.md) |
+| AI 网关集成 | [技术选型](decisions/2026-08-12-gateway-tech-selection.md)（已实施） | [v3 设计](designs/2026-08-11-ai-agent-integration-v3-design.md)（已实施）→ [分层演进](designs/2026-08-18-multi-system-gateway-design.md)（**待实施**） | `crates/rsiot-gateway/`、`crates/rsiot-mcp/` | gateway/mcp crate 内单测 | [部署指南](ops/deploy-gateway-and-mcp.md)、[reasonix 版本兼容](ops/reasonix-version-compat.md)（v1.25.3 基线 / v2.35.0 实测 / v2.58.1 代码核对） |
 | 设备模型注册表（物模型） | [元数据唯一来源决策](decisions/2026-08-25-device-model-registry.md)（已实施） | [四期实施计划](designs/2026-08-25-device-model-registry-plan.md)（**已实施**·M-1~M-4 全并） | M-1~M-4 全并入（`src/model/` 九模块 + 六插件模型驱动 + lua/sidecar v2 + 发现引擎 + tags 退役 + 前端四面板） | `tests/model_registry_e2e.rs` + `tests/tag_effective_e2e.rs` + `tests/history_bi_e2e.rs` | 决策文档附录 · 决策文档 §3 业界对标 |
-| 历史时序存储（tsink） | [tsink 选型决策](decisions/2026-08-24-history-storage-tsink-selection.md)（已实施·含实测对比） | [总设计与路线图](designs/2026-08-24-history-storage-master-plan.md)（部分实施·ADR 权威版）→ [Tag Registry](designs/2026-08-24-tag-registry-plan.md)（已实施·Phase 1a 地基；tags 表于 M-4 退役被 devreg.overrides 吸收）→ [写路径 Phase 1b](designs/2026-08-25-history-write-path-plan.md)（已实施·四门禁全过·已并 master aedd1cf）→ [读+订阅 Phase 2](designs/2026-08-25-history-read-subscribe-plan.md)（已实施·feat/history-read-sub）→ [治理收口 Phase 3](designs/2026-08-26-history-phase3-governance-plan.md)（已实施·feat/history-phase3·治理 metrics/前端历史查询/init_failed+栈溢出 e2e/浏览器实测） | Phase 1b/2/3 已实施 + BI 大屏端点 stats/batch（2026-10-29 P1，81a0216）：`src/history/` + `src/api/routes_history.rs` + `src/api/rtdata_watch.rs`（订阅 dirty-set 服务；读侧 effective() 缓存见 `src/model/cache.rs`） | `tests/history_{dataflow,write,kill_recovery,read}_e2e.rs` + `tests/rtdata_{subscribe,watch}_e2e.rs` + `tests/tag_effective_e2e.rs` + `tests/history_bi_e2e.rs` | 决策文档附录（实测基线/工件位置） |
+| 历史时序存储（tsink） | [tsink 选型决策](decisions/2026-08-24-history-storage-tsink-selection.md)（已实施·含实测对比） | [总设计与路线图](designs/2026-08-24-history-storage-master-plan.md)（**部分实施**·ADR 权威版；Phase 1a/1b/2/3 与 10 万点四轮已落地，Phase 4 压测/5 演进待）→ [Tag Registry](designs/2026-08-24-tag-registry-plan.md)（已实施·Phase 1a 地基；tags 表于 M-4 退役被 devreg.overrides 吸收）→ [写路径 Phase 1b](designs/2026-08-25-history-write-path-plan.md)（已实施·四门禁全过·已并 master aedd1cf）→ [读+订阅 Phase 2](designs/2026-08-25-history-read-subscribe-plan.md)（已实施·feat/history-read-sub）→ [治理收口 Phase 3](designs/2026-08-26-history-phase3-governance-plan.md)（已实施·feat/history-phase3·治理 metrics/前端历史查询/init_failed+栈溢出 e2e/浏览器实测） | Phase 1b/2/3 已实施 + BI 大屏端点 stats/batch（2026-10-29 P1，81a0216）：`src/history/` + `src/api/routes_history.rs` + `src/api/rtdata_watch.rs`（订阅 dirty-set 服务；读侧 effective() 缓存见 `src/model/cache.rs`） | `tests/history_{dataflow,write,kill_recovery,read}_e2e.rs` + `tests/rtdata_{subscribe,watch}_e2e.rs` + `tests/tag_effective_e2e.rs` + `tests/history_bi_e2e.rs` | 决策文档附录（实测基线/工件位置） |
 | 现场部署与测试 | — | — | `field-kit/` | `field-kit` e2e 脚本 | [field-e2e-windows](ops/field-e2e-windows.md) |
 
 ## guides/ — 开发与使用指南（怎么用/怎么开发）
@@ -51,12 +52,13 @@
 | [2026-08-07-plugin-extension-strategy.md](decisions/2026-08-07-plugin-extension-strategy.md) | 插件扩展策略：动态库 vs SDK crate vs sidecar → 走 sidecar+lua | 已实施 |
 | [2026-08-07-feature-gating-protocols.md](decisions/2026-08-07-feature-gating-protocols.md) | 内置协议 Cargo feature 裁剪（方案 B）评估与实施 | 已实施 |
 | [2026-08-12-gateway-tech-selection.md](decisions/2026-08-12-gateway-tech-selection.md) | API Gateway 技术选型调研：axum 0.8 + reqwest 手写反代（全部 file:line 引证） | 已实施 |
-| [2026-08-24-history-storage-tsink-selection.md](decisions/2026-08-24-history-storage-tsink-selection.md) | 历史时序存储选型：tsink 内嵌（fork 自管）+ 独立 server 形态实测对比 + 单机 10 万点位级定位 | 已实施 |
+| [2026-08-24-history-storage-tsink-selection.md](decisions/2026-08-24-history-storage-tsink-selection.md) | 历史时序存储选型：tsink 内嵌（fork 自管）+ 独立 server 形态实测对比 + 单机 10 万点位级定位 | 已实施（选型已落地，Phase 1b/2/3 实施） |
 | [2026-08-25-device-model-registry.md](decisions/2026-08-25-device-model-registry.md) | 设备模型注册表（物模型）：元数据唯一来源原则（宪法级）+ 全局设备实体 + tags 表吸收 + 严格校验 | 已实施 |
 | [2026-08-26-default-compile-surface.md](decisions/2026-08-26-default-compile-surface.md) | 默认编译面收敛：default=[lua,lua-http,opcua,modbus]，s7/eip/transform 显式启用 | 已实施 |
 | [2026-08-31-n5-longrun-degradation-fixes.md](decisions/2026-08-31-n5-longrun-degradation-fixes.md) | 长跑退化 n5 修复决策：长时运行下采集/管道/告警域的退化修复取舍 | 已实施 |
 | [2026-08-27-model-extension-slot.md](decisions/2026-08-27-model-extension-slot.md) | 设备模型开放扩展槽（extra）与 `x_` 键契约：前向兼容信封 + 宿主不解释 + 外置应用定位边界 | 已实施 |
 | [2026-11-01-upstream-library-fork-policy.md](decisions/2026-11-01-upstream-library-fork-policy.md) | 上游库缺陷处置策略：三层（插件规避 / 最小 fork / 上游 PR）；tokio-s7 fork 4 补丁（S-1/S-4/S-5/S-9）、rust-ethernet-ip 先规避+PR、async-opcua/tokio-modbus 不 fork；含 `[patch.crates-io]` 形态、CI 适配、治理与退出条件 | **已实施**（fork 已接入 832c8e2；CI 可达性/上游 PR 待办） |
+| [2026-08-31-n5-longrun-degradation-fixes.md](decisions/2026-08-31-n5-longrun-degradation-fixes.md) | N5 长跑退化修复执行决策：锁解耦竞态自愈加固/payload 损坏语义放宽/输出段预算/tiering 风险登记 | 已实施（D-N5-3 登记不做） |
 
 ## designs/ — 设计定稿（怎么做，日期命名）
 
@@ -97,12 +99,17 @@
 | [2026-10-27-architecture-optimization-review.md](designs/2026-10-27-architecture-optimization-review.md) | 架构优化评估（9 项议题：依赖可复现/丢数据总账/bind 类型化/effective 扇入/热路径/api 分层/协议骨架/配置面/Sample 分配）+ 实施顺序与"不建议做"清单 | 评审 |
 | [2026-10-27-external-plugin-config-push-v3-design.md](designs/2026-10-27-external-plugin-config-push-v3-design.md) | 外部插件配置下发升级（ConfigPush v3）：补 `app_config`/`devices[].bind` 两层下发 + 版本集合协商 + 凭证解析下发 + 不变量与不做什么清单 | **已实施**（批次 1+2；批次 3 可选未做） |
 | [2026-08-26-history-phase3-governance-plan.md](designs/2026-08-26-history-phase3-governance-plan.md) | 历史存储 Phase 3 余项收口实施计划（治理 metrics 7 新 family/HistoryTelemetry 内存水位/前端历史查询面板/init_failed+栈溢出双 e2e/浏览器嵌入实测七项+2 bug 修复） | **已实施**（feat/history-phase3，2026-08-26） |
+| [2026-08-26-history-review-fix-plan.md](designs/2026-08-26-history-review-fix-plan.md) | 历史存储 Phase 1/2/3 审查修复计划（High×5 + Medium×11 全修；Low×17 延后 backlog） | **已实施**（2026-08-26，b81ce26 收口） |
+| [2026-08-26-nonbreaking-quality-batch-plan.md](designs/2026-08-26-nonbreaking-quality-batch-plan.md) | 非破坏性质量修复包（审计后续 B1-B7：写失败可见性/默认端口等） | **已实施**（2026-08-26，8605980 验收回填） |
+| [2026-08-26-p0-p1-bugfix-plan.md](designs/2026-08-26-p0-p1-bugfix-plan.md) | P0+P1 九项 BUG 修复计划（routes_lua minimal 门控 + 八项修复） | **已实施**（2026-08-26，27dd53b 验收回填） |
+| [2026-08-26-schema-compile-tagkey-plan.md](designs/2026-08-26-schema-compile-tagkey-plan.md) | schema 默认值单源 / 默认编译面收敛 / tag_key 串扰修复（C1-C3） | **已实施**（2026-08-26，3a25959 验收回填） |
 | [2026-08-27-model-extension-slot-design.md](designs/2026-08-27-model-extension-slot-design.md) | 设备模型域扩展性设计（DeviceModel/TagTemplate 开放扩展槽）：flatten 语义/wire 形态/`x_` 键契约与毕业机制/报警外置与存储梯度定位边界/场景驱动演进路线 | **已实施**（扩展槽+键契约+读透出面：REST 校验/MCP 两读工具/前端只读展示） |
 | [2026-10-30-screen-versioning-design.md](designs/2026-10-30-screen-versioning-design.md) | 画面/主题文档版本管理与并发控制（routes_meta 演进）：`sv:` 键族 + 内容判重 + if_version 乐观锁 + rollback + SSE screen 事件 + embedded 无事务的失败矩阵 | **已实施**（166fe25/40698d4；2026-10-30 复审修复：锁序/回滚 no-op/错误路径） |
 | [2026-10-30-screen-versioning-plan.md](designs/2026-10-30-screen-versioning-plan.md) | 画面/主题版本管理实施计划（P0 第 1 轮 TDD 任务表 A1~A9 + 开工基线漂移记录） | **已实施**（166fe25/40698d4：11 组测试 + §6 六实测全符） |
 | [2026-11-01-layering-coupling-review.md](designs/2026-11-01-layering-coupling-review.md) | 分层耦合专项：实测 10 模块强连通分量 → 切三条类型回边（InstState/LogEntry/ModelError 上移）+ 分层门禁 `scripts/check_layers.py` + plugin→history / api→lua_core 收口 | **已实施**（2026-11-01） |
 | [2026-11-01-plugin-audit-fix-plan.md](designs/2026-11-01-plugin-audit-fix-plan.md) | 内置插件审查修复跟踪（10 插件 28 项真 BUG：四协议 I/O 超时/RTU 串扰/eip 位寻址+panic/luaTransform 饿死/luaNorth 等待环/静默写 0 拒写/sidecar 日志与注册竞态等）+ 定性不修清单 | **已实施**（A~H 八批 + 门禁全绿） |
 | [2026-11-01-protocol-semantics-audit.md](designs/2026-11-01-protocol-semantics-audit.md) | 协议插件协议语义审查台账（Modbus/OPC UA/S7/EtherNet/IP 73 条）：逐条定级 + 框架/插件/上游库归责 + 库源码与探针证据；含 HMI 写通道失效、S7 重连风暴与写应答丢弃、EIP 批量失败不重连、OPC UA 60s 阻塞等 | **已实施**（a27328b/a4b6c1b；未闭环项见 §9.2） |
+| [2026-11-04-plugin-kernel-evolution-design.md](designs/2026-11-04-plugin-kernel-evolution-design.md) | 插件内核演进（轻量·优雅·可演进）：统一 descriptor/runtime/catalog；schema 配置、sidecar 2.1、托管进程、SDK/conformance、能力与健康面 | **讨论中**（draft；P0-P2 未实施） |
 
 ## ops/ — 部署与运维（怎么跑起来）
 
@@ -110,6 +117,7 @@
 |---|---|---|
 | [history-100k-tuning.md](ops/history-100k-tuning.md) | 10 万点位历史链调优：参数配方、门禁判据、优雅关停与积压治理 | 活文档 |
 | [deploy-gateway-and-mcp.md](ops/deploy-gateway-and-mcp.md) | AI 集成三件套（gateway/mcp/reasonix）现场部署 | 活文档（gateway 单 crate；分层设计未实施） |
+| [reasonix-version-compat.md](ops/reasonix-version-compat.md) | reasonix 版本兼容性权威源：v1.25.3（field-kit 基线）/ v2.35.0（端到端实测）/ v2.58.1（代码核对）——兼容面/断裂面/各版本部署差异 | 活文档 |
 | [field-e2e-windows.md](ops/field-e2e-windows.md) | Windows 真实工厂级测试场完整手册（配套 `field-kit/`） | 活文档 |
 | [lux-upstream-sync-strategy.md](ops/lux-upstream-sync-strategy.md) | lux 上游同步与本地补丁维护策略、风险与应急恢复 | 活文档 |
 | [releases/2026-08-20-lua-stage-a.md](ops/releases/2026-08-20-lua-stage-a.md) | 发布说明：Lua 阶段 A（机制地基）——升级必读/新能力/已知限制 | 已发布 |

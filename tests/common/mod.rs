@@ -35,6 +35,11 @@ pub fn test_data_dir(name: &str) -> PathBuf {
         std::process::id()
     ))
 }
+/// [`test_data_dir`] 的别名（master 线测试如 `lua_api_e2e` 的调用名；
+/// ours 实现本就每次调用唯一，语义等价直接转发）。
+pub fn unique_test_data_dir(name: &str) -> PathBuf {
+    test_data_dir(name)
+}
 
 /// 启动测试 lux 实例：端口 0 由 OS 分配（见 lux `ServerConfig::port` 文档），
 /// data_dir 指向临时目录。返回 (handle, client)。
