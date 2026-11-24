@@ -55,3 +55,40 @@ pub async fn serve(uri: Uri) -> Response {
         }
     }
 }
+
+/// 运行时磁盘目录的 SPA 静态服务（HMI /hmi/*）：命中文件直返，无扩展名深链回退 index.html。
+/// dist 由 gateway 配置的 hmi_dist 指向（绝对路径），build 即上线、无需重编 gateway。
+pub async fn serve_dir_spa(dist: &str, uri: Uri) -> Response {
+    use std::path::{Path, PathBuf};
+    let rel = uri.path().trim_start_matches('/').trim_start_matches("hmi/");
+    let rel = if rel.is_empty() { "index.html" } else { rel };
+    // 安全：拒绝路径穿越
+    if rel.contains("..") || rel.starts_with('/') {
+        return (StatusCode::NOT_FOUND, "not found").into_response();
+    }
+    let base = PathBuf::from(dist);
+    let file = base.join(rel);
+    if file.is_file() {
+        match tokio::fs::read(&file).await {
+            Ok(bytes) => {
+                let mime = mime_guess::from_path(&file).first_or_octet_stream();
+                return Response::builder()
+                    .header(header::CONTENT_TYPE, mime.as_ref())
+                    .body(Body::from(bytes))
+                    .unwrap();
+            }
+            Err(_) => return (StatusCode::NOT_FOUND, "not found").into_response(),
+        }
+    }
+    if Path::new(rel).extension().is_some() {
+        return (StatusCode::NOT_FOUND, "not found").into_response();
+    }
+    // SPA fallback
+    match tokio::fs::read(base.join("index.html")).await {
+        Ok(bytes) => Response::builder()
+            .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
+            .body(Body::from(bytes))
+            .unwrap(),
+        Err(_) => (StatusCode::NOT_FOUND, "hmi dist not built").into_response(),
+    }
+}

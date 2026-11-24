@@ -33,6 +33,8 @@ pub struct GwState {
     pub serve_token: Arc<String>,
     /// 层1 JWT secret（与 rs-iot 同值）。auth_middleware 验前端 JWT 用。
     pub jwt_secret: Arc<String>,
+    /// HMI 组态产物目录（可选）：由 app.rs 挂载 /hmi/*。
+    pub hmi_dist: Option<String>,
     /// 供应商管理段（home_dir/warden；空 home_dir = 未启用，端点返 503）。
     pub reasonix: crate::config::ReasonixCfg,
 }
@@ -52,6 +54,7 @@ impl GwState {
             serve_base: cfg.serve_base.clone(),
             serve_token: Arc::new(cfg.serve_token.clone()),
             jwt_secret: Arc::new(cfg.jwt_secret.clone()),
+            hmi_dist: cfg.hmi_dist.clone(),
             reasonix: cfg.reasonix.clone(),
         })
     }

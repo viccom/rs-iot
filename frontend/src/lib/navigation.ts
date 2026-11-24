@@ -1,5 +1,6 @@
 export type WorkspaceRouteKey =
   | 'overview'
+  | 'dashboard'
   | 'telemetry'
   | 'collectors'
   | 'models'
@@ -22,6 +23,13 @@ export const PRIMARY_ROUTES: PrimaryRouteDefinition[] = [
     title: '全局总览',
     shortTitle: '总览',
     summary: '把握实例健康、实时流量与当前告警态势',
+  },
+  {
+    key: 'dashboard',
+    path: '/dashboard',
+    title: '工业驾驶舱',
+    shortTitle: '驾驶舱',
+    summary: '水/电/气/环境设备实时监控与历史趋势分析',
   },
   {
     key: 'telemetry',

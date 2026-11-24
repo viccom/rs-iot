@@ -16,7 +16,7 @@ path = "src/main.rs"
 # multipart：附件上传端点（/api/agent/attachments）需要 Multipart extractor。
 axum = { version = "0.8", features = ["macros", "multipart"] }
 tower = "0.5"
-tower-http = { version = "0.6", features = ["trace", "cors"] }
+tower-http = { version = "0.6", features = ["trace", "cors", "fs"] }
 # stream feature 必加：SSE 裸字节流透传用 bytes_stream()（plan-gateway-tech-selection.md §五关键决策）。
 # rs-iot 主 crate 的 reqwest 是 optional + lua-http 无 stream，gateway 独立声明带 stream。
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }

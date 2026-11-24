@@ -57,6 +57,9 @@ pub struct GwConfig {
     /// reasonix serve token（伪造 Cookie: reasonix_token 注入，层3）。
     /// 来自 serve 启动 `--auth token --token <值>` 或 `--token-file`。
     pub serve_token: String,
+    /// HMI 组态产物目录（可选）：挂载为 /hmi/*（ServeDir 运行时读取，build 即上线）。
+    #[serde(default)]
+    pub hmi_dist: Option<String>,
     /// 供应商管理段（可选）。
     #[serde(default)]
     pub reasonix: ReasonixCfg,

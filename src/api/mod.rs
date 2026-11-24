@@ -22,6 +22,7 @@ pub mod routes_discovery;
 pub mod routes_events;
 pub mod routes_group;
 pub mod routes_history;
+pub mod routes_hmi;
 pub mod routes_inst;
 pub mod routes_logs;
 pub mod routes_lua;
@@ -157,6 +158,15 @@ pub fn build_router(state: AppState) -> axum::Router {
         // 历史时序读（Phase 2：单 series raw/降采样查询；默认 JWT 保护，
         // 503/400 矩阵见 routes_history）
         .route("/api/v1/history", get(routes_history::history))
+        // HMI 组态后端（hmi-studio：画面 CRUD/版本/图符/历史批查）
+        .route("/api/v1/screens", get(routes_hmi::list_screens))
+        .route("/api/v1/screens/{id}", get(routes_hmi::get_screen).put(routes_hmi::put_screen).delete(routes_hmi::delete_screen))
+        .route("/api/v1/screens/{id}/versions", get(routes_hmi::list_versions))
+        .route("/api/v1/screens/{id}/versions/{seq}", get(routes_hmi::get_version_doc))
+        .route("/api/v1/screens/{id}/rollback", post(routes_hmi::rollback_screen))
+        .route("/api/v1/symbols", get(routes_hmi::list_symbols))
+        .route("/api/v1/symbols/{name}", axum::routing::put(routes_hmi::put_symbol))
+        .route("/api/v1/history/batch", post(routes_hmi::history_batch))
         // 设备模型注册表（M-1；devreg 为过渡路径，M-2 接管 /api/v1/devices 系）
         .route("/api/v1/devmodels", get(routes_model::list))
         .route("/api/v1/devmodel/set", post(routes_model::set))

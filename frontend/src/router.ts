@@ -13,6 +13,7 @@ export const router = createRouter({
       meta: { auth: true },
       children: [
         { path: 'overview', name: 'overview', component: () => import('./views/Overview.vue'), meta: { auth: true } },
+        { path: 'dashboard', name: 'dashboard', component: () => import('./views/IndustryDashboard.vue'), meta: { auth: true } },
         { path: 'telemetry', name: 'telemetry', component: () => import('./views/Telemetry.vue'), meta: { auth: true } },
         { path: 'collectors', name: 'collectors', component: () => import('./views/Collectors.vue'), meta: { auth: true } },
         { path: 'models', name: 'models', component: () => import('./views/DeviceModels.vue'), meta: { auth: true } },

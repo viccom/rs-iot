@@ -53,7 +53,7 @@ pub fn build_router(st: Arc<GwState>) -> Router {
             let st = serve_st.clone();
             async move { forward(State(st), req, Upstream::Serve).await }
         }));
-    Router::new()
+    let app = Router::new()
         .route("/api/gw/health", any(health))
         .route("/api/gw/login", post(login))
         .nest("/api/agent", agent_routes)
@@ -63,8 +63,23 @@ pub fn build_router(st: Arc<GwState>) -> Router {
                 let st = rsiot_st.clone();
                 async move { forward(State(st), req, Upstream::Rsiot).await }
             }),
+        );
+    // HMI 组态产物：运行时挂载 /hmi/*（hmi_dist 配置可选；build 即上线，零重启）。
+    // 用自定义 handler 而非纯 ServeDir——hmi-studio 用 history 路由（/hmi/edit /hmi/view），
+    // 需对无扩展名深链回退 index.html（SPA fallback），带扩展名缺失则 404 防断链被当 HTML。
+    let hmi_st = st.clone();
+    let app = if st.hmi_dist.is_some() {
+        app.nest_service(
+            "/hmi",
+            axum::routing::get(move |uri: axum::http::Uri| {
+                let dist = hmi_st.hmi_dist.clone().unwrap_or_default();
+                async move { crate::static_assets::serve_dir_spa(&dist, uri).await }
+            }),
         )
-        .fallback(static_assets::serve)
+    } else {
+        app
+    };
+    app.fallback(static_assets::serve)
         .with_state(st.clone())
         .layer(axum::middleware::from_fn_with_state(st, auth_middleware))
 }
