@@ -1,0 +1,27 @@
+# 行尾规范化：仓库内一律 LF，工作区按平台检出（Windows 侧配合 core.autocrlf=true）
+* text=auto
+*.rs text eol=lf
+*.toml text eol=lf
+*.md text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.json text eol=lf
+*.ts text eol=lf
+*.vue text eol=lf
+*.js text eol=lf
+*.css text eol=lf
+*.html text eol=lf
+*.sh text eol=lf
+*.lua text eol=lf
+*.py text eol=lf
+*.svg text eol=lf
+*.lock text eol=lf
+# 二进制不分
+*.png binary
+*.jpg binary
+*.gif binary
+*.ico binary
+*.der binary
+*.exe binary
+*.dll binary
+*.so binary
