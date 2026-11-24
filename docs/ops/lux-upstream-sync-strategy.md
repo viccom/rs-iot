@@ -98,8 +98,9 @@ lux 升级还可能改变**运行期契约**，`cargo build` 不报错，需按�
 
 | lux 变更 | 影响 | rs-iot 适配 |
 |---|---|---|
-| `3f75c17` shutdown 变持久化屏障 | 丢弃 `ServerHandle` → `accepting_work=false`，后续 client 调用报 "SERVER shutting down" | 测试统一用 `crate::db::TestLux`（进程级 handle 注册表，持有到测试结束）；生产路径始终持有 handle 到 `shutdown_and_wait` |
-| v0.37.1 `jsonwebtoken` feature 由 `rust_crypto` 改 `aws_lc_rs` | 与 rs-iot 声明的 `rust_crypto` 经 Cargo feature 统一后双 provider 同时启用 → encode/decode panic | `api::auth::install_jwt_crypto_provider()` 与 `crates/rsiot-gateway/src/auth.rs` 同名函数显式 `install_default()`（幂等；自行签发 JWT 的测试也调用） |
+| `3f75c17` shutdown 变持久化屏障 | 丢弃 `ServerHandle` → `accepting_work=false`，后续 client 调用报 "SERVER shutting down" | 测试辅助函数取 `handle.client()` 后 `std::mem::forget(handle)`（全仓统一此方案）。注意 `let _keep = handle` 这类绑定保活**无效**——async helper 的栈帧随 future 完成即销毁；生产路径始终持有 handle 到 `shutdown_and_wait` |
+| v0.37.1 `jsonwebtoken` feature 由 `rust_crypto` 改 `aws_lc_rs` | 宿主若仍声明 `rust_crypto`，Cargo feature 统一后双 provider 同时启用 → encode/decode panic（jsonwebtoken 10 的二选一约束） | rs-iot 与 gateway 的 `jsonwebtoken` 均声明 `aws_lc_rs`（全工作区单 provider，与 lux 一致）；`api::auth::install_jwt_crypto_provider()` 与 `crates/rsiot-gateway/src/auth.rs` 同名函数保留为幂等兜底（`crypto::aws_lc::DEFAULT_PROVIDER.install_default()`；自行签发 JWT 的测试也调用） |
+| `data_dir` 排他锁 | 同名目录并发打开直接 `AlreadyExists` 拒启 | 测试 data_dir 每次调用唯一（`tests/common::test_data_dir`：pid + 纳秒 + 进程内序号）；同一用例内跨 start/stop 重启复用同一个 `PathBuf`，不重复调用 helper |
 | `827d1dd` state 目录 owner-only 校验 | 新建 state 子目录按 umask 取权限，0o775 被拒 | 本地补丁 `bf32c25` + rs-iot `prepare_lux_data_dir` 预建根目录并 chmod 0o700（不再改进程 umask，避免全局副作用） |
 
 ## 五、同步策略:rebase(非 merge)

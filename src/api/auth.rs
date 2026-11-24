@@ -17,17 +17,16 @@ use crate::error::TResult;
 
 /// 显式选定 jsonwebtoken 的进程级 `CryptoProvider`（幂等，可重复调用）。
 ///
-/// lux 自 v0.37.1（更新后的 mine/main）把 `jsonwebtoken` feature 从
-/// `rust_crypto` 改成 `aws_lc_rs`，而 rs-iot 自己声明 `rust_crypto`；Cargo
-/// feature 统一后两个 provider 同时启用，jsonwebtoken 10.4 无法自动判定，
-/// 任何 encode/decode 都会 panic（`Could not automatically determine the
-/// process-level CryptoProvider`）。官方给宿主的解法即
-/// `CryptoProvider::install_default()`（进程内至多成功一次）。
+/// jsonwebtoken 10 的 provider 是二选一（`rust_crypto` / `aws_lc_rs`）：两个 feature
+/// 经 Cargo 统一后同时启用时，它无法自动判定，任何 encode/decode 都会 panic
+/// （`Could not automatically determine the process-level CryptoProvider`）。
+/// lux 自 v0.37.1 起用 `aws_lc_rs`，所以本 crate 与 gateway 也声明 `aws_lc_rs`——
+/// 全工作区单 provider，本可以直接依赖自动判定；这里保留显式的
+/// `CryptoProvider::install_default()`（进程内至多成功一次）作为幂等兜底，防御
+/// 将来某一侧再引入第二 provider。HS256 签发/校验语义不受 provider 选择影响。
 ///
-/// 显式选定 `aws_lc`（全工作区 feature 已统一为 `aws_lc_rs`，HS256 签发/校验
-/// 语义不变；本调用为幂等兜底）。`pub` 供不经过本模块
-/// `encode_token`/`verify_token` 的调用方（如集成测试里自行签发 JWT 的
-/// `make_jwt`）在 encode 前调用。
+/// `pub` 供不经过本模块 `encode_token`/`verify_token` 的调用方（如集成测试里
+/// 自行签发 JWT 的 `make_jwt`）在 encode 前调用。
 static CRYPTO_PROVIDER: Once = Once::new();
 
 pub fn install_jwt_crypto_provider() {
