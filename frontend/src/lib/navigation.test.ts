@@ -5,6 +5,7 @@ describe('PRIMARY_ROUTES', () => {
   it('defines dashboard pages in navigation order', () => {
     expect(PRIMARY_ROUTES.map(route => route.key)).toEqual([
       'overview',
+      'dashboard',
       'telemetry',
       'collectors',
       'models',
@@ -14,6 +15,7 @@ describe('PRIMARY_ROUTES', () => {
     ])
     expect(PRIMARY_ROUTES.map(route => route.path)).toEqual([
       '/overview',
+      '/dashboard',
       '/telemetry',
       '/collectors',
       '/models',
