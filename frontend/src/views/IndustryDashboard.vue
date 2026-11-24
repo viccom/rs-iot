@@ -3,7 +3,10 @@
 // 无需新依赖：实时值走 monitor store（SSE rtdata），历史曲线复用
 // lib/historyQuery 的 buildHistoryUrl/decimate/buildSparklinePath（手写 SVG）。
 // 设备按水表/电表/燃气表/其他分组（devid 前缀 dev_mb_*/dev_ua_* + 标签语义）。
-import { computed, onMounted, ref } from 'vue'
+// 本视图只读 monitor store：SSE 订阅的生命周期归 AppShell 管（挂载时 start、
+// 卸载时 stop），叶子视图不得再调 monitor.start()——它不是幂等的（先 stop 再
+// 新建 EventSource），子视图先于 AppShell 挂载时会把刚建好的连接断开重连一次。
+import { computed, ref } from 'vue'
 import { useMonitorStore } from '../stores/monitor'
 import { apiFetch } from '../api/fetch'
 import {
@@ -113,8 +116,6 @@ const HISTORY_H = 160
 function sparkViewBox(path: string): string {
   return path ? `0 0 ${HISTORY_W} ${HISTORY_H}` : `0 0 ${HISTORY_W} ${HISTORY_H}`
 }
-
-onMounted(() => { if (!monitor.rtdata || Object.keys(monitor.rtdata).length === 0) monitor.start() })
 </script>
 
 <template>
