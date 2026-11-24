@@ -189,6 +189,18 @@ codegen-units = 1
 strip = true
 # 不设 panic = "abort"，保留 unwind 以支持优雅关闭
 
+[profile.dev]
+# debuginfo 瘦身（2026-11-09）：line-tables-only 只保留回溯所需的 文件:行号 表，
+# 去掉变量/类型完整细节——单二进制从 ~550MB 降到数十 MB；调试器断点检查变量时
+# 信息会变粗，需要完整细节时临时用 `cargo build --profile dev-full`（见下）。
+debug = "line-tables-only"
+
+# 完整 debuginfo 的开发 profile（需要单步调试看变量时用）：
+# cargo build --profile dev-full
+[profile.dev-full]
+inherits = "dev"
+debug = true
+
 # Windows Service（仅 windows target）
 [target.'cfg(windows)'.dependencies]
 windows-service = "0.7"
