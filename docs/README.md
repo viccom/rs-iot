@@ -120,6 +120,7 @@
 | [reasonix-version-compat.md](ops/reasonix-version-compat.md) | reasonix 版本兼容性权威源：v1.25.3（field-kit 基线）/ v2.35.0（端到端实测）/ v2.58.1（代码核对）——兼容面/断裂面/各版本部署差异 | 活文档 |
 | [field-e2e-windows.md](ops/field-e2e-windows.md) | Windows 真实工厂级测试场完整手册（配套 `field-kit/`） | 活文档 |
 | [lux-upstream-sync-strategy.md](ops/lux-upstream-sync-strategy.md) | lux 上游同步与本地补丁维护策略、风险与应急恢复 | 活文档 |
+| [iot-demo-limit-alarms.md](ops/iot-demo-limit-alarms.md) | iot-demo 限值报警（limit_alarm transform）运维说明：数据流、阈值表、启动对账、实例复建与历史读阻塞处置 | 活文档 |
 | [releases/2026-08-20-lua-stage-a.md](ops/releases/2026-08-20-lua-stage-a.md) | 发布说明：Lua 阶段 A（机制地基）——升级必读/新能力/已知限制 | 已发布 |
 | [releases/2026-08-20-lua-stage-b.md](ops/releases/2026-08-20-lua-stage-b.md) | 发布说明：Lua 阶段 B（北向突破）——luaNorth/secret/cloud 配方/透传 | 已发布（已合并 master，2026-10-27 核实） |
 | [releases/2026-08-21-lua-stage-c.md](ops/releases/2026-08-21-lua-stage-c.md) | 发布说明：Lua 阶段 C（数据加工）——luaTransform/EventBus 带值/自环防护/rhai 冻结 | 已发布（已合并 master，2026-10-27 核实） |

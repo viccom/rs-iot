@@ -1,5 +1,7 @@
 # iot-demo 限值报警（limit_alarm transform）运维说明
 
+> **状态**：活文档（随脚本阈值与报警规则演进；2026-11-24 落地）
+>
 > 2026-11-24 落地。脚本：`scripts/limit-alarm/main.lua`；实例：`limit_alarm`
 > （`app_code=luaTransform`，`auto_start=true`）；HMI 侧消费：`hmi-studio/src/lib/synthetic.ts`。
 > 定位：把"点位越限"变成 rs-iot 活动告警，喂给 HMI 报警徽标/区域计数/报警抽屉。
