@@ -25,6 +25,8 @@
 //! 内命中即跳过（跨源同 tag 静默取舍见 const 注释）。
 
 mod config;
+#[cfg(test)]
+mod tests;
 
 use crate::event_bus::EventPayload;
 use crate::host::HostContext;

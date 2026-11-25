@@ -10,6 +10,11 @@
 -- 两处是同一套工程限值的"判定端"与"显示端"，改一处必须同步另一处（计划文档 §6 已知取舍）。
 -- key 约定：<devid>.<tag>.<hh|hi|lo|ll|alarm>（合成点位用第一个 '.' 之前的 devid 聚合）。
 -- level 映射：HH/LL/故障 → error（HMI 映射 P1）；H/L → warn（P3）；仅提示类 → info（P4）。
+--
+-- **模拟量延时**：模拟量（h/hh/l/ll）连续越限满 ANALOG_DELAY_S 秒才 fire—— ISA-18.2 的
+-- alarm delay，压掉尖峰抖动（iot-demo 2026-11-25 实测：不加延时约 53 条事件/分钟，全是
+-- 正弦峰顶的短促越限）。尚未报出就回落到回差带之下 → 取消计时；已报出的清除不受延时
+-- 影响。布尔故障点（alarm 规则）不走延时，立即报。
 
 -- 阈值表：h/hh = 高限/高高限，l/ll = 低限/低低限；alarm = 布尔故障点
 local RULES = {
@@ -76,6 +81,11 @@ local HYS_REL = 0.02
 -- fired[key] = true：已经在报（避免每采样重复 fire 刷 count）
 local fired = {}
 
+-- 模拟量延时（秒）：连续越限满这么久才 fire；0 = 关闭（回到一越限即报）
+local ANALOG_DELAY_S = 15
+-- pending[key] = 连续越限的起始时刻（ms，ctx:now()）；未报出前有效
+local pending = {}
+
 -- 启动对账：transform 重启会丢失 fired 表，上一轮已 fire 的告警会变成孤儿
 -- （值已回落但 alarms 表里还留着，永远不会被 clear）。策略：on_timer 分批 clear
 -- 全部规则 key（15 条/秒，避开 20/s 频控），**跳过本轮已 fire 的 key**；对账完成后停。
@@ -97,6 +107,7 @@ local recon_idx = 1
 
 function on_init()
   fired = {}
+  pending = {}
 end
 
 function on_timer()
@@ -128,25 +139,48 @@ local function clear(key)
   fired[key] = nil
 end
 
--- 高限：v >= limit 触发；v < limit - hys 恢复
+-- 高限：v >= limit 进入越限区，连续停留满延时触发；v < limit - hys 恢复。
+-- 越限区按回差带算（[limit - hys, +∞)）：带内抖动不打断计时，与 fire 之后的清除线一致。
 local function eval_hi(devid, tag, v, rule, limit, kind, level)
   local key = key_of(devid, tag, kind)
-  if not fired[key] and v >= limit then
-    fire(key, level, string.format("%s %s 高限越限 %.3f %s（%s≥%.3f）",
-      devid, tag, v, rule.unit or "", kind, limit))
-  elseif fired[key] and v < limit - hys_of(limit, rule) then
-    clear(key)
+  local resume = limit - hys_of(limit, rule)
+  if fired[key] then
+    if v < resume then clear(key) end
+    return
+  end
+  if v >= limit then
+    local since = pending[key] or ctx:now()
+    pending[key] = since
+    if ctx:now() - since >= ANALOG_DELAY_S * 1000 then
+      fire(key, level, string.format("%s %s 高限越限 %.3f %s（%s≥%.3f）",
+        devid, tag, v, rule.unit or "", kind, limit))
+      -- fire 成功才清计时。被频控拒收时 fire 不置 fired：保留 since，下一个越限采样
+      -- 立即重试（到点条件已满足），不重新等一个延时。
+      if fired[key] then pending[key] = nil end
+    end
+  elseif v < resume then
+    pending[key] = nil -- 尚未报出就回落到回差带之下：取消计时
   end
 end
 
--- 低限：v <= limit 触发；v > limit + hys 恢复
+-- 低限：v <= limit 进入越限区，连续停留满延时触发；v > limit + hys 恢复。
 local function eval_lo(devid, tag, v, rule, limit, kind, level)
   local key = key_of(devid, tag, kind)
-  if not fired[key] and v <= limit then
-    fire(key, level, string.format("%s %s 低限越限 %.3f %s（%s≤%.3f）",
-      devid, tag, v, rule.unit or "", kind, limit))
-  elseif fired[key] and v > limit + hys_of(limit, rule) then
-    clear(key)
+  local resume = limit + hys_of(limit, rule)
+  if fired[key] then
+    if v > resume then clear(key) end
+    return
+  end
+  if v <= limit then
+    local since = pending[key] or ctx:now()
+    pending[key] = since
+    if ctx:now() - since >= ANALOG_DELAY_S * 1000 then
+      fire(key, level, string.format("%s %s 低限越限 %.3f %s（%s≤%.3f）",
+        devid, tag, v, rule.unit or "", kind, limit))
+      if fired[key] then pending[key] = nil end -- 同 eval_hi：拒收后下一采样立即重试
+    end
+  elseif v > resume then
+    pending[key] = nil
   end
 end
 
