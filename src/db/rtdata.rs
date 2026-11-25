@@ -98,14 +98,15 @@ pub async fn write_batch(
             continue;
         }
         let key = format!("rtdata:{devid}");
-        let mut argv: Vec<String> = Vec::with_capacity(1 + pairs.len() * 2);
-        argv.push(key);
+        // argv 直接借用聚合产物（&str 切片）：field/cell 不再各 clone 一份 String——
+        // 热路径每点省 2 次分配（2026-10-27 架构评估 §3.5）。
+        let mut argv: Vec<&str> = Vec::with_capacity(1 + pairs.len() * 2);
+        argv.push(&key);
         for (f, v) in pairs {
-            argv.push(f.clone());
-            argv.push(v.clone());
+            argv.push(f.as_str());
+            argv.push(v.as_str());
         }
-        let argv_ref: Vec<&str> = argv.iter().map(|s| s.as_str()).collect();
-        if c.execute("HSET", &argv_ref[..]).await.is_err() {
+        if c.execute("HSET", &argv[..]).await.is_err() {
             outcome.failed_devids.insert((*devid).to_string());
         }
     }
