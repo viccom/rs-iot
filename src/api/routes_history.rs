@@ -17,6 +17,11 @@
 //!   runtime worker）；reader 的 `Err(String)` 分层映射（P12）：串含
 //!   `bad request: ` 前缀（engine 侧对参数类 tsink 错误构造，见
 //!   engine.rs `classify_err`）→ 400 去前缀返 `{error}`，其余 → 500。
+//! - **读超时护栏**（2026-11-25）：tsink 存储引擎的可见性栅栏（visibility fence）
+//!   在目录发布拍里持写锁；该拍异常时会**全局阻塞读路径**（症状：写入继续、
+//!   任何 history 查询都不返回，优雅停机也卡在 engine close）。REST 层给读
+//!   加超时：超时 → 503 `{error:"history query timeout"}`，不让请求无限挂住
+//!   （阻塞线程仍会被 tsink 归还，但客户端能立刻看到"读超时"而不是白屏）。
 
 use crate::api::AppState;
 use crate::history::{HistoryAgg, HistoryQuery};
@@ -27,6 +32,24 @@ use axum::Json;
 use serde::Deserialize;
 use serde_json::json;
 use std::sync::Arc;
+
+/// 单次历史读的超时预算（秒）。tsink 可见性栅栏异常时读会无限期阻塞，
+/// 这里给上限：超时按 503 返回，前端面板显示"查询超时"而不是一直空白。
+pub const HISTORY_READ_TIMEOUT_SECS: u64 = 20;
+
+/// 读超时预算（可经环境变量覆盖，便于 e2e 用小预算验证超时分支）。
+/// `RSIOT_HISTORY_READ_TIMEOUT_SECS`：正整数秒；非法值回落缺省 20s。
+pub fn history_read_timeout() -> std::time::Duration {
+    static TIMEOUT: std::sync::OnceLock<std::time::Duration> = std::sync::OnceLock::new();
+    *TIMEOUT.get_or_init(|| {
+        let secs = std::env::var("RSIOT_HISTORY_READ_TIMEOUT_SECS")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .filter(|s| *s > 0)
+            .unwrap_or(HISTORY_READ_TIMEOUT_SECS);
+        std::time::Duration::from_secs(secs)
+    })
+}
 
 /// `GET /api/v1/history` query（P3；时间参数一律秒）。
 #[derive(Deserialize)]
@@ -195,11 +218,29 @@ pub async fn history(State(st): State<AppState>, Query(q): Query<HistoryParams>)
     };
     let metric = tag.clone();
     let devid = dev_id.clone();
-    let result = tokio::task::spawn_blocking(move || reader.select(&metric, &devid, &query))
-        .await
-        .unwrap_or_else(|e| Err(format!("select blocking 任务失败: {e}")));
+    let result = match tokio::time::timeout(
+        history_read_timeout(),
+        tokio::task::spawn_blocking(move || reader.select(&metric, &devid, &query)),
+    )
+    .await
+    {
+        Err(_) => Err("history query timeout".to_string()),
+        Ok(Ok(inner)) => inner,
+        Ok(Err(e)) => Err(format!("select blocking 任务失败: {e}")),
+    };
 
     match result {
+        Err(msg) if msg == "history query timeout" => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({
+                "error": "history query timeout",
+                "reason": format!(
+                    "读超时（>{:?}）：存储引擎可见性栅栏可能处于发布拍",
+                    history_read_timeout().as_secs()
+                ),
+            })),
+        )
+            .into_response(),
         Ok(points) => {
             // ts 秒基线（P2）：ts_ms / 1000；value 经 SampleValue untagged serde。
             let out: Vec<_> = points
@@ -469,9 +510,18 @@ pub async fn history_batch(State(st): State<AppState>, Json(req): Json<BatchReq>
                 Ok(v) => {
                     let metric = v.metric;
                     let devid = v.devid;
-                    tokio::task::spawn_blocking(move || reader.select(&metric, &devid, &v.query))
-                        .await
-                        .unwrap_or_else(|e| Err(format!("batch blocking 任务失败: {e}")))
+                    match tokio::time::timeout(
+                        history_read_timeout(),
+                        tokio::task::spawn_blocking(move || {
+                            reader.select(&metric, &devid, &v.query)
+                        }),
+                    )
+                    .await
+                    {
+                        Err(_) => Err("history query timeout".to_string()),
+                        Ok(Ok(inner)) => inner,
+                        Ok(Err(e)) => Err(format!("batch blocking 任务失败: {e}")),
+                    }
                 }
             };
             (idx, label, outcome)

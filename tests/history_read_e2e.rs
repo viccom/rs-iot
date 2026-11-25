@@ -21,7 +21,7 @@ use rs_iot::plugin::instance::InstanceManager;
 use rs_iot::types::Hwid;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio_util::sync::CancellationToken;
@@ -718,4 +718,59 @@ async fn history_downsample_empty_bucket_skipped() {
     );
 
     teardown(&mut engine, handle, &dir).await;
+}
+
+/// 读超时护栏（2026-11-25）：tsink 可见性栅栏在目录发布拍里持写锁，异常时
+/// **所有** history 读会无限期阻塞（症状：写入继续、查询永不返回、优雅停机
+/// 卡在 engine close）。REST 层给读加超时，超时 → 503 `{error:"history query
+/// timeout"}`——客户端立刻看到"读超时"，而不是白屏等下去。
+///
+/// 本用例用"永远不返回的 reader"复现阻塞：预算经环境变量压到 1s。
+struct StuckReader {
+    /// 用例结束时置位，唤醒阻塞线程（否则阻塞池线程会让测试进程挂到超时）。
+    release: Arc<AtomicBool>,
+}
+
+impl HistoryReader for StuckReader {
+    fn select(
+        &self,
+        _metric: &str,
+        _devid: &str,
+        _q: &HistoryQuery,
+    ) -> Result<Vec<HistoryPoint>, String> {
+        // 模拟被写锁挡住的读：请求侧超时后仍未返回。
+        while !self.release.load(Ordering::Relaxed) {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        Ok(vec![])
+    }
+}
+
+#[tokio::test]
+async fn history_read_timeout_returns_503() {
+    // 预算取小值（OnceLock 缓存进程级，故本进程内只设一次）。
+    std::env::set_var("RSIOT_HISTORY_READ_TIMEOUT_SECS", "1");
+    let release = Arc::new(AtomicBool::new(false));
+    let reader = Arc::new(StuckReader {
+        release: release.clone(),
+    });
+    let (app, handle) = test_app(Some(reader), Arc::from("ok")).await;
+    let token = login_token(&app).await;
+
+    let t0 = now_secs();
+    let uri = format!(
+        "/api/v1/history?dev_id=dev-x&tag=t&start={t0}&end={}&interval=5&agg=avg",
+        t0 + 60
+    );
+    let resp = get_history(&app, &token, &uri).await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::SERVICE_UNAVAILABLE,
+        "读卡死时必须 503（不能无限挂住请求）"
+    );
+    let json = body_json(resp).await;
+    assert_eq!(json["error"], "history query timeout");
+
+    release.store(true, Ordering::Relaxed);
+    handle.shutdown_and_wait().await.expect("lux shutdown");
 }
