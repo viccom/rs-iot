@@ -139,7 +139,12 @@ impl InstanceManager {
         }
         // D-OWN-1 唯一包装点：Source 出口经 SampleSender 遮蔽 send/try_send 登记
         // dev2inst（归属 = 本实例）；seen 去重防每 tick 旁路写，详见 sample_sender。
-        let tx = SampleSender::new(self.hub_tx.clone(), self.ctx.lux.clone(), id_key.clone());
+        let tx = SampleSender::new(
+            self.hub_tx.clone(),
+            self.ctx.lux.clone(),
+            id_key.clone(),
+            self.ctx.metrics.clone(),
+        );
         let token_run = token.clone();
         let id_for_log = id_key.clone();
         // 实例日志归属：任务整体包 inst_id span（log_ringbuffer on_new_span 抓取）

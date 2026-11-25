@@ -171,6 +171,18 @@ pub async fn sysstatus(State(st): State<AppState>) -> Json<serde_json::Value> {
             "pipeline_batch_count": m.pipeline_batch_count.load(std::sync::atomic::Ordering::Relaxed),
             "pipeline_workers_active": m.pipeline_workers_active.load(std::sync::atomic::Ordering::Relaxed),
             "pipeline_worker_deaths": m.pipeline_worker_deaths_count.load(std::sync::atomic::Ordering::Relaxed),
+            // 主链路守恒账(架构评估 §3.2):稳态 samples_out − pipeline_processed ==
+            // samples_dropped_dead_worker + samples_dropped_closed。
+            "samples_out_count": m.samples_out_count.load(std::sync::atomic::Ordering::Relaxed),
+            "samples_dropped_dead_worker_count": m
+                .samples_dropped_dead_worker_count
+                .load(std::sync::atomic::Ordering::Relaxed),
+            "samples_dropped_closed_count": m
+                .samples_dropped_closed_count
+                .load(std::sync::atomic::Ordering::Relaxed),
+            "samples_dropped_source_exit_count": m
+                .samples_dropped_source_exit_count
+                .load(std::sync::atomic::Ordering::Relaxed),
             "hub": {
                 "depth_last": m.hub_depth_last.load(std::sync::atomic::Ordering::Relaxed),
                 "depth_max": m.hub_depth_max.load(std::sync::atomic::Ordering::Relaxed),

@@ -7,6 +7,7 @@
 //! HSET，防每 tick 旁路写）；登记失败仅 warn 不阻断数据面（归属是管理面数据，
 //! 最终一致——启动预登记兜底，见 T3）。
 
+use crate::process_metrics::ProcessMetrics;
 use crate::types::Sample;
 use lux::EmbeddedClient;
 use std::collections::HashSet;
@@ -28,6 +29,10 @@ use tokio::sync::mpsc;
 /// 晚到无碍最终一致）。
 ///
 /// 未实现 `Debug`（EmbeddedClient 无 Debug，同 `HostContext` 口径 expect 放行）。
+///
+/// 主链路记账（架构评估 §3.2）：`send`/`try_send` 按结果计入进程级守恒账——成功进 hub
+/// 计 `samples_out`，hub 已关闭计 `samples_dropped_source_exit`（try_send 的 Full 把样本
+/// 退还调用方，两桶都不计）。所有 Source 都经本类型出口，故无需逐插件改。
 #[expect(missing_debug_implementations)]
 #[derive(Clone)]
 pub struct SampleSender {
@@ -39,41 +44,65 @@ pub struct SampleSender {
     inst_id: String,
     /// 进程内已登记 devid 集（防每 tick 旁路写；Clone 共享）。
     seen: Arc<Mutex<HashSet<String>>>,
+    /// 主链路守恒账（进程级指标）。
+    metrics: Arc<ProcessMetrics>,
 }
 
 impl SampleSender {
-    /// 生产构造：绑定登记目标 lux 与宿主 inst_id（`InstanceManager::start_source`）。
-    pub fn new(inner: mpsc::Sender<Sample>, lux: EmbeddedClient, inst_id: String) -> Self {
+    /// 生产构造：绑定登记目标 lux、宿主 inst_id 与进程级指标（`InstanceManager::start_source`）。
+    pub fn new(
+        inner: mpsc::Sender<Sample>,
+        lux: EmbeddedClient,
+        inst_id: String,
+        metrics: Arc<ProcessMetrics>,
+    ) -> Self {
         Self {
             inner,
             lux: Some(lux),
             inst_id,
             seen: Arc::new(Mutex::new(HashSet::new())),
+            metrics,
         }
     }
 
-    /// 纯转发构造（不登记）：luaNorth 黑洞 stub 通道与测试用（生产 Source 路径恒
-    /// 走 [`SampleSender::new`]）。
+    /// 纯转发构造（不登记、不计数）：luaNorth 黑洞 stub 通道与测试用（生产 Source 路径恒
+    /// 走 [`SampleSender::new`]）。计数落在一个无人读取的私有指标实例上。
     pub fn untracked(inner: mpsc::Sender<Sample>) -> Self {
         Self {
             inner,
             lux: None,
             inst_id: String::new(),
             seen: Arc::new(Mutex::new(HashSet::new())),
+            metrics: Arc::new(ProcessMetrics::new()),
         }
     }
 
-    /// 遮蔽 `mpsc::Sender::send`：先归属登记再转发（返回类型与 mpsc 对齐）。
+    /// 遮蔽 `mpsc::Sender::send`：先归属登记再转发（返回类型与 mpsc 对齐），并按结果记账。
     pub async fn send(&self, sample: Sample) -> Result<(), mpsc::error::SendError<Sample>> {
         self.note_send(&sample.devid).await;
-        self.inner.send(sample).await
+        let res = self.inner.send(sample).await;
+        if res.is_ok() {
+            self.metrics.samples_out();
+        } else {
+            self.metrics.samples_dropped_source_exit();
+        }
+        res
     }
 
     /// 遮蔽 `mpsc::Sender::try_send`：登记走 detached task（同步面无 lux API），
-    /// 发送语义与 mpsc 完全一致。
+    /// 发送语义与 mpsc 完全一致；按结果记账。
     pub fn try_send(&self, sample: Sample) -> Result<(), mpsc::error::TrySendError<Sample>> {
         self.note_spawn(&sample.devid);
-        self.inner.try_send(sample)
+        let res = self.inner.try_send(sample);
+        match &res {
+            Ok(()) => self.metrics.samples_out(),
+            // hub 已关：样本丢弃。Full 把样本退还调用方（可重试/自缓存），两桶都不计。
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                self.metrics.samples_dropped_source_exit();
+            }
+            Err(mpsc::error::TrySendError::Full(_)) => {}
+        }
+        res
     }
 
     /// 异步登记（`send` 路径）：seen 查重 → miss 才 await note；失败仅 warn
@@ -147,6 +176,13 @@ impl Deref for SampleSender {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::process_metrics::ProcessMetrics;
+    use std::sync::atomic::Ordering;
+
+    /// 主链路记账用的独立指标实例（每个用例一份，互不串扰）。
+    fn metrics() -> Arc<ProcessMetrics> {
+        Arc::new(ProcessMetrics::new())
+    }
 
     /// 唯一临时 data_dir（tag 区分用例，防并行测试互扰；照 db/dev_registry 模式）。
     async fn test_client(tag: &str) -> EmbeddedClient {
@@ -201,7 +237,7 @@ mod tests {
     async fn send_registers_dev2inst() {
         let lux = test_client("send-reg").await;
         let (tx, mut rx) = mpsc::channel::<Sample>(8);
-        let ss = SampleSender::new(tx, lux.clone(), "inst-a".into());
+        let ss = SampleSender::new(tx, lux.clone(), "inst-a".into(), metrics());
 
         ss.send(sample("d1")).await.expect("转发");
 
@@ -220,7 +256,7 @@ mod tests {
     async fn send_seen_dedupes() {
         let lux = test_client("send-dedup").await;
         let (tx, _rx) = mpsc::channel::<Sample>(8);
-        let ss = SampleSender::new(tx, lux.clone(), "inst-a".into());
+        let ss = SampleSender::new(tx, lux.clone(), "inst-a".into(), metrics());
 
         ss.send(sample("d1")).await.unwrap();
         ss.send(sample("d1")).await.unwrap();
@@ -243,7 +279,7 @@ mod tests {
     async fn clone_shares_seen() {
         let lux = test_client("send-clone").await;
         let (tx, _rx) = mpsc::channel::<Sample>(8);
-        let ss = SampleSender::new(tx, lux.clone(), "inst-a".into());
+        let ss = SampleSender::new(tx, lux.clone(), "inst-a".into(), metrics());
         let ss2 = ss.clone();
 
         ss.send(sample("d1")).await.unwrap();
@@ -285,7 +321,7 @@ mod tests {
     async fn try_send_registers_dev2inst() {
         let lux = test_client("try-reg").await;
         let (tx, mut rx) = mpsc::channel::<Sample>(8);
-        let ss = SampleSender::new(tx, lux.clone(), "inst-a".into());
+        let ss = SampleSender::new(tx, lux.clone(), "inst-a".into(), metrics());
 
         ss.try_send(sample("d1")).expect("转发");
         assert_eq!(rx.try_recv().unwrap().devid, "d1", "同步转发即刻可见");
@@ -299,7 +335,7 @@ mod tests {
     async fn try_send_seen_dedupes() {
         let lux = test_client("try-dedup").await;
         let (tx, _rx) = mpsc::channel::<Sample>(8);
-        let ss = SampleSender::new(tx, lux.clone(), "inst-a".into());
+        let ss = SampleSender::new(tx, lux.clone(), "inst-a".into(), metrics());
 
         ss.try_send(sample("d1")).unwrap();
         ss.try_send(sample("d1")).unwrap();
@@ -333,5 +369,76 @@ mod tests {
                 .is_empty(),
             "untracked try_send 不登记"
         );
+    }
+
+    /// 主链路记账：send 成功计 samples_out。
+    #[tokio::test]
+    async fn send_counts_samples_out() {
+        let lux = test_client("cnt-out").await;
+        let (tx, mut rx) = mpsc::channel::<Sample>(8);
+        let m = metrics();
+        let ss = SampleSender::new(tx, lux, "inst-a".into(), m.clone());
+
+        ss.send(sample("d1")).await.expect("转发");
+        assert_eq!(
+            m.samples_out_count.load(Ordering::Relaxed),
+            1,
+            "成功进 hub 计出口"
+        );
+        assert_eq!(rx.recv().await.unwrap().devid, "d1");
+    }
+
+    /// 主链路记账：hub 已关闭 → send 失败计 samples_dropped_source_exit，不计 samples_out。
+    #[tokio::test]
+    async fn send_to_closed_hub_counts_source_exit() {
+        let lux = test_client("cnt-closed").await;
+        let (tx, rx) = mpsc::channel::<Sample>(8);
+        let m = metrics();
+        let ss = SampleSender::new(tx, lux, "inst-a".into(), m.clone());
+        drop(rx);
+
+        assert!(ss.send(sample("d1")).await.is_err(), "hub 已关，send 失败");
+        assert_eq!(
+            m.samples_dropped_source_exit_count.load(Ordering::Relaxed),
+            1
+        );
+        assert_eq!(
+            m.samples_out_count.load(Ordering::Relaxed),
+            0,
+            "未进 hub 不计出口"
+        );
+    }
+
+    /// try_send 记账：成功计出口；Full 样本退还调用方——不计出口也不计丢弃；Closed 计丢弃。
+    #[tokio::test]
+    async fn try_send_counts_out_full_and_closed() {
+        let lux = test_client("cnt-try").await;
+        let (tx, rx) = mpsc::channel::<Sample>(1);
+        let m = metrics();
+        let ss = SampleSender::new(tx, lux, "inst-a".into(), m.clone());
+
+        ss.try_send(sample("d1")).expect("首个样本进 hub");
+        let e = ss.try_send(sample("d2")).expect_err("容量 1 已满");
+        assert!(
+            matches!(e, mpsc::error::TrySendError::Full(_)),
+            "Full 应把样本退还调用方"
+        );
+        assert_eq!(m.samples_out_count.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            m.samples_dropped_source_exit_count.load(Ordering::Relaxed),
+            0,
+            "Full 不算丢弃"
+        );
+
+        drop(rx);
+        assert!(matches!(
+            ss.try_send(sample("d3")),
+            Err(mpsc::error::TrySendError::Closed(_))
+        ));
+        assert_eq!(
+            m.samples_dropped_source_exit_count.load(Ordering::Relaxed),
+            1
+        );
+        assert_eq!(m.samples_out_count.load(Ordering::Relaxed), 1);
     }
 }

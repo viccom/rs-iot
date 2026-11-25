@@ -123,6 +123,29 @@ pub(crate) fn render_process(
             "pipeline worker 异常死亡数(panic)",
             m.pipeline_worker_deaths_count.load(rel),
         ),
+        // 主链路守恒账(架构评估 §3.2):稳态下
+        // samples_out − pipeline_processed == dropped_dead_worker + dropped_closed;
+        // dropped_source_exit 是未进入 hub 的样本(不在 samples_out 内)。
+        (
+            "rs_iot_samples_out_total",
+            "Source 出口成功送入 hub 的 Sample 数(主链路入口)",
+            m.samples_out_count.load(rel),
+        ),
+        (
+            "rs_iot_samples_dropped_dead_worker_total",
+            "dispatcher 丢弃:目标 worker 已退出(分片停入库)之后的样本",
+            m.samples_dropped_dead_worker_count.load(rel),
+        ),
+        (
+            "rs_iot_samples_dropped_closed_total",
+            "dispatcher 丢弃:向刚关闭的 worker channel 发送失败的样本",
+            m.samples_dropped_closed_count.load(rel),
+        ),
+        (
+            "rs_iot_samples_dropped_source_exit_total",
+            "Source 丢弃:向已关闭的 hub 发送失败(采集循环随之退出)",
+            m.samples_dropped_source_exit_count.load(rel),
+        ),
     ] {
         family_header(&mut s, name, help, "counter");
         metric_line(&mut s, name, "", &val.to_string());
@@ -659,6 +682,9 @@ mod tests {
         m.sse_lagged_count.store(3, Ordering::Relaxed);
         m.meta_versions_created[0].store(2, Ordering::Relaxed);
         m.meta_versions_created[1].store(1, Ordering::Relaxed);
+        m.samples_out_count.store(11, Ordering::Relaxed);
+        m.samples_dropped_dead_worker_count
+            .store(2, Ordering::Relaxed);
         m
     }
 
@@ -666,15 +692,16 @@ mod tests {
     fn render_process_has_help_type_and_values() {
         let m = proc_metrics();
         let out = render_process(&m, "eiot_abc", "0.1.0", 12.5, 8192);
-        // 全部 22 个 metric family 都在场(防误删某 family 静默通过)
+        // 全部 26 个 metric family 都在场(防误删某 family 静默通过)
         // 18 既有 + 4 版本管理(P0 2026-10-30: meta_versions_created/version_conflicts/
         // rollbacks/compactions ×{kind=screen,theme})
+        // + 4 主链路守恒账(2026-11-25 架构评估 §3.2)
         assert_eq!(
             out.lines()
                 .filter(|line| line.starts_with("# TYPE "))
                 .count(),
-            22,
-            "应输出 22 个 metric family"
+            26,
+            "应输出 26 个 metric family"
         );
         // 版本管理 label 形状：每 family 三行 {kind="screen"}/{kind="theme"}/{kind="symbol"}
         // （P0 两 kind；symbol = P3a 2026-10-31 第三资源族）
@@ -707,6 +734,12 @@ mod tests {
         // SSE lagged(R6:慢消费者 lag 丢帧计数,>0 提示调大 event_bus_capacity)
         assert!(out.contains("# TYPE rs_iot_sse_lagged_total counter"));
         assert!(out.contains("rs_iot_sse_lagged_total 3"));
+        // 主链路守恒账(架构评估 §3.2):入口 + 三个丢弃桶
+        assert!(out.contains("# TYPE rs_iot_samples_out_total counter"));
+        assert!(out.contains("rs_iot_samples_out_total 11"));
+        assert!(out.contains("rs_iot_samples_dropped_dead_worker_total 2"));
+        assert!(out.contains("# TYPE rs_iot_samples_dropped_closed_total counter"));
+        assert!(out.contains("# TYPE rs_iot_samples_dropped_source_exit_total counter"));
         // 资源
         assert!(out.contains("rs_iot_process_cpu_pct 12.5"));
         assert!(out.contains("rs_iot_process_mem_bytes 8192"));

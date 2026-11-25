@@ -18,6 +18,7 @@ use crate::history;
 use crate::host::HostContext;
 use crate::model;
 use crate::plugin::traits::Processor;
+use crate::process_metrics::ProcessMetrics;
 use crate::ticker::fnv1a_64;
 use crate::types::{Sample, SampleValue};
 use std::collections::{BTreeMap, HashMap};
@@ -96,22 +97,10 @@ pub async fn run(
                 };
                 ctx.metrics.hub_depth(hub_rx.len());
                 let idx = route(&s.devid, n);
-                if dead[idx] {
-                    // 该 worker 已退出，分片停入库；静默丢弃（首次关闭已告警）。
-                    continue;
-                }
-                // select! 包 send(I3):原裸 send().await 在 worker channel 满(256)时阻塞,
-                // 外层 select! 的 cancelled 分支无法观测直到 channel 腾空。内层 select! 让
-                // cancel 时立即中断 send(break 跳外层 loop),提升取消响应。
-                tokio::select! {
-                    _ = token.cancelled() => break,
-                    send_res = worker_txs[idx].send(s) => {
-                        if send_res.is_err() {
-                            // worker channel 关闭（worker 已退出）→ 标 dead，后续该 idx 跳过 send。
-                            dead[idx] = true;
-                            tracing::error!("[pipeline] worker {idx} closed (devid 分片停入库)");
-                        }
-                    }
+                // 投递 + 记账见 dispatch_one（返回 false = 取消中，跳外层 loop）。
+                if !dispatch_one(&ctx.metrics, &worker_txs[idx], &mut dead, idx, s, &token).await
+                {
+                    break;
                 }
             }
         }
@@ -136,6 +125,46 @@ pub async fn run(
         }
     }
     tracing::info!("[pipeline] stopped");
+}
+
+/// dispatcher 向分片 worker 投递一个 Sample，并按结果记入主链路守恒账（丢弃口径的
+/// 单一实现点）。返回 `false` = pipeline 取消中（调用方退出循环）。
+///
+/// 三种去向：
+/// - `dead[idx]` 已置位：该 worker 已退出、分片停入库，样本丢弃计
+///   `samples_dropped_dead_worker`（首次关闭已告警，这里只计数不再刷日志）；
+/// - 发送失败：worker channel 刚关闭的这一个样本丢弃计 `samples_dropped_closed`，并标
+///   `dead`（后续该 idx 不再 send，防忙循环）；
+/// - 发送成功：样本交给 worker，之后由 `pipeline_processed` / `pipeline_write_fail` 接手。
+///
+/// 取消打断的那一次 send 不计数（仅关停瞬间，样本随 future 丢弃）。
+async fn dispatch_one(
+    metrics: &ProcessMetrics,
+    worker_tx: &mpsc::Sender<Sample>,
+    dead: &mut [bool],
+    idx: usize,
+    s: Sample,
+    token: &CancellationToken,
+) -> bool {
+    if dead[idx] {
+        metrics.samples_dropped_dead_worker();
+        return true;
+    }
+    // select! 包 send(I3):原裸 send().await 在 worker channel 满(256)时阻塞,
+    // 外层 select! 的 cancelled 分支无法观测直到 channel 腾空。内层 select! 让
+    // cancel 时立即中断 send(返回 false),提升取消响应。
+    tokio::select! {
+        _ = token.cancelled() => false,
+        send_res = worker_tx.send(s) => {
+            if send_res.is_err() {
+                // worker channel 关闭（worker 已退出）→ 标 dead，后续该 idx 跳过 send。
+                dead[idx] = true;
+                metrics.samples_dropped_closed();
+                tracing::error!("[pipeline] worker {idx} closed (devid 分片停入库)");
+            }
+            true
+        }
+    }
 }
 
 /// 单 worker：攒批窗口 50ms → `write_batch`。所有 lux 错误 catch 降级，不 propagate。
@@ -408,6 +437,128 @@ mod tests {
                 .collect(),
             timestamp: ts,
         }
+    }
+
+    /// pipeline 单测用的进程内 lux（照 sample_sender tests 的 `test_client`；保活方式同）。
+    async fn test_lux(tag: &str) -> lux::EmbeddedClient {
+        let cfg = crate::config::AppConfig {
+            lux: crate::config::LuxConfig {
+                port: 0,
+                data_dir: std::env::temp_dir()
+                    .join(format!("pl-{tag}-{}", std::process::id()))
+                    .to_str()
+                    .unwrap()
+                    .to_string(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let handle = lux::run_with_config(crate::db::build_lux_config(&cfg))
+            .await
+            .expect("lux");
+        let client = handle.client();
+        // lux ≥0.37.1：ServerHandle drop 即停机——helper 只回 client，须 forget 保活。
+        std::mem::forget(handle);
+        client
+    }
+
+    /// dispatcher 丢弃记账分桶：刚关闭的 channel 上那一个样本计 closed 并标 dead；
+    /// 标 dead 之后的样本计 dead_worker；健康分片送达且不计丢弃。
+    #[tokio::test]
+    async fn dispatch_one_accounts_drops_by_bucket() {
+        use std::sync::atomic::Ordering;
+        let m = ProcessMetrics::new();
+        let token = CancellationToken::new();
+        let mut dead = vec![false; 2];
+
+        let (closed_tx, closed_rx) = mpsc::channel::<Sample>(4);
+        drop(closed_rx);
+        assert!(dispatch_one(&m, &closed_tx, &mut dead, 0, smp("a", 1, &[]), &token).await);
+        assert_eq!(
+            m.samples_dropped_closed_count.load(Ordering::Relaxed),
+            1,
+            "关闭 channel 上的第一个样本计 closed"
+        );
+        assert!(dead[0], "关闭即标 dead");
+        assert!(dispatch_one(&m, &closed_tx, &mut dead, 0, smp("a", 2, &[]), &token).await);
+        assert_eq!(
+            m.samples_dropped_dead_worker_count.load(Ordering::Relaxed),
+            1,
+            "标 dead 后的样本计 dead_worker"
+        );
+        assert_eq!(m.samples_dropped_closed_count.load(Ordering::Relaxed), 1);
+
+        let (live_tx, mut live_rx) = mpsc::channel::<Sample>(4);
+        assert!(dispatch_one(&m, &live_tx, &mut dead, 1, smp("b", 1, &[]), &token).await);
+        assert_eq!(live_rx.recv().await.unwrap().devid, "b", "健康分片照常送达");
+        assert!(!dead[1]);
+    }
+
+    /// 取消打断的 send：返回 false 且不计数（仅关停瞬间；被卡住的是满 channel）。
+    #[tokio::test]
+    async fn dispatch_one_cancelled_returns_false_without_counting() {
+        use std::sync::atomic::Ordering;
+        let m = ProcessMetrics::new();
+        let token = CancellationToken::new();
+        let (tx, _rx) = mpsc::channel::<Sample>(1);
+        tx.send(smp("x", 0, &[])).await.unwrap(); // 占满，令被测 send 挂起
+        token.cancel();
+        let mut dead = vec![false; 1];
+        assert!(!dispatch_one(&m, &tx, &mut dead, 0, smp("a", 1, &[]), &token).await);
+        assert!(!dead[0]);
+        assert_eq!(
+            m.samples_dropped_closed_count.load(Ordering::Relaxed)
+                + m.samples_dropped_dead_worker_count.load(Ordering::Relaxed),
+            0
+        );
+    }
+
+    /// 主链路守恒账（架构评估 §3.2 验收判据的单元形态）：
+    /// `samples_out − processed == dropped_dead_worker + dropped_closed`。
+    /// 场景：唯一分片的 worker 已退出，出口发出的样本全部落丢弃桶。
+    #[tokio::test]
+    async fn main_link_conservation_when_worker_dead() {
+        use crate::plugin::sample_sender::SampleSender;
+        use std::sync::atomic::Ordering;
+        let lux = test_lux("conservation").await;
+        let metrics = Arc::new(ProcessMetrics::new());
+        let (hub_tx, mut hub_rx) = mpsc::channel::<Sample>(64);
+        let ss = SampleSender::new(hub_tx, lux, "inst-t".into(), metrics.clone());
+        let (worker_tx, worker_rx) = mpsc::channel::<Sample>(8);
+        drop(worker_rx); // worker 已退出的等价物：接收端消失
+        let mut dead = vec![false];
+        let token = CancellationToken::new();
+
+        const N: u64 = 5;
+        let sender = tokio::spawn(async move {
+            for i in 0..N {
+                ss.send(smp("dev", i as i64, &[("t", SampleValue::Int(i as i64))]))
+                    .await
+                    .expect("hub 开着");
+            }
+        });
+        for _ in 0..N {
+            let s = hub_rx.recv().await.expect("hub 收到");
+            assert!(dispatch_one(&metrics, &worker_tx, &mut dead, 0, s, &token).await);
+        }
+        sender.await.unwrap();
+
+        let closed = metrics.samples_dropped_closed_count.load(Ordering::Relaxed);
+        let dead_worker = metrics
+            .samples_dropped_dead_worker_count
+            .load(Ordering::Relaxed);
+        let out = metrics.samples_out_count.load(Ordering::Relaxed);
+        assert_eq!(
+            (closed, dead_worker),
+            (1, N - 1),
+            "第一个样本撞上刚关闭的 channel，其余落在已死的分片"
+        );
+        assert_eq!(out, N);
+        assert_eq!(
+            out - metrics.pipeline_processed_count.load(Ordering::Relaxed),
+            closed + dead_worker,
+            "samples_out − processed == 丢弃之和"
+        );
     }
 
     /// 同批同 dev 合并为一个 RtdataSample：同 tag 后写覆盖、不同 tag 保留、

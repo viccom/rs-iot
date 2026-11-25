@@ -29,6 +29,23 @@ pub struct ProcessMetrics {
     pub pipeline_workers_active: AtomicU64,
     /// pipeline worker 异常死亡数(panic;counter)。
     pub pipeline_worker_deaths_count: AtomicU64,
+    // 主链路守恒账（2026-10-27 架构评估 §3.2）：此前只有"出"（processed）与"深度"
+    // （hub_depth），缺"入"与"丢"。稳态恒等式：
+    //   samples_out − pipeline_processed == dropped_dead_worker + dropped_closed
+    // `pipeline_processed` 的口径是"已冲刷的整批"：写 lux 失败的批次同样计入（失败另有
+    // `pipeline_write_fail` 计次），故写失败不破坏上式。差额的可解释来源：
+    // 在途（hub/worker channel 与攒批 buf 内）、关停残留（取消后未 dispatch 的存量与被
+    // 打断的那一次 send）、worker panic 时其 buf 内样本、Processor 返回 None 丢弃的样本
+    // （Passthrough 下恒 0）、`write_batch` prep 出错的整批（`write_fail` 只计 1 次）。
+    // dropped_source_exit 是**未进入 hub** 的样本，不在 samples_out 内，单独看。
+    /// Source 出口成功送入 hub 的 Sample 数（主链路入口）。
+    pub samples_out_count: AtomicU64,
+    /// dispatcher 丢弃：目标 worker 已退出（分片停入库）之后的样本。
+    pub samples_dropped_dead_worker_count: AtomicU64,
+    /// dispatcher 丢弃：向刚关闭的 worker channel 发送失败的那一个样本。
+    pub samples_dropped_closed_count: AtomicU64,
+    /// Source 丢弃：向已关闭的 hub 发送失败（采集循环随之退出）。
+    pub samples_dropped_source_exit_count: AtomicU64,
     // hub 背压（gauge）
     /// hub channel 最新深度（gauge）。
     pub hub_depth_last: AtomicU64,
@@ -77,6 +94,10 @@ impl ProcessMetrics {
             pipeline_batch_count: AtomicU64::new(0),
             pipeline_workers_active: AtomicU64::new(0),
             pipeline_worker_deaths_count: AtomicU64::new(0),
+            samples_out_count: AtomicU64::new(0),
+            samples_dropped_dead_worker_count: AtomicU64::new(0),
+            samples_dropped_closed_count: AtomicU64::new(0),
+            samples_dropped_source_exit_count: AtomicU64::new(0),
             hub_depth_last: AtomicU64::new(0),
             hub_depth_max: AtomicU64::new(0),
             sse_lagged_count: AtomicU64::new(0),
@@ -140,6 +161,25 @@ impl ProcessMetrics {
     /// 后计死亡,运维可统计 worker 历史死亡次数)。
     pub fn worker_died(&self) {
         self.pipeline_worker_deaths_count
+            .fetch_add(1, Ordering::Relaxed);
+    }
+    /// Source 出口成功送入 hub +1（主链路入口）。
+    pub fn samples_out(&self) {
+        self.samples_out_count.fetch_add(1, Ordering::Relaxed);
+    }
+    /// dispatcher 丢弃：目标 worker 已退出之后的样本 +1。
+    pub fn samples_dropped_dead_worker(&self) {
+        self.samples_dropped_dead_worker_count
+            .fetch_add(1, Ordering::Relaxed);
+    }
+    /// dispatcher 丢弃：向刚关闭的 worker channel 发送失败 +1。
+    pub fn samples_dropped_closed(&self) {
+        self.samples_dropped_closed_count
+            .fetch_add(1, Ordering::Relaxed);
+    }
+    /// Source 丢弃：向已关闭的 hub 发送失败 +1。
+    pub fn samples_dropped_source_exit(&self) {
+        self.samples_dropped_source_exit_count
             .fetch_add(1, Ordering::Relaxed);
     }
     /// 更新 hub 深度 gauge（last + fetch_max）。
@@ -274,5 +314,28 @@ mod tests {
         m.worker_died();
         m.worker_died();
         assert_eq!(m.pipeline_worker_deaths_count.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn main_link_drop_counters_increment_independently() {
+        // 主链路守恒账四个计数器各自独立累加（架构评估 §3.2）
+        let m = ProcessMetrics::new();
+        m.samples_out();
+        m.samples_out();
+        m.samples_dropped_dead_worker();
+        m.samples_dropped_closed();
+        m.samples_dropped_closed();
+        m.samples_dropped_closed();
+        m.samples_dropped_source_exit();
+        assert_eq!(m.samples_out_count.load(Ordering::Relaxed), 2);
+        assert_eq!(
+            m.samples_dropped_dead_worker_count.load(Ordering::Relaxed),
+            1
+        );
+        assert_eq!(m.samples_dropped_closed_count.load(Ordering::Relaxed), 3);
+        assert_eq!(
+            m.samples_dropped_source_exit_count.load(Ordering::Relaxed),
+            1
+        );
     }
 }

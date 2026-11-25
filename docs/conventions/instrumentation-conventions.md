@@ -27,7 +27,7 @@
 - 进程级 → 内存 `AtomicU64`（不落 lux，REST 直读）。
 - **REST 出口**（两个，同源 M4 数据）：
   - `GET /api/v1/inst/stats?inst_id=`（JSON，人查出口，`{inst_id, app_code, host_kind, state, health}`）
-  - `GET /metrics`（Prometheus exposition 文本，机器出口，免 JWT）—— per-instance 5 family（`rs_iot_instance_info`/`tick_total`/`fail_total`/`last_activity_duration_ms`/`last_activity_ts`）+ 进程级 14 family
+  - `GET /metrics`（Prometheus exposition 文本，机器出口，免 JWT）—— per-instance 5 family（`rs_iot_instance_info`/`tick_total`/`fail_total`/`last_activity_duration_ms`/`last_activity_ts`）+ 进程级 26 family（含主链路守恒账四族 `rs_iot_samples_*`，2026-11-25；清单见 [rest-api](../reference/rest-api.md) `/metrics` 节）
 - **同批次可观测姊妹端点**（非埋点，同属 P1 可观测面）：`POST/GET/DELETE /api/v1/inst/trace`（报文 hex dump，target `io_trace`）+ `GET /api/v1/logs/recent`（日志 ring buffer，`[log].ring_buffer_capacity` 默认 2000）。详见 [`rest-api.md`](../reference/rest-api.md) §4.10。
 - `/api/v1/lua/stats`（lua 专属旧端点）**已废弃移除**，统一到 `/api/v1/inst/stats`。
 
