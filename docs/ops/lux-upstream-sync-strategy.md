@@ -64,6 +64,7 @@ git rebase origin/main
 ```
 origin → https://github.com/lux-db/lux.git        官方上游,fetch 只读同步
 mine   → https://git.metme.top/viccom/lux.git     私人 fork,push 备份
+镜像   → https://github.com/viccom/lux.git        私有镜像,只供 CI 检出(§九.5);本地不加 remote
 ```
 
 - 本地 `main` 是工作分支,叠本地补丁于官方之上;另有 `fix/windows-compat` 历史分支
@@ -192,6 +193,33 @@ git push mine main
 git push mine main --force-with-lease
 ```
 
+### 九.5、CI 可达性(GitHub Actions 私有镜像)
+
+rs-iot 的 CI（GitHub `viccom/rs-iot`，`.github/workflows/ci.yml`）要把 lux 检出到 rs-iot 的同级目录。
+lux fork 含本地补丁、不公开，官方源上也没有，所以 GitHub 上另有一份**私有镜像**（2026-11-25 建）：
+`viccom/lux`，私有，只有 `main` 分支。
+
+- **建立与同步**：从本地克隆只推 `main`，不带标签、其他分支和工作区改动；本地克隆**不新增 remote**。
+
+  ```bash
+  cd "$LUX"
+  git push https://github.com/viccom/lux.git main                       # 快进
+  git push https://github.com/viccom/lux.git main --force-with-lease    # rebase 改写历史后
+  ```
+
+- **同步义务**：本地 `main` 一变（rebase、新增补丁）就要重推。镜像落后时 CI 测的是旧 lux——
+  rs-iot 依赖了新的 lux 行为就会误红或误绿。速查见 §十三。
+- **CI 布局**：`actions/checkout` 不允许检出到工作区之外，所以 Rust job 的布局是
+  `$GITHUB_WORKSPACE/{rs-iot, lux, tsink_fork}`——rs-iot 检出到子目录 `rs-iot/`，lux、tsink 在
+  它的同级，各 job 以 `defaults.run.working-directory` 进 `rs-iot/` 执行 cargo。
+  2026-11-25 之前写成 `path: ../lux`，被 checkout 拒绝，Rust job 自 CI 建立以来没有跑通过。
+- **token**：repo secret `RUST_DEPS_TOKEN`（仓库 Settings → Secrets and variables → Actions）。
+  用 fine-grained PAT：Repository access 只选 `viccom/lux`，权限只给 Contents: Read。
+  它**不能**用来检出别的仓库，所以 tsink（`viccom/tsink`，公开）的检出步骤不传 token。
+  secret 缺失或无权时，Rust job 在「Checkout lux」一步失败；换 token 只改 secret，不动工作流，
+  然后在 Actions 页面重跑失败的 job。PAT 有有效期：到期后 Rust job 回到同一处失败，需换新 token
+  （`docs` / `frontend` 不受影响，所以整体不会全红，容易漏看）。
+
 ## 十、应急恢复
 
 rebase 搞砸时,三级兜底:
@@ -235,6 +263,7 @@ git fetch origin && git rebase origin/main     # 同步 + 重叠补丁(冲突按
 cargo build -j 2                                # lux 编译
 cd "$RSIOT" && cargo check -j 2                # rs-iot 集成
 # 全绿后:git push mine main --force-with-lease  # 云备份
+#          git push https://github.com/viccom/lux.git main --force-with-lease  # 同步 CI 镜像(§九.5)
 ```
 
 ---

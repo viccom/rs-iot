@@ -25,8 +25,8 @@ repository = { workspace = true }
 [dependencies]
 # 嵌入式内存数据库：对外 RESP + Tiered 持久化
 lux = { path = "../lux" }
-# 历史时序存储引擎（Phase 1b 写路径终态存储；path 依赖同级 fork，基线 tag
-# rs-iot-1b-baseline）。仅 feature `history` 引入，默认构建依赖面零变化。
+# 历史时序存储引擎（Phase 1b 写路径终态存储；path 依赖同级 fork，跟随其 master——
+# 无版本锚，与本地开发和 CI 一致）。仅 feature `history` 引入，默认构建依赖面零变化。
 tsink = { path = "../tsink_fork", optional = true }
 
 # 异步运行时

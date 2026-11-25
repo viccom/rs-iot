@@ -10,38 +10,50 @@ env:
   # 因此警告严格化只在本仓代码上生效：各 job 用 `-- -D warnings`（clippy）而非全局 RUSTFLAGS。
   CARGO_TERM_COLOR: always
 
-# ── 私有 path 依赖前提（2026-10-27 审查 P1 修正说明）────────────────────────
-# rs-iot 依赖两个同级私有库：../lux（必需）与 ../tsink_fork（仅 history feature）。
-# 本 workflow 用 `RUST_DEPS_TOKEN`（org/repo secret）拉取；**秘密未配置时 checkout 会
-# 立即失败并打印本注释指引**——这正是此前的沉默失效点（viccom/lux 在 GitHub 匿名 404，
-# 五个 Rust job 从未跑通过）。
-# 三种部署选择（自行裁决其一，见 CLAUDE.md「CI 私有依赖」节）：
-#   ① 配 RUST_DEPS_TOKEN（repo scope，可读 viccom/lux 与 viccom/tsink）；
-#   ② 把 luc/tsink 镜像到公开托管点，改下面的 repository 字段；
-#   ③ 承认单机开发现实 → 删除 Rust jobs，只保留 docs / frontend / audit
-#      （本地门禁 = `just check`，已覆盖 fmt/docs/lint/test）。
-# 无论选哪种，`docs` 与 `frontend` 两个 job 都不依赖私有库，恒定可跑。
+# ── 私有 path 依赖与检出布局（2026-11-25 方案①）──────────────────────────────
+# rs-iot 依赖两个同级库：../lux（必需；lux-db/lux 0.37.1 + 本地补丁，私有）与
+# ../tsink_fork（仅 history feature；viccom/tsink，公开）。
+#
+# 布局：actions/checkout 不允许检出到工作区之外，所以用到 Rust 的 job 一律是
+#   $GITHUB_WORKSPACE/{rs-iot, lux, tsink_fork}
+# ——本仓检出到子目录 rs-iot/，lux、tsink 检出到它的同级；各 job 以
+# defaults.run.working-directory 进 rs-iot/ 执行 cargo。
+# （2026-11-25 之前 lux/tsink 写成 path: ../lux、../tsink_fork，被 checkout 以
+#   "Repository path … is not under …" 拒绝——Rust job 自 CI 建立以来从未跑通过。）
+#
+# 私有依赖 viccom/lux 经 repo secret `RUST_DEPS_TOKEN` 拉取：fine-grained PAT，只需
+# viccom/lux 的 Contents: Read。secret 缺失或无权时，Rust job 在「Checkout lux」一步失败。
+# lux 镜像的建立与同步、token 的权限，见 docs/ops/lux-upstream-sync-strategy.md「CI 可达性」。
+#
+# tsink 检出 viccom/tsink 的 master：rs-iot 的 path 依赖没有版本锚，本地开发与部署
+# 用的都是 master；旧基线标签 rs-iot-1b-baseline 停在 2026-08-25，已不适用。
+# 它是公开仓库，检出时不传 token（只授了 lux 的 fine-grained PAT 对它无权）。
+#
+# docs / frontend / audit 三个 job 不依赖这两个库，恒定可跑。
 
 jobs:
   fmt:
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: rs-iot
     steps:
       - uses: actions/checkout@v4
-      # lux 为 path 依赖（../lux）；CI 一并 checkout（仓库名按实际 GitHub org 调整）
+        with:
+          path: rs-iot
       - name: Checkout lux (private path dep)
         uses: actions/checkout@v4
         with:
           repository: viccom/lux
-          path: ../lux
+          ref: main
+          path: lux
           token: ${{ secrets.RUST_DEPS_TOKEN }}
-      # tsink 为 path 依赖(../tsink_fork);CI 一并 checkout(pin 基线)
-      - name: Checkout tsink (private path dep, pin baseline)
+      - name: Checkout tsink (path dep, history feature)
         uses: actions/checkout@v4
         with:
           repository: viccom/tsink
-          ref: rs-iot-1b-baseline
-          path: ../tsink_fork
-          token: ${{ secrets.RUST_DEPS_TOKEN }}
+          ref: master
+          path: tsink_fork
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
@@ -49,22 +61,26 @@ jobs:
 
   clippy:
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: rs-iot
     steps:
       - uses: actions/checkout@v4
+        with:
+          path: rs-iot
       - name: Checkout lux (private path dep)
         uses: actions/checkout@v4
         with:
           repository: viccom/lux
-          path: ../lux
+          ref: main
+          path: lux
           token: ${{ secrets.RUST_DEPS_TOKEN }}
-      # tsink 为 path 依赖(../tsink_fork);CI 一并 checkout(pin 基线)
-      - name: Checkout tsink (private path dep, pin baseline)
+      - name: Checkout tsink (path dep, history feature)
         uses: actions/checkout@v4
         with:
           repository: viccom/tsink
-          ref: rs-iot-1b-baseline
-          path: ../tsink_fork
-          token: ${{ secrets.RUST_DEPS_TOKEN }}
+          ref: master
+          path: tsink_fork
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
@@ -88,22 +104,26 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: rs-iot
     steps:
       - uses: actions/checkout@v4
+        with:
+          path: rs-iot
       - name: Checkout lux (private path dep)
         uses: actions/checkout@v4
         with:
           repository: viccom/lux
-          path: ../lux
+          ref: main
+          path: lux
           token: ${{ secrets.RUST_DEPS_TOKEN }}
-      # tsink 为 path 依赖(../tsink_fork);CI 一并 checkout(pin 基线)
-      - name: Checkout tsink (private path dep, pin baseline)
+      - name: Checkout tsink (path dep, history feature)
         uses: actions/checkout@v4
         with:
           repository: viccom/tsink
-          ref: rs-iot-1b-baseline
-          path: ../tsink_fork
-          token: ${{ secrets.RUST_DEPS_TOKEN }}
+          ref: master
+          path: tsink_fork
       - uses: dtolnay/rust-toolchain@stable
       - name: Install libudev-dev (Linux)
         if: runner.os == 'Linux'
@@ -114,22 +134,26 @@ jobs:
     # 验证裁剪组合可编译：关掉三协议，覆盖最小现场部署（lua 脚本采集）。
     # 防止 feature 化后裁剪组合悄悄编译失败却无人发现（docs/decisions/2026-08-07-feature-gating-protocols.md R4）。
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: rs-iot
     steps:
       - uses: actions/checkout@v4
+        with:
+          path: rs-iot
       - name: Checkout lux (private path dep)
         uses: actions/checkout@v4
         with:
           repository: viccom/lux
-          path: ../lux
+          ref: main
+          path: lux
           token: ${{ secrets.RUST_DEPS_TOKEN }}
-      # tsink 为 path 依赖(../tsink_fork);CI 一并 checkout(pin 基线)
-      - name: Checkout tsink (private path dep, pin baseline)
+      - name: Checkout tsink (path dep, history feature)
         uses: actions/checkout@v4
         with:
           repository: viccom/tsink
-          ref: rs-iot-1b-baseline
-          path: ../tsink_fork
-          token: ${{ secrets.RUST_DEPS_TOKEN }}
+          ref: master
+          path: tsink_fork
       - uses: dtolnay/rust-toolchain@stable
       - name: Install libudev-dev (Linux)
         if: runner.os == 'Linux'
@@ -146,22 +170,26 @@ jobs:
 
   doc:
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: rs-iot
     steps:
       - uses: actions/checkout@v4
+        with:
+          path: rs-iot
       - name: Checkout lux (private path dep)
         uses: actions/checkout@v4
         with:
           repository: viccom/lux
-          path: ../lux
+          ref: main
+          path: lux
           token: ${{ secrets.RUST_DEPS_TOKEN }}
-      # tsink 为 path 依赖(../tsink_fork);CI 一并 checkout(pin 基线)
-      - name: Checkout tsink (private path dep, pin baseline)
+      - name: Checkout tsink (path dep, history feature)
         uses: actions/checkout@v4
         with:
           repository: viccom/tsink
-          ref: rs-iot-1b-baseline
-          path: ../tsink_fork
-          token: ${{ secrets.RUST_DEPS_TOKEN }}
+          ref: master
+          path: tsink_fork
       - uses: dtolnay/rust-toolchain@stable
       - name: Install libudev-dev (Linux)
         if: runner.os == 'Linux'
