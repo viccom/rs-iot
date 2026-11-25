@@ -96,7 +96,7 @@
 | [2026-09-01-history-round3-chunk-passthrough-plan.md](designs/2026-09-01-history-round3-chunk-passthrough-plan.md) | tsink R3：chunk 直通（恢复吞吐 + N7 收口） | **已实施**（结论见 08-29 总账 §五-G） |
 | [2026-09-02-history-round4-n8-flush-verify-race-plan.md](designs/2026-09-02-history-round4-n8-flush-verify-race-plan.md) | tsink R4：N8 flush verify 对 compaction 替换的容忍语义 | **已实施**（结论见 08-29 总账 §五-I） |
 | [2026-09-03-history-round5-p3-watermark-eviction-plan.md](designs/2026-09-03-history-round5-p3-watermark-eviction-plan.md) | tsink R5：P3 水位粗判（消维护拍全量扫） | **已实施**（结论见 08-29 总账 §五-K） |
-| [2026-10-27-architecture-optimization-review.md](designs/2026-10-27-architecture-optimization-review.md) | 架构优化评估（9 项议题：依赖可复现/丢数据总账/bind 类型化/effective 扇入/热路径/api 分层/协议骨架/配置面/Sample 分配）+ 实施顺序与"不建议做"清单 | 评审 |
+| [2026-10-27-architecture-optimization-review.md](designs/2026-10-27-architecture-optimization-review.md) | 架构优化评估（9 项议题：依赖可复现/丢数据总账/bind 类型化/effective 扇入/热路径/api 分层/协议骨架/配置面/Sample 分配）+ 实施顺序与"不建议做"清单 | **部分实施**（2026-11-25 落地第 2、5 项：主链路守恒账、write_batch 去 clone；其余 7 项待裁决） |
 | [2026-10-27-external-plugin-config-push-v3-design.md](designs/2026-10-27-external-plugin-config-push-v3-design.md) | 外部插件配置下发升级（ConfigPush v3）：补 `app_config`/`devices[].bind` 两层下发 + 版本集合协商 + 凭证解析下发 + 不变量与不做什么清单 | **已实施**（批次 1+2；批次 3 可选未做） |
 | [2026-08-26-history-phase3-governance-plan.md](designs/2026-08-26-history-phase3-governance-plan.md) | 历史存储 Phase 3 余项收口实施计划（治理 metrics 7 新 family/HistoryTelemetry 内存水位/前端历史查询面板/init_failed+栈溢出双 e2e/浏览器嵌入实测七项+2 bug 修复） | **已实施**（feat/history-phase3，2026-08-26） |
 | [2026-08-26-history-review-fix-plan.md](designs/2026-08-26-history-review-fix-plan.md) | 历史存储 Phase 1/2/3 审查修复计划（High×5 + Medium×11 全修；Low×17 延后 backlog） | **已实施**（2026-08-26，b81ce26 收口） |
@@ -109,7 +109,7 @@
 | [2026-11-01-layering-coupling-review.md](designs/2026-11-01-layering-coupling-review.md) | 分层耦合专项：实测 10 模块强连通分量 → 切三条类型回边（InstState/LogEntry/ModelError 上移）+ 分层门禁 `scripts/check_layers.py` + plugin→history / api→lua_core 收口 | **已实施**（2026-11-01） |
 | [2026-11-01-plugin-audit-fix-plan.md](designs/2026-11-01-plugin-audit-fix-plan.md) | 内置插件审查修复跟踪（10 插件 28 项真 BUG：四协议 I/O 超时/RTU 串扰/eip 位寻址+panic/luaTransform 饿死/luaNorth 等待环/静默写 0 拒写/sidecar 日志与注册竞态等）+ 定性不修清单 | **已实施**（A~H 八批 + 门禁全绿） |
 | [2026-11-01-protocol-semantics-audit.md](designs/2026-11-01-protocol-semantics-audit.md) | 协议插件协议语义审查台账（Modbus/OPC UA/S7/EtherNet/IP 73 条）：逐条定级 + 框架/插件/上游库归责 + 库源码与探针证据；含 HMI 写通道失效、S7 重连风暴与写应答丢弃、EIP 批量失败不重连、OPC UA 60s 阻塞等 | **已实施**（a27328b/a4b6c1b；未闭环项见 §9.2） |
-| [2026-11-04-plugin-kernel-evolution-design.md](designs/2026-11-04-plugin-kernel-evolution-design.md) | 插件内核演进（轻量·优雅·可演进）：统一 descriptor/runtime/catalog；schema 配置、sidecar 2.1、托管进程、SDK/conformance、能力与健康面 | **讨论中**（draft；P0-P2 未实施） |
+| [2026-11-04-plugin-kernel-evolution-design.md](designs/2026-11-04-plugin-kernel-evolution-design.md) | 插件内核演进（轻量·优雅·可演进）：统一 descriptor/runtime/catalog；schema 配置、sidecar 2.1、托管进程、SDK/conformance、能力与健康面 | **讨论中**（draft；P0-P2 未实施。2026-11-25 部分裁决：WASM、runtime trait、能力闭集、SDK 不做，其余目标待裁决） |
 
 ## ops/ — 部署与运维（怎么跑起来）
 

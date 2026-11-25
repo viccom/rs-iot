@@ -1,7 +1,11 @@
 # rs-iot 架构优化评估（2026-10-27）
 
-> **状态**：in-review（评估结论，待逐项裁决；无代码改动）
+> **状态**：partially-implemented（2026-11-25 落地第 2、5 项；其余 7 项待逐项裁决）
 > **日期**：2026-10-27
+> **实施**：2026-11-25 用户裁决"做"第 2 项（主链路守恒账四计数器）与第 5 项（`write_batch` 去双重 clone）；回填见 §3.2、§3.5 末尾
+> **代码**：`src/process_metrics.rs`（`samples_*` 四计数器）、`src/plugin/sample_sender.rs`（出口记账）、`src/pipeline.rs`（`dispatch_one`，丢弃口径的单一实现点）、`src/api/routes_metrics/render.rs` 与 `src/api/routes_sys.rs`（暴露）、`src/db/rtdata.rs`（argv 借用）
+> **测试**：`src/pipeline.rs` / `src/plugin/sample_sender.rs` / `src/process_metrics.rs` / `src/api/routes_metrics/render.rs` 内单测（守恒账 7 例）；`src/db/rtdata.rs` 批写 8 例
+> **遗留**：第 1、3、4、6、7、8、9 项未动，待逐项裁决（触发条件见 §2 表）；第 1 项的现状是 CI 的 Rust 作业仍不可运行（lux 检出路径与私有仓库可达性，见 `.github/workflows/ci.yml` 头注）
 > **范围**：全仓架构级评估（分层/耦合/可观测性/热路径/配置面/依赖工程），**不含**已修复的 P1 缺陷与文档漂移
 > **依据**：三路并行架构审查（分层 / 功能耦合 / 规范纪律）+ 主会话独立依赖矩阵与卫生统计；全部行号为 HEAD `d188155` 实测
 > **前置结论**：本轮审查**未发现 P1 结构性缺陷**——依赖矩阵严格单向（`lib.rs 装配 → {api,pipeline} → {plugin,model,history} → {db,types,error,event_bus,host}`），无环、无反向依赖（`db→api` 仅存在于一条历史注释）。因此本文是**增量优化**，不是返工建议。
@@ -88,6 +92,12 @@
 
 **验收判据**：压测跑一轮后 `samples_out - pipeline_processed_count == 三个 dropped 之和`（0 或差额可解释）。
 
+> **实施回填（2026-11-25）**：四计数器落地——`rs_iot_samples_out_total`、`rs_iot_samples_dropped_{dead_worker,closed,source_exit}_total`（`/sysstatus` 同步暴露）。两点与上文建议不同：
+> 1. Source 出口的计数统一放在 `SampleSender::send`/`try_send` 内（未逐插件改）：成功计 `samples_out`，hub 已关计 `source_exit`；`try_send` 的 Full 把样本退还调用方，不计。
+> 2. 验收判据更正为 `samples_out − pipeline_processed == dropped_dead_worker + dropped_closed`。`source_exit` 是**未进入 hub** 的样本，不在 `samples_out` 内；差额另有三个可解释来源——在途（hub/worker channel 与攒批 buf）、关停残留（取消后未 dispatch 的存量与被打断的那一次 send，不计数）、worker panic 时其 buf 内样本（无计数）。
+>
+> dispatcher 的投递与记账抽成 `dispatch_one`（丢弃口径单一实现点）；守恒账的单测形态是"唯一分片已死，出口样本全部落丢弃桶"，**未做**压测轮次的实机验收。
+
 ### 3.3 `DeviceBinding.bind` 类型擦除
 
 **事实**：`src/types.rs:236-243`
@@ -143,6 +153,8 @@ for (f, v) in pairs {
 **后果**：50 万点/秒门禁下每点 2 次纯多余 `String` 分配（~2×点数量/秒）。bench 到 2.1–2.4M 说明有余量，但这是纯浪费。
 
 **建议**：聚合直接产出 `Vec<&str>` 借用（`argv` 改为 `Vec<&str>`，`key` 单独持有），去掉两次 clone。**改动 <10 行，无行为变化，有 `db::rtdata::batch_tests` 5 个测试兜底。**
+
+> **实施回填（2026-11-25）**：argv 改 `Vec<&str>` 借用聚合产物。对照实测（临时 bench，计数分配器 + dev profile，各 3 次）：每次调用分配次数 140 点批 2963 → 2673（−290 = 2×点数 + 设备数，−9.8%），5000 点批 95031 → 84931（−10.6%），数值三次完全一致。**吞吐未测出差别**（dev profile 噪声数倍于效应）——收益是确定性的分配次数下降，不是可观测的速度提升。
 
 ### 3.6 `api/` 承担领域逻辑
 
