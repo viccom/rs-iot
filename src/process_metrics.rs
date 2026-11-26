@@ -64,21 +64,22 @@ pub struct ProcessMetrics {
     pub mqtt_publish_fail_count: AtomicU64,
     /// mqtt 当前是否已连接（gauge，1=true/0=false；T8 后恒 false）。
     pub mqtt_connected: AtomicBool,
-    // 画面/主题/符号版本管理（P0，design 2026-10-30-screen-versioning §5.2；symbol = P3a 2026-10-31）
-    // 索引约定：0=screen 1=theme 2=symbol（routes_meta::MetaKind::metric_idx，三 kind 同构）。
+    // 画面/主题/符号/场景版本管理（P0，design 2026-10-30-screen-versioning §5.2；
+    // symbol = P3a 2026-10-31；scene = 3D 组态 2026-11-26）。
+    // 索引约定：0=screen 1=theme 2=symbol 3=scene（routes_meta::MetaKind::metric_idx，四 kind 同构）。
     /// 版本快照创建数（捕获发生时 +1；判重命中不计）。
-    pub meta_versions_created: [AtomicU64; 3],
+    pub meta_versions_created: [AtomicU64; 4],
     /// if_version 409 次数（写者竞争温度计——持续增长 = 有写者没接乐观锁）。
-    pub meta_version_conflicts: [AtomicU64; 3],
+    pub meta_version_conflicts: [AtomicU64; 4],
     /// 回滚次数。
-    pub meta_rollbacks: [AtomicU64; 3],
+    pub meta_rollbacks: [AtomicU64; 4],
     /// 紧缩执行次数（频繁 = cap 配置过小或 TTL 过长）。
-    pub meta_compactions: [AtomicU64; 3],
+    pub meta_compactions: [AtomicU64; 4],
 }
 
 impl ProcessMetrics {
-    /// meta_* 计数数组构造（三 kind：screen/theme/symbol，全 0）。
-    fn init_meta_array() -> [AtomicU64; 3] {
+    /// meta_* 计数数组构造（四 kind：screen/theme/symbol/scene，全 0）。
+    fn init_meta_array() -> [AtomicU64; 4] {
         std::array::from_fn(|_| AtomicU64::new(0))
     }
 

@@ -277,6 +277,26 @@ pub fn build_router(state: AppState) -> axum::Router {
         // 第三资源族 symbols（P3a reg-combin，2026-10-31：站点自建组合图元，
         // 四端点——versions 浏览/rollback v1 裁剪，PUT/DELETE 版本机制免费继承）
         .route("/api/v1/symbols", get(routes_meta::symbols_list))
+        // 3D 场景（2026-11-26）：独立资源族，cap 1 MiB（见 routes_meta::MAX_SCENE_DOC_BYTES）
+        .route("/api/v1/scenes", get(routes_meta::scenes_list))
+        .route(
+            "/api/v1/scenes/{id}",
+            get(routes_meta::scenes_get)
+                .put(routes_meta::scenes_put)
+                .delete(routes_meta::scenes_delete),
+        )
+        .route(
+            "/api/v1/scenes/{id}/versions",
+            get(routes_meta::scenes_versions),
+        )
+        .route(
+            "/api/v1/scenes/{id}/versions/{seq}",
+            get(routes_meta::scenes_version_get),
+        )
+        .route(
+            "/api/v1/scenes/{id}/rollback",
+            post(routes_meta::scenes_rollback),
+        )
         .route(
             "/api/v1/symbols/{id}",
             get(routes_meta::symbols_get)

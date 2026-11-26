@@ -36,8 +36,14 @@ use sha2::{Digest, Sha256};
 /// id 约束（agent-hmi 契约）：`^[a-z0-9][a-z0-9-]{0,63}$`，即总长 1..=64，
 /// 首字符小写字母/数字，其余可含连字符。
 const ID_MAX_LEN: usize = 64;
-/// 单文档大小上限（agent-hmi 契约）：128 KiB。
+/// 单文档大小上限（agent-hmi 契约）：128 KiB。适用于 screen/theme/symbol。
 pub const MAX_DOC_BYTES: usize = 131_072;
+/// 3D 场景文档上限（2026-11-26 Q1a 决策）：1 MiB。
+///
+/// 3D 场景是节点图（每个对象一条记录），量级比 2D 画面大一个数量级：实测 172 对象
+/// 精简后 68 KiB、原样 139 KiB（已超 128 KiB）；1 MiB ≈ 2600 个 primitive，覆盖现实厂区。
+/// **按族参数化**，不放宽 screens——2D 的 128 KiB 契约有客户端与 hmi-mcp 依赖。
+pub const MAX_SCENE_DOC_BYTES: usize = 1_048_576;
 /// Hash 内存放 JSON 文本的 field 名（存储细节，REST 契约不可见）。
 const DOC_FIELD: &str = "doc";
 /// 资源种类：lux key 前缀 + 列表响应字段名 + 版本键族前缀（screens/themes/symbols 同构）。
@@ -49,8 +55,10 @@ struct MetaKind {
     list_field: &'static str,
     kind: &'static str,
     sv_prefix: &'static str,
-    /// 指标数组索引（ProcessMetrics 的 meta_* 三元数组：0=screen 1=theme 2=symbol）。
+    /// 指标数组索引（ProcessMetrics 的 meta_* 数组：0=screen 1=theme 2=symbol 3=scene）。
     metric_idx: usize,
+    /// 该族单文档上限（字节）。各族独立：3D 场景远大于 2D 画面。
+    max_bytes: usize,
 }
 
 const SCREENS: MetaKind = MetaKind {
@@ -59,6 +67,7 @@ const SCREENS: MetaKind = MetaKind {
     kind: "screen",
     sv_prefix: "sv:screen",
     metric_idx: 0,
+    max_bytes: MAX_DOC_BYTES,
 };
 const THEMES: MetaKind = MetaKind {
     key_prefix: "theme",
@@ -66,6 +75,7 @@ const THEMES: MetaKind = MetaKind {
     kind: "theme",
     sv_prefix: "sv:theme",
     metric_idx: 1,
+    max_bytes: MAX_DOC_BYTES,
 };
 /// 第三资源族 `symbol`（P3a reg-combin，2026-10-31）：站点自建组合图元的存储面——
 /// doc = 一个 combin 描述（`{id,name,combin_json,width,height}`），编辑器启动时
@@ -77,6 +87,20 @@ const SYMBOLS: MetaKind = MetaKind {
     kind: "symbol",
     sv_prefix: "sv:symbol",
     metric_idx: 2,
+    max_bytes: MAX_DOC_BYTES,
+};
+/// 第四资源族 `scene`（2026-11-26，3D 组态）：doc = 3D 场景文档
+/// （`{$schema:'agent-hmi.scene3d/1'|'…/2', meta, objects/nodes, links, bindings?, events?}`）。
+/// 与 screens 分开的核心理由：①cap 需要 1 MiB；②2D/3D 是两条平行功能线，
+/// 存储层物理分开后，2D 列表无需逐 doc 读 `$schema` 过滤、hmi-mcp 也不会用
+/// 2D 校验器误判 3D 文档；③观测可分（kind="scene"）。
+const SCENES: MetaKind = MetaKind {
+    key_prefix: "scene",
+    list_field: "scenes",
+    kind: "scene",
+    sv_prefix: "sv:scene",
+    metric_idx: 3,
+    max_bytes: MAX_SCENE_DOC_BYTES,
 };
 
 /// `PUT`/`POST rollback` 的 query 参数：`?if_version=N` 乐观锁（缺省无条件写，
@@ -155,6 +179,74 @@ pub async fn screens_rollback(
     rollback(
         &st,
         &SCREENS,
+        &id,
+        &body,
+        q.if_version,
+        &author_of(user.as_ref()),
+    )
+    .await
+}
+
+// ---------- handlers（scenes，3D 组态 2026-11-26） ----------
+
+pub async fn scenes_list(State(st): State<AppState>) -> Response {
+    list(&st, &SCENES).await
+}
+
+pub async fn scenes_get(State(st): State<AppState>, Path(id): Path<String>) -> Response {
+    get(&st, &SCENES, &id).await
+}
+
+pub async fn scenes_put(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+    Query(q): Query<VersionQuery>,
+    user: Option<Extension<AuthedUser>>,
+    body: Bytes,
+) -> Response {
+    put(
+        &st,
+        &SCENES,
+        &id,
+        &body,
+        q.if_version,
+        author_of(user.as_ref()),
+    )
+    .await
+}
+
+pub async fn scenes_delete(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+    user: Option<Extension<AuthedUser>>,
+) -> Response {
+    delete(&st, &SCENES, &id, author_of(user.as_ref())).await
+}
+
+/// `GET /api/v1/scenes/{id}/versions`：版本元数据列表（seq 降序）。
+pub async fn scenes_versions(State(st): State<AppState>, Path(id): Path<String>) -> Response {
+    versions_list(&st, &SCENES, &id).await
+}
+
+/// `GET /api/v1/scenes/{id}/versions/{seq}`：单版正文取回（404/410 矩阵）。
+pub async fn scenes_version_get(
+    State(st): State<AppState>,
+    Path((id, seq)): Path<(String, u64)>,
+) -> Response {
+    version_get(&st, &SCENES, &id, seq).await
+}
+
+/// `POST /api/v1/scenes/{id}/rollback`：回滚到目标版（回滚本身可再回滚）。
+pub async fn scenes_rollback(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+    Query(q): Query<VersionQuery>,
+    user: Option<Extension<AuthedUser>>,
+    body: Bytes,
+) -> Response {
+    rollback(
+        &st,
+        &SCENES,
         &id,
         &body,
         q.if_version,
@@ -326,11 +418,11 @@ pub(crate) enum PutReject {
 /// id 词法 → 400；大小 ≤ 128 KiB → 413；JSON 语法合法 → 400（存储完整性——
 /// GET 契约要求 parse 后原样返回，非法 JSON 会让 doc 退化成字符串）。
 /// 通过后按提交原文落库（不做规范化重序列化）。
-pub(crate) fn validate_put(id: &str, body: &[u8]) -> Result<(), PutReject> {
+pub(crate) fn validate_put(kind: &MetaKind, id: &str, body: &[u8]) -> Result<(), PutReject> {
     if !valid_id(id) {
         return Err(PutReject::InvalidId);
     }
-    if body.len() > MAX_DOC_BYTES {
+    if body.len() > kind.max_bytes {
         return Err(PutReject::TooLarge);
     }
     // 语法校验即丢弃（存储用原文）。
@@ -359,7 +451,7 @@ async fn put(
     if_version: Option<u64>,
     author: String,
 ) -> Response {
-    if let Err(r) = validate_put(id, body) {
+    if let Err(r) = validate_put(kind, id, body) {
         return match r {
             PutReject::InvalidId => err(StatusCode::BAD_REQUEST, "invalid id"),
             PutReject::TooLarge => err(StatusCode::PAYLOAD_TOO_LARGE, "payload too large"),
@@ -1046,14 +1138,14 @@ mod tests {
     fn validate_put_size_clamp_boundary() {
         let ok = format!("{{\"v\":\"{}\"}}", "x".repeat(MAX_DOC_BYTES - 8));
         assert_eq!(ok.len(), MAX_DOC_BYTES);
-        assert_eq!(validate_put("a", ok.as_bytes()), Ok(()));
+        assert_eq!(validate_put(&SCREENS, "a", ok.as_bytes()), Ok(()));
 
         let big = " ".repeat(MAX_DOC_BYTES + 1);
         // 用合法 JSON 包裹避免撞 InvalidJson 掩盖 TooLarge（校验顺序：id → size → json）。
         let big_json = format!(" {{}}{}", big);
         assert!(big_json.len() > MAX_DOC_BYTES);
         assert_eq!(
-            validate_put("a", big_json.as_bytes()),
+            validate_put(&SCREENS, "a", big_json.as_bytes()),
             Err(PutReject::TooLarge)
         );
     }
@@ -1062,12 +1154,21 @@ mod tests {
     /// 顺序错了会把无效请求误报成别的错误。
     #[test]
     fn validate_put_reject_order_and_json_syntax() {
-        assert_eq!(validate_put("-x", b"{}"), Err(PutReject::InvalidId));
-        assert_eq!(validate_put("a", b"not json"), Err(PutReject::InvalidJson));
-        assert_eq!(validate_put("a", b"[1,2,3]"), Ok(()));
-        assert_eq!(validate_put("a", b"null"), Ok(()));
+        assert_eq!(
+            validate_put(&SCREENS, "-x", b"{}"),
+            Err(PutReject::InvalidId)
+        );
+        assert_eq!(
+            validate_put(&SCREENS, "a", b"not json"),
+            Err(PutReject::InvalidJson)
+        );
+        assert_eq!(validate_put(&SCREENS, "a", b"[1,2,3]"), Ok(()));
+        assert_eq!(validate_put(&SCREENS, "a", b"null"), Ok(()));
         // 空 body 不是合法 JSON 文档。
-        assert_eq!(validate_put("a", b""), Err(PutReject::InvalidJson));
+        assert_eq!(
+            validate_put(&SCREENS, "a", b""),
+            Err(PutReject::InvalidJson)
+        );
     }
 
     /// 验证意图：列表契约是"去前缀 + 过滤 + 升序"——直接决定 GET /screens 的
@@ -1137,6 +1238,82 @@ mod tests {
         assert_eq!(SYMBOLS.kind, "symbol");
         // sv 键不落 symbol: 命名空间（列表 KEYS symbol:* 的前缀隔离，同 screens 教训）。
         assert!(!sv_body_key(&SYMBOLS, "a", 1).starts_with("symbol:"));
+    }
+
+    // ---------- scenes 资源族（2026-11-26，Q1a 决策：独立族 + 1 MiB cap） ----------
+
+    /// 验证意图：`scenes` 是第四资源族，与 screen/theme/symbol 完全隔离——
+    /// lux key 前缀、版本键族、列表响应字段、指标索引四者两两不同，否则会
+    /// 串族（列表混入他族键）或指标互相覆盖。
+    #[test]
+    fn scenes_kind_is_isolated_from_other_meta_kinds() {
+        let kinds = [&SCREENS, &THEMES, &SYMBOLS, &SCENES];
+        for a in 0..kinds.len() {
+            for b in (a + 1)..kinds.len() {
+                assert_ne!(kinds[a].key_prefix, kinds[b].key_prefix, "lux key 前缀撞车");
+                assert_ne!(kinds[a].sv_prefix, kinds[b].sv_prefix, "版本键族前缀撞车");
+                assert_ne!(kinds[a].list_field, kinds[b].list_field, "列表响应字段撞车");
+                assert_ne!(kinds[a].metric_idx, kinds[b].metric_idx, "指标数组索引撞车");
+            }
+        }
+        assert_eq!(SCENES.kind, "scene");
+        assert_eq!(SCENES.key_prefix, "scene");
+        assert_eq!(SCENES.list_field, "scenes");
+        // 版本键不得落 scene: 命名空间（否则列表 KEYS scene:* 会把版本键当文档）
+        assert!(!sv_body_key(&SCENES, "a", 1).starts_with("scene:"));
+    }
+
+    /// 验证意图：3D 场景文档比 2D 画面大一个量级（实测 172 对象 139 KiB），
+    /// 独立族的意义就是放宽 cap。1 MiB 放行、超 1 MiB 拒绝，且 screens 仍是 128 KiB。
+    #[test]
+    fn scenes_cap_is_one_mib_and_screens_unchanged() {
+        assert_eq!(MAX_DOC_BYTES, 131_072, "screens 契约必须保持 128 KiB");
+        assert_eq!(MAX_SCENE_DOC_BYTES, 1_048_576);
+
+        // 700 KiB：对 scenes 合法，对 screens 应超限
+        let mid = format!("{{\"v\":\"{}\"}}", "x".repeat(700 * 1024));
+        assert_eq!(
+            validate_put(&SCREENS, "a", mid.as_bytes()),
+            Err(PutReject::TooLarge),
+            "700 KiB 必须被 screens 拒绝（128 KiB 契约不变）"
+        );
+        assert_eq!(
+            validate_put(&SCENES, "a", mid.as_bytes()),
+            Ok(()),
+            "700 KiB 应被 scenes 接受（1 MiB cap）"
+        );
+
+        // 1 MiB 边界：恰好放行、+1 拒绝
+        let ok = format!("{{\"v\":\"{}\"}}", "x".repeat(MAX_SCENE_DOC_BYTES - 8));
+        assert_eq!(ok.len(), MAX_SCENE_DOC_BYTES);
+        assert_eq!(validate_put(&SCENES, "a", ok.as_bytes()), Ok(()));
+        let over = format!("{{}}{}", " ".repeat(MAX_SCENE_DOC_BYTES + 1));
+        assert!(over.len() > MAX_SCENE_DOC_BYTES);
+        assert_eq!(
+            validate_put(&SCENES, "a", over.as_bytes()),
+            Err(PutReject::TooLarge)
+        );
+    }
+
+    /// 验证意图：cap 是**按族**的参数化，不是全局放宽——否则 2D 画面也会被
+    /// 允许塞到 1 MiB，破坏既有 128 KiB 契约（客户端与 hmi-mcp 均依赖它）。
+    #[test]
+    fn cap_is_per_kind_not_global() {
+        let big = format!("{{\"v\":\"{}\"}}", "x".repeat(200 * 1024));
+        assert_eq!(
+            validate_put(&SCREENS, "a", big.as_bytes()),
+            Err(PutReject::TooLarge)
+        );
+        assert_eq!(validate_put(&SCENES, "a", big.as_bytes()), Ok(()));
+        // themes/symbols 保持原 cap
+        assert_eq!(
+            validate_put(&THEMES, "a", big.as_bytes()),
+            Err(PutReject::TooLarge)
+        );
+        assert_eq!(
+            validate_put(&SYMBOLS, "a", big.as_bytes()),
+            Err(PutReject::TooLarge)
+        );
     }
 
     /// 验证意图：sha16 是元数据审计指纹（§2.2）——长度恒 16、同内容稳定、
