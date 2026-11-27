@@ -246,7 +246,7 @@ jobs:
 
   # audit 硬门禁（2026-11-27 起，替代原先的 continue-on-error 信息性作业）：
   # 兼容性范围内的 20 条漏洞已由 Cargo.lock 精准升级清掉（lock 中 quinn*/rustls*/
-  # url/webpki-roots/zstd* 一族）；剩余 9 条逐一 --ignore（理由与解除条件见下方
+  # url/webpki-roots/zstd* 一族）+ rmcp 3 迁移清掉；剩余 7 条逐一 --ignore（理由与解除条件见下方
   # 注释）。此后**新增**漏洞不在清单内 → 本作业红——不再有"信息性失败"这种漏看方式。
   # 维护义务：每条 ignore 的解除条件到期（依赖升级）时应删除对应行。
   #
@@ -269,8 +269,6 @@ jobs:
             --ignore RUSTSEC-2026-0099 \
             --ignore RUSTSEC-2026-0104 \
             --ignore RUSTSEC-2026-0382 \
-            --ignore RUSTSEC-2026-0457 \
-            --ignore RUSTSEC-2026-0462 \
             --ignore RUSTSEC-2023-0071 \
             --ignore RUSTSEC-2026-0387
 
@@ -281,8 +279,8 @@ jobs:
   #   1883（warden 路径级配置同），实际风险≈0。
   #   解除：rumqttc 升级放开 webpki 0.103 后删这 5 行。
   # C 类 —— 需要上游/大版本迁移：
-  #   RUSTSEC-2026-0457 / 0462（rmcp 2.2 → ≥3.9）：rsiot-mcp 直接依赖，2→3 为
-  #     breaking，单独立项迁移；触达面是本地 stdio MCP server。
+  #   RUSTSEC-2026-0457 / 0462（rmcp 2.2 → ≥3.9）：已于 2026-11-27 迁移 rmcp
+  #     3.12 清除，ignore 行删除（42 单测 + 6 duplex 协议测全绿）。
   #   RUSTSEC-2023-0071（rsa 0.9 → ≥0.10）：经 async-opcua 0.19 传递；Marvin
   #     类攻击针对持私钥的服务端，rs-iot 是 OPC UA 客户端、不持受影响私钥。
   #     解除：async-opcua 升 rsa 0.10。
