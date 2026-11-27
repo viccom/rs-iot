@@ -34,6 +34,11 @@ env:
 # 它是公开仓库，检出时不传凭据（SSH 私钥只对 lux 生效）。
 #
 # docs / frontend / audit 三个 job 不依赖这两个库，恒定可跑。
+#
+# 「Install libudev-dev」对 `apt-get update` 的失败宽容：runner 镜像里预置的
+# packages.microsoft.com 源偶发 403（与本仓无关；2026-11-27 实测 ubuntu-latest
+# 的 test 作业因此整个挂在装包一步）。Ubuntu 官方源此时已取到列表，故 update
+# 失败不再中断流程，而 install 仍是硬失败——包装不上照样红。
 
 jobs:
   fmt:
@@ -91,7 +96,9 @@ jobs:
       # serialport/tokio-serial（RTU over serial）在 Linux 链接 libudev，需头文件。
       - name: Install libudev-dev (Linux)
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libudev-dev
+        run: |
+          sudo apt-get update -o Acquire::Retries=3 || true
+          sudo apt-get install -y libudev-dev
       # 全开档
       - name: clippy (all features)
         run: cargo clippy --all-targets --all-features -- -D warnings
@@ -131,7 +138,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Install libudev-dev (Linux)
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libudev-dev
+        run: |
+          sudo apt-get update -o Acquire::Retries=3 || true
+          sudo apt-get install -y libudev-dev
       - run: cargo test --all-targets --all-features
 
   minimal:
@@ -161,7 +170,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Install libudev-dev (Linux)
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libudev-dev
+        run: |
+          sudo apt-get update -o Acquire::Retries=3 || true
+          sudo apt-get install -y libudev-dev
       # test（非 build）：让 feature_gate_e2e（#![cfg(not(feature = "modbus"))]）在
       # 裁剪组合下执行，验证关协议时优雅降级（R1）；同时回归保护裁剪组合下其他测试。
       - run: cargo test --no-default-features --features lua
@@ -197,7 +208,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Install libudev-dev (Linux)
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libudev-dev
+        run: |
+          sudo apt-get update -o Acquire::Retries=3 || true
+          sudo apt-get install -y libudev-dev
       - run: cargo doc --no-deps --all-features
 
   frontend:
