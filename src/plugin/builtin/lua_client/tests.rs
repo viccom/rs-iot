@@ -708,9 +708,19 @@ async fn reload_vm_on_init_budget_timeout_falls_back() {
         .await
         .expect_err("on_init 挂起应被预算切断 → Err → 回退旧 VM");
     assert!(e.to_string().contains("on_init"), "错误应可辨识回调名：{e}");
+    // 预算切断的权威证据是错误文本：with_budget 的 Elapsed 原样上抛为
+    // "callback timeout: on_init 超预算 200ms…"，只有预算路径带"超预算"；
+    // 等满 send_with_deadline 的 2s 时 on_init 以发送超时结束，走不到本 Err。
+    // 曾用 elapsed < 2s 做二次判定，但 2026-11-27 windows runner 负载下实测：
+    // 预算 200ms 触发后观察到返回也可能 >2s——墙钟判定误报，改为断言文本，
+    // 墙钟只保留挂死护栏（60s，非时序判定）。
     assert!(
-        started.elapsed() < std::time::Duration::from_secs(2),
-        "应在 200ms 预算处切断，而非等满 send_with_deadline 的 2s"
+        e.to_string().contains("超预算"),
+        "应为预算切断而非等满 deadline：{e}"
+    );
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(60),
+        "挂死护栏（非时序判定）：{e}"
     );
     let _ = std::fs::remove_dir_all(&tmp);
 }

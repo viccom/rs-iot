@@ -2228,8 +2228,13 @@ end"#
         .await
         .unwrap();
 
-        // 阶段 3（20s）：遗嘱 + on_disconnect + 重连（connacks≥2）+ 再发布（n≥2）。
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        // 阶段 3（60s）：遗嘱 + on_disconnect + 重连（connacks≥2）+ 再发布（n≥2）。
+        // 本阶段断言的是断连→重连链**最终闭合**（遗嘱/connack/重发布全部到位），
+        // 不是时延——成功路径条件满足即退出，deadline 只作用于失败路径。
+        // 20s 曾在 CI 负载下偶发误红（2026-11-27 minimal 作业：北向侧已重连并
+        // 重发布 kv=2，对端 500ms/次的 poll 只收到 hello-1）——`--lib` 数百用例
+        // 同 2 核 runner 并行，20s 窗口不够对端收齐帧。放宽到 60s。
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
         loop {
             match tokio::time::timeout(std::time::Duration::from_millis(500), peer_ev.poll()).await
             {
