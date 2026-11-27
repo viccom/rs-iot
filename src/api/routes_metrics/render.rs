@@ -264,7 +264,7 @@ pub(crate) fn render_process(
         ),
     ] {
         family_header(&mut s, name, help, "counter");
-        for (idx, kind) in ["screen", "theme", "symbol"].iter().enumerate() {
+        for (idx, kind) in ["screen", "theme", "symbol", "scene"].iter().enumerate() {
             metric_line(
                 &mut s,
                 name,
@@ -703,17 +703,18 @@ mod tests {
             26,
             "应输出 26 个 metric family"
         );
-        // 版本管理 label 形状：每 family 三行 {kind="screen"}/{kind="theme"}/{kind="symbol"}
-        // （P0 两 kind；symbol = P3a 2026-10-31 第三资源族）
+        // 版本管理 label 形状：每 family 四行 screen/theme/symbol/scene
+        // （P0 两 kind；symbol = P3a 2026-10-31；scene = 3D 组态 2026-11-26）
         assert!(out.contains("rs_iot_meta_versions_created_total{kind=\"screen\"} 2"));
         assert!(out.contains("rs_iot_meta_versions_created_total{kind=\"theme\"} 1"));
         assert!(out.contains("rs_iot_meta_versions_created_total{kind=\"symbol\"} 0"));
+        assert!(out.contains("rs_iot_meta_versions_created_total{kind=\"scene\"} 0"));
         assert_eq!(
             out.lines()
                 .filter(|l| l.starts_with("rs_iot_meta_"))
                 .count(),
-            12,
-            "四 family × 三 kind 行"
+            16,
+            "四 family × 四 kind 行（screen/theme/symbol/scene）"
         );
         // HELP / TYPE 每个 family 齐全
         assert!(out.contains("# HELP rs_iot_info "));

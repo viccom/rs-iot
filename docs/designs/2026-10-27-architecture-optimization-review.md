@@ -57,7 +57,7 @@
 - **A（推荐）**：`git submodule` + 版本锚（lux 与 tsink 各 pin commit），CI 用 submodule 拉取；本地开发一次 `git submodule update --init` 即完整。
 - **B**：`vendor/` 目录 + `.cargo/config.toml` 的 `[source]` 替换（离线友好，但仓库体积大）。
 - **C**：发布私有 registry / 或把 lux 的 2 个本地补丁以 `[patch]` 形式回归上游（治本但需上游权限，CLAUDE.md 已声明无 PR 权限）。
-- 无论哪种，**都需要先解决 CI 的私有依赖可达性**（`RUST_DEPS_TOKEN`，见 `.github/workflows/ci.yml` 头部注释）。
+- 无论哪种，**都需要先解决 CI 的私有依赖可达性**（`LUX_DEPLOY_KEY`，见 `.github/workflows/ci.yml` 头部注释）。
 
 **验收判据**：`cargo test --all-features --lib` 在干净 clone 上一条命令可跑通；`just lint` 不再需要"stub 环境自动跳过"分支。
 

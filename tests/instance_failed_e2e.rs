@@ -327,10 +327,21 @@ async fn stop_during_start_never_leaves_zombie() {
         let stop_res = m2.stop(c2.inst_id.as_ref()).await;
         let start_res = hs.await;
         assert!(stop_res.is_ok(), "第 {round} 轮：stop 不应报错");
-        // 竞态窗口被命中（见上 Starting 卡位）：start 必须放弃注册而不是覆盖终态
+        // 两个合法结局，不固定谁先到：
+        //
+        // a) `Ok(Err(..))`——stop 抢在 start 的尾部检查之前，start 放弃注册
+        //    （原回归的守护路径）；
+        // b) `Ok(())`——start 在 stop 进入 stop() 之前就跑完了尾部注册，随后
+        //    stop 摘掉 handle 并 join 掉 source。实例确实停了，只是"start 赢
+        //    在注册、stop 赢在收尾"。
+        //
+        // 观测到 Starting 并不能保证 stop 一定先到：测试侧只 yield_now，start
+        // 可能已经跑完尾部（Windows 调度更宽，2026-11-27 第 5 轮实测命中）。
+        // 本用例真正要守的不变量是下面两条——不得留 Running 僵尸、stop 后不得
+        // 再出数；僵尸路径会让二者之一变红，与 start 是否放弃无关。
         assert!(
-            matches!(start_res, Ok(Err(_))),
-            "第 {round} 轮：窗口内 start 应放弃注册"
+            matches!(start_res, Ok(Err(_)) | Ok(Ok(()))),
+            "第 {round} 轮：start 任务本身失败: {start_res:?}"
         );
         let _ = (stop_res, start_res);
 
