@@ -81,7 +81,7 @@ git branch -vv          # 看 main 相对 origin/main ahead/behind
 
 ## 四、当前本地补丁清单
 
-本地 `main` 领先 `origin/main` 5 个提交（2026-11-27 复核；`mine/main` 与 CI 镜像 `viccom/lux` 均已同步含 `01f62a2`，官方源不推——无写权限且不接收 Agent 修复）：
+本地 `main` 领先 `origin/main` 6 个提交（2026-11-27 复核；`mine/main` 与 CI 镜像 `viccom/lux` 均已同步含 `40b8268`，官方源不推——无写权限且不接收 Agent 修复）：
 
 | commit | 用途 | 改动文件 | 冲突热点 | 丢弃条件 |
 |---|---|---|---|---|
@@ -90,8 +90,9 @@ git branch -vv          # 看 main 相对 origin/main ahead/behind
 | `bf32c25` | state 目录 owner-only 创建（与进程 umask 无关） | `src/file_security.rs`（`create_dir_all_private` + 3 个测试） | `ensure_dir` 创建路径 | 官方改用 `DirBuilder::mode(0o700)` 或等价实现 |
 | `6b9dcb9` | **Windows 持久化状态支持**（替代非 Unix 的 fail-closed） | `src/file_security.rs`（`open_private_file` 的 windows 分支 + `lock_state_dir` 拆 `finish_state_dir_lock`） | 上游再动 `open_private_file` / `lock_state_dir` 的 `cfg` 结构 | 官方提供非 Unix 的等价实现（reparse point 拒绝 + 排他锁） |
 | `01f62a2` | **Windows CI 腿**（防同类回归再次静默通过） | `.github/workflows/test.yml`（新增 `test-windows` job：`cargo clippy --lib -D warnings` + `cargo test --lib file_security`） | 上游重排 job 时 | 官方自己加了 windows 腿 |
+| `40b8268` | 清 Windows 专属 lint 债务（同为 #108 遗留） | `src/restore.rs`（`CString` 导入按 unix 门控）+ `src/encryption.rs`（`read_seal_key` 去掉 needless return、`write_new_seal_file` 非 unix 标 dead_code） | 上游动这两个文件时 | 官方清理同问题 |
 
-**关键**：五个补丁都在 lux **内部**（lua 引擎 / 测试 / 文件安全 / CI），**完全不碰 rs-iot 耦合面**（`ServerConfig`/`EmbeddedClient`/`EmbeddedValue` 等）。所以补丁本身不会让 rs-iot 代码失效。
+**关键**：六个补丁都在 lux **内部**（lua 引擎 / 测试 / 文件安全 / CI），**完全不碰 rs-iot 耦合面**（`ServerConfig`/`EmbeddedClient`/`EmbeddedValue` 等）。所以补丁本身不会让 rs-iot 代码失效。
 
 `bf32c25` 背景：`ensure_dir` 先 `create_dir_all`（按 umask 得 0o775/0o755）再 `validate_directory`（`mode & 0o022 != 0` 拒绝）最后才 chmod 0o700——顺序错误使 Linux 首次启动必败（`state/shard_0/journal` 等子目录同病）。补丁把创建改为 `DirBuilder::recursive(true).mode(0o700)`，umask 无法放宽 owner-only 位。
 
