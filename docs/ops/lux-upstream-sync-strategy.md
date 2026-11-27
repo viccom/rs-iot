@@ -81,17 +81,22 @@ git branch -vv          # 看 main 相对 origin/main ahead/behind
 
 ## 四、当前本地补丁清单
 
-本地 `main` 领先 `origin/main` 3 个提交（2026-11-09 复核；`mine/main` 已同步含 `bf32c25`，官方源不推——无写权限且不接收 Agent 修复）：
+本地 `main` 领先 `origin/main` 4 个提交（2026-11-27 复核；`mine/main` 与 CI 镜像 `viccom/lux` 均已同步含 `6b9dcb9`，官方源不推——无写权限且不接收 Agent 修复）：
 
 | commit | 用途 | 改动文件 | 冲突热点 | 丢弃条件 |
 |---|---|---|---|---|
 | `fed8471` | mlua 0.10→0.12 对齐 rs-iot | `Cargo.toml` + `Cargo.lock` + `src/lua.rs`（`String`→`LuaString` + `set_hook` 返回 `Result`） | mlua 版本行、lua.rs API 改名 | 官方 lux 升 mlua ≥ 0.12 |
 | `f745e5f` | Windows 测试套件修复 | `tests/common/mod.rs` + `tests/public_api.rs` | 测试辅助函数 | 官方修了同问题 |
 | `bf32c25` | state 目录 owner-only 创建（与进程 umask 无关） | `src/file_security.rs`（`create_dir_all_private` + 3 个测试） | `ensure_dir` 创建路径 | 官方改用 `DirBuilder::mode(0o700)` 或等价实现 |
+| `6b9dcb9` | **Windows 持久化状态支持**（替代非 Unix 的 fail-closed） | `src/file_security.rs`（`open_private_file` 的 windows 分支 + `lock_state_dir` 拆 `finish_state_dir_lock`） | 上游再动 `open_private_file` / `lock_state_dir` 的 `cfg` 结构 | 官方提供非 Unix 的等价实现（reparse point 拒绝 + 排他锁） |
 
-**关键**：三个补丁都在 lux **内部**（lua 引擎 / 测试 / 文件安全），**完全不碰 rs-iot 耦合面**（`ServerConfig`/`EmbeddedClient`/`EmbeddedValue` 等）。所以补丁本身不会让 rs-iot 代码失效。
+**关键**：四个补丁都在 lux **内部**（lua 引擎 / 测试 / 文件安全），**完全不碰 rs-iot 耦合面**（`ServerConfig`/`EmbeddedClient`/`EmbeddedValue` 等）。所以补丁本身不会让 rs-iot 代码失效。
 
 `bf32c25` 背景：`ensure_dir` 先 `create_dir_all`（按 umask 得 0o775/0o755）再 `validate_directory`（`mode & 0o022 != 0` 拒绝）最后才 chmod 0o700——顺序错误使 Linux 首次启动必败（`state/shard_0/journal` 等子目录同病）。补丁把创建改为 `DirBuilder::recursive(true).mode(0o700)`，umask 无法放宽 owner-only 位。
+
+`6b9dcb9` 背景：上游 #108（`827d1dd`）把非 Unix 的持久化文件打开改成一律 `PermissionDenied`，状态目录锁同样 fail-closed；上游 CI 只有 ubuntu，所以 Windows 支持被静默移除。`run_with_config` 每次启动都校验 data_dir，因此引擎在 Windows 上**完全起不来**——rs-iot 内嵌 lux 后，其 windows CI 一次冒出 152 个失败，全部同一个根因。补丁给 Windows 补两条：`FILE_FLAG_OPEN_REPARSE_POINT` + `FILE_ATTRIBUTE_REPARSE_POINT` 拒绝（等价于 `O_NOFOLLOW`），以及用 `share_mode(0)` 让 open 本身即排他锁（第二个进程得 `ERROR_SHARING_VIOLATION`，映射成 `AlreadyExists`，与 Unix 的 `WouldBlock` 路径同语义）；**不引入新依赖**。Windows 上文件机密性由 state 目录继承的 NTFS ACL 承担（不是 0o600），owner-only ACL 收紧与磁盘 seal 文件（`read_seal_key`）仍仅 Unix，保持 fail-closed 并给出指引。
+
+**Windows 回归的验证载体**：rs-iot 的 `test (windows-latest)` 作业（内嵌 lux 跑全量集成测）。上游 lux 没有 Windows 腿，所以这条作业是 lux Windows 行为的事实门禁——它红了不要先怀疑 rs-iot。
 
 ### 四.5、行为契约适配（rs-iot 侧，不改 lux 签名）
 
@@ -103,6 +108,8 @@ lux 升级还可能改变**运行期契约**，`cargo build` 不报错，需按�
 | v0.37.1 `jsonwebtoken` feature 由 `rust_crypto` 改 `aws_lc_rs` | 宿主若仍声明 `rust_crypto`，Cargo feature 统一后双 provider 同时启用 → encode/decode panic（jsonwebtoken 10 的二选一约束） | rs-iot 与 gateway 的 `jsonwebtoken` 均声明 `aws_lc_rs`（全工作区单 provider，与 lux 一致）；`api::auth::install_jwt_crypto_provider()` 与 `crates/rsiot-gateway/src/auth.rs` 同名函数保留为幂等兜底（`crypto::aws_lc::DEFAULT_PROVIDER.install_default()`；自行签发 JWT 的测试也调用） |
 | `data_dir` 排他锁 | 同名目录并发打开直接 `AlreadyExists` 拒启 | 测试 data_dir 每次调用唯一（`tests/common::test_data_dir`：pid + 纳秒 + 进程内序号）；同一用例内跨 start/stop 重启复用同一个 `PathBuf`，不重复调用 helper |
 | `827d1dd` state 目录 owner-only 校验 | 新建 state 子目录按 umask 取权限，0o775 被拒 | 本地补丁 `bf32c25` + rs-iot `prepare_lux_data_dir` 预建根目录并 chmod 0o700（不再改进程 umask，避免全局副作用） |
+| `827d1dd` 非 Unix 持久化 fail-closed | Windows 上 `open_private_file` / `lock_state_dir` 一律 `PermissionDenied`，`run_with_config` 起不来 | 本地补丁 `6b9dcb9`（reparse point 拒绝 + 零共享排他锁）；验证靠 rs-iot 的 `test (windows-latest)` 作业 |
+| `EncryptionKeyring` 磁盘 seal 文件仅 Unix | Windows 上启用 `seal_path` 加密会 `ERR ENC on-disk seal files require Unix` | rs-iot 不启用 lux 加密（`build_lux_config` 不设 `encryption`），不在路径上；将来要启用须改用 `LUX_ENC_SEAL_SECRET` 或先做 Windows ACL |
 
 ## 五、同步策略:rebase(非 merge)
 
