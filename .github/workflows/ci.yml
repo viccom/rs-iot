@@ -21,13 +21,17 @@ env:
 # （2026-11-25 之前 lux/tsink 写成 path: ../lux、../tsink_fork，被 checkout 以
 #   "Repository path … is not under …" 拒绝——Rust job 自 CI 建立以来从未跑通过。）
 #
-# 私有依赖 viccom/lux 经 repo secret `RUST_DEPS_TOKEN` 拉取：fine-grained PAT，只需
-# viccom/lux 的 Contents: Read。secret 缺失或无权时，Rust job 在「Checkout lux」一步失败。
-# lux 镜像的建立与同步、token 的权限，见 docs/ops/lux-upstream-sync-strategy.md「CI 可达性」。
+# 私有依赖 viccom/lux 经 **deploy key（SSH）** 拉取：仓库 secret `LUX_DEPLOY_KEY`
+# 存的是 CI 专用私钥，其公钥以**只读 deploy key** 挂在 viccom/lux 上
+# （Settings → Deploy keys，read-only）。凭据在协议层只对该仓有效、只读、无到期
+# （优于 fine-grained PAT：PAT 的「只读」靠配置约束、且最长 90 天要续）。
+# secret 缺失、deploy key 被删或被改成 RW 之外的状态时，Rust job 在「Checkout lux」
+# 一步失败。lux 镜像的建立与同步、deploy key 的办理与轮换，见
+# docs/ops/lux-upstream-sync-strategy.md「CI 可达性」。
 #
 # tsink 检出 viccom/tsink 的 master：rs-iot 的 path 依赖没有版本锚，本地开发与部署
 # 用的都是 master；旧基线标签 rs-iot-1b-baseline 停在 2026-08-25，已不适用。
-# 它是公开仓库，检出时不传 token（只授了 lux 的 fine-grained PAT 对它无权）。
+# 它是公开仓库，检出时不传凭据（SSH 私钥只对 lux 生效）。
 #
 # docs / frontend / audit 三个 job 不依赖这两个库，恒定可跑。
 
@@ -47,7 +51,7 @@ jobs:
           repository: viccom/lux
           ref: main
           path: lux
-          token: ${{ secrets.RUST_DEPS_TOKEN }}
+          ssh-key: ${{ secrets.LUX_DEPLOY_KEY }}
       - name: Checkout tsink (path dep, history feature)
         uses: actions/checkout@v4
         with:
@@ -74,7 +78,7 @@ jobs:
           repository: viccom/lux
           ref: main
           path: lux
-          token: ${{ secrets.RUST_DEPS_TOKEN }}
+          ssh-key: ${{ secrets.LUX_DEPLOY_KEY }}
       - name: Checkout tsink (path dep, history feature)
         uses: actions/checkout@v4
         with:
@@ -117,7 +121,7 @@ jobs:
           repository: viccom/lux
           ref: main
           path: lux
-          token: ${{ secrets.RUST_DEPS_TOKEN }}
+          ssh-key: ${{ secrets.LUX_DEPLOY_KEY }}
       - name: Checkout tsink (path dep, history feature)
         uses: actions/checkout@v4
         with:
@@ -147,7 +151,7 @@ jobs:
           repository: viccom/lux
           ref: main
           path: lux
-          token: ${{ secrets.RUST_DEPS_TOKEN }}
+          ssh-key: ${{ secrets.LUX_DEPLOY_KEY }}
       - name: Checkout tsink (path dep, history feature)
         uses: actions/checkout@v4
         with:
@@ -183,7 +187,7 @@ jobs:
           repository: viccom/lux
           ref: main
           path: lux
-          token: ${{ secrets.RUST_DEPS_TOKEN }}
+          ssh-key: ${{ secrets.LUX_DEPLOY_KEY }}
       - name: Checkout tsink (path dep, history feature)
         uses: actions/checkout@v4
         with:

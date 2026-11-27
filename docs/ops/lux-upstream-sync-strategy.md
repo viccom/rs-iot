@@ -213,12 +213,21 @@ lux fork 含本地补丁、不公开，官方源上也没有，所以 GitHub 上
   `$GITHUB_WORKSPACE/{rs-iot, lux, tsink_fork}`——rs-iot 检出到子目录 `rs-iot/`，lux、tsink 在
   它的同级，各 job 以 `defaults.run.working-directory` 进 `rs-iot/` 执行 cargo。
   2026-11-25 之前写成 `path: ../lux`，被 checkout 拒绝，Rust job 自 CI 建立以来没有跑通过。
-- **token**：repo secret `RUST_DEPS_TOKEN`（仓库 Settings → Secrets and variables → Actions）。
-  用 fine-grained PAT：Repository access 只选 `viccom/lux`，权限只给 Contents: Read。
-  它**不能**用来检出别的仓库，所以 tsink（`viccom/tsink`，公开）的检出步骤不传 token。
-  secret 缺失或无权时，Rust job 在「Checkout lux」一步失败；换 token 只改 secret，不动工作流，
-  然后在 Actions 页面重跑失败的 job。PAT 有有效期：到期后 Rust job 回到同一处失败，需换新 token
-  （`docs` / `frontend` 不受影响，所以整体不会全红，容易漏看）。
+- **凭据**：**只读 deploy key（SSH）**，2026-11-27 起用，替代原 fine-grained PAT。
+  - 私钥存 rs-iot 的 repo secret `LUX_DEPLOY_KEY`（仓库 Settings → Secrets and variables → Actions）；
+    公钥作为 **read-only deploy key** 挂在 `viccom/lux` 的 Settings → Deploy keys（标题 `lux-ci`）。
+  - 本机私钥副本：`~/.ssh/lux_ci_deploy`（600，不进任何仓库）。
+  - **为什么换**：deploy key 在协议层只对该仓有效、只读、**无到期**；PAT 的「只读」靠配置约束，
+    且最长 90 天到期后 Rust job 会回到同一处失败（`docs` / `frontend` 不受影响，整体不会全红，容易漏看）。
+  - **换凭据只改 secret + deploy key 两处，工作流不动**（工作流用 `ssh-key:` 引用 secret 名）。
+    deploy key 被删或私钥轮换时，同样在「Checkout lux」一步失败。
+  - tsink（`viccom/tsink`，公开）的检出步骤不传凭据——SSH 私钥只对 lux 生效。
+  - 本机自检（不经 CI，确认 deploy key 与私钥仍然匹配）：
+
+    ```bash
+    GIT_SSH_COMMAND="ssh -i ~/.ssh/lux_ci_deploy -o IdentitiesOnly=yes" \
+      git ls-remote git@github.com:viccom/lux main
+    ```
 
 ## 十、应急恢复
 
