@@ -418,7 +418,11 @@ pub(crate) enum PutReject {
 /// id 词法 → 400；大小 ≤ 128 KiB → 413；JSON 语法合法 → 400（存储完整性——
 /// GET 契约要求 parse 后原样返回，非法 JSON 会让 doc 退化成字符串）。
 /// 通过后按提交原文落库（不做规范化重序列化）。
-pub(crate) fn validate_put(kind: &MetaKind, id: &str, body: &[u8]) -> Result<(), PutReject> {
+///
+/// 可见性说明：`MetaKind` 是本模块私有类型，`validate_put` 也只在本模块内使用
+/// （含同模块的单元测试），因此保持私有；写成 `pub(crate)` 会触发 rustc 的
+/// `private_interfaces` lint（`cargo clippy -- -D warnings` 下是硬错误）。
+fn validate_put(kind: &MetaKind, id: &str, body: &[u8]) -> Result<(), PutReject> {
     if !valid_id(id) {
         return Err(PutReject::InvalidId);
     }
