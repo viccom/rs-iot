@@ -198,8 +198,22 @@ async fn teardown(env: Env) {
     common::stop_lux(env.handle).await;
 }
 
+/// 进程级串行闸：本文件 11 个用例各自起一套 lux + 管线，而 model cache 的
+/// effective 快照是**进程级全局**（任一 setup 的 set_model→refresh_after_write
+/// 都会整体替换它）。用例并行交织时，另一用例的 reload 可能恰好插在本用例
+/// "reload 完成 → 首帧 dataup 批处理"之间；CI 2 核负载把窗口拉宽后，建模 tag
+/// 会被误判为未建模写进 `discoveries`——2026-11-27 master CI 实测
+/// `sidecar_dataup_gate_rejects_unmodeled_to_discovery` 偶发红（重跑绿、同内容
+/// 分支 run 4 次绿、本地含 2 核限核 10+ 轮未复现，精确交织未定位）。串行化
+/// 消除"跨测试干扰"这一类；若串行后仍红，则是单用例内部竞态，需在闸门处
+/// 加插桩定位，不要再靠重跑。
+/// 用 tokio Mutex：守卫要跨 await 持有整个用例时长，std Mutex 触发
+/// clippy::await_holding_lock（-D warnings 下为硬错误）。
+static CASE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 #[tokio::test]
 async fn sidecar_dataup_and_command_roundtrip() {
+    let _serial = CASE_LOCK.lock().await;
     let env = setup("sc1", 60).await;
 
     // 模拟外部客户端：连接 + Hello。
@@ -307,6 +321,7 @@ async fn sidecar_dataup_and_command_roundtrip() {
 /// 建模）；建模 tag 正常落库且不进队列。
 #[tokio::test]
 async fn sidecar_dataup_gate_rejects_unmodeled_to_discovery() {
+    let _serial = CASE_LOCK.lock().await;
     let env = setup("sc-gate", 60).await;
 
     let stream = tokio::net::TcpStream::connect(("127.0.0.1", env.port))
@@ -387,6 +402,7 @@ async fn sidecar_dataup_gate_rejects_unmodeled_to_discovery() {
 
 #[tokio::test]
 async fn sidecar_wrong_token_rejected() {
+    let _serial = CASE_LOCK.lock().await;
     let env = setup("sc2", 60).await;
 
     let stream = tokio::net::TcpStream::connect(("127.0.0.1", env.port))
@@ -413,6 +429,7 @@ async fn sidecar_wrong_token_rejected() {
 
 #[tokio::test]
 async fn sidecar_reconnect_resends_config() {
+    let _serial = CASE_LOCK.lock().await;
     let env = setup("sc3", 60).await;
 
     // 第一次连接 + 握手 + ConfigPush。
@@ -469,6 +486,7 @@ async fn sidecar_reconnect_resends_config() {
 
 #[tokio::test]
 async fn sidecar_heartbeat_timeout_disconnects() {
+    let _serial = CASE_LOCK.lock().await;
     // hb_timeout=2s：不发心跳 → task 在 ~2s + hb_check(1s) 内判失联断连。
     let env = setup("sc4", 2).await;
 
@@ -544,6 +562,7 @@ async fn handshake(
 /// v3 客户端收到 app_config（宿主内部键已排除）与 devices[].bind。
 #[tokio::test]
 async fn sidecar_v3_pushes_app_config_and_bind() {
+    let _serial = CASE_LOCK.lock().await;
     let mut bind = BTreeMap::new();
     bind.insert("group".to_string(), "g1".to_string());
     bind.insert("update_rate".to_string(), "1000".to_string());
@@ -591,6 +610,7 @@ async fn sidecar_v3_pushes_app_config_and_bind() {
 /// v2 客户端收到 v2 形状（无 app_config、无 bind）——存量外部进程零影响。
 #[tokio::test]
 async fn sidecar_v2_client_still_gets_v2_shape() {
+    let _serial = CASE_LOCK.lock().await;
     let mut bind = BTreeMap::new();
     bind.insert("group".to_string(), "g1".to_string());
     let env = setup_with(
@@ -616,6 +636,7 @@ async fn sidecar_v2_client_still_gets_v2_shape() {
 /// app_config.password 的 `secret:<ref>` 引用在 v3 下解析成明文。
 #[tokio::test]
 async fn sidecar_v3_resolves_secret_password() {
+    let _serial = CASE_LOCK.lock().await;
     let env = setup_with(
         "sc-secret",
         60,
@@ -645,6 +666,7 @@ async fn sidecar_v3_resolves_secret_password() {
 /// 同口径；v2 客户端同样受益（修的是组装侧，不是 v3 新增字段）。
 #[tokio::test]
 async fn sidecar_pushes_effective_unit_override() {
+    let _serial = CASE_LOCK.lock().await;
     let env = setup_with("sc-unit", 60, json!({}), BTreeMap::new()).await;
 
     // 模型模板单位 V；设备级覆盖成 kV（等价 POST /api/v1/tag/set）。
@@ -687,6 +709,7 @@ async fn sidecar_pushes_effective_unit_override() {
 /// `secret:` 引用未写入 → 下发 null（不静默给空串/不拒连），且实例仍可正常采集。
 #[tokio::test]
 async fn sidecar_v3_missing_secret_pushes_null() {
+    let _serial = CASE_LOCK.lock().await;
     let env = setup_with(
         "sc-nosecret",
         60,
@@ -725,6 +748,7 @@ async fn sidecar_v3_missing_secret_pushes_null() {
 /// 不支持的版本（v1/v9）→ HelloAck{ok:false} + 消息列出支持集，且不发 ConfigPush。
 #[tokio::test]
 async fn sidecar_unsupported_version_rejected() {
+    let _serial = CASE_LOCK.lock().await;
     let env = setup("sc-ver", 60).await;
 
     for bad in ["1", "9", "abc"] {
