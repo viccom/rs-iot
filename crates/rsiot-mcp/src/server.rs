@@ -885,17 +885,20 @@ impl rmcp::ServerHandler for RsiotMcpServer {
     /// **注意**：risk 闸门只在 call_tool 这一层——工具方法与 `tool_router()` 当前均为
     /// 私有，无现实绕过路径；若未来 library 化公开这些入口，须把 risk 闸门一并前置，
     /// 否则绕过陷阱（审查 Minor）。
+    /// rmcp 3 起 `call_tool` 返回 `CallToolResponse` 枚举（Complete/InputRequired/
+    /// Task，MRTR 中间结果）；本服务器全部工具是请求-响应语义，两条出口都经
+    /// `From<CallToolResult>` 包成 `Complete`。
     async fn call_tool(
         &self,
         request: rmcp::model::CallToolRequestParams,
         context: rmcp::service::RequestContext<rmcp::RoleServer>,
-    ) -> Result<CallToolResult, rmcp::ErrorData> {
+    ) -> Result<rmcp::model::CallToolResponse, rmcp::ErrorData> {
         let name = request.name.as_ref();
         if let Some(blocked) = self.risk_policy.check(name) {
-            return Ok(blocked);
+            return Ok(blocked.into());
         }
         let tcc = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
-        Self::tool_router().call(tcc).await
+        Self::tool_router().call(tcc).await.map(Into::into)
     }
 }
 
