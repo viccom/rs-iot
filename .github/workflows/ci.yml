@@ -244,15 +244,48 @@ jobs:
       - run: python scripts/check_docs.py
       - run: python scripts/check_layers.py
 
+  # audit 硬门禁（2026-11-27 起，替代原先的 continue-on-error 信息性作业）：
+  # 兼容性范围内的 20 条漏洞已由 Cargo.lock 精准升级清掉（lock 中 quinn*/rustls*/
+  # url/webpki-roots/zstd* 一族）；剩余 9 条逐一 --ignore（理由与解除条件见下方
+  # 注释）。此后**新增**漏洞不在清单内 → 本作业红——不再有"信息性失败"这种漏看方式。
+  # 维护义务：每条 ignore 的解除条件到期（依赖升级）时应删除对应行。
+  #
+  # 设计取舍：不使用 --deny warnings。unmaintained/unsound/yanked 类警告当前
+  # 有 17 条（heapless 0.7 unsound ×8、rhai→smartstring、tsink→bincode 1.3、
+  # async-opcua→chrono、rumqttc→rustls-pemfile、postcard→atomic-polyfill 等，
+  # 全是无修复版本的传递依赖），--deny warnings 会把它们全部变成失败，噪音大于
+  # 信号。它们仍完整打印在本作业日志里供人工审阅；哪条将来出了漏洞变体，会以
+  # 漏洞身份真红。
   audit:
     runs-on: ubuntu-latest
-    # 信息性：传递依赖（rustls TLS 链，经 rumqttc/lux 引入）当前有已知 advisory
-    # （rustls-webpki 0.102.8 / rustls-pemfile 2.2.0 等）；rs-iot 用明文 MQTT
-    # （broker:1883，TLS 路径未启用）实际风险低。升级 lux/rumqttc 依赖链后
-    # 移除 continue-on-error 改为严格。
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo install cargo-audit --locked
-      - run: cargo audit
+      - run: |
+          cargo audit \
+            --ignore RUSTSEC-2026-0049 \
+            --ignore RUSTSEC-2026-0098 \
+            --ignore RUSTSEC-2026-0099 \
+            --ignore RUSTSEC-2026-0104 \
+            --ignore RUSTSEC-2026-0382 \
+            --ignore RUSTSEC-2026-0457 \
+            --ignore RUSTSEC-2026-0462 \
+            --ignore RUSTSEC-2023-0071 \
+            --ignore RUSTSEC-2026-0387
+
+  # ── ignore 清单的理由与解除条件 ──────────────────────────────────────────
+  # B 类 —— rustls-webpki 0.102.x（rumqttc 0.25.1 锁死该线，已停更）：
+  #   RUSTSEC-2026-0049 / 0098 / 0099 / 0104 / 0382
+  #   影响：仅 [mqtt] 走 TLS（8883）的证书校验路径；当前部署 broker 明文
+  #   1883（warden 路径级配置同），实际风险≈0。
+  #   解除：rumqttc 升级放开 webpki 0.103 后删这 5 行。
+  # C 类 —— 需要上游/大版本迁移：
+  #   RUSTSEC-2026-0457 / 0462（rmcp 2.2 → ≥3.9）：rsiot-mcp 直接依赖，2→3 为
+  #     breaking，单独立项迁移；触达面是本地 stdio MCP server。
+  #   RUSTSEC-2023-0071（rsa 0.9 → ≥0.10）：经 async-opcua 0.19 传递；Marvin
+  #     类攻击针对持私钥的服务端，rs-iot 是 OPC UA 客户端、不持受影响私钥。
+  #     解除：async-opcua 升 rsa 0.10。
+  #   RUSTSEC-2026-0387（crypto-bigint 0.5 → ≥0.7.6）：经 lux 的 p256/JWT
+  #     ECDSA 链；常时运算时序变异需同机高精度测量才有实际意义。
+  #     解除：RustCrypto 生态新 major（随 lux 上游升级）。
